@@ -19,6 +19,12 @@ __device__ unsigned hash(unsigned x) { // PCG
     return (x >> 22) ^ x;
 }
 __device__ float random(unsigned& state) { return ((state = hash(state)) >> 8) * 0x1p-24f; }
+// In [0, 1) to double precision, from 27 and 26 bits of two draws
+__device__ double random53(unsigned& state) {
+    const unsigned high = (state = hash(state)) >> 5;
+    const unsigned low = (state = hash(state)) >> 6;
+    return (high * 0x1p26 + low) * 0x1p-53;
+}
 // Cosine-weighted direction around axis.
 __device__ float3 sampleCosine(float3 axis, unsigned& state) {
     const float cosine = sqrtf(random(state));
@@ -52,8 +58,38 @@ extern "C" __global__ void __raygen__camera() {
         if (dot(normal, direction) > 0) normal = normal * -1;
         origin = origin + direction * optixHitObjectGetRayTmax();
         const Material material = scene.materials[i];
-        radiance = radiance + throughput * material.emission;
+        // Emitters seen by the camera; later bounces reach them through light sampling instead.
+        if (bounce == 0) radiance = radiance + throughput * material.emission;
         throughput = throughput * material.baseColor;
+        // Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible.
+        // The first triangle whose cumulative power exceeds the pick, below the total: never one of no power
+        const double total = scene.power[scene.count - 1];
+        const double pick = random53(state) * total;
+        unsigned light = 0;
+        for (unsigned last = scene.count - 1; light < last;) {
+            const unsigned middle = (light + last) / 2;
+            if (scene.power[middle] <= pick) light = middle + 1; else last = middle;
+        }
+        const float3 la = scene.vertices[3 * light];
+        const float3 lb = scene.vertices[3 * light + 1];
+        const float3 lc = scene.vertices[3 * light + 2];
+        const float3 emission = scene.materials[light].emission;
+        const float3 lightNormal = cross(lb - la, lc - la);
+        const float side = sqrtf(random(state));
+        const float along = random(state);
+        const float emitted = emission.x + emission.y + emission.z;
+        const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
+        const float distance = sqrtf(dot(toLight, toLight));
+        const float cosine = dot(normal, toLight) / distance;
+        if (emitted > 0 && cosine > 0) {
+            optixTraverse(scene.handle, origin, toLight * (1 / distance), 1e-4f, distance * (1 - 1e-4f), 0.0f, 255,
+                OPTIX_RAY_FLAG_NONE, 0, 1, 0);
+            // Lambert f * emission * cosines / distance^2 / pdf,
+            // pdf = power share / area and power = 2 * area * emitted.
+            if (!optixHitObjectIsHit()) radiance = radiance + throughput * emission
+                * (float(total) / (2 * PI * emitted) * cosine * fabsf(dot(lightNormal, toLight))
+                / (distance * distance * distance * sqrtf(dot(lightNormal, lightNormal))));
+        }
         // Lambert with cosine sampling: weight = f * cos / pdf = base color.
         direction = sampleCosine(normal, state);
     }

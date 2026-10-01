@@ -20,6 +20,8 @@ inline Scene loadScene(OptixDeviceContext context) {
     const std::vector<float3> vertices{{0, 0.6f, -1}, {-0.8f, -0.6f, -1}, {0.8f, -0.6f, -1},
         {0, 4, 1}, {-4, -4, 1}, {4, -4, 1}};
     const std::vector<Material> materials{{.baseColor = {0.8f, 0.8f, 0.8f}}, {.emission = {1, 1, 1}}};
+    // Cumulative doubled area times summed emission: light sampling picks triangles by it.
+    const std::vector<double> power{0, 192};
     CUdeviceptr vertexBuffer = allocate(vertices.size() * sizeof(float3), vertices.data());
     unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
@@ -32,5 +34,6 @@ inline Scene loadScene(OptixDeviceContext context) {
     CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, allocate(sizes.tempSizeInBytes), sizes.tempSizeInBytes,
         allocate(sizes.outputSizeInBytes), sizes.outputSizeInBytes, &handle, nullptr, 0));
     return {.handle = handle, .vertices = (float3*)vertexBuffer, .materials = (Material*)allocate(
-        materials.size() * sizeof(Material), materials.data()), .focal = 1};
+        materials.size() * sizeof(Material), materials.data()),
+        .power = (double*)allocate(power.size() * sizeof(double), power.data()), .count = 2, .focal = 1};
 }
