@@ -3,7 +3,7 @@
 #include "loader.h"
 #include "../build/shaders.h"
 
-int main(int, char** argv) { // Usage: renderer width height > pixels
+int main(int, char** argv) { // Usage: renderer width height samples > sums
     const int width = std::atoi(argv[1]);
     const int height = std::atoi(argv[2]);
     // CUDA + OptiX contexts
@@ -19,7 +19,7 @@ int main(int, char** argv) { // Usage: renderer width height > pixels
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
     // Build scene, alloc framebuffer
     Scene scene{.handle = loadScene(context)};
-    scene.pixels = (float4*)allocate(width * height * sizeof(float4));
+    scene.accumulation = (float4*)allocate(width * height * sizeof(float4), std::vector<float4>(width * height).data());
 
     // Load embedded PTX
     OptixPipelineCompileOptions compile{};
@@ -27,31 +27,25 @@ int main(int, char** argv) { // Usage: renderer width height > pixels
     OptixModule module;
     CHECK(optixModuleCreate(context, &moduleOptions, &compile,
         (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
-    // Raygen, miss, hit programs
-    OptixProgramGroupDesc desc[] = {
-        {.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, "__raygen__camera"}},
-        {.kind = OPTIX_PROGRAM_GROUP_KIND_MISS}, // Null miss leaves the background unchanged.
-        {.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP, .hitgroup = {module, "__closesthit__color"}}};
-    OptixProgramGroup groups[3];
+    // Raygen program: rays are only traversed, so none runs on a miss or a hit
+    OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, "__raygen__camera"}};
+    OptixProgramGroup group;
     OptixProgramGroupOptions groupOptions{};
-    CHECK(optixProgramGroupCreate(context, desc, 3, &groupOptions, nullptr, nullptr, groups));
+    CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &group));
     // Link pipeline, no recursion
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
     OptixPipeline pipeline;
-    CHECK(optixPipelineCreate(context, &compile, &link, groups, 3, nullptr, nullptr, &pipeline));
-    // One SBT record per group, the raygen's and the hit's carrying scene
+    CHECK(optixPipelineCreate(context, &compile, &link, &group, 1, nullptr, nullptr, &pipeline));
+    // Its SBT record carries scene
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
-    Record records[] = {{ {}, scene }, {}, { {}, scene }};
-    for (int i = 0; i < 3; ++i) CHECK(optixSbtRecordPackHeader(groups[i], &records[i]));
-    // Upload records, point SBT at them
-    const CUdeviceptr table = allocate(sizeof(records), records);
-    OptixShaderBindingTable sbt = {.raygenRecord = table,
-        .missRecordBase = table + sizeof(Record), .missRecordStrideInBytes = sizeof(Record), .missRecordCount = 1,
-        .hitgroupRecordBase = table + 2 * sizeof(Record), .hitgroupRecordStrideInBytes = sizeof(Record),
-        .hitgroupRecordCount = 1};
-    CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, width, height, 1));
-    // Raw linear RGBA, rows top to bottom
-    std::vector<float4> pixels(width * height);
-    CHECK(cuMemcpyDtoH(pixels.data(), (CUdeviceptr)scene.pixels, pixels.size() * sizeof(float4)));
-    std::fwrite(pixels.data(), sizeof(float4), pixels.size(), stdout);
+    Record record{ {}, scene };
+    CHECK(optixSbtRecordPackHeader(group, &record));
+    OptixShaderBindingTable sbt = {.raygenRecord = allocate(sizeof(record), &record)};
+    // One path per pixel and sample
+    for (int sample = std::atoi(argv[3]); sample > 0; --sample)
+        CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, width, height, 1));
+    // Raw linear sums with the sample count in w, rows top to bottom
+    std::vector<float4> sums(width * height);
+    CHECK(cuMemcpyDtoH(sums.data(), (CUdeviceptr)scene.accumulation, sums.size() * sizeof(float4)));
+    std::fwrite(sums.data(), sizeof(float4), sums.size(), stdout);
 }
