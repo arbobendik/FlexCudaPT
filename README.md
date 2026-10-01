@@ -2,7 +2,8 @@
 
 Blender render engine.
 
-Requires Blender, Python 3 and Make.
+Requires an RTX GPU, CUDA, Blender, Python 3, Make, Git and xxd. The first build fetches the
+[OptiX 9.1 headers](https://github.com/NVIDIA/optix-dev/tree/v9.1.0).
 
 ```sh
 make
