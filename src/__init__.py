@@ -1,4 +1,4 @@
-# Blender render engine: ray traces one triangle with the bundled OptiX binary.
+# Blender render engine: path traces a fixed scene with the bundled OptiX binary.
 import bpy, numpy, os, subprocess
 
 SAMPLES = 1024
