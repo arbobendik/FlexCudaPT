@@ -18,7 +18,7 @@ int main(int, char** argv) { // Usage: renderer width height samples > sums
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
     // Build scene, alloc framebuffer
-    Scene scene{.handle = loadScene(context)};
+    Scene scene = loadScene(context);
     scene.accumulation = (float4*)allocate(width * height * sizeof(float4), std::vector<float4>(width * height).data());
 
     // Load embedded PTX
