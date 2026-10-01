@@ -5,8 +5,7 @@ OPTIX_PATH ?= .deps/optix
 CPPFLAGS += -I$(CUDA_PATH)/include -I$(OPTIX_PATH)/include
 LDLIBS += -L$(CUDA_PATH)/lib64 -lcuda -ldl
 
-build/flex.zip: src/__init__.py src/blender_manifest.toml
-	mkdir -p build
+build/flex.zip: src/__init__.py src/blender_manifest.toml build/renderer
 	python3 -m zipfile -c $@ $^
 
 build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
