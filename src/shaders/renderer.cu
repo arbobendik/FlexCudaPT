@@ -30,11 +30,14 @@ __device__ double random53(unsigned& state) {
     const unsigned low = (state = hash(state)) >> 6;
     return (high * 0x1p26 + low) * 0x1p-53;
 }
-// Linear color of the texel at a UV, repeating
+__device__ float3 decode(uchar4 texel) { return make_float3(decode(texel.x), decode(texel.y), decode(texel.z)); }
+// Linear color of the texel at a UV, repeating; a ramp replaces it with its color at the texel's luminance
 __device__ float3 lookup(const Scene& scene, const Texture& texture, float u, float v) {
-    const uchar4 texel = scene.texels[texture.texel + unsigned(wrap(v) * texture.height) * texture.width
-        + unsigned(wrap(u) * texture.width)];
-    return make_float3(decode(texel.x), decode(texel.y), decode(texel.z));
+    const float3 color = decode(scene.texels[texture.texel + unsigned(wrap(v) * texture.height) * texture.width
+        + unsigned(wrap(u) * texture.width)]);
+    if (!texture.ramp) return color;
+    const float luminance = dot(color, make_float3(0.2126f, 0.7152f, 0.0722f));
+    return decode(scene.texels[texture.ramp + unsigned(luminance * 255 + 0.5f)]);
 }
 // At a triangle's barycentrics
 __device__ float3 lookup(const Scene& scene, const Texture& texture, unsigned triangle, float s, float t) {
@@ -79,7 +82,8 @@ extern "C" __global__ void __raygen__camera() {
         const float s = __uint_as_float(optixHitObjectGetAttribute_0());
         const float t = __uint_as_float(optixHitObjectGetAttribute_1());
         // Emitters seen by the camera; later bounces reach them through light sampling instead.
-        if (bounce == 0) radiance = radiance + throughput * material.emission;
+        if (bounce == 0)
+            radiance = radiance + throughput * material.emission * lookup(scene, material.emissionTexture, i, s, t);
         throughput = throughput * material.baseColor * lookup(scene, material.baseTexture, i, s, t);
         // Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible.
         // The first triangle whose cumulative power exceeds the pick, below the total: never one of no power
@@ -93,11 +97,11 @@ extern "C" __global__ void __raygen__camera() {
         const float3 la = scene.vertices[3 * light];
         const float3 lb = scene.vertices[3 * light + 1];
         const float3 lc = scene.vertices[3 * light + 2];
-        const float3 emission = scene.materials[light].emission;
+        const Material lit = scene.materials[light];
         const float3 lightNormal = cross(lb - la, lc - la);
         const float side = sqrtf(random(state));
         const float along = random(state);
-        const float emitted = emission.x + emission.y + emission.z;
+        const float emitted = lit.emission.x + lit.emission.y + lit.emission.z;
         const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
         const float distance = sqrtf(dot(toLight, toLight));
         const float cosine = dot(normal, toLight) / distance;
@@ -106,7 +110,8 @@ extern "C" __global__ void __raygen__camera() {
                 OPTIX_RAY_FLAG_NONE, 0, 1, 0);
             // Lambert f * emission * cosines / distance^2 / pdf,
             // pdf = power share / area and power = 2 * area * emitted.
-            if (!optixHitObjectIsHit()) radiance = radiance + throughput * emission
+            if (!optixHitObjectIsHit()) radiance = radiance + throughput * lit.emission
+                * lookup(scene, lit.emissionTexture, light, side * (1 - along), side * along)
                 * (float(total) / (2 * PI * emitted) * cosine * fabsf(dot(lightNormal, toLight))
                 / (distance * distance * distance * sqrtf(dot(lightNormal, lightNormal))));
         }
