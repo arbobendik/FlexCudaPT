@@ -64,11 +64,18 @@ extern "C" __global__ void __raygen__camera() {
     float3 radiance = make_float3(0, 0, 0);
     float3 throughput = make_float3(1, 1, 1);
     float3 direction = normalize(make_float3((2 * (p.x + random(state)) - size.x) / size.y,
-                                             (size.y - 2 * (p.y + random(state))) / size.y, -scene.focal));
+                                             (size.y - 2 * (p.y + random(state))) / size.y, -scene.camera.focal));
     for (int bounce = 0; bounce < MAX_BOUNCES; ++bounce) {
         // Traverse only; hit data is read from the hit object below.
         optixTraverse(scene.handle, origin, direction, 1e-4f, 1e16f, 0.0f, 255, OPTIX_RAY_FLAG_NONE, 0, 1, 0);
-        if (!optixHitObjectIsHit()) break;
+        if (!optixHitObjectIsHit()) { // World: equirectangular texture along the world-space direction
+            const float3 d = make_float3(dot(scene.camera.axes[0], direction), dot(scene.camera.axes[1], direction),
+                dot(scene.camera.axes[2], direction));
+            const Material world = scene.materials[scene.count];
+            radiance = radiance + throughput * world.baseColor * lookup(scene, world.baseTexture,
+                0.5f - atan2f(d.y, d.x) / (2 * PI), 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI);
+            break;
+        }
         // Bounce data: position, face normal facing the ray, material.
         const unsigned i = optixHitObjectGetPrimitiveIndex();
         const float3 a = scene.vertices[3 * i];
