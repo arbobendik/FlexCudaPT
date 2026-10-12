@@ -79,6 +79,10 @@ extern "C" __global__ void __raygen__camera() {
         if (dot(normal, direction) > 0) normal = normal * -1;
         origin = origin + direction * optixHitObjectGetRayTmax();
         const Material material = scene.materials[i];
+        if (bounce == 0 && material.hidden) {
+            --bounce;
+            continue;
+        }
         // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
         const float s = __uint_as_float(optixHitObjectGetAttribute_0());
         const float t = __uint_as_float(optixHitObjectGetAttribute_1());

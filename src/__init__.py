@@ -3,7 +3,7 @@ import bpy, bmesh, numpy, os, struct, subprocess
 
 SAMPLES = 1024
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
-# Material: baseColor, emission, then first texel, width, height and ramp of each one's texture
+# Material: baseColor, emission, then first texel, width, height and ramp of each one's texture; a hidden flag follows
 GRAY = [0.8, 0.8, 0.8, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]
 
 def encode(linear):  # Linear to sRGB
@@ -59,6 +59,7 @@ class Flex(bpy.types.RenderEngine):
         for instance in depsgraph.object_instances:
             ob = instance.object
             bm = bmesh.new()
+            if ob.hide_render: continue
             if ob.type in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}:
                 bm.from_mesh(ob.to_mesh())
                 ob.to_mesh_clear()
@@ -72,25 +73,25 @@ class Flex(bpy.types.RenderEngine):
                 for row in shades[face.material_index]:  # No row for a surface that is not rendered
                     vertices.extend(c for vertex in face.verts for c in vertex.co)
                     uvs.extend(c for loop in face.loops for c in loop[uv].uv)
-                    materials.extend(row)
+                    materials.extend((*row, not ob.visible_camera))
         world = [0, 0, 0, 0, 1, 1, 0]
         for node in scene.world.node_tree.nodes if scene.world else ():
             if node.type == 'BACKGROUND':
                 world = tint(node.inputs['Color'], textures, texels)
                 world[:3] = [c * node.inputs['Strength'].default_value for c in world[:3]]
-        materials.extend((*world[:3], 0, 0, 0, *world[3:], 0, 1, 1, 0))
+        materials.extend((*world[:3], 0, 0, 0, *world[3:], 0, 1, 1, 0, 0))
         focal = scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x,
             y=scene.render.resolution_y)[1][1]
         width = self.resolution_x
         height = self.resolution_y
         triangles = numpy.array(vertices, 'f').reshape(-1, 3, 3)
-        materials = numpy.array(materials).reshape(-1, 14)
+        materials = numpy.array(materials).reshape(-1, 15)
         texels = numpy.concatenate(texels)
         # Cumulative doubled area times summed emission per triangle: the binary picks light samples by it.
         normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
         power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 3:6].sum(1))
         # Scene on stdin: triangle count, texel count, focal, world axes in camera space; per triangle 9 vertex floats,
-        # 6 UV floats, a material of 6 floats and 8 integers (then the world's), the power; then the texels. Radiance
+        # 6 UV floats, a material of 6 floats and 9 integers (then the world's), the power; then the texels. Radiance
         # sums and sample count per pixel on stdout.
         axes = [c for column in view.col[:3] for c in column[:3]]
         description = b''.join((struct.pack('<II10f', len(power), len(texels) // 4, focal, *axes),
