@@ -73,6 +73,12 @@ class Flex(bpy.types.RenderEngine):
                     vertices.extend(c for vertex in face.verts for c in vertex.co)
                     uvs.extend(c for loop in face.loops for c in loop[uv].uv)
                     materials.extend(row)
+        world = [0, 0, 0, 0, 1, 1, 0]
+        for node in scene.world.node_tree.nodes if scene.world else ():
+            if node.type == 'BACKGROUND':
+                world = tint(node.inputs['Color'], textures, texels)
+                world[:3] = [c * node.inputs['Strength'].default_value for c in world[:3]]
+        materials.extend((*world[:3], 0, 0, 0, *world[3:], 0, 1, 1, 0))
         focal = scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x,
             y=scene.render.resolution_y)[1][1]
         width = self.resolution_x
@@ -82,10 +88,12 @@ class Flex(bpy.types.RenderEngine):
         texels = numpy.concatenate(texels)
         # Cumulative doubled area times summed emission per triangle: the binary picks light samples by it.
         normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
-        power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:, 3:6].sum(1))
-        # Scene on stdin: triangle count, texel count, focal; per triangle 9 vertex floats, 6 UV floats, a material of
-        # 6 floats and 8 integers, the power; then the texels. Radiance sums and sample count per pixel on stdout.
-        description = b''.join((struct.pack('<IIf', len(power), len(texels) // 4, focal),
+        power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 3:6].sum(1))
+        # Scene on stdin: triangle count, texel count, focal, world axes in camera space; per triangle 9 vertex floats,
+        # 6 UV floats, a material of 6 floats and 8 integers (then the world's), the power; then the texels. Radiance
+        # sums and sample count per pixel on stdout.
+        axes = [c for column in view.col[:3] for c in column[:3]]
+        description = b''.join((struct.pack('<II10f', len(power), len(texels) // 4, focal, *axes),
             triangles.tobytes(), numpy.array(uvs, 'f').tobytes(),
             numpy.hstack((materials[:, :6].astype('f').view('I'), materials[:, 6:].astype('I'))).tobytes(),
             power.astype('f').tobytes(), texels.tobytes()))
