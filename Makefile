@@ -19,6 +19,11 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h $(OPTIX_PATH)/in
 $(OPTIX_PATH)/include/optix.h:
 	git clone --depth 1 --branch v9.1.0 https://github.com/NVIDIA/optix-dev.git $(OPTIX_PATH)
 
-.PHONY: clean
+.PHONY: test clean
+test: export BLENDER_USER_RESOURCES = $(CURDIR)/build/blender
+test: build/flex.zip
+	blender -b --command extension install-file -r user_default -e $<
+	blender -b --python-exit-code 1 -P src/test.py
+
 clean:
 	rm -rf build
