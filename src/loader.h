@@ -15,25 +15,28 @@ inline CUdeviceptr allocate(size_t bytes, const void* data = nullptr) {
     return ptr;
 }
 
-// Diffuse triangle lit by an emissive one behind the camera: three vertices and one material per triangle.
+// Array piped in by the extension, uploaded to the GPU.
+template <typename T> T* load(size_t count) {
+    std::vector<T> data(count);
+    std::fread(data.data(), sizeof(T), count, stdin);
+    return (T*)allocate(count * sizeof(T), data.data());
+}
+
+// Camera-space scene piped in by the extension: triangle count, focal, then the scene's arrays in order.
 inline Scene loadScene(OptixDeviceContext context) {
-    const std::vector<float3> vertices{{0, 0.6f, -1}, {-0.8f, -0.6f, -1}, {0.8f, -0.6f, -1},
-        {0, 4, 1}, {-4, -4, 1}, {4, -4, 1}};
-    const std::vector<Material> materials{{.baseColor = {0.8f, 0.8f, 0.8f}}, {.emission = {1, 1, 1}}};
-    // Cumulative doubled area times summed emission: light sampling picks triangles by it.
-    const std::vector<double> power{0, 192};
-    CUdeviceptr vertexBuffer = allocate(vertices.size() * sizeof(float3), vertices.data());
+    struct { unsigned count; float focal; } header;
+    std::fread(&header, sizeof(header), 1, stdin);
+    Scene scene{.vertices = load<float3>(3 * header.count), .materials = load<Material>(header.count),
+        .power = load<double>(header.count), .count = header.count, .focal = header.focal};
+    CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;
     unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
-        .vertexBuffers = &vertexBuffer, .numVertices = (unsigned)vertices.size(),
+        .vertexBuffers = &vertexBuffer, .numVertices = 3 * header.count,
         .vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3, .flags = &flags, .numSbtRecords = 1}};
     OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
     OptixAccelBufferSizes sizes{};
     CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
-    OptixTraversableHandle handle;
     CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, allocate(sizes.tempSizeInBytes), sizes.tempSizeInBytes,
-        allocate(sizes.outputSizeInBytes), sizes.outputSizeInBytes, &handle, nullptr, 0));
-    return {.handle = handle, .vertices = (float3*)vertexBuffer, .materials = (Material*)allocate(
-        materials.size() * sizeof(Material), materials.data()),
-        .power = (double*)allocate(power.size() * sizeof(double), power.data()), .count = 2, .focal = 1};
+        allocate(sizes.outputSizeInBytes), sizes.outputSizeInBytes, &scene.handle, nullptr, 0));
+    return scene;
 }
