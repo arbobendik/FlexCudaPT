@@ -22,12 +22,13 @@ template <typename T> T* load(size_t count) {
     return (T*)allocate(count * sizeof(T), data.data());
 }
 
-// Camera-space scene piped in by the extension: triangle count, focal, then the scene's arrays in order.
+// Camera-space scene piped in by the extension: triangle and texel counts, focal, then the scene's arrays in order.
 inline Scene loadScene(OptixDeviceContext context) {
-    struct { unsigned count; float focal; } header;
+    struct { unsigned count, texels; float focal; } header;
     std::fread(&header, sizeof(header), 1, stdin);
-    Scene scene{.vertices = load<float3>(3 * header.count), .materials = load<Material>(header.count),
-        .power = load<float>(header.count), .count = header.count, .focal = header.focal};
+    Scene scene{.vertices = load<float3>(3 * header.count), .uvs = load<float2>(3 * header.count),
+        .materials = load<Material>(header.count), .power = load<float>(header.count),
+        .texels = load<uchar4>(header.texels), .count = header.count, .focal = header.focal};
     CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;
     unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
