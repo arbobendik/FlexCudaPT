@@ -13,6 +13,11 @@ __device__ float3 cross(float3 a, float3 b) {
     return make_float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 }
 __device__ float3 normalize(float3 a) { return a * rnorm3df(a.x, a.y, a.z); }
+// Repeats into [0, 1)
+__device__ float wrap(float coordinate) { return fminf(coordinate - floorf(coordinate), 0x1.fffffep-1f); }
+__device__ float decode(unsigned char srgb) {
+    return srgb <= 10 ? srgb / 3294.6f : powf((srgb / 255.0f + 0.055f) / 1.055f, 2.4f);
+}
 __device__ unsigned hash(unsigned x) { // PCG
     x = x * 747796405u + 2891336453u;
     x = ((x >> ((x >> 28) + 4)) ^ x) * 277803737u;
@@ -24,6 +29,18 @@ __device__ double random53(unsigned& state) {
     const unsigned high = (state = hash(state)) >> 5;
     const unsigned low = (state = hash(state)) >> 6;
     return (high * 0x1p26 + low) * 0x1p-53;
+}
+// Linear color of the texel at a UV, repeating
+__device__ float3 lookup(const Scene& scene, const Texture& texture, float u, float v) {
+    const uchar4 texel = scene.texels[texture.texel + unsigned(wrap(v) * texture.height) * texture.width
+        + unsigned(wrap(u) * texture.width)];
+    return make_float3(decode(texel.x), decode(texel.y), decode(texel.z));
+}
+// At a triangle's barycentrics
+__device__ float3 lookup(const Scene& scene, const Texture& texture, unsigned triangle, float s, float t) {
+    const float2* uv = scene.uvs + 3 * triangle;
+    return lookup(scene, texture, uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
+        uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t);
 }
 // Cosine-weighted direction around axis.
 __device__ float3 sampleCosine(float3 axis, unsigned& state) {
@@ -58,9 +75,12 @@ extern "C" __global__ void __raygen__camera() {
         if (dot(normal, direction) > 0) normal = normal * -1;
         origin = origin + direction * optixHitObjectGetRayTmax();
         const Material material = scene.materials[i];
+        // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
+        const float s = __uint_as_float(optixHitObjectGetAttribute_0());
+        const float t = __uint_as_float(optixHitObjectGetAttribute_1());
         // Emitters seen by the camera; later bounces reach them through light sampling instead.
         if (bounce == 0) radiance = radiance + throughput * material.emission;
-        throughput = throughput * material.baseColor;
+        throughput = throughput * material.baseColor * lookup(scene, material.baseTexture, i, s, t);
         // Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible.
         // The first triangle whose cumulative power exceeds the pick, below the total: never one of no power
         const double total = scene.power[scene.count - 1];
