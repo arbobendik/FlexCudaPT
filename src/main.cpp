@@ -3,7 +3,7 @@
 #include "loader.h"
 #include "../build/shaders.h"
 
-int main(int, char** argv) { // Usage: renderer width height samples > sums
+int main(int, char** argv) { // Usage: renderer width height samples < scene > sums
     const int width = std::atoi(argv[1]);
     const int height = std::atoi(argv[2]);
     // CUDA + OptiX contexts
