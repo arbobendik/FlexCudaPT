@@ -10,5 +10,5 @@ make
 blender --command extension install-file -r user_default -e build/flex.zip
 ```
 
-Select Flex as the render engine. It renders geometry, Principled BSDF base color and emission, and the active
-camera.
+Select Flex as the render engine. It renders geometry, Principled BSDF base color, its image texture and emission,
+and the active camera.
