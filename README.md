@@ -11,4 +11,4 @@ blender --command extension install-file -r user_default -e build/flex.zip
 ```
 
 Select Flex as the render engine. It renders geometry, Principled BSDF base color, its image texture and emission,
-the world and the active camera.
+lights, the world and the active camera.
