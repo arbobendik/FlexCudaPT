@@ -1,6 +1,8 @@
 # Blender render engine: exports the scene as camera-space triangles and path traces it with the bundled OptiX binary.
-import bpy, bmesh, numpy, os, struct, subprocess
+import bpy, bmesh, math, numpy, os, struct, subprocess
+from mathutils import Matrix
 
+SUN_DISTANCE = 1e5
 SAMPLES = 1024
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 # Material: baseColor, emission, then first texel, width, height and ramp of each one's texture; a hidden flag follows
@@ -43,6 +45,10 @@ def shade(material, textures, texels):
         return [[*color[:3], *(c * strength for c in emission[:3]), *color[3:], *emission[3:]]]
     return [GRAY]
 
+def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
+    bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
+        matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
+
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
@@ -66,8 +72,35 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots:
                     if slot.material not in rows: rows[slot.material] = shade(slot.material, textures, texels)
                 shades = [rows[slot.material] for slot in ob.material_slots] or [[GRAY]]
+            # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
+            if ob.type == 'LIGHT':
+                light = ob.data
+                radius = max(light.shadow_soft_size, 0.01)
+                # Cone tangent to the emitter, rim 6 radii wide on the spot cone: soft edge centered on spot_size
+                if light.type == 'SPOT':
+                    angle = min(light.spot_size / 2, 1.5)
+                    apex = radius / math.sin(angle - math.asin(math.sin(angle) / 6))
+                    depth = apex + 6 * radius / math.tan(angle)
+                    bmesh.ops.create_cone(bm, segments=32, radius1=6 * radius / math.cos(math.pi / 32), radius2=0,
+                        depth=depth, matrix=Matrix.Translation((0, 0, apex - depth / 2)))
+                if light.type == 'AREA':  # Back side
+                    sides = 4 if light.shape in {'SQUARE', 'RECTANGLE'} else 32
+                    size = light.size, light.size_y if light.shape in {'RECTANGLE', 'ELLIPSE'} else light.size
+                    disk(bm, sides, *size, 1e-3)
+                for face in bm.faces: face.material_index = 1
+                if light.type == 'AREA': disk(bm, sides, *size, 0)
+                elif light.type == 'SUN':
+                    disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(light.angle / 2)], SUN_DISTANCE)
+                else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
             bm.transform(view @ instance.matrix_world)
+            if ob.type == 'LIGHT':
+                area = sum(face.calc_area() for face in bm.faces if not face.material_index)
+                # Sun irradiance, else watts
+                radiance = light.energy * (SUN_DISTANCE ** 2 if light.type == 'SUN' else 1 / math.pi) / area
+                # Black reflects nothing
+                shades = [[[0, 0, 0, *(c * radiance for c in light.color), 0, 1, 1, 0, 0, 1, 1, 0]],
+                    [[0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]]]
             uv = bm.loops.layers.uv.verify()
             for face in bm.faces:
                 for row in shades[face.material_index]:  # No row for a surface that is not rendered
