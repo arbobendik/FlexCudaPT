@@ -1,6 +1,8 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
-# sky with Flex through a render border and checks the pixels.
-import bpy, bmesh, math, numpy
+# sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
+# methods and compares.
+import bpy, bmesh, gpu, math, numpy, types
+from mathutils import Matrix
 
 SIZE = 64
 COLOR = (0.8, 0.2, 0.1)
@@ -82,3 +84,33 @@ for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
+
+class Viewport:  # Stands in for the engine instance Blender creates for a viewport, which background mode has none of
+    engine = bpy.types.RenderEngine.bl_rna_get_subclass_py('FLEX')
+    start = engine.start
+    trace = engine.trace
+    view_update = engine.view_update
+    view_draw = engine.view_draw
+    visible = ()
+    def tag_redraw(self): self.redraw = True
+    def bind_display_space_shader(self, scene): pass
+    def unbind_display_space_shader(self): pass
+
+gpu.init()
+bpy.context.window.scene = scene
+depsgraph = bpy.context.evaluated_depsgraph_get()
+viewport = Viewport()
+offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
+region = types.SimpleNamespace(width=SIZE, height=SIZE)
+region_data = types.SimpleNamespace(view_matrix=scene.camera.matrix_world.inverted(),
+    window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE))
+context = types.SimpleNamespace(region=region, region_data=region_data)
+with offscreen.bind():
+    gpu.matrix.load_matrix(Matrix.Identity(4))
+    # Pixel space, as in a viewport
+    gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+    viewport.view_update(context, depsgraph)
+    viewport.view_draw(context, depsgraph)
+    while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)  # Until the sample limit
+    drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
