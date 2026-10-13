@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import bpy, bmesh, fcntl, gpu, math, numpy, os, struct, subprocess
+import addon_utils, bpy, bmesh, fcntl, gpu, math, numpy, os, struct, subprocess
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix
 
@@ -7,6 +7,7 @@ SUN_DISTANCE = 1e5
 VIEWPORT_SAMPLES = 4  # Per redraw
 RENDER_SAMPLES = 64  # At most, per update of a final render
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
+MODIFIED = os.path.getmtime(__file__)
 # Material: baseColor, emission, then first texel, width, height and ramp of each one's texture; a hidden flag follows
 GRAY = [0.8, 0.8, 0.8, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]
 
@@ -222,14 +223,22 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
             self.layout.prop(context.scene.render, name)
 
+# Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
+def reload():
+    if os.path.exists(__file__) and os.path.getmtime(__file__) != MODIFIED:
+        bpy.app.timers.register(lambda: addon_utils.enable(__package__) and None)
+    return 1
+
 def register():
     os.chmod(BINARY, 0o755)  # Extension installs drop the executable bit
+    bpy.app.timers.register(reload, persistent=True)
     bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1)
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
 
 def unregister():
+    bpy.app.timers.unregister(reload)
     bpy.utils.unregister_class(RENDER_PT_flex)
     bpy.utils.unregister_class(Flex)
     del bpy.types.Scene.flex_samples
