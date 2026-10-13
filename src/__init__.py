@@ -1,8 +1,10 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import bpy, bmesh, fcntl, math, numpy, os, struct, subprocess
+import bpy, bmesh, fcntl, gpu, math, numpy, os, struct, subprocess
+from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix
 
 SUN_DISTANCE = 1e5
+VIEWPORT_SAMPLES = 4  # Per redraw
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 # Material: baseColor, emission, then first texel, width, height and ramp of each one's texture; a hidden flag follows
 GRAY = [0.8, 0.8, 0.8, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]
@@ -51,6 +53,11 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.visible = ()  # Names of the instances the renderer was last started on
+        self.texture = None  # The viewport's view as last traced
 
     def start(self, depsgraph):  # Starts the renderer on the exported scene
         scene = depsgraph.scene_eval
@@ -165,6 +172,31 @@ class Flex(bpy.types.RenderEngine):
         pixels = (sums / sums[..., 3:])[y:y + result.resolution_y, x:x + result.resolution_x]
         result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
         self.end_result(result)
+
+    # Restarts the renderer when what it renders changed. Blender also reports selection, scene settings and cameras
+    # here, which need none.
+    def view_update(self, context, depsgraph):
+        visible = [instance.object.name for instance in depsgraph.object_instances]
+        if visible != self.visible or any(not isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
+                and getattr(update.id, 'type', '') != 'CAMERA' for update in depsgraph.updates):
+            self.visible = visible
+            self.start(depsgraph)
+
+    def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
+        region = context.region
+        scene = depsgraph.scene
+        sums = self.trace(region.width, region.height, scene.flex_samples, VIEWPORT_SAMPLES,
+            context.region_data.view_matrix.inverted(), context.region_data.window_matrix)
+        if len(sums):
+            pixels = (sums * (1 / sums[0, 0, 3])).ravel()
+            self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',
+                data=gpu.types.Buffer('FLOAT', len(pixels), pixels))
+            self.tag_redraw()
+        gpu.state.blend_set('ALPHA_PREMULT')
+        self.bind_display_space_shader(scene)
+        draw_texture_2d(self.texture, (0, 0), region.width, region.height)
+        self.unbind_display_space_shader()
+        gpu.state.blend_set('NONE')
 
 class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     bl_label = 'Flex'
