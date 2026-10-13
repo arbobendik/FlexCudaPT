@@ -6,9 +6,11 @@ Requires an RTX GPU, CUDA, Blender, Python 3, Make, Git and xxd. The first build
 [OptiX 9.1 headers](https://github.com/NVIDIA/optix-dev/tree/v9.1.0).
 
 ```sh
-make
-blender --command extension install-file -r user_default -e build/flex.zip
+make install
 ```
+
+This builds the extension and installs it into Blender without launching it; a running Blender loads the new build by
+itself.
 
 Select Flex as the render engine, for final renders and the viewport's rendered shading. It renders geometry, Principled
 BSDF base color and emission with their image textures, lights and the world through perspective cameras. Max samples
