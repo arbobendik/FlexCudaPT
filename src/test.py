@@ -84,6 +84,39 @@ for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
+# Hidden from the camera wherever it sees straight: an emitter of radiance 1 under clear glass of IOR 1, which bends no
+# ray, reads 1 seen and 0 hidden from the camera
+veil = bpy.data.scenes.new('veil')
+veil.render.engine = 'FLEX'
+veil.render.resolution_x = veil.render.resolution_y = 16
+veil.flex_samples = 16
+veil.render.image_settings.file_format = 'OPEN_EXR'
+veil.render.filepath = bpy.app.tempdir + 'veil.exr'
+veil.world = bpy.data.worlds.new('black')
+veil.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+for name, z in (('veiled', 0), ('veil', 0.5)):
+    mesh = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=2)
+    bm.to_mesh(mesh)
+    mesh.materials.append(bpy.data.materials.new(name))
+    veil.collection.objects.link(bpy.data.objects.new(name, mesh))
+    bpy.data.objects[name].location.z = z
+glass = bpy.data.materials['veil'].node_tree.nodes['Principled BSDF']
+glass.inputs['Base Color'].default_value, glass.inputs['Transmission Weight'].default_value = (1, 1, 1, 1), 1
+glass.inputs['IOR'].default_value, glass.inputs['Roughness'].default_value = 1, 0
+glowing = bpy.data.materials['veiled'].node_tree.nodes['Principled BSDF']
+glowing.inputs['Base Color'].default_value, glowing.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+glowing.inputs['Emission Strength'].default_value = 1
+veil.camera = bpy.data.objects.new('veil camera', bpy.data.cameras.new('veil camera'))
+veil.collection.objects.link(veil.camera)
+veil.camera.location, veil.camera.data.angle = (0, 0, 1), math.pi / 2
+for hidden in (False, True):
+    bpy.data.objects['veiled'].visible_camera = not hidden
+    bpy.ops.render.render(scene=veil.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(veil.render.filepath, check_existing=False).pixels).reshape(16, 16, 4)[
+        4:12, 4:12, :3].mean()
+    assert abs(seen - (0 if hidden else 1)) < 0.02, ('veil', hidden, seen)
 
 class Viewport:  # Stands in for the engine instance Blender creates for a viewport, which background mode has none of
     engine = bpy.types.RenderEngine.bl_rna_get_subclass_py('FLEX')
