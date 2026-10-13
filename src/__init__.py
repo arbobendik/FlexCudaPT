@@ -60,13 +60,22 @@ def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by a
     return 'ADD', ('MULTIPLY', a, ('SUBTRACT', 1, factor)), ('MULTIPLY', b, factor)
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
-# image is read at the UV without a vector and is pink when missing.
+# image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
+# mapping of points scales and moves them without rotating.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE', inputs[0] if node.inputs[0].is_linked
         else ('UV',), node.image) if node.image and node.image.size[0] else numpy.array((1, 0, 1)),
     'VALTORGB': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE',
-        ('ADD', ('MULTIPLY', inputs[0], 255 / 256), 0.5 / 256), node)}
-NODES['TEX_ENVIRONMENT'] = NODES['TEX_IMAGE']
+        ('ADD', ('MULTIPLY', inputs[0], 255 / 256), 0.5 / 256), node),
+    'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
+        if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 6) else ('ADD', a, b)
+        for attribute, (a, b) in enumerate(zip(*inputs))],
+    'MATH': lambda node, inputs, index: (node.operation, *inputs[:2]) if OPS.get(node.operation) else inputs[0],
+    'MAPPING': lambda node, inputs, index: ('ADD', ('MULTIPLY', inputs[0], inputs[3]), inputs[1])
+        if node.vector_type == 'POINT' else inputs[0]}
+NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
+    'VECT_MATH': NODES['MATH']}
 
 # Expression of what a socket receives, a surface for a shader: a constant, or a step followed by its operands. groups
 # are the group nodes entered on the way; a node that is muted or not resolved exactly passes its input on.
