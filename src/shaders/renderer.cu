@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 constexpr int MAX_BOUNCES = 8;
+constexpr int STACK = 64;
 constexpr float PI = 3.14159265f;
 __device__ float3 operator+(float3 a, float3 b) { return make_float3(a.x + b.x, a.y + b.y, a.z + b.z); }
 __device__ float3 operator-(float3 a, float3 b) { return make_float3(a.x - b.x, a.y - b.y, a.z - b.z); }
@@ -25,23 +26,29 @@ __device__ unsigned hash(unsigned x) { // PCG
 }
 __device__ float random(unsigned& state) { return ((state = hash(state)) >> 8) * 0x1p-24f; }
 __device__ float3 decode(uchar4 texel) { return make_float3(decode(texel.x), decode(texel.y), decode(texel.z)); }
-// Linear color of the texel at a UV, repeating; a ramp replaces it with its color at the texel's luminance
-__device__ float3 lookup(const Scene& scene, const Texture& texture, float u, float v) {
-    const float3 color = decode(scene.texels[texture.texel + unsigned(wrap(v) * texture.height) * texture.width
-        + unsigned(wrap(u) * texture.width)]);
-    if (!texture.ramp) return color;
-    const float luminance = dot(color, make_float3(0.2126f, 0.7152f, 0.0722f));
-    return decode(scene.texels[texture.ramp + unsigned(luminance * 255 + 0.5f)]);
-}
-// Surface of a material at a UV, facing along the normal: diffuse and opaque
-__device__ Surface shade(const Scene& scene, const Material& material, float3 normal, float u, float v) {
-    return {normal, material.baseColor * lookup(scene, material.baseTexture, u, v), 0, 1,
-        material.emission * lookup(scene, material.emissionTexture, u, v), 0, 1.5f};
+// Surface a program resolves to at a UV, facing along the normal
+__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, float u, float v) {
+    float3 stack[STACK], *top = stack;
+    for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
+        case PUSH: *top++ = op->value; break;
+        case UV: *top++ = make_float3(u, v, 0); break;
+        case NORMAL: *top++ = normal; break;
+        case IMAGE: case ALPHA: { // Repeating
+            const uchar4 texel = scene.texels[op->texel + unsigned(wrap(top[-1].y) * op->height) * op->width
+                + unsigned(wrap(top[-1].x) * op->width)];
+            top[-1] = op->code == IMAGE ? decode(texel) : make_float3(1, 1, 1) * decode(texel.w);
+        } break;
+        case ADD: --top; top[-1] = top[-1] + *top; break;
+        case SUBTRACT: --top; top[-1] = top[-1] - *top; break;
+        case MULTIPLY: --top; top[-1] = top[-1] * *top; break;
+        case DOT_PRODUCT: --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
+    }
+    return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x};
 }
 // Of a triangle at its barycentrics
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
     const float2* uv = scene.uvs + 3 * triangle;
-    return shade(scene, scene.materials[triangle], normal,
+    return shade(scene, scene.materials[triangle].program, normal,
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t);
 }
@@ -70,9 +77,9 @@ extern "C" __global__ void __raygen__camera() {
         optixTraverse(scene.handle, origin, direction, 1e-4f, 1e16f, 0.0f, 255, OPTIX_RAY_FLAG_NONE, 0, 1, 0);
         if (!optixHitObjectIsHit()) { // World: equirectangular texture along the direction
             const Material world = scene.materials[scene.count];
-            radiance = radiance + throughput * shade(scene, world, direction,
+            radiance = radiance + throughput * shade(scene, world.program, direction,
                 0.5f - atan2f(direction.y, direction.x) / (2 * PI),
-                0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).albedo;
+                0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).emissive;
             break;
         }
         // Bounce data: position, face normal facing the ray, material.
@@ -106,11 +113,10 @@ extern "C" __global__ void __raygen__camera() {
         const float3 la = scene.vertices[3 * light];
         const float3 lb = scene.vertices[3 * light + 1];
         const float3 lc = scene.vertices[3 * light + 2];
-        const Material lit = scene.materials[light];
         const float3 lightNormal = cross(lb - la, lc - la);
         const float side = sqrtf(random(state));
         const float along = random(state);
-        const float emitted = lit.emission.x + lit.emission.y + lit.emission.z;
+        const float emitted = scene.materials[light].emitted;
         const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
         const float distance = sqrtf(dot(toLight, toLight));
         const float cosine = dot(surface.normal, toLight) / distance;
