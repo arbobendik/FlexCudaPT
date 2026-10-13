@@ -7,6 +7,8 @@ struct Camera { float3 origin, x, y, z; };
 struct Texture { unsigned texel, width, height, ramp; };
 // Base color and emission each tint a texture; hidden surfaces let camera rays through.
 struct Material { float3 baseColor, emission; Texture baseTexture, emissionTexture; unsigned hidden; };
+// What the shading of a hit reads
+struct Surface { float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; };
 // Per triangle: three vertices and UVs, one material, cumulative emitted power; the world's material comes last.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3* vertices; float2* uvs; Material* materials; float* power;
