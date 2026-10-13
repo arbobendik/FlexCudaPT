@@ -39,10 +39,16 @@ __device__ float3 lookup(const Scene& scene, const Texture& texture, float u, fl
     const float luminance = dot(color, make_float3(0.2126f, 0.7152f, 0.0722f));
     return decode(scene.texels[texture.ramp + unsigned(luminance * 255 + 0.5f)]);
 }
-// At a triangle's barycentrics
-__device__ float3 lookup(const Scene& scene, const Texture& texture, unsigned triangle, float s, float t) {
+// Surface of a material at a UV, facing along the normal: diffuse and opaque
+__device__ Surface shade(const Scene& scene, const Material& material, float3 normal, float u, float v) {
+    return {normal, material.baseColor * lookup(scene, material.baseTexture, u, v), 0, 1,
+        material.emission * lookup(scene, material.emissionTexture, u, v), 0, 1.5f};
+}
+// Of a triangle at its barycentrics
+__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
     const float2* uv = scene.uvs + 3 * triangle;
-    return lookup(scene, texture, uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
+    return shade(scene, scene.materials[triangle], normal,
+        uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t);
 }
 // Cosine-weighted direction around axis.
@@ -70,9 +76,9 @@ extern "C" __global__ void __raygen__camera() {
         optixTraverse(scene.handle, origin, direction, 1e-4f, 1e16f, 0.0f, 255, OPTIX_RAY_FLAG_NONE, 0, 1, 0);
         if (!optixHitObjectIsHit()) { // World: equirectangular texture along the direction
             const Material world = scene.materials[scene.count];
-            radiance = radiance + throughput * world.baseColor * lookup(scene, world.baseTexture,
+            radiance = radiance + throughput * shade(scene, world, direction,
                 0.5f - atan2f(direction.y, direction.x) / (2 * PI),
-                0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI);
+                0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).albedo;
             break;
         }
         // Bounce data: position, face normal facing the ray, material.
@@ -92,9 +98,9 @@ extern "C" __global__ void __raygen__camera() {
         const float s = __uint_as_float(optixHitObjectGetAttribute_0());
         const float t = __uint_as_float(optixHitObjectGetAttribute_1());
         // Emitters seen by the camera; later bounces reach them through light sampling instead.
-        if (bounce == 0)
-            radiance = radiance + throughput * material.emission * lookup(scene, material.emissionTexture, i, s, t);
-        throughput = throughput * material.baseColor * lookup(scene, material.baseTexture, i, s, t);
+        const Surface surface = shade(scene, i, s, t, normal);
+        if (bounce == 0) radiance = radiance + throughput * surface.emissive;
+        throughput = throughput * surface.albedo;
         // Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible.
         // The first triangle whose cumulative power exceeds the pick, below the total: never one of no power
         const double total = scene.power[scene.count - 1];
@@ -114,19 +120,19 @@ extern "C" __global__ void __raygen__camera() {
         const float emitted = lit.emission.x + lit.emission.y + lit.emission.z;
         const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
         const float distance = sqrtf(dot(toLight, toLight));
-        const float cosine = dot(normal, toLight) / distance;
+        const float cosine = dot(surface.normal, toLight) / distance;
         if (emitted > 0 && cosine > 0) {
             optixTraverse(scene.handle, origin, toLight * (1 / distance), 1e-4f, distance * (1 - 1e-4f), 0.0f, 255,
                 OPTIX_RAY_FLAG_NONE, 0, 1, 0);
             // Lambert f * emission * cosines / distance^2 / pdf,
             // pdf = power share / area and power = 2 * area * emitted.
-            if (!optixHitObjectIsHit()) radiance = radiance + throughput * lit.emission
-                * lookup(scene, lit.emissionTexture, light, side * (1 - along), side * along)
+            if (!optixHitObjectIsHit()) radiance = radiance + throughput
+                * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
                 * (float(total) / (2 * PI * emitted) * cosine * fabsf(dot(lightNormal, toLight))
                 / (distance * distance * distance * sqrtf(dot(lightNormal, lightNormal))));
         }
         // Lambert with cosine sampling: weight = f * cos / pdf = base color.
-        direction = sampleCosine(normal, state);
+        direction = sampleCosine(surface.normal, state);
     }
     sum = make_float4(sum.x + radiance.x, sum.y + radiance.y, sum.z + radiance.z, sum.w + 1);
 }
