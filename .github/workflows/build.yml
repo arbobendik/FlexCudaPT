@@ -1,0 +1,37 @@
+# Builds the extension on pushes to main and on pull requests; a v* tag also publishes it as a release.
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write  # For the release
+
+env:
+  CUDA_PATH: /usr/local/cuda-13.4
+  NVCC: /usr/local/cuda-13.4/bin/nvcc
+  LDLIBS: -L/usr/local/cuda-13.4/lib64/stubs  # libcuda itself comes with the GPU driver, which runners lack
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the CUDA compiler and headers
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-13-4 xxd
+      - run: make
+      - uses: actions/upload-artifact@v7
+        with:
+          path: build/flex.zip
+          archive: false
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release create "$GITHUB_REF_NAME" build/flex.zip --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

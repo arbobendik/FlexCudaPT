@@ -10,7 +10,8 @@ make install
 ```
 
 This builds the extension and installs it into Blender without launching it; a running Blender loads the new build by
-itself.
+itself. GitHub Actions builds every push to main and every pull request; pushing a `v*` tag also publishes `flex.zip` as
+a release.
 
 Select Flex as the render engine, for final renders and the viewport's rendered shading. It renders geometry, Principled
 BSDF base color and emission with their image textures, lights and the world through perspective cameras. Max samples
