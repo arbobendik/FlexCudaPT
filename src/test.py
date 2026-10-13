@@ -11,6 +11,7 @@ scene = bpy.data.scenes.new('test')
 scene.render.engine = 'FLEX'
 scene.render.resolution_x = SIZE
 scene.render.resolution_y = SIZE
+scene.flex_samples = 256
 scene.render.image_settings.file_format = 'OPEN_EXR'
 scene.render.filepath = bpy.app.tempdir + 'test.exr'
 scene.render.use_border = True
