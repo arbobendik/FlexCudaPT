@@ -55,6 +55,14 @@ def emit(expression, ops, textures, texels):
     ops.append(([*OPS].index(name), *payload))
     return OPS[name](*values) if OPS[name] else numpy.ones(3)
 
+def fold(expression):  # The expression with its operations on constants alone computed, as the shader would
+    if isinstance(expression, list): return [fold(attribute) for attribute in expression]
+    if not isinstance(expression, tuple): return expression
+    name, *operands = (fold(part) if isinstance(part, tuple) else part for part in expression)
+    if OPS[name] and not any(isinstance(operand, tuple) for operand in operands):
+        return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
+    return name, *operands
+
 def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
     if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(a, b)]
     return 'ADD', ('MULTIPLY', a, ('SUBTRACT', 1, factor)), ('MULTIPLY', b, factor)
@@ -137,7 +145,7 @@ class Flex(bpy.types.RenderEngine):
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height per image and ramp
         texels = [numpy.full(4, 255, 'B')]  # sRGB bytes after a white texel: the renderer loads no empty array
-        program = lambda surface: [len(ops), emit(surface, ops, textures, texels)][::-1]
+        program = lambda surface: [len(ops), emit(fold(surface), ops, textures, texels)][::-1]
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         for instance in depsgraph.object_instances:
             ob = instance.object
