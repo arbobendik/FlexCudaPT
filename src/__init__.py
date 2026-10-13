@@ -1,4 +1,4 @@
-# Blender render engine: exports the scene as camera-space triangles and path traces it with the bundled OptiX binary.
+# Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import bpy, bmesh, math, numpy, os, struct, subprocess
 from mathutils import Matrix
 
@@ -54,7 +54,6 @@ class Flex(bpy.types.RenderEngine):
 
     def render(self, depsgraph):
         scene = depsgraph.scene_eval
-        view = scene.camera.matrix_world.normalized().inverted()
         vertices = []
         uvs = []
         materials = []
@@ -92,7 +91,7 @@ class Flex(bpy.types.RenderEngine):
                     disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(light.angle / 2)], SUN_DISTANCE)
                 else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
-            bm.transform(view @ instance.matrix_world)
+            bm.transform(instance.matrix_world)
             if ob.type == 'LIGHT':
                 area = sum(face.calc_area() for face in bm.faces if not face.material_index)
                 # Sun irradiance, else watts
@@ -112,8 +111,12 @@ class Flex(bpy.types.RenderEngine):
                 world = tint(node.inputs['Color'], textures, texels)
                 world[:3] = [c * node.inputs['Strength'].default_value for c in world[:3]]
         materials.extend((*world[:3], 0, 0, 0, *world[3:], 0, 1, 1, 0, 0))
-        focal = scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x,
-            y=scene.render.resolution_y)[1][1]
+        matrix = scene.camera.matrix_world.normalized()
+        projection = scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x,
+            y=scene.render.resolution_y)
+        right = matrix.col[0].xyz / projection[0][0]
+        up = matrix.col[1].xyz / projection[1][1]
+        center = right * projection[0][2] + up * projection[1][2] - matrix.col[2].xyz
         width = self.resolution_x
         height = self.resolution_y
         triangles = numpy.array(vertices, 'f').reshape(-1, 3, 3)
@@ -123,11 +126,11 @@ class Flex(bpy.types.RenderEngine):
         # tiny emitters after bright ones keep intervals of their power.
         normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
         power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 3:6].sum(1))
-        # Scene on stdin: triangle count, texel count, focal, world axes in camera space; per triangle 9 vertex floats,
-        # 6 UV floats, a material of 6 floats and 9 integers (then the world's), the power; then the texels. Radiance
-        # sums and sample count per pixel on stdout.
-        axes = [c for column in view.col[:3] for c in column[:3]]
-        description = b''.join((struct.pack('<II10f', len(power), len(texels) // 4, focal, *axes),
+        # Scene on stdin: triangle count, texel count, the camera's origin and its ray direction per NDC x, per NDC y
+        # and at the center; per triangle 9 vertex floats, 6 UV floats, a material of 6 floats and 9 integers (then the
+        # world's), the power; then the texels. Radiance sums and sample count per pixel on stdout.
+        header = struct.pack('<II12f', len(power), len(texels) // 4, *matrix.translation, *right, *up, *center)
+        description = b''.join((header,
             triangles.tobytes(), numpy.array(uvs, 'f').tobytes(),
             numpy.hstack((materials[:, :6].astype('f').view('I'), materials[:, 6:].astype('I'))).tobytes(),
             power.astype('d').tobytes(), texels.tobytes()))
