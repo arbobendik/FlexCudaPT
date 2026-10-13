@@ -3,7 +3,6 @@ import bpy, bmesh, math, numpy, os, struct, subprocess
 from mathutils import Matrix
 
 SUN_DISTANCE = 1e5
-SAMPLES = 1024
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 # Material: baseColor, emission, then first texel, width, height and ramp of each one's texture; a hidden flag follows
 GRAY = [0.8, 0.8, 0.8, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]
@@ -132,7 +131,7 @@ class Flex(bpy.types.RenderEngine):
             triangles.tobytes(), numpy.array(uvs, 'f').tobytes(),
             numpy.hstack((materials[:, :6].astype('f').view('I'), materials[:, 6:].astype('I'))).tobytes(),
             power.astype('d').tobytes(), texels.tobytes()))
-        output = subprocess.run([BINARY, str(width), str(height), str(SAMPLES)], input=description,
+        output = subprocess.run([BINARY, str(width), str(height), str(scene.flex_samples)], input=description,
             stdout=subprocess.PIPE, check=True).stdout
         # Blender rows run bottom to top
         sums = numpy.frombuffer(output, numpy.float32).reshape(height, width, 4)[::-1]
@@ -144,8 +143,29 @@ class Flex(bpy.types.RenderEngine):
         result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
         self.end_result(result)
 
+class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
+    bl_label = 'Flex'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'render'
+
+    @classmethod
+    def poll(cls, context): return context.engine == Flex.bl_idname
+
+    def draw(self, context):
+        self.layout.use_property_split = True
+        self.layout.prop(context.scene, 'flex_samples')
+        for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
+            self.layout.prop(context.scene.render, name)
+
 def register():
     os.chmod(BINARY, 0o755)  # Extension installs drop the executable bit
+    bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
+        default=1024, min=1)
     bpy.utils.register_class(Flex)
+    bpy.utils.register_class(RENDER_PT_flex)
 
-def unregister(): bpy.utils.unregister_class(Flex)
+def unregister():
+    bpy.utils.unregister_class(RENDER_PT_flex)
+    bpy.utils.unregister_class(Flex)
+    del bpy.types.Scene.flex_samples

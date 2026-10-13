@@ -11,4 +11,5 @@ blender --command extension install-file -r user_default -e build/flex.zip
 ```
 
 Select Flex as the render engine. It renders geometry, Principled BSDF base color, its image texture and emission,
-lights, the world and the active camera. `make test` renders a small scene headlessly and checks the result.
+lights, the world and the active camera. Max samples and resolution are set in the Flex panel of the render properties.
+`make test` renders a small scene headlessly and checks the result.
