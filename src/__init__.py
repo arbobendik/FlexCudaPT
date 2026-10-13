@@ -14,6 +14,19 @@ GRAY = [0.8, 0.8, 0.8, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]
 def encode(linear):  # Linear to sRGB
     return numpy.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear.clip(0, 1) ** (1 / 2.4) - 0.055)
 
+# First texel, width and height of an image or of a ramp node's 256 colors, added to the texels as sRGB at first use
+def texture(source, textures, texels):
+    if source not in textures:
+        ramp = source.type == 'VALTORGB'
+        pixels = numpy.empty(1024 if ramp else len(source.pixels), 'f')
+        if ramp: pixels[:] = numpy.ravel([source.color_ramp.evaluate(i / 255) for i in range(256)])
+        else: source.pixels.foreach_get(pixels)
+        if ramp or source.is_float or source.colorspace_settings.is_data: pixels = encode(pixels)
+        else: pixels[3::4] = encode(pixels[3::4])  # Alpha as well
+        textures[source] = sum(map(len, texels)) // 4, *((256, 1) if ramp else source.size)
+        texels.append((pixels * 255 + 0.5).clip(0, 255).astype('B'))
+    return textures[source]
+
 # The socket's color, or white and the image linked to it, directly or through a color ramp; then the image's first
 # texel, width and height and the ramp's first texel, 0 without one
 def tint(socket, textures, texels):
@@ -21,17 +34,7 @@ def tint(socket, textures, texels):
     ramps = [node for node in nodes if node.type == 'VALTORGB']
     feeds = [link.from_node for ramp in ramps for link in ramp.inputs['Fac'].links] or nodes
     for image in [node.image for node in feeds if hasattr(node, 'image') and node.image and node.image.size[0]]:
-        if image not in textures:
-            pixels = numpy.empty(len(image.pixels), 'f')
-            image.pixels.foreach_get(pixels)
-            if image.is_float: pixels = encode(pixels)
-            textures[image] = sum(map(len, texels)) // 4, *image.size
-            texels.append((pixels * 255 + 0.5).clip(0, 255).astype('B'))
-        for ramp in set(ramps) - textures.keys():  # The ramp's colors as 256 texels
-            colors = encode(numpy.array([ramp.color_ramp.evaluate(i / 255) for i in range(256)]))
-            textures[ramp] = sum(map(len, texels)) // 4
-            texels.append((colors * 255 + 0.5).astype('B').ravel())
-        return [1, 1, 1, *textures[image], sum(textures[ramp] for ramp in ramps)]
+        return [1, 1, 1, *texture(image, textures, texels), sum(texture(ramp, textures, texels)[0] for ramp in ramps)]
     return [*socket.default_value[:3], 0, 1, 1, 0]
 
 # The material's surface as rows, one or none: base color and emission of its Principled BSDF, gray without one; none
