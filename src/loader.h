@@ -22,7 +22,7 @@ template <typename T> T* load(size_t count) {
     return (T*)allocate(count * sizeof(T), data.data());
 }
 
-// Camera-space scene piped in by the extension: triangle and texel counts, camera, then the scene's arrays in order.
+// World-space scene piped in by the extension: triangle and texel counts, camera, then the scene's arrays in order.
 inline Scene loadScene(OptixDeviceContext context) {
     struct { unsigned count, texels; Camera camera; } header;
     std::fread(&header, sizeof(header), 1, stdin);
