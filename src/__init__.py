@@ -17,7 +17,16 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency and ior
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5]
 BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5]
-LUMINANCE = numpy.array((0.2126, 0.7152, 0.0722))
+# Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
+# or a constant; any other shader is diffuse
+SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission Color', 'Emission Strength',
+        'Transmission Weight', 'IOR'), 'BSDF_METALLIC': ('Base Color', 1, 'Roughness', 0, 0, 0, 1.5),
+    'EEVEE_SPECULAR': ('Base Color', 0, 'Roughness', 'Emissive Color', 1, 'Transparency', 1.5),
+    'BSDF_GLOSSY': ('Color', 1, 'Roughness', 0, 0, 0, 1.5), 'BSDF_GLASS': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'),
+    'BSDF_REFRACTION': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'), 'BSDF_TRANSPARENT': ('Color', 0, 0, 0, 0, 1, 1),
+    'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1.5), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1.5)}
+# Luminance of a color and mean of a vector, as Blender converts them to values
+WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
 
 def encode(linear):  # Linear to sRGB
     return numpy.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear.clip(0, 1) ** (1 / 2.4) - 0.055)
@@ -65,30 +74,57 @@ def emit(expression, ops, textures, texels, uses, slots=None):
         ops.append(([*OPS].index('STORE'), slots[key], 0, 0))
     return value
 
-# Expression of the socket's color: its constant, or the image linked to it read at the UV, directly or through a color
-# ramp at its luminance
-def tint(socket):
-    nodes = [link.from_node for link in socket.links]
-    ramps = [node for node in nodes if node.type == 'VALTORGB']
-    feeds = [link.from_node for ramp in ramps for link in ramp.inputs['Fac'].links] or nodes
-    for image in [node.image for node in feeds if hasattr(node, 'image') and node.image and node.image.size[0]]:
-        color = 'IMAGE', ('UV',), image
-        for ramp in ramps:
-            color = 'IMAGE', ('ADD', ('MULTIPLY', ('DOT_PRODUCT', color, LUMINANCE), 255 / 256), 0.5 / 256), ramp
-        return color
-    return numpy.resize(socket.default_value, 3)
+def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
+    if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(a, b)]
+    return 'ADD', ('MULTIPLY', a, ('SUBTRACT', 1, factor)), ('MULTIPLY', b, factor)
 
-# The material's surface as rows, one or none: the row of its Principled BSDF's base color and emission, gray without
-# one; none for volumes without a surface shader and for textured alpha
+# The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
+# image is read at the UV without a vector and is pink when missing.
+NODES = {'NORMAL_MAP': lambda node, inputs, index: ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
+    'TEX_IMAGE': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE', inputs[0] if node.inputs[0].is_linked
+        else ('UV',), node.image) if node.image and node.image.size[0] else numpy.array((1, 0, 1)),
+    'VALTORGB': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE',
+        ('ADD', ('MULTIPLY', inputs[0], 255 / 256), 0.5 / 256), node)}
+NODES['TEX_ENVIRONMENT'] = NODES['TEX_IMAGE']
+
+# Expression of what a socket receives, a surface for a shader: a constant, or a step followed by its operands. groups
+# are the group nodes entered on the way; a node that is muted or not resolved exactly passes its input on.
+def resolve(socket, groups=()):
+    link = next((link for link in socket.links  # Invalid links close a cycle
+        if link.is_valid and not (socket.is_output or link.is_muted)), None)
+    if not link and socket.type == 'SHADER': return BLACK
+    if not link:  # A virtual socket has no value
+        value = numpy.resize(getattr(socket, 'default_value', 0), 3)
+        return {'Normal': ('NORMAL',), 'UV': ('UV',)}.get(socket.name, value)
+    node, output = link.from_node, link.from_socket
+    index = [*node.outputs].index(output)
+    get = lambda name, default=0: resolve(node.inputs[name], groups) if name in node.inputs else default
+    if node.type == 'GROUP_INPUT': value = resolve(groups[-1].inputs[index], groups[:-1])
+    elif node.mute or not (node.type in NODES or node.type == 'GROUP' or output.type == 'SHADER'):
+        value = ([resolve(passed.from_socket, groups) for passed in node.internal_links if passed.to_socket == output]
+            or [resolve(output)])[0]
+    elif node.type == 'GROUP':
+        inner = next(inner for inner in node.node_tree.nodes if inner.type == 'GROUP_OUTPUT' and inner.is_active_output)
+        value = resolve(inner.inputs[index], (*groups, node))
+    elif node.type in NODES:
+        value = NODES[node.type](node, [resolve(input, groups) for input in node.inputs if input.enabled], index)
+    else:  # Alpha fades a shader into full transparency without refraction
+        albedo, metallic, roughness, emissive, strength, transparency, ior = (get(source) if isinstance(source, str)
+            else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1.5)))
+        value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness, ('MULTIPLY', emissive, strength),
+            mix(1, transparency, get('Alpha', 1)), mix(1, ior, get('Alpha', 1))]
+    if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
+    if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
+    return value
+
+# The material's surface as rows, one or none: the row of its surface; none for volumes without a surface shader and
+# for textured alpha
 def shade(material, program):
     output = material.node_tree.get_output_node('ALL')
     shaders = [node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'][:1]
     if not (output and output.inputs['Surface'].is_linked) or any(node.inputs['Alpha'].is_linked for node in shaders):
         return []
-    for node in shaders:
-        emissive = 'MULTIPLY', tint(node.inputs['Emission Color']), node.inputs['Emission Strength'].default_value
-        return [program([('NORMAL',), tint(node.inputs['Base Color']), 0, 0.5, emissive, 0, 1.5])]
-    return [program(GRAY)]
+    return [program(resolve(output.inputs['Surface']))]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
@@ -162,12 +198,8 @@ class Flex(bpy.types.RenderEngine):
                     vertices.extend(c for vertex in face.verts for c in vertex.co)
                     uvs.extend(c for loop in face.loops for c in loop[uv].uv)
                     materials.extend((*row, not ob.visible_camera))
-        world = BLACK
-        for node in scene.world.node_tree.nodes if scene.world else ():
-            if node.type == 'BACKGROUND':
-                emissive = 'MULTIPLY', tint(node.inputs['Color']), node.inputs['Strength'].default_value
-                world = [*BLACK[:4], emissive, *BLACK[5:]]
-        materials.extend((*program(world), 0))
+        world = scene.world and scene.world.node_tree.get_output_node('ALL')
+        materials.extend((*program(resolve(world.inputs['Surface']) if world else BLACK), 0))
         triangles = numpy.array(vertices, 'f').reshape(-1, 3, 3)
         materials = numpy.array(materials).reshape(-1, 3)
         texels = numpy.concatenate(texels)
