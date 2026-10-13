@@ -5,6 +5,7 @@ from mathutils import Matrix
 
 SUN_DISTANCE = 1e5
 VIEWPORT_SAMPLES = 4  # Per redraw
+RENDER_SAMPLES = 64  # At most, per update of a final render
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 # Material: baseColor, emission, then first texel, width, height and ramp of each one's texture; a hidden flag follows
 GRAY = [0.8, 0.8, 0.8, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0]
@@ -158,19 +159,26 @@ class Flex(bpy.types.RenderEngine):
         sums = self.answers.read(16 * width * height * bool(launched))
         return numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
 
+    # Shows the result after ever larger batches of samples, until it has them all or the render is cancelled
     def render(self, depsgraph):
         scene = depsgraph.scene_eval
         width = self.resolution_x
         height = self.resolution_y
         self.start(depsgraph)
-        sums = self.trace(width, height, scene.flex_samples, scene.flex_samples, scene.camera.matrix_world.normalized(),
+        camera = (scene.camera.matrix_world.normalized(),
             scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y))
         result = self.begin_result(0, 0, width, height)  # Blender clips the result to the render border
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)
         y = int(border.use_border * border.border_min_y * height)
-        pixels = (sums / sums[..., 3:])[y:y + result.resolution_y, x:x + result.resolution_x]
-        result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
+        count = 1
+        while (len(sums := self.trace(width, height, scene.flex_samples, min(count, RENDER_SAMPLES), *camera))
+                and not self.test_break()):
+            count = int(sums[0, 0, 3])
+            pixels = sums[y:y + result.resolution_y, x:x + result.resolution_x] * (1 / count)
+            result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
+            self.update_result(result)
+            self.update_progress(count / scene.flex_samples)
         self.end_result(result)
 
     # Restarts the renderer when what it renders changed. Blender also reports selection, scene settings and cameras
