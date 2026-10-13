@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import bpy, bmesh, math, numpy, os, struct, subprocess
+import bpy, bmesh, fcntl, math, numpy, os, struct, subprocess
 from mathutils import Matrix
 
 SUN_DISTANCE = 1e5
@@ -52,7 +52,7 @@ class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
 
-    def render(self, depsgraph):
+    def start(self, depsgraph):  # Starts the renderer on the exported scene
         scene = depsgraph.scene_eval
         vertices = []
         uvs = []
@@ -111,14 +111,6 @@ class Flex(bpy.types.RenderEngine):
                 world = tint(node.inputs['Color'], textures, texels)
                 world[:3] = [c * node.inputs['Strength'].default_value for c in world[:3]]
         materials.extend((*world[:3], 0, 0, 0, *world[3:], 0, 1, 1, 0, 0))
-        matrix = scene.camera.matrix_world.normalized()
-        projection = scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x,
-            y=scene.render.resolution_y)
-        right = matrix.col[0].xyz / projection[0][0]
-        up = matrix.col[1].xyz / projection[1][1]
-        center = right * projection[0][2] + up * projection[1][2] - matrix.col[2].xyz
-        width = self.resolution_x
-        height = self.resolution_y
         triangles = numpy.array(vertices, 'f').reshape(-1, 3, 3)
         materials = numpy.array(materials).reshape(-1, 15)
         texels = numpy.concatenate(texels)
@@ -128,17 +120,45 @@ class Flex(bpy.types.RenderEngine):
         power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 3:6].sum(1))
         # Scene on stdin: triangle count, texel count; per triangle 9 vertex floats, 6 UV floats, a material of 6 floats
         # and 9 integers (then the world's), the power; then the texels.
-        # Request on stdin: samples, launches, size, the camera's origin and its ray direction per NDC x, per NDC y and
-        # at the center. Answer on stdout: samples launched, then radiance sums and sample count per pixel.
-        request = struct.pack('<4I12f', scene.flex_samples, scene.flex_samples, width, height, *matrix.translation,
-            *right, *up, *center)
-        description = b''.join((struct.pack('<II', len(power), len(texels) // 4), triangles.tobytes(),
+        # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process
+        # runs: once the engine drops them, the renderer reads the end of its input and exits.
+        process = subprocess.Popen(BINARY, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        self.requests = process.stdin
+        self.answers = process.stdout
+        process.stdin = process.stdout = None
+        # Frames arrive slowly and unevenly through the default 64 KiB
+        fcntl.fcntl(self.answers, fcntl.F_SETPIPE_SZ, 1 << 20)
+        self.requests.write(b''.join((struct.pack('<II', len(power), len(texels) // 4), triangles.tobytes(),
             numpy.array(uvs, 'f').tobytes(),
             numpy.hstack((materials[:, :6].astype('f').view('I'), materials[:, 6:].astype('I'))).tobytes(),
-            power.astype('d').tobytes(), texels.tobytes(), request))
-        output = subprocess.run(BINARY, input=description, stdout=subprocess.PIPE, check=True).stdout
-        # Blender rows run bottom to top
-        sums = numpy.frombuffer(output, numpy.float32, offset=4).reshape(height, width, 4)[::-1]
+            power.astype('d').tobytes(), texels.tobytes())))
+
+    # Radiance sums and sample count per pixel, rows bottom to top, after up to launches more samples, samples at most,
+    # of the view from the camera's matrix through its perspective projection; no rows if the view already had its
+    # samples. A view other than the last starts over.
+    def trace(self, width, height, samples, launches, matrix, projection):
+        right = matrix.col[0].xyz
+        up = matrix.col[1].xyz
+        back = matrix.col[2].xyz
+        x = right / projection[0][0]
+        y = up / projection[1][1]
+        center = x * projection[0][2] + y * projection[1][2] - back
+        # Request on stdin: samples, launches, size, the camera's origin and its ray direction per NDC x, per NDC y and
+        # at the center.
+        self.requests.write(struct.pack('<4I12f', samples, launches, width, height, *matrix.translation,
+            *x, *y, *center))
+        self.requests.flush()
+        launched, = struct.unpack('I', self.answers.read(4))  # Answer: samples launched, then the sums if any were
+        sums = self.answers.read(16 * width * height * bool(launched))
+        return numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
+
+    def render(self, depsgraph):
+        scene = depsgraph.scene_eval
+        width = self.resolution_x
+        height = self.resolution_y
+        self.start(depsgraph)
+        sums = self.trace(width, height, scene.flex_samples, scene.flex_samples, scene.camera.matrix_world.normalized(),
+            scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y))
         result = self.begin_result(0, 0, width, height)  # Blender clips the result to the render border
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)
