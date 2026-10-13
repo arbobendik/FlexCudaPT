@@ -19,10 +19,12 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h $(OPTIX_PATH)/in
 $(OPTIX_PATH)/include/optix.h:
 	git clone --depth 1 --branch v9.1.0 https://github.com/NVIDIA/optix-dev.git $(OPTIX_PATH)
 
-.PHONY: test clean
-test: export BLENDER_USER_RESOURCES = $(CURDIR)/build/blender
-test: build/flex.zip
+.PHONY: install test clean
+install: build/flex.zip  # A running Blender loads the new build within a second
 	blender -b --command extension install-file -r user_default -e $<
+
+test: export BLENDER_USER_RESOURCES = $(CURDIR)/build/blender
+test: install  # Into the exported resources instead of the user's
 	blender -b --python-exit-code 1 -P src/test.py
 
 clean:
