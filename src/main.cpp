@@ -1,11 +1,10 @@
 #include "shaders/renderer.h"
 #include <optix_function_table_definition.h>
 #include "loader.h"
+#include <cstring>
 #include "../build/shaders.h"
 
-int main(int, char** argv) { // Usage: renderer width height samples < scene > sums
-    const int width = std::atoi(argv[1]);
-    const int height = std::atoi(argv[2]);
+int main() { // Usage: renderer < scene, then requests > an answer per request
     // CUDA + OptiX contexts
     CUcontext cuda;
     OptixDeviceContext context;
@@ -17,9 +16,8 @@ int main(int, char** argv) { // Usage: renderer width height samples < scene > s
     unsigned rtcore;
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
-    // Build scene, alloc framebuffer
+    // Build scene
     Scene scene = loadScene(context);
-    scene.accumulation = (float4*)allocate(width * height * sizeof(float4), std::vector<float4>(width * height).data());
 
     // Load embedded PTX
     OptixPipelineCompileOptions compile{};
@@ -38,14 +36,35 @@ int main(int, char** argv) { // Usage: renderer width height samples < scene > s
     CHECK(optixPipelineCreate(context, &compile, &link, &group, 1, nullptr, nullptr, &pipeline));
     // Its SBT record carries scene
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
-    Record record{ {}, scene };
+    Record record;
     CHECK(optixSbtRecordPackHeader(group, &record));
-    OptixShaderBindingTable sbt = {.raygenRecord = allocate(sizeof(record), &record)};
-    // One path per pixel and sample
-    for (int sample = std::atoi(argv[3]); sample > 0; --sample)
-        CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, width, height, 1));
-    // Raw linear sums with the sample count in w, rows top to bottom
-    std::vector<float4> sums(width * height);
-    CHECK(cuMemcpyDtoH(sums.data(), (CUdeviceptr)scene.accumulation, sums.size() * sizeof(float4)));
-    std::fwrite(sums.data(), sizeof(float4), sums.size(), stdout);
+    const CUdeviceptr table = allocate(sizeof(record));
+    OptixShaderBindingTable sbt = {.raygenRecord = table};
+    // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
+    // number launched, followed by the sums if any were; a new view starts over
+    struct View { unsigned width, height; Camera camera; } view{};
+    struct { unsigned samples, launches; View view; } request;
+    std::vector<float4> sums;
+    scene.accumulation = (float4*)allocate(sizeof(float4)); // For the first view to free like any later one's
+    for (unsigned done = 0, launched; std::fread(&request, sizeof(request), 1, stdin); std::fflush(stdout)) {
+        if (std::memcmp(&view, &request.view, sizeof(View))) {
+            view = request.view;
+            done = 0;
+            scene.camera = view.camera;
+            sums.resize(view.width * view.height);
+            CHECK(cuMemFree((CUdeviceptr)scene.accumulation));
+            scene.accumulation = (float4*)allocate(sums.size() * sizeof(float4));
+            CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * sums.size()));
+            record.data = scene;
+            CHECK(cuMemcpyHtoD(table, &record, sizeof(record)));
+        }
+        // One path per pixel and sample
+        for (launched = 0; launched < request.launches && done < request.samples; ++launched, ++done)
+            CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, view.width, view.height, 1));
+        std::fwrite(&launched, sizeof(launched), 1, stdout);
+        if (!launched) continue;
+        // Raw linear sums with the sample count in w, rows top to bottom
+        CHECK(cuMemcpyDtoH(sums.data(), (CUdeviceptr)scene.accumulation, sums.size() * sizeof(float4)));
+        std::fwrite(sums.data(), sizeof(float4), sums.size(), stdout);
+    }
 }

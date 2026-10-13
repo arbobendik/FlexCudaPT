@@ -126,18 +126,19 @@ class Flex(bpy.types.RenderEngine):
         # tiny emitters after bright ones keep intervals of their power.
         normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
         power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 3:6].sum(1))
-        # Scene on stdin: triangle count, texel count, the camera's origin and its ray direction per NDC x, per NDC y
-        # and at the center; per triangle 9 vertex floats, 6 UV floats, a material of 6 floats and 9 integers (then the
-        # world's), the power; then the texels. Radiance sums and sample count per pixel on stdout.
-        header = struct.pack('<II12f', len(power), len(texels) // 4, *matrix.translation, *right, *up, *center)
-        description = b''.join((header,
-            triangles.tobytes(), numpy.array(uvs, 'f').tobytes(),
+        # Scene on stdin: triangle count, texel count; per triangle 9 vertex floats, 6 UV floats, a material of 6 floats
+        # and 9 integers (then the world's), the power; then the texels.
+        # Request on stdin: samples, launches, size, the camera's origin and its ray direction per NDC x, per NDC y and
+        # at the center. Answer on stdout: samples launched, then radiance sums and sample count per pixel.
+        request = struct.pack('<4I12f', scene.flex_samples, scene.flex_samples, width, height, *matrix.translation,
+            *right, *up, *center)
+        description = b''.join((struct.pack('<II', len(power), len(texels) // 4), triangles.tobytes(),
+            numpy.array(uvs, 'f').tobytes(),
             numpy.hstack((materials[:, :6].astype('f').view('I'), materials[:, 6:].astype('I'))).tobytes(),
-            power.astype('d').tobytes(), texels.tobytes()))
-        output = subprocess.run([BINARY, str(width), str(height), str(scene.flex_samples)], input=description,
-            stdout=subprocess.PIPE, check=True).stdout
+            power.astype('d').tobytes(), texels.tobytes(), request))
+        output = subprocess.run(BINARY, input=description, stdout=subprocess.PIPE, check=True).stdout
         # Blender rows run bottom to top
-        sums = numpy.frombuffer(output, numpy.float32).reshape(height, width, 4)[::-1]
+        sums = numpy.frombuffer(output, numpy.float32, offset=4).reshape(height, width, 4)[::-1]
         result = self.begin_result(0, 0, width, height)  # Blender clips the result to the render border
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)
