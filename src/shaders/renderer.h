@@ -5,8 +5,9 @@
 struct Camera { float3 origin, x, y, z; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height sRGB texels from texel on or a color with the normal it encodes in tangent space, or
-// combines the two topmost.
-enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, STORE, LOAD };
+// combines the two or three topmost.
+enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, MAXIMUM, LOGARITHM,
+    MULTIPLY_ADD, STORE, LOAD };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
