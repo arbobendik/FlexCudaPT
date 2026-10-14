@@ -23,16 +23,19 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
     'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, absorption and density
-GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5, 1, 0]
-BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5, 1, 0]
+GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 0]
+BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 0]
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
-# or a constant; any other shader is diffuse
+# or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Cycles ignores EEVEE's specular
+# shader and volume shaders on surfaces, and passes rays through a portal without a position or direction; any other
+# shader is diffuse.
 SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission Color', 'Emission Strength',
         'Transmission Weight', 'IOR'), 'BSDF_METALLIC': ('Base Color', 1, 'Roughness', 0, 0, 0, 1.5),
-    'EEVEE_SPECULAR': ('Base Color', 0, 'Roughness', 'Emissive Color', 1, 'Transparency', 1.5),
+    **dict.fromkeys(('EEVEE_SPECULAR', 'PRINCIPLED_VOLUME', 'VOLUME_ABSORPTION', 'VOLUME_SCATTER',
+        'VOLUME_COEFFICIENTS'), (0, 0, 1, 0, 0, 0, 1)), 'BSDF_RAY_PORTAL': ('Color', 0, 0, 0, 0, 1, 1),
     'BSDF_GLOSSY': ('Color', 1, 'Roughness', 0, 0, 0, 1.5), 'BSDF_GLASS': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'),
     'BSDF_REFRACTION': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'), 'BSDF_TRANSPARENT': ('Color', 0, 0, 0, 0, 1, 1),
-    'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1.5), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1.5)}
+    'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1)}
 # Absorption color and density per volume shader node; any other absorbs nothing
 VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density'), 'PRINCIPLED_VOLUME': ('Absorption Color', 'Density')}
 # Luminance of a color and mean of a vector, as Blender converts them to values
@@ -89,7 +92,8 @@ def clamp(value):
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
 # mapping of points scales and moves them without rotating. A normal map bends the normal by its strength toward the
-# color's normal in tangent space and keeps it in any other space.
+# color's normal in tangent space and keeps it in any other space. Added shaders sum their iors' excess over 1, as
+# Cycles sums their reflections.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
@@ -100,7 +104,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
     'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 6, 7) else ('ADD', a, b)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7)
+        else ('SUBTRACT', ('ADD', a, b), 1) if attribute == 6 else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation) else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
@@ -138,7 +143,7 @@ def resolve(socket, groups=()):
             value = clamp(value)
     else:  # Alpha fades a shader into full transparency without refraction
         albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density = (get(source)
-            if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1.5))
+            if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1))
             + VOLUMES.get(node.type, (1, 0)))
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness, ('MULTIPLY', emissive, strength),
             mix(1, transparency, get('Alpha', 1)), mix(1, ior, get('Alpha', 1)), absorption, density]
