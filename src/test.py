@@ -109,7 +109,7 @@ assert not numpy.allclose(pixels[18:46, 34:62], SKY, atol=0.01), 'opaque'  # The
 for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 assert chroma(44, 4, 8, (1, 1, 1)), 'leaf'
-for y in (2, 10): assert not numpy.allclose(pixels[y:y + 4, 56:60], SKY, atol=0.01), 'black'  # Hides the sky
+for y in (2, 10): assert not pixels[y:y + 4, 56:60].any(), 'black'  # Reflecting nothing, as in Cycles
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
 
