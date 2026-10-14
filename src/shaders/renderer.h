@@ -4,8 +4,9 @@
 // Perspective: the ray through NDC (u, v) leaves origin along x * u + y * v + z.
 struct Camera { float3 origin, x, y, z; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
-// there of the width * height sRGB texels from texel on, or combines the two topmost.
-enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT };
+// there of the width * height sRGB texels from texel on or a color with the normal it encodes in tangent space, or
+// combines the two topmost.
+enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface { float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; };
