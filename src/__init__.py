@@ -96,6 +96,9 @@ def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by a
     if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(a, b)]
     return 'ADD', ('MULTIPLY', a, ('SUBTRACT', 1, factor)), ('MULTIPLY', b, factor)
 
+def clamp(value):
+    return 'SUBTRACT', 1, ('MAXIMUM', 0, ('SUBTRACT', 1, ('MAXIMUM', 0, value)))
+
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
 # mapping of points scales and moves them without rotating. A normal map bends the normal by its strength toward the
@@ -105,7 +108,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'TEX_IMAGE': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE', inputs[0] if node.inputs[0].is_linked
         else ('UV',), node.image) if node.image and node.image.size[0] else numpy.array((1, 0, 1)),
     'VALTORGB': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE',
-        ('ADD', ('MULTIPLY', inputs[0], 255 / 256), 0.5 / 256), node),
+        ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
     'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 6, 7) else ('ADD', a, b)
@@ -139,7 +142,11 @@ def resolve(socket, groups=()):
         inner = next(inner for inner in node.node_tree.nodes if inner.type == 'GROUP_OUTPUT' and inner.is_active_output)
         value = resolve(inner.inputs[index], (*groups, node))
     elif node.type in NODES:
-        value = NODES[node.type](node, [resolve(input, groups) for input in node.inputs if input.enabled], index)
+        inputs = [resolve(input, groups) for input in node.inputs if input.enabled]
+        if node.type == 'MIX_RGB' or node.type == 'MIX' and node.clamp_factor: inputs[0] = clamp(inputs[0])
+        value = NODES[node.type](node, inputs, index)
+        if node.type in ('MATH', 'MIX_RGB') and node.use_clamp or node.type == 'MIX' and node.clamp_result:
+            value = clamp(value)
     else:  # Alpha fades a shader into full transparency without refraction
         albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density = (get(source)
             if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1.5))
