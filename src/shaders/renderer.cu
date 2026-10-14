@@ -20,6 +20,10 @@ __device__ float3 operator*(float s, float3 a) { return a * s; }
 __device__ float3 operator/(float3 a, float s) { return make_float3(a.x / s, a.y / s, a.z / s); }
 __device__ float3 xzy(float3 a) { return make_float3(a.x, a.z, a.y); }
 __device__ float3 mix(float3 a, float3 b, float t) { return a * (1 - t) + b * t; }
+__device__ float4 mix(float4 a, float4 b, float t) {
+    return make_float4(a.x * (1 - t) + b.x * t, a.y * (1 - t) + b.y * t,
+        a.z * (1 - t) + b.z * t, a.w * (1 - t) + b.w * t);
+}
 // -1, 0 or 1
 __device__ float sign(float x) { return (x > 0) - (x < 0); }
 __device__ float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -474,6 +478,9 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
 // Of a to the base b, zero where undefined as Blender's
 __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
+__device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
+    return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
+}
 // Surface a program resolves to at a UV, facing along the normal with the tangent space tbn
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Matrix tbn, float u, float v) {
     float3 stack[STACK], *top = stack, saved[SLOTS];
@@ -483,10 +490,17 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
         case LOAD: *top++ = saved[op->texel]; break;
         case UV: *top++ = make_float3(u, v, 0); break;
         case NORMAL: *top++ = normal; break;
-        case IMAGE: case ALPHA: { // Repeating
-            const float4 texel = scene.texels[op->texel + unsigned(wrap(top[-1].y) * op->height) * op->width
-                + unsigned(wrap(top[-1].x) * op->width)];
-            top[-1] = op->code == IMAGE ? make_float3(texel.x, texel.y, texel.z) : make_float3(1, 1, 1) * texel.w;
+        case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: { // Repeating
+            float x = wrap(top[-1].x) * op->width, y = wrap(top[-1].y) * op->height;
+            float4 color = texel(scene, *op, int(x), int(y));
+            if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
+                x -= 0.5f; y -= 0.5f;
+                const int i = int(floorf(x)), j = int(floorf(y));
+                color = mix(mix(texel(scene, *op, i, j), texel(scene, *op, i + 1, j), x - i),
+                    mix(texel(scene, *op, i, j + 1), texel(scene, *op, i + 1, j + 1), x - i), y - j);
+            }
+            top[-1] = op->code == IMAGE || op->code == IMAGE_LINEAR ? make_float3(color.x, color.y, color.z)
+                : make_float3(1, 1, 1) * color.w;
         } break;
         case NORMAL_MAP: top[-1] = normalize(tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn)); break;
         case ADD: --top; top[-1] = top[-1] + *top; break;
