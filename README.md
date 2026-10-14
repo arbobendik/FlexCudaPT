@@ -14,6 +14,7 @@ itself. GitHub Actions builds every push to main and every pull request; every p
 as a [release](https://github.com/arbobendik/flex-cuda-pt/releases).
 
 Select Flex as the render engine, for final renders and the viewport's rendered shading. It renders geometry, lights and
-the world through perspective cameras. Material node trees resolve to a normal, albedo, metallic, roughness, emission,
-transparency and IOR per hit, of which the shading so far uses albedo and emission. Max samples and resolution are set
-in the Flex panel of the render properties. `make test` renders a small scene headlessly and checks the result.
+the world through perspective cameras. Material node trees resolve to a smooth or normal mapped normal, albedo,
+metallic, roughness, emission, transparency and IOR per hit, and their volumes to the absorption color and density that
+media absorb by. Max samples and resolution are set in the Flex panel of the render properties. `make test` renders a
+small scene headlessly and checks the result.
