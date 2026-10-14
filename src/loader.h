@@ -77,7 +77,7 @@ inline Scene loadScene(OptixDeviceContext context) {
     Scene scene{.vertices = load<float3>(3 * header.count), .normals = load<float3>(3 * header.count),
         .uvs = load<float2>(3 * header.count),
         .materials = load<Material>(header.count + 1), .power = load<double>(header.count),
-        .ops = load<Op>(header.ops), .texels = load<uchar4>(header.texels), .count = header.count,
+        .ops = load<Op>(header.ops), .texels = load<float4>(header.texels), .count = header.count,
         .pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]), loadPairing(PAIRING_SIZES[2])}};
     CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;
     unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
