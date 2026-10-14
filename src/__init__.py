@@ -25,6 +25,9 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
     'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1.5), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1.5)}
 # Luminance of a color and mean of a vector, as Blender converts them to values
 WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
+# Blender's material panels the engine shows: the slots, the surface's nodes and the generic ones
+PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
+    'MATERIAL_PT_animation')
 
 def encode(linear):  # Linear to sRGB
     return numpy.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear.clip(0, 1) ** (1 / 2.4) - 0.055)
@@ -343,9 +346,11 @@ def register():
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
     bpy.utils.register_class(RENDER_PT_flex_restir)
+    for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.add(Flex.bl_idname)
 
 def unregister():
     bpy.app.timers.unregister(reload)
+    for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.remove(Flex.bl_idname)
     bpy.utils.unregister_class(RENDER_PT_flex_restir)
     bpy.utils.unregister_class(RENDER_PT_flex)
     bpy.utils.unregister_class(Flex)
