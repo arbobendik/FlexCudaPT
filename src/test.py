@@ -88,6 +88,10 @@ leaf.id_data.nodes['Material Output'].is_active_output = False
 cycles = leaf.id_data.nodes.new('ShaderNodeOutputMaterial')
 cycles.target = 'CYCLES'
 leaf.id_data.links.new(leaf.id_data.nodes.new('ShaderNodeEmission').outputs[0], cycles.inputs['Surface'])
+void = plane('void', 0.8, -0.875, 0.2).id_data  # Black: an output without a shader
+void.links.remove(void.nodes['Material Output'].inputs['Surface'].links[0])
+bare = plane('bare', 0.8, -0.625, 0.2).id_data  # Black: no output
+bare.nodes.remove(bare.nodes['Material Output'])
 for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
     node.interpolation = 'Closest'  # Whole texels
 
@@ -107,6 +111,7 @@ assert not numpy.allclose(pixels[18:46, 34:62], SKY, atol=0.01), 'opaque'  # The
 for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 assert chroma(44, 4, 8, (1, 1, 1)), 'leaf'
+for y in (2, 10): assert not numpy.allclose(pixels[y:y + 4, 56:60], SKY, atol=0.01), 'black'  # Hides the sky
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
 
