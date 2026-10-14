@@ -55,8 +55,13 @@ source = colored.id_data.nodes.new('ShaderNodeTexImage')
 source.image = texture.image
 colored.id_data.links.new(source.outputs['Color'], ramp.inputs['Fac'])
 colored.id_data.links.new(ramp.outputs['Color'], colored.inputs['Base Color'])
-cutout = plane('cutout', 0, 0, 4)  # Not rendered: linked alpha
-cutout.id_data.links.new(cutout.id_data.nodes.new('ShaderNodeValue').outputs[0], cutout.inputs['Alpha'])
+opaque = textured.id_data.nodes.new('ShaderNodeValue')  # Rendered: alpha linked from a constant
+opaque.outputs[0].default_value = 1
+textured.id_data.links.new(opaque.outputs[0], textured.inputs['Alpha'])
+cutout = plane('cutout', 0, 0, 4)  # Not rendered: textured alpha
+alpha = cutout.id_data.nodes.new('ShaderNodeTexImage')
+alpha.image = texture.image
+cutout.id_data.links.new(alpha.outputs['Alpha'], cutout.inputs['Alpha'])
 fog = plane('fog', 0, 0, 4).id_data  # Not rendered: volume only
 output = fog.nodes['Material Output']
 fog.links.remove(output.inputs['Surface'].links[0])
@@ -83,6 +88,7 @@ assert not pixels[56:].any(), 'border'
 assert chroma(0, 16, 32, COLOR), 'color'
 for texel, (x, y) in zip(TEXELS, ((32, 16), (48, 16), (32, 32), (48, 32))):
     assert chroma(x, y, 16, texel), f'texture {texel}'
+assert not numpy.allclose(pixels[18:46, 34:62], SKY, atol=0.01), 'opaque'  # The textured plane hides the sky
 for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
