@@ -13,9 +13,9 @@ MODIFIED = os.path.getmtime(__file__)
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': numpy.dot}
-# Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency and ior
-GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5]
-BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5]
+# Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, absorption and density
+GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5, 1, 0]
+BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5, 1, 0]
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; any other shader is diffuse
 SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission Color', 'Emission Strength',
@@ -24,6 +24,8 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
     'BSDF_GLOSSY': ('Color', 1, 'Roughness', 0, 0, 0, 1.5), 'BSDF_GLASS': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'),
     'BSDF_REFRACTION': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'), 'BSDF_TRANSPARENT': ('Color', 0, 0, 0, 0, 1, 1),
     'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1.5), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1.5)}
+# Absorption color and density per volume shader node; any other absorbs nothing
+VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density'), 'PRINCIPLED_VOLUME': ('Absorption Color', 'Density')}
 # Luminance of a color and mean of a vector, as Blender converts them to values
 WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
 # Blender's material panels the engine shows: the slots, the surface's nodes and the generic ones
@@ -83,7 +85,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         ('ADD', ('MULTIPLY', inputs[0], 255 / 256), 0.5 / 256), node),
     'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 6) else ('ADD', a, b)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 6, 7) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs[:2]) if OPS.get(node.operation) else inputs[0],
     'MAPPING': lambda node, inputs, index: ('ADD', ('MULTIPLY', inputs[0], inputs[3]), inputs[1])
@@ -113,22 +115,23 @@ def resolve(socket, groups=()):
     elif node.type in NODES:
         value = NODES[node.type](node, [resolve(input, groups) for input in node.inputs if input.enabled], index)
     else:  # Alpha fades a shader into full transparency without refraction
-        albedo, metallic, roughness, emissive, strength, transparency, ior = (get(source) if isinstance(source, str)
-            else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1.5)))
+        albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density = (get(source)
+            if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1.5))
+            + VOLUMES.get(node.type, (1, 0)))
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness, ('MULTIPLY', emissive, strength),
-            mix(1, transparency, get('Alpha', 1)), mix(1, ior, get('Alpha', 1))]
+            mix(1, transparency, get('Alpha', 1)), mix(1, ior, get('Alpha', 1)), absorption, density]
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
 
-# The material's surface as rows, one or none: the row of its surface; none for volumes without a surface shader and
-# for textured alpha
+# The material's surface as rows, one or none: the row of its surface, absorbing as its volume; none for volumes
+# without a surface shader and for textured alpha
 def shade(material, program):
     output = material.node_tree.get_output_node('ALL')
     shaders = [node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'][:1]
     if not (output and output.inputs['Surface'].is_linked) or any(node.inputs['Alpha'].is_linked for node in shaders):
         return []
-    return [program(resolve(output.inputs['Surface']))]
+    return [program([*resolve(output.inputs['Surface'])[:7], *resolve(output.inputs['Volume'])[7:]])]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
