@@ -170,12 +170,13 @@ def upstream(socket, nodes):  # nodes, with those the socket receives from throu
         for input in node.inputs: upstream(input, nodes)
     return nodes
 
-# The material's surface as rows, one or none: the row of its surface, absorbing as its volume; none for volumes
-# without a surface shader and for textured alpha of a Principled BSDF the surface receives from
+# The material's surface as rows, one or none: the row of its surface, absorbing as its volume, black without an output;
+# none for volumes without a surface shader and for textured alpha of a Principled BSDF the surface receives from
 def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
-    if not (output and output.inputs['Surface'].is_linked) or any(node.type == 'BSDF_PRINCIPLED'
-            and isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
+    if not output: return [program(BLACK)]
+    if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked or any(
+            node.type == 'BSDF_PRINCIPLED' and isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
             for node in upstream(output.inputs['Surface'], set())):
         return []
     return [program([*resolve(output.inputs['Surface'])[:7], *resolve(output.inputs['Volume'])[7:]])]
