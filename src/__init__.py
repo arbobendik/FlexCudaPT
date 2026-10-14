@@ -169,7 +169,8 @@ def resolve(socket, groups=()):
 def shade(material, program):
     output = material.node_tree.get_output_node('ALL')
     shaders = [node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'][:1]
-    if not (output and output.inputs['Surface'].is_linked) or any(node.inputs['Alpha'].is_linked for node in shaders):
+    if not (output and output.inputs['Surface'].is_linked) or any(isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
+            for node in shaders):
         return []
     return [program([*resolve(output.inputs['Surface'])[:7], *resolve(output.inputs['Volume'])[7:]])]
 
