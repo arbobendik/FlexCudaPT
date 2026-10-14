@@ -146,13 +146,19 @@ def resolve(socket, groups=()):
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
 
+def upstream(socket, nodes):  # nodes, with those the socket receives from through links that are not muted added
+    for node in {link.from_node for link in socket.links if not link.is_muted} - nodes:
+        nodes.add(node)
+        for input in node.inputs: upstream(input, nodes)
+    return nodes
+
 # The material's surface as rows, one or none: the row of its surface, absorbing as its volume; none for volumes
-# without a surface shader and for textured alpha
+# without a surface shader and for textured alpha of a Principled BSDF the surface receives from
 def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
-    shaders = [node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'][:1]
-    if not (output and output.inputs['Surface'].is_linked) or any(isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
-            for node in shaders):
+    if not (output and output.inputs['Surface'].is_linked) or any(node.type == 'BSDF_PRINCIPLED'
+            and isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
+            for node in upstream(output.inputs['Surface'], set())):
         return []
     return [program([*resolve(output.inputs['Surface'])[:7], *resolve(output.inputs['Volume'])[7:]])]
 
