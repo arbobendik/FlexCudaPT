@@ -142,3 +142,7 @@ with offscreen.bind():
     while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)  # Until the sample limit
     drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
 assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
+for ob in scene.objects: ob.hide_render = ob != scene.camera  # Nothing left to render but the sky
+bpy.ops.render.render(scene=scene.name, write_still=True)
+empty = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+assert numpy.allclose(empty, SKY, atol=0.01), 'empty'
