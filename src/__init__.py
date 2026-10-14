@@ -9,11 +9,16 @@ RENDER_SAMPLES = 64  # At most, per update of a final render
 SLOTS = 32  # Values a program keeps for reuse, as the shader's
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 MODIFIED = os.path.getmtime(__file__)
+def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
+    with numpy.errstate(all='ignore'):
+        return numpy.where((a > 0) & (b > 0) & (b != 1), numpy.log(a) / numpy.log(b), 0)
+
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
-    'DOT_PRODUCT': numpy.dot, **dict.fromkeys(('STORE', 'LOAD'))}
+    'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
+    'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5, 1, 0]
 BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5, 1, 0]
@@ -105,7 +110,10 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 6, 7) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
-    'MATH': lambda node, inputs, index: (node.operation, *inputs[:2]) if OPS.get(node.operation) else inputs[0],
+    'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation) else inputs[0],
+    'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
+    'COMBXYZ': lambda node, inputs, index: ('ADD', ('ADD', ('MULTIPLY', inputs[0], numpy.eye(3)[0]),
+        ('MULTIPLY', inputs[1], numpy.eye(3)[1])), ('MULTIPLY', inputs[2], numpy.eye(3)[2])),
     'MAPPING': lambda node, inputs, index: ('ADD', ('MULTIPLY', inputs[0], inputs[3]), inputs[1])
         if node.vector_type == 'POINT' else inputs[0]}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
