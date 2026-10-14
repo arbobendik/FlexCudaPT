@@ -37,9 +37,6 @@ __device__ float length(float3 a) { return sqrtf(dot(a, a)); }
 __device__ bool operator==(float3 a, float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
 // Repeats into [0, 1)
 __device__ float wrap(float coordinate) { return fminf(coordinate - floorf(coordinate), 0x1.fffffep-1f); }
-__device__ float decode(unsigned char srgb) {
-    return srgb <= 10 ? srgb / 3294.6f : powf((srgb / 255.0f + 0.055f) / 1.055f, 2.4f);
-}
 __device__ unsigned hash(unsigned x) { // PCG
     x = x * 747796405u + 2891336453u;
     x = ((x >> ((x >> 28) + 4)) ^ x) * 277803737u;
@@ -52,7 +49,6 @@ __device__ double random53(unsigned& state) {
     const unsigned low = (state = hash(state)) >> 6;
     return (high * 0x1p26 + low) * 0x1p-53;
 }
-__device__ float3 decode(uchar4 texel) { return make_float3(decode(texel.x), decode(texel.y), decode(texel.z)); }
 struct Random { unsigned state; float value; };
 struct RandomSphere { unsigned state; float3 value; };
 struct RandomHemisphere { unsigned state; float3 value; };
@@ -488,9 +484,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
         case UV: *top++ = make_float3(u, v, 0); break;
         case NORMAL: *top++ = normal; break;
         case IMAGE: case ALPHA: { // Repeating
-            const uchar4 texel = scene.texels[op->texel + unsigned(wrap(top[-1].y) * op->height) * op->width
+            const float4 texel = scene.texels[op->texel + unsigned(wrap(top[-1].y) * op->height) * op->width
                 + unsigned(wrap(top[-1].x) * op->width)];
-            top[-1] = op->code == IMAGE ? decode(texel) : make_float3(1, 1, 1) * decode(texel.w);
+            top[-1] = op->code == IMAGE ? make_float3(texel.x, texel.y, texel.z) : make_float3(1, 1, 1) * texel.w;
         } break;
         case NORMAL_MAP: top[-1] = normalize(tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn)); break;
         case ADD: --top; top[-1] = top[-1] + *top; break;
