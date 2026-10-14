@@ -11,7 +11,8 @@ MODIFIED = os.path.getmtime(__file__)
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
-    'ALPHA')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply, 'DOT_PRODUCT': numpy.dot}
+    'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
+    'DOT_PRODUCT': numpy.dot}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency and ior
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5]
 BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5]
@@ -72,8 +73,10 @@ def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by a
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
-# mapping of points scales and moves them without rotating.
-NODES = {'NORMAL_MAP': lambda node, inputs, index: ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
+# mapping of points scales and moves them without rotating. A normal map bends the normal by its strength toward the
+# color's normal in tangent space and keeps it in any other space.
+NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
+        if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE', inputs[0] if node.inputs[0].is_linked
         else ('UV',), node.image) if node.image and node.image.size[0] else numpy.array((1, 0, 1)),
     'VALTORGB': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE',
