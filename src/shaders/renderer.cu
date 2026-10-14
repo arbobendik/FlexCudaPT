@@ -294,10 +294,10 @@ __device__ float3 BSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, cons
         const float denom_f_sq = denom_f * denom_f;
         // Check if refraction is possible
         if (fabsf(denom_f) > BIAS && denominator_geom > BIAS) {
-            // Term is uncolored by albedo, this is handled by Beer's law in lightTrace
+            // Term is colored by albedo as the surface, the medium's absorption is Beer's law's
             const float walter = (numerator_geom / denominator_geom) * (1.0f - rgb_to_greyscale(FT)) * DT * GT
                 * (eta_o * eta_o / denom_f_sq);
-            return make_float3(walter, walter, walter) * material.transparency * n_dot_l;
+            return material.albedo * (walter * material.transparency * n_dot_l);
         }
         // If refraction is not possible, return black this case should never happen
         return make_float3(0.0f, 0.0f, 0.0f);
@@ -366,8 +366,6 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
     const float diffuse_component = fmaxf(diffuse_weight * (1.0f - F_greyscale), 0.0f);
     const float refract_component = fmaxf(refract_weight * (1.0f - F_greyscale)
         * sign(sqrtf(dot(refracted, refracted))), 0.0f);
-    // Do not account for chroma of reflection for transmissive materials as in this case our model uses albedo as proxy for absorption instead.
-    float colorless_reflection = material.transparency;
     // Calculate sampling probabilities
     const float total_component = reflect_component + diffuse_component + refract_component;
     const float total_component_inv = 1.0f / fmaxf(total_component, BIAS);
@@ -435,7 +433,7 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
         // G = G1_v * G1_l
         // => throughput = refract_weight * G1_l * (1 - F)
-        sample.throughput = make_float3(1.0f, 1.0f, 1.0f) * (refract_weight * G1_l * (1.0f - F_greyscale) / p_refract);
+        sample.throughput = material.albedo * (refract_weight * G1_l * (1.0f - F_greyscale) / p_refract);
         sample.random_state = random_state;
         sample.refracted = true;
         sample.lobe = 1u;
@@ -464,8 +462,7 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
     // G = G1_v * G1_l
     // => throughput = reflect_weight * G1_l * F
-    sample.throughput = reflect_weight * G1_l
-        * mix(F, make_float3(F_greyscale, F_greyscale, F_greyscale), colorless_reflection) / p_reflect;
+    sample.throughput = reflect_weight * G1_l * F / p_reflect;
     sample.random_state = random_state;
     sample.lobe = 2u;
     sample.pdf = pdf_h > 0.0f ? p_reflect * pdf_h / (4.0f * v_dot_h) : 0.0f;
@@ -773,12 +770,11 @@ __device__ Lobe evalLobe(float3 in_dir, float3 out_dir, float3 n, const Surface&
         }
         const float denom = eta_i * v_dot_h + eta_o * l_dot_h;
         const float pdf = chance[1] * pdf_h * eta_o * eta_o * fabsf(l_dot_h) / (denom * denom);
-        return Lobe{make_float3(1.0f, 1.0f, 1.0f)
+        return Lobe{material.albedo
             * (pdf * material.transparency * G1(alpha, fmaxf(- n_dot_l, 0.0f)) * (1.0f - F_greyscale) / p[1]), pdf};
     }
     const float pdf = chance[2] * pdf_h / (4.0f * v_dot_h);
-    return Lobe{pdf * G1(alpha, fmaxf(n_dot_l, 0.0f))
-        * mix(F, make_float3(F_greyscale, F_greyscale, F_greyscale), material.transparency) / p[2], pdf};
+    return Lobe{pdf * G1(alpha, fmaxf(n_dot_l, 0.0f)) * F / p[2], pdf};
 }
 
 // Weighted reservoir sampling step, weight is the vector-valued resampling weight (Sec. 6.3)
