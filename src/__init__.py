@@ -37,20 +37,20 @@ WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3
 PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
     'MATERIAL_PT_animation')
 
-def encode(linear):  # Linear to sRGB
-    return numpy.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear.clip(0, 1) ** (1 / 2.4) - 0.055)
+def decode(srgb):  # sRGB to linear
+    return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
 
-# First texel, width and height of an image or of a ramp node's 256 colors, added to the texels as sRGB at first use
+# First texel, width and height of an image or of a ramp node's 256 colors, added as linear floats at first use
 def texture(source, textures, texels):
     if source not in textures:
         ramp = source.type == 'VALTORGB'
         pixels = numpy.empty(1024 if ramp else len(source.pixels), 'f')
         if ramp: pixels[:] = numpy.ravel([source.color_ramp.evaluate(i / 255) for i in range(256)])
         else: source.pixels.foreach_get(pixels)
-        if ramp or source.is_float or source.colorspace_settings.is_data: pixels = encode(pixels)
-        else: pixels[3::4] = encode(pixels[3::4])  # Alpha as well
+        if not (ramp or source.is_float or source.colorspace_settings.is_data):
+            pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
         textures[source] = sum(map(len, texels)) // 4, *((256, 1) if ramp else source.size)
-        texels.append((pixels * 255 + 0.5).clip(0, 255).astype('B'))
+        texels.append(pixels)
     return textures[source]
 
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
@@ -172,7 +172,7 @@ class Flex(bpy.types.RenderEngine):
         materials = []
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height per image and ramp
-        texels = [numpy.full(4, 255, 'B')]  # sRGB bytes after a white texel: the renderer loads no empty array
+        texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         program = lambda surface: [len(ops), emit(fold(surface), ops, textures, texels)][::-1]
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         for instance in depsgraph.object_instances:
