@@ -17,7 +17,7 @@ def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
-    'MULTIPLY_ADD': lambda a, b, c: a * b + c}
+    'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5, 1, 0]
 BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5, 1, 0]
@@ -61,7 +61,8 @@ def emit(expression, ops, textures, texels):
         ops.append((1, *numpy.resize(expression, 3).astype('f').view('I')))
         return expression
     name, *operands = expression
-    payload = texture(operands.pop(), textures, texels) if name in ('IMAGE', 'ALPHA') else (0, 0, 0)
+    payload = texture(operands.pop(), textures, texels) if name in ('IMAGE', 'ALPHA', 'IMAGE_LINEAR',
+        'ALPHA_LINEAR') else (0, 0, 0)
     values = [emit(operand, ops, textures, texels) for operand in operands]
     ops.append(([*OPS].index(name), *payload))
     return OPS[name](*values) if OPS[name] else numpy.ones(3)
@@ -87,9 +88,11 @@ def clamp(value):
 # color's normal in tangent space and keeps it in any other space.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
-    'TEX_IMAGE': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE', inputs[0] if node.inputs[0].is_linked
+    'TEX_IMAGE': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
+        + ('_LINEAR' if node.interpolation == 'Linear' else ''), inputs[0] if node.inputs[0].is_linked
         else ('UV',), node.image) if node.image and node.image.size[0] else numpy.array((1, 0, 1)),
-    'VALTORGB': lambda node, inputs, index: ('ALPHA' if index else 'IMAGE',
+    'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
+        + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
     'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
