@@ -10,8 +10,8 @@ make install
 ```
 
 This builds the extension and installs it into Blender without launching it; a running Blender loads the new build by
-itself. GitHub Actions builds every push to main and every pull request; pushing a `v*` tag also publishes `flex.zip` as
-a release.
+itself. GitHub Actions builds every push to main and every pull request; every push to main also publishes `flex.zip`
+as a [release](https://github.com/arbobendik/flex-cuda-pt/releases).
 
 Select Flex as the render engine, for final renders and the viewport's rendered shading. It renders geometry, lights and
 the world through perspective cameras. Material node trees resolve to a normal, albedo, metallic, roughness, emission,
