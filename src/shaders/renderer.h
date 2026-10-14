@@ -11,8 +11,35 @@ struct Op { unsigned code; union { float3 value; struct { unsigned texel, width,
 struct Surface { float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; };
 // Lights are sampled by emitted, their summed emission under white textures; hidden surfaces let camera rays through.
 struct Material { float emitted; unsigned program, hidden; };
+// Point of a triangle at its barycentrics, triangle NONE for no point
+constexpr unsigned NONE = ~0u;
+struct Hit { unsigned triangle; float2 uv; };
+// ReSTIR sample of a pixel: the path its seed draws, described by path, and how to reconnect to it
+struct Reservoir {
+    unsigned seed, path;
+    // Unbiased contribution weight and confidence
+    float w, c;
+    // Integrand of the sample in the owning pixel
+    float3 f;
+    // Source densities p(x_k-1 -> x_k) G(x_k-1 -> x_k) p(x_k -> x_k+1) of the reconnection
+    float jac;
+    // Reconnection vertex
+    Hit rc;
+    // Direction leaving the reconnection vertex and the radiance arriving along it
+    float3 dir, radiance;
+};
+// Integrand of a sample shifted into another pixel times the Jacobian determinant of the shift, and the latter
+struct Shift { float3 f; float jac; };
+// Of the scene: whether ReSTIR reuses paths
+struct Settings { unsigned restir; };
+// Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
+constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle: three vertices and UVs, one material, cumulative emitted power; the world's material comes last.
+// Per pixel: the reservoir the last frame ended with, this frame's initial and temporal reservoir and the shifts of the
+// latter to the pixel's partner in each reuse texture. The frame's number seeds it.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3* vertices; float2* uvs; Material* materials; double* power;
     Op* ops; uchar4* texels; unsigned count; Camera camera;
+    Reservoir *previous, *initial, *temporal; Shift* shifts; char2* pairing[3];
+    unsigned frame; Camera previousCamera; Settings settings;
 };
