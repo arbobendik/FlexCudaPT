@@ -95,7 +95,17 @@ bare.nodes.remove(bare.nodes['Material Output'])
 for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
     node.interpolation = 'Closest'  # Whole texels
 
+STATS = []
+def stats(*args): STATS.append(args[0])
+bpy.app.handlers.render_stats.append(stats)
 bpy.ops.render.render(scene=scene.name, write_still=True)
+bpy.app.handlers.render_stats.remove(stats)
+progress = [message for message in STATS if ' | Sample ' in message]
+counts = [int(message.split('Sample ')[1].split('/')[0]) for message in progress]
+assert counts[0] == 1 and counts[-1] == scene.flex_samples and all(
+    0 < batch <= 64 for batch in numpy.diff([0, *counts])), 'sample progress'
+assert len(counts) <= 10, 'batched progress'
+assert all('Remaining:' in message and 'samples/s' in message for message in progress), 'performance stats'
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
 
 def chroma(x, y, size, color):  # Whether the block of pixels has the color's hue
@@ -149,6 +159,7 @@ with offscreen.bind():
     gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
     viewport.view_update(context, depsgraph)
     viewport.view_draw(context, depsgraph)
+    assert 0 < viewport.memory[0] <= viewport.memory[1], 'memory stats'
     while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)  # Until the sample limit
     drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
 assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
