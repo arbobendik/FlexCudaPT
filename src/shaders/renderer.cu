@@ -478,6 +478,8 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
     return sample;
 }
 
+// Of a to the base b, zero where undefined as Blender's
+__device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
 // Surface a program resolves to at a UV, facing along the normal with the tangent space tbn
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Matrix tbn, float u, float v) {
     float3 stack[STACK], *top = stack;
@@ -495,6 +497,14 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
         case SUBTRACT: --top; top[-1] = top[-1] - *top; break;
         case MULTIPLY: --top; top[-1] = top[-1] * *top; break;
         case DOT_PRODUCT: --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
+        case MAXIMUM: --top;
+            top[-1] = make_float3(fmaxf(top[-1].x, top->x), fmaxf(top[-1].y, top->y), fmaxf(top[-1].z, top->z));
+            break;
+        case LOGARITHM: --top;
+            top[-1] = make_float3(logarithm(top[-1].x, top->x), logarithm(top[-1].y, top->y),
+                logarithm(top[-1].z, top->z));
+            break;
+        case MULTIPLY_ADD: top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x};
