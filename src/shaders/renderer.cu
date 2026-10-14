@@ -519,8 +519,10 @@ __device__ bool neeDecision(const Surface& material, float n_dot_v, float eta_i,
 constexpr float RESTIR_ROUGHNESS = 0.2f;
 // Dual ray footprint constant c / 100 * 4 PI of Eq. 5 with c = 0.02
 constexpr float RESTIR_FOOTPRINT = 0.0025132741228718345f;
-// Temporal confidence cap
+// Temporal confidence cap and its duplication-driven reduction (Sec. 5)
 constexpr float RESTIR_CAP = 20.0f;
+constexpr float RESTIR_CAP_MIN = 1.0f;
+constexpr float RESTIR_DUPLICATION_ALPHA = 0.1f;
 
 constexpr unsigned LOBE_DIFFUSE = 0u;
 constexpr unsigned LOBE_REFRACT = 1u;
@@ -1107,7 +1109,10 @@ extern "C" __global__ void __raygen__temporal() {
     }
     if (q >= 0) {
         const Reservoir temporal = scene.previous[q];
-        const float c_t = fminf(temporal.c, RESTIR_CAP);
+        // Optionally lower the confidence cap where the previous frame duplicated samples (Sec. 5), this biases the estimate
+        const float duplicated = scene.settings.decorrelation ? scene.duplication[q] : 0.0f;
+        const float cap = RESTIR_CAP + (RESTIR_CAP_MIN - RESTIR_CAP) * powf(duplicated, RESTIR_DUPLICATION_ALPHA);
+        const float c_t = fminf(temporal.c, cap);
         const Shift to_current = still ? Shift{temporal.f, 1.0f} : shift(scene, scene.camera, index, size, temporal);
         const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(scene, scene.previousCamera, q, size, r);
         const float p_c = rgb_to_greyscale(r.f);
@@ -1141,7 +1146,7 @@ extern "C" __global__ void __raygen__spatial() {
     const Reservoir r = scene.temporal[index];
     float count = 0.0f;
     float c_sum = r.c;
-    for (unsigned t = 0u; t < 3u; t++) {
+    for (unsigned t = 0u; t < scene.settings.neighbors; t++) {
         const int q = partner(scene, p, size, t);
         if (q >= 0) {
             count += 1.0f;
@@ -1154,7 +1159,7 @@ extern "C" __global__ void __raygen__spatial() {
     float canonical_mis = count == 0.0f ? 1.0f : 0.0f;
     Selection sel = {};
     sel.random_state = stream(scene.initial[index].seed, STREAM_SELECT + 2u);
-    for (unsigned t = 0u; t < 3u; t++) {
+    for (unsigned t = 0u; t < scene.settings.neighbors; t++) {
         const int q = partner(scene, p, size, t);
         if (q >= 0) {
             const Reservoir neighbor = scene.temporal[q];
@@ -1173,4 +1178,23 @@ extern "C" __global__ void __raygen__spatial() {
     scene.previous[index] = finalize(sel, c_sum);
     float4& sum = scene.accumulation[index];
     sum = make_float4(sum.x + sel.color.x, sum.y + sel.color.y, sum.z + sel.color.z, sum.w);
+}
+
+// Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
+extern "C" __global__ void __raygen__duplicates() {
+    const uint3 p = optixGetLaunchIndex();
+    const uint3 size = optixGetLaunchDimensions();
+    const unsigned index = p.y * size.x + p.x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    const Reservoir& own = scene.previous[index];
+    unsigned count = 0u;
+    for (int y = int(p.y) - 8; y <= int(p.y) + 8; y++) {
+        for (int x = int(p.x) - 8; x <= int(p.x) + 8; x++) {
+            if (x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)) {
+                const Reservoir& other = scene.previous[y * size.x + x];
+                count += other.w > 0.0f && other.seed == own.seed ? 1u : 0u;
+            }
+        }
+    }
+    scene.duplication[index] = own.w > 0.0f ? (count - 1u) / 288.0f : 0.0f;
 }
