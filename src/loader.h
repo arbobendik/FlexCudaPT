@@ -29,6 +29,7 @@ inline void loadView(Scene& scene, size_t pixels) {
     scene.previous = zeros<Reservoir>(pixels);
     scene.initial = zeros<Reservoir>(pixels);
     scene.temporal = zeros<Reservoir>(pixels);
+    scene.duplication = zeros<float>(pixels);
     scene.shifts = zeros<Shift>(3 * pixels);
 }
 
