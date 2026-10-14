@@ -12,12 +12,16 @@ def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
     with numpy.errstate(all='ignore'):
         return numpy.where((a > 0) & (b > 0) & (b != 1), numpy.log(a) / numpy.log(b), 0)
 
+def divide(a, b):
+    return numpy.divide(a, b, out=numpy.zeros(3), where=b != 0)
+
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
-    'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR'))}
+    'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
+    'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1.5, 1, 0]
 BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1.5, 1, 0]
