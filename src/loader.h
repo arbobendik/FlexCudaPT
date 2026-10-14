@@ -1,5 +1,6 @@
 #pragma once
 #include "shaders/renderer.h"
+#include <algorithm>
 #include <vector>
 #include <random>
 #include <cuda.h>
@@ -9,11 +10,23 @@
 #define CHECK(call) do { int error = (call); if (error) { \
     std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::exit(1); } } while (0)
 
+inline size_t memory_used = 0, memory_peak = 0;
+
 inline CUdeviceptr allocate(size_t bytes, const void* data = nullptr) {
     CUdeviceptr ptr;
     CHECK(cuMemAlloc(&ptr, bytes ? bytes : 1)); // CUDA allocates no empty arrays, as of scenes without triangles
+    memory_used += bytes ? bytes : 1;
+    memory_peak = std::max(memory_peak, memory_used);
     if (data) CHECK(cuMemcpyHtoD(ptr, data, bytes));
     return ptr;
+}
+
+inline void release(CUdeviceptr ptr) {
+    CUdeviceptr base;
+    size_t bytes;
+    CHECK(cuMemGetAddressRange(&base, &bytes, ptr));
+    CHECK(cuMemFree(ptr));
+    memory_used -= bytes;
 }
 
 // Zeroed array on the GPU
