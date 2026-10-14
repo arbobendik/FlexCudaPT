@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, fcntl, gpu, math, numpy, os, struct, subprocess
+import addon_utils, bpy, bmesh, fcntl, gpu, math, numpy, os, struct, subprocess, time
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix
 
@@ -183,6 +183,7 @@ class Flex(bpy.types.RenderEngine):
         super().__init__(*args, **kwargs)
         self.visible = ()  # Names of the instances the renderer was last started on
         self.texture = None  # The viewport's view as last traced
+        self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
 
     def start(self, depsgraph):  # Starts the renderer on the exported scene
         scene = depsgraph.scene_eval
@@ -288,7 +289,7 @@ class Flex(bpy.types.RenderEngine):
         self.requests.write(struct.pack(f'<{4 + len(settings)}I12f', samples, launches, width, height, *settings,
             *matrix.translation, *x, *y, *center))
         self.requests.flush()
-        launched, = struct.unpack('I', self.answers.read(4))  # Answer: samples launched, then the sums if any were
+        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, then sums if any
         sums = self.answers.read(16 * width * height * bool(launched))
         return numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
 
@@ -297,6 +298,8 @@ class Flex(bpy.types.RenderEngine):
         scene = depsgraph.scene_eval
         width = self.resolution_x
         height = self.resolution_y
+        self.update_progress(0)
+        self.update_stats('', f'{scene.name} | Syncing scene')
         self.start(depsgraph)
         camera = (scene.camera.matrix_world.normalized(),
             scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y))
@@ -304,6 +307,7 @@ class Flex(bpy.types.RenderEngine):
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)
         y = int(border.use_border * border.border_min_y * height)
+        started = time.perf_counter()
         count = 1
         while (len(sums := self.trace(width, height, scene.flex_samples, min(count, RENDER_SAMPLES), settings(scene),
                 *camera)) and not self.test_break()):
@@ -312,6 +316,12 @@ class Flex(bpy.types.RenderEngine):
             result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
             self.update_result(result)
             self.update_progress(count / scene.flex_samples)
+            elapsed = time.perf_counter() - started
+            remaining = elapsed * (scene.flex_samples / count - 1)
+            self.update_memory_stats(memory_used=self.memory[0], memory_peak=self.memory[1])
+            self.update_stats(f'Mem:{self.memory[0]:.2f}M, Peak:{self.memory[1]:.2f}M',
+                f'Remaining:{remaining:.1f}s | {scene.name}, {depsgraph.view_layer.name} | '
+                f'Sample {count}/{scene.flex_samples} | {count / elapsed:.2f} samples/s')
         self.end_result(result)
 
     # Restarts the renderer when what it renders changed. Blender also reports selection, scene settings and cameras
