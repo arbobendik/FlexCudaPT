@@ -27,7 +27,8 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
     CHECK(optixModuleCreate(context, &moduleOptions, &compile,
         (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
     // Raygen programs of a frame's passes: rays are only traversed, so none runs on a miss or a hit
-    const char* passes[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial"};
+    const char* passes[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
+        "__raygen__duplicates"};
     constexpr unsigned PASSES = sizeof(passes) / sizeof(*passes);
     OptixProgramGroup groups[PASSES];
     OptixProgramGroupOptions groupOptions{};
@@ -55,7 +56,7 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             if (std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
-                    (void*)scene.temporal, (void*)scene.shifts})
+                    (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts})
                     CHECK(cuMemFree((CUdeviceptr)array));
                 loadView(scene, request.view.width * request.view.height);
             }
@@ -67,9 +68,11 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
             CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * sums.size()));
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
-        // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs.
+        // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs, the duplication
+        // map only for decorrelation.
         const unsigned restir = scene.settings.restir;
-        const unsigned depths[PASSES] = {1, restir, 3 * restir, restir};
+        const unsigned depths[PASSES] = {1, restir, restir * scene.settings.neighbors, restir,
+            restir * scene.settings.decorrelation};
         for (launched = 0; launched < request.launches && done < request.samples; ++launched, ++done, ++scene.frame) {
             for (Record& record : records) record.data = scene;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
