@@ -37,6 +37,7 @@ def plane(name, x, y=0, size=1):  # Square at height 0 with a Principled BSDF, r
     mesh.normals_split_custom_set([(0, 0.01 if name == 'colored' else 0, 1)] * len(mesh.loops))
     mesh.materials.append(bpy.data.materials.new(name))
     add(mesh, (x, y, 0))
+    mesh.materials[0].node_tree.nodes['Principled BSDF'].inputs['IOR'].default_value = 1  # Pure colors: no specular
     return mesh.materials[0].node_tree.nodes['Principled BSDF']
 
 # The camera looks down on [-1, 1]^2: sky above and below the planes, colored plane left, textured plane right, light
@@ -69,6 +70,8 @@ emitter.inputs['Emission Strength'].default_value = 1
 emitter.id_data.links.new(emitter.id_data.nodes.new('ShaderNodeTexImage').outputs['Color'],
     emitter.inputs['Emission Color'])
 emitter.id_data.nodes['Image Texture'].image = texture.image
+for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
+    node.interpolation = 'Closest'  # Whole texels
 
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
