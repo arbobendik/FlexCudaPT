@@ -46,8 +46,8 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
     for (unsigned pass = 0; pass < PASSES; ++pass) CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
     const CUdeviceptr table = allocate(sizeof(records));
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
-    // number launched, followed by the sums if any were; a new view starts over, from the reservoirs of the last one if
-    // it has its size and settings
+    // number launched, memory used and peak in MiB, followed by the sums if any were; a new view starts over, from the
+    // reservoirs of the last one if it has its size and settings
     struct View { unsigned width, height; Settings settings; Camera camera; } view{};
     struct { unsigned samples, launches; View view; } request;
     std::vector<float4> sums;
@@ -57,7 +57,7 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
             if (std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
                     (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts})
-                    CHECK(cuMemFree((CUdeviceptr)array));
+                    release((CUdeviceptr)array);
                 loadView(scene, request.view.width * request.view.height);
             }
             view = request.view;
@@ -83,6 +83,8 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
             scene.previousCamera = scene.camera;
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
+        const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
+        std::fwrite(memory, sizeof(memory), 1, stdout);
         if (!launched) continue;
         // Raw linear sums with the sample count in w, rows top to bottom
         CHECK(cuMemcpyDtoH(sums.data(), (CUdeviceptr)scene.accumulation, sums.size() * sizeof(float4)));
