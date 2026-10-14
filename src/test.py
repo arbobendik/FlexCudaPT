@@ -111,7 +111,7 @@ assert not numpy.allclose(pixels[18:46, 34:62], SKY, atol=0.01), 'opaque'  # The
 for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 assert chroma(44, 4, 8, (1, 1, 1)), 'leaf'
-for y in (2, 10): assert not numpy.allclose(pixels[y:y + 4, 56:60], SKY, atol=0.01), 'black'  # Hides the sky
+for y in (2, 10): assert not pixels[y:y + 4, 56:60].any(), 'black'  # Reflecting nothing, as in Cycles
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
 
@@ -125,6 +125,14 @@ class Viewport:  # Stands in for the engine instance Blender creates for a viewp
     def tag_redraw(self): self.redraw = True
     def bind_display_space_shader(self, scene): pass
     def unbind_display_space_shader(self): pass
+
+# EEVEE's specular shader resolves to a surface of its base color with a dielectric's specular reflection, not black
+specular = bpy.data.materials.new('specular').node_tree
+specular.links.new(specular.nodes.new('ShaderNodeEeveeSpecular').outputs[0],
+    specular.nodes['Material Output'].inputs['Surface'])
+module = Viewport.engine.start.__globals__
+surface = module['fold'](module['resolve'](specular.nodes['Material Output'].inputs['Surface']))
+assert numpy.any(surface[1]) and numpy.all(surface[6] == 1.5), 'eevee specular'
 
 gpu.init()
 bpy.context.window.scene = scene
