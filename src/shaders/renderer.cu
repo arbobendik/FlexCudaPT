@@ -2,7 +2,6 @@
 #include <optix.h>
 #include <cuda_runtime.h>
 
-constexpr int MAX_BOUNCES = 8;
 constexpr int STACK = 64;
 constexpr float PI = 3.14159265f;
 constexpr float INV_PI = 0.3183098861837907f;
@@ -776,7 +775,8 @@ __device__ Reservoir withEnd(const Reservoir& r, unsigned end_type, unsigned end
 // vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
 // dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
 // determinant of Eq. 2, zero if the path is not in the image of the shift.
-__device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r, bool replay, Selection& sel) {
+__device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r, bool replay, float scale,
+    Selection& sel) {
     const Shift fail = Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     const unsigned end = extractBits(r.path, PATH_END, 5u);
     const unsigned k = extractBits(r.path, PATH_K, 5u);
@@ -871,7 +871,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                     candidate = here;
                 }
                 offer(sel, withEnd(candidate, END_EMIT, b, throughput * surface.emissive),
-                    throughput * surface.emissive / density);
+                    throughput * surface.emissive * scale / density);
             }
             if (nee) {
                 float3 light_dir;
@@ -891,7 +891,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                     // Forced reconnection to the light vertex (Sec. 6.2.3)
                     candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
                 }
-                offer(sel, withEnd(candidate, END_NEE, b, f), f / density);
+                offer(sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
             }
         }
         direct_light_emission = !nee;
@@ -952,7 +952,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (!replay) {
             const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
                 / density, 0.0f), 1.0f);
-            if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b + 1u >= MAX_BOUNCES) {
+            if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
                 break;
             }
             density *= survival_probability;
@@ -990,7 +990,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 candidate.jac = prev.pdf;
                 candidate.dir = direction;
             }
-            offer(sel, withEnd(candidate, END_ENV, b, f), f / density);
+            offer(sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
             break;
         }
         // Project ray origin to hit point
@@ -1009,7 +1009,7 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
     if (dom.hit.triangle == NONE) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
-    return walk(scene, dom, r, true, sel);
+    return walk(scene, dom, r, true, 0.0f, sel);
 }
 
 // Pixel coordinates a camera sees a position at
@@ -1064,27 +1064,32 @@ __device__ int partner(const Scene& scene, uint3 p, uint3 size, unsigned t) {
     return valid ? qy * int(size.x) + qx : -1;
 }
 
-// Initial candidates: the path tree of the pixel's primary hit at a jitter of its own; it adds the radiance the camera
-// sees right there, of an emitter or the world, as it carries no randomness to resample. Without ReSTIR it adds the
-// path tree's estimate as well.
+// Initial candidates: the path trees of the pixel's primary hits, each at a jitter of its own; it adds the radiance the
+// camera sees right there, of an emitter or the world, as it carries no randomness to resample. Without ReSTIR it adds
+// the path trees' estimate as well.
 extern "C" __global__ void __raygen__initial() {
     const uint3 p = optixGetLaunchIndex();
     const uint3 size = optixGetLaunchDimensions();
     const unsigned index = p.y * size.x + p.x;
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    Reservoir r = {};
-    r.seed = stream(hash(scene.frame), index);
-    const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
+    const unsigned pixel_seed = stream(hash(scene.frame), index);
     Selection initial = {};
-    initial.random_state = stream(r.seed, STREAM_SELECT);
-    if (dom.hit.triangle != NONE) {
-        walk(scene, dom, r, false, initial);
-    }
+    initial.random_state = stream(pixel_seed, STREAM_SELECT);
     // The pixel's own seed even without a sample, its domain for later passes
+    initial.r.seed = stream(pixel_seed, 0u);
+    float3 seen = make_float3(0.0f, 0.0f, 0.0f);
+    for (unsigned i = 0u; i < scene.settings.paths; i++) {
+        Reservoir r = {};
+        r.seed = stream(pixel_seed, i);
+        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
+        if (dom.hit.triangle != NONE) {
+            walk(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
+        }
+        seen = seen + (dom.hit.triangle == NONE ? environment(scene, normalize(dom.x1 - dom.x0))
+            : shade(scene, dom.hit.triangle, dom.hit.uv.x, dom.hit.uv.y, faceNormal(scene, dom.hit.triangle)).emissive)
+            / scene.settings.paths;
+    }
     scene.initial[index] = finalize(initial, 1.0f);
-    scene.initial[index].seed = r.seed;
-    const float3 seen = dom.hit.triangle == NONE ? environment(scene, normalize(dom.x1 - dom.x0))
-        : shade(scene, dom.hit.triangle, dom.hit.uv.x, dom.hit.uv.y, faceNormal(scene, dom.hit.triangle)).emissive;
     const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
     float4& sum = scene.accumulation[index];
     sum = make_float4(sum.x + radiance.x, sum.y + radiance.y, sum.z + radiance.z, sum.w + 1);
