@@ -33,6 +33,8 @@ def plane(name, x, y=0, size=1):  # Square at height 0 with a Principled BSDF, r
     bm.loops.layers.uv.new()
     bmesh.ops.create_grid(bm, size=size / 2, calc_uvs=True)
     bm.to_mesh(mesh)
+    mesh.shade_smooth()  # The colored plane's normals slightly off the face: light sampling leaves it at an offset
+    mesh.normals_split_custom_set([(0, 0.01 if name == 'colored' else 0, 1)] * len(mesh.loops))
     mesh.materials.append(bpy.data.materials.new(name))
     add(mesh, (x, y, 0))
     return mesh.materials[0].node_tree.nodes['Principled BSDF']

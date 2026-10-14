@@ -74,7 +74,8 @@ template <typename T> T* load(size_t count) {
 inline Scene loadScene(OptixDeviceContext context) {
     struct { unsigned count, ops, texels; } header;
     std::fread(&header, sizeof(header), 1, stdin);
-    Scene scene{.vertices = load<float3>(3 * header.count), .uvs = load<float2>(3 * header.count),
+    Scene scene{.vertices = load<float3>(3 * header.count), .normals = load<float3>(3 * header.count),
+        .uvs = load<float2>(3 * header.count),
         .materials = load<Material>(header.count + 1), .power = load<double>(header.count),
         .ops = load<Op>(header.ops), .texels = load<uchar4>(header.texels), .count = header.count,
         .pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]), loadPairing(PAIRING_SIZES[2])}};

@@ -35,13 +35,13 @@ struct Shift { float3 f; float jac; };
 struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
-// Per triangle: three vertices and UVs, one material, cumulative emitted power; the world's material comes last.
+// Per triangle: three vertices, normals and UVs, one material, cumulative emitted power; the world's material last.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
 // The frame's number seeds it.
 struct Scene {
-    float4* accumulation; unsigned long long handle; float3* vertices; float2* uvs; Material* materials; double* power;
-    Op* ops; uchar4* texels; unsigned count; Camera camera;
+    float4* accumulation; unsigned long long handle; float3 *vertices, *normals; float2* uvs; Material* materials;
+    double* power; Op* ops; uchar4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
 };
