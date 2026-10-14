@@ -81,6 +81,13 @@ eevee = emitter.id_data.nodes.new('ShaderNodeOutputMaterial')
 eevee.target = 'EEVEE'
 emitter.id_data.links.new(emitter.id_data.nodes.new('ShaderNodeBsdfPrincipled').outputs[0], eevee.inputs['Surface'])
 scene.world.node_tree.nodes['World Output'].target = 'CYCLES'
+leaf = plane('leaf', 0.5, -0.75, 0.25)  # Rendered: textured alpha in the deactivated tree, emitting through Cycles'
+leaf.id_data.links.new(leaf.id_data.nodes.new('ShaderNodeTexImage').outputs['Alpha'], leaf.inputs['Alpha'])
+leaf.id_data.nodes['Image Texture'].image = texture.image
+leaf.id_data.nodes['Material Output'].is_active_output = False
+cycles = leaf.id_data.nodes.new('ShaderNodeOutputMaterial')
+cycles.target = 'CYCLES'
+leaf.id_data.links.new(leaf.id_data.nodes.new('ShaderNodeEmission').outputs[0], cycles.inputs['Surface'])
 for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
     node.interpolation = 'Closest'  # Whole texels
 
@@ -99,6 +106,7 @@ for texel, (x, y) in zip(TEXELS, ((32, 16), (48, 16), (32, 32), (48, 32))):
 assert not numpy.allclose(pixels[18:46, 34:62], SKY, atol=0.01), 'opaque'  # The textured plane hides the sky
 for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
+assert chroma(44, 4, 8, (1, 1, 1)), 'leaf'
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
 
