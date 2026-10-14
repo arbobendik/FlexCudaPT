@@ -128,6 +128,9 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
         matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
 
+def settings(scene):  # The scene's settings of the renderer, in its order
+    return (scene.flex_restir,)
+
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
@@ -215,19 +218,19 @@ class Flex(bpy.types.RenderEngine):
             power.astype('f').tobytes(), numpy.array(ops, 'I').tobytes(), texels.tobytes())))
 
     # Radiance sums and sample count per pixel, rows bottom to top, after up to launches more samples, samples at most,
-    # of the view from the camera's matrix through its perspective projection; no rows if the view already had its
-    # samples. A view other than the last starts over.
-    def trace(self, width, height, samples, launches, matrix, projection):
+    # of the view from the camera's matrix through its perspective projection under the settings; no rows if the view
+    # already had its samples. A view other than the last starts over.
+    def trace(self, width, height, samples, launches, settings, matrix, projection):
         right = matrix.col[0].xyz
         up = matrix.col[1].xyz
         back = matrix.col[2].xyz
         x = right / projection[0][0]
         y = up / projection[1][1]
         center = x * projection[0][2] + y * projection[1][2] - back
-        # Request on stdin: samples, launches, size, the camera's origin and its ray direction per NDC x, per NDC y and
-        # at the center.
-        self.requests.write(struct.pack('<4I12f', samples, launches, width, height, *matrix.translation,
-            *x, *y, *center))
+        # Request on stdin: samples, launches, size, settings, the camera's origin and its ray direction per NDC x, per
+        # NDC y and at the center.
+        self.requests.write(struct.pack(f'<{4 + len(settings)}I12f', samples, launches, width, height, *settings,
+            *matrix.translation, *x, *y, *center))
         self.requests.flush()
         launched, = struct.unpack('I', self.answers.read(4))  # Answer: samples launched, then the sums if any were
         sums = self.answers.read(16 * width * height * bool(launched))
@@ -246,8 +249,8 @@ class Flex(bpy.types.RenderEngine):
         x = int(border.use_border * border.border_min_x * width)
         y = int(border.use_border * border.border_min_y * height)
         count = 1
-        while (len(sums := self.trace(width, height, scene.flex_samples, min(count, RENDER_SAMPLES), *camera))
-                and not self.test_break()):
+        while (len(sums := self.trace(width, height, scene.flex_samples, min(count, RENDER_SAMPLES), settings(scene),
+                *camera)) and not self.test_break()):
             count = int(sums[0, 0, 3])
             pixels = sums[y:y + result.resolution_y, x:x + result.resolution_x] * (1 / count)
             result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
@@ -267,7 +270,7 @@ class Flex(bpy.types.RenderEngine):
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
         region = context.region
         scene = depsgraph.scene
-        sums = self.trace(region.width, region.height, scene.flex_samples, VIEWPORT_SAMPLES,
+        sums = self.trace(region.width, region.height, scene.flex_samples, VIEWPORT_SAMPLES, settings(scene),
             context.region_data.view_matrix.inverted(), context.region_data.window_matrix)
         if len(sums):
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
@@ -295,6 +298,17 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
             self.layout.prop(context.scene.render, name)
 
+class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
+    bl_label = 'ReSTIR'
+    bl_parent_id = 'RENDER_PT_flex'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'render'
+
+    def draw(self, context):
+        self.layout.use_property_split = True
+        self.layout.prop(context.scene, 'flex_restir')
+
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
 def reload():
     if os.path.exists(__file__) and os.path.getmtime(__file__) != MODIFIED:
@@ -306,11 +320,16 @@ def register():
     bpy.app.timers.register(reload, persistent=True)
     bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1)
+    bpy.types.Scene.flex_restir = bpy.props.BoolProperty(name='ReSTIR',
+        description='Reuse paths across pixels and samples with ReSTIR PT Enhanced', default=True)
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
+    bpy.utils.register_class(RENDER_PT_flex_restir)
 
 def unregister():
     bpy.app.timers.unregister(reload)
+    bpy.utils.unregister_class(RENDER_PT_flex_restir)
     bpy.utils.unregister_class(RENDER_PT_flex)
     bpy.utils.unregister_class(Flex)
     del bpy.types.Scene.flex_samples
+    del bpy.types.Scene.flex_restir

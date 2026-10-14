@@ -33,6 +33,8 @@ __device__ float3 cross(float3 a, float3 b) {
     return make_float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 }
 __device__ float3 normalize(float3 a) { return a * rnorm3df(a.x, a.y, a.z); }
+__device__ float length(float3 a) { return sqrtf(dot(a, a)); }
+__device__ bool operator==(float3 a, float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
 // Repeats into [0, 1)
 __device__ float wrap(float coordinate) { return fminf(coordinate - floorf(coordinate), 0x1.fffffep-1f); }
 __device__ float decode(unsigned char srgb) {
@@ -509,91 +511,666 @@ __device__ bool neeDecision(const Surface& material, float n_dot_v, float eta_i,
         * (1.0f - material.transparency), 0.0f);
     return diffuse_factor_estimate > 0.04f || material.roughness > 0.2f;
 }
-extern "C" __global__ void __raygen__camera() {
-    const uint3 p = optixGetLaunchIndex();
-    const uint3 size = optixGetLaunchDimensions();
-    const unsigned index = p.y * size.x + p.x;
-    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    float4& sum = scene.accumulation[index];
-    unsigned state = hash(index + hash((unsigned)sum.w));
-    float3 origin = scene.camera.origin;
-    float3 radiance = make_float3(0, 0, 0);
-    float3 throughput = make_float3(1, 1, 1);
+
+// ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
+// Paths live in primary sample space, vertex b draws its random numbers from stream(seed, b).
+
+// Single-vertex roughness threshold (Sec. 4.2)
+constexpr float RESTIR_ROUGHNESS = 0.2f;
+// Dual ray footprint constant c / 100 * 4 PI of Eq. 5 with c = 0.02
+constexpr float RESTIR_FOOTPRINT = 0.0025132741228718345f;
+// Temporal confidence cap
+constexpr float RESTIR_CAP = 20.0f;
+
+constexpr unsigned LOBE_DIFFUSE = 0u;
+constexpr unsigned LOBE_REFRACT = 1u;
+
+// How a path ends: next event estimation, emissive surface or environment
+constexpr unsigned END_NEE = 0u;
+constexpr unsigned END_EMIT = 1u;
+constexpr unsigned END_ENV = 2u;
+
+// Reconnection vertex: none (pure random replay), triangle hit, NEE light vertex or environment direction
+constexpr unsigned RC_NONE = 0u;
+constexpr unsigned RC_SURFACE = 1u;
+constexpr unsigned RC_LIGHT = 2u;
+constexpr unsigned RC_ENV = 3u;
+
+// Bit offsets of the packed path description
+constexpr unsigned PATH_END = 0u;
+constexpr unsigned PATH_K = 5u;
+constexpr unsigned PATH_RC = 10u;
+constexpr unsigned PATH_TYPE = 12u;
+constexpr unsigned PATH_LOBE_PREV = 15u;
+constexpr unsigned PATH_LOBE = 17u;
+constexpr unsigned PATH_NEE = 19u;
+
+// Random streams besides the per vertex ones
+constexpr unsigned STREAM_NEE = 64u;
+constexpr unsigned STREAM_RR = 128u;
+constexpr unsigned STREAM_JITTER = 192u;
+constexpr unsigned STREAM_SELECT = 193u;
+
+// Camera and primary hit of a pixel
+struct Domain {
+    float3 x0;
+    float3 x1;
+    Hit hit;
+};
+
+// Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
+struct Vertex {
+    bool rough;
+    unsigned lobe;
+    float pdf;
+    float cos;
+};
+
+struct Lobe {
+    float3 f_cos;
+    float pdf;
+};
+
+struct Selection {
+    Reservoir r;
+    float w_sum;
+    float3 color;
+    unsigned random_state;
+};
+
+__device__ unsigned stream(unsigned seed, unsigned index) {
+    return hash(seed ^ hash(index));
+}
+
+__device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) {
+    return path >> offset & ((1u << count) - 1u);
+}
+
+// Nearest hit of a ray within far and its distance, NONE on a miss
+__device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance) {
+    // Traverse only; hit data is read from the hit object below.
+    optixTraverse(scene.handle, origin, direction, 1e-4f, far, 0.0f, 255, OPTIX_RAY_FLAG_NONE, 0, 1, 0);
+    if (!optixHitObjectIsHit()) return {NONE};
+    distance = optixHitObjectGetRayTmax();
+    // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
+    return {optixHitObjectGetPrimitiveIndex(), make_float2(__uint_as_float(optixHitObjectGetAttribute_0()),
+        __uint_as_float(optixHitObjectGetAttribute_1()))};
+}
+
+__device__ float3 hitPosition(const Scene& scene, Hit hit) {
+    const float3* vertices = scene.vertices + 3 * hit.triangle;
+    return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
+}
+
+__device__ float3 faceNormal(const Scene& scene, unsigned triangle) {
+    const float3* vertices = scene.vertices + 3 * triangle;
+    return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
+}
+
+// Camera and primary hit of the ray through a pixel at the jitter its sample's seed draws, which makes the pixel's area
+// part of the sample's primary sample space; hidden surfaces let camera rays through. On a miss x1 is one along the ray.
+__device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixel, uint3 size, unsigned seed) {
+    unsigned state = stream(seed, STREAM_JITTER);
+    const float x = pixel % size.x + random(state);
+    const float y = pixel / size.x + random(state);
+    const float3 direction = normalize(camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z);
+    float3 origin = camera.origin;
+    Hit hit;
+    do {
+        float distance = 0;
+        hit = traverse(scene, origin, direction, 1e16f, distance);
+        origin = origin + direction * distance;
+    } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden);
+    return {camera.origin, hit.triangle == NONE ? camera.origin + direction : hitPosition(scene, hit), hit};
+}
+
+// World: equirectangular texture along the direction
+__device__ float3 environment(const Scene& scene, float3 direction) {
+    return shade(scene, scene.materials[scene.count].program, direction,
+        0.5f - atan2f(direction.y, direction.x) / (2 * PI),
+        0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).emissive;
+}
+
+// Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible from in front of the
+// normal. Returns emission * the light's cosine / distance^2 / pdf arriving along direction,
+// pdf = power share / area and power = 2 * area * emitted.
+__device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, unsigned state, float3& direction) {
+    const float total = scene.power[scene.count - 1];
+    const float pick = random(state) * total;
+    unsigned light = 0;
+    for (unsigned last = scene.count - 1; light < last;) {
+        const unsigned middle = (light + last) / 2;
+        if (scene.power[middle] < pick) light = middle + 1; else last = middle;
+    }
+    const float3 la = scene.vertices[3 * light];
+    const float3 lb = scene.vertices[3 * light + 1];
+    const float3 lc = scene.vertices[3 * light + 2];
+    const float3 lightNormal = cross(lb - la, lc - la);
+    const float side = sqrtf(random(state));
+    const float along = random(state);
+    const float emitted = scene.materials[light].emitted;
+    const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
+    const float distance = length(toLight);
+    float occluder;
+    direction = toLight * (1 / distance);
+    if (!(emitted > 0 && dot(normal, toLight) > 0)
+        || traverse(scene, origin, direction, distance * (1 - 1e-4f), occluder).triangle != NONE)
+        return make_float3(0, 0, 0);
+    return shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
+        * (total / (2 * emitted) * fabsf(dot(lightNormal, toLight))
+        / (distance * distance * distance * length(lightNormal)));
+}
+
+__device__ float3 safeDivide(float3 a, float3 b) {
+    return make_float3(b.x == 0.0f ? 0.0f : a.x / b.x, b.y == 0.0f ? 0.0f : a.y / b.y, b.z == 0.0f ? 0.0f : a.z / b.z);
+}
+
+// BSDF times cosine and solid angle density of sampleBSDF choosing lobe and producing out_dir.
+// Both are the ones sampleBSDF's throughput implies, delta lobes have no density and evaluate to zero.
+__device__ Lobe evalLobe(float3 in_dir, float3 out_dir, float3 n, const Surface& material, float eta_i, float eta_o,
+    unsigned lobe, unsigned random_state) {
+    const Lobe none = Lobe{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
+    const float3 v = - in_dir;
+    const float3 n_i = n * sign(dot(n, v));
+    const float n_i_dot_v = fabsf(dot(n, v));
+    const float alpha = material.roughness * material.roughness;
+    float3 h = normalize(v + out_dir);
+    if (lobe == LOBE_DIFFUSE) {
+        // The visible normal only steers the lobe choice of diffuse samples
+        const Random random_h_1 = pcg(random_state);
+        const Random random_h_2 = pcg(random_h_1.state);
+        h = tangentToWorld(xzy(sampleGGXVNDF(xzy(worldToTangent(v, n_i)), alpha, random_h_1.value, random_h_2.value)),
+            n_i);
+    } else if (lobe == LOBE_REFRACT) {
+        // Refraction without index change passes straight through
+        if (eta_i == eta_o) {
+            return none;
+        }
+        const float3 h_t = - (eta_i * v + eta_o * out_dir);
+        h = normalize(h_t) * sign(dot(h_t, n_i));
+    }
+    const float v_dot_h = dot(v, h);
+    const float l_dot_h = dot(out_dir, h);
+    const float n_dot_l = dot(n_i, out_dir);
+    const float n_dot_h = dot(n_i, h);
+    const float3 F = mix(make_float3(1.0f, 1.0f, 1.0f) * fresnel(fabsf(v_dot_h), eta_i, eta_o), material.albedo,
+        material.metallic);
+    const float F_greyscale = rgb_to_greyscale(F);
+    const float eta = eta_i / eta_o;
+    const float refractable = 1.0f - eta * eta * (1.0f - v_dot_h * v_dot_h) >= 0.0f ? 1.0f : 0.0f;
+    const float diffuse_weight = (1.0f - material.transparency) * (1.0f - material.metallic);
+    // Lobe probabilities as sampleBSDF uses them and the chance its random number lands in each lobe
+    const float components[3] = {fmaxf(diffuse_weight * (1.0f - F_greyscale), 0.0f),
+        fmaxf(material.transparency * (1.0f - F_greyscale) * refractable, 0.0f), fmaxf(F_greyscale, 0.0f)};
+    const float total = fmaxf(components[0] + components[1] + components[2], BIAS);
+    const float p[3] = {components[0] / total, components[1] / total, components[2] / total};
+    const float cdf[2] = {fminf(p[0], 1.0f), fminf(p[0] + p[1], 1.0f)};
+    const float chance[3] = {cdf[0], cdf[1] - cdf[0], 1.0f - cdf[1]};
+    if (chance[lobe] <= 0.0f || p[lobe] <= 0.0f || n_i_dot_v <= 0.0f) {
+        return none;
+    }
+    if (lobe == LOBE_DIFFUSE) {
+        const float pdf = chance[0] * fmaxf(n_dot_l, 0.0f) * INV_PI;
+        return Lobe{pdf * diffuse_weight * material.albedo / p[0] * (1.0f - rgb_to_greyscale(mix(make_float3(1.0f, 1.0f,
+            1.0f) * fresnel(fabsf(dot(v, normalize(v + out_dir))), eta_i, eta_o), material.albedo, material.metallic))),
+            pdf};
+    }
+    if (alpha == 0.0f || v_dot_h <= 0.0f || n_dot_h <= 0.0f) {
+        return none;
+    }
+    // Visible normal density of the unclamped GGX distribution
+    const float d_term = n_dot_h * n_dot_h * (alpha * alpha - 1.0f) + 1.0f;
+    const float pdf_h = smithG1(alpha, n_i_dot_v) * v_dot_h * alpha * alpha / (PI * d_term * d_term * n_i_dot_v);
+    if (lobe == LOBE_REFRACT) {
+        if (l_dot_h >= 0.0f) {
+            return none;
+        }
+        const float denom = eta_i * v_dot_h + eta_o * l_dot_h;
+        const float pdf = chance[1] * pdf_h * eta_o * eta_o * fabsf(l_dot_h) / (denom * denom);
+        return Lobe{make_float3(1.0f, 1.0f, 1.0f)
+            * (pdf * material.transparency * G1(alpha, fmaxf(- n_dot_l, 0.0f)) * (1.0f - F_greyscale) / p[1]), pdf};
+    }
+    const float pdf = chance[2] * pdf_h / (4.0f * v_dot_h);
+    return Lobe{pdf * G1(alpha, fmaxf(n_dot_l, 0.0f))
+        * mix(F, make_float3(F_greyscale, F_greyscale, F_greyscale), material.transparency) / p[2], pdf};
+}
+
+// Weighted reservoir sampling step, weight is the vector-valued resampling weight (Sec. 6.3)
+__device__ void offer(Selection& sel, const Reservoir& candidate, float3 weight) {
+    const float w = rgb_to_greyscale(weight);
+    // Also rejects NaN and infinite weights of degenerate samples
+    if (!(w > 0.0f && w < 3.0e38f)) {
+        return;
+    }
+    sel.w_sum += w;
+    sel.color = sel.color + weight;
+    if (random(sel.random_state) * sel.w_sum <= w) {
+        sel.r = candidate;
+    }
+}
+
+// Resample a shifted sample with MIS weight mis, keeping its Jacobian for later shifts
+__device__ void offerShifted(Selection& sel, const Reservoir& r, Shift shifted, float mis) {
+    Reservoir candidate = r;
+    candidate.f = shifted.f / shifted.jac;
+    candidate.jac = r.jac * shifted.jac;
+    offer(sel, candidate, mis * shifted.f * r.w);
+}
+
+__device__ Reservoir finalize(const Selection& sel, float c) {
+    Reservoir r = sel.r;
+    const float p_hat = rgb_to_greyscale(r.f);
+    r.w = p_hat > 0.0f ? sel.w_sum / p_hat : 0.0f;
+    r.c = c;
+    return r;
+}
+
+__device__ Reservoir withEnd(const Reservoir& r, unsigned end_type, unsigned end, float3 f) {
+    Reservoir candidate = r;
+    candidate.path = r.path | end << PATH_END | end_type << PATH_TYPE;
+    candidate.f = f;
+    return candidate;
+}
+
+// Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
+// vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
+// dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
+// determinant of Eq. 2, zero if the path is not in the image of the shift.
+__device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r, bool replay, Selection& sel) {
+    const Shift fail = Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
+    const unsigned end = extractBits(r.path, PATH_END, 5u);
+    const unsigned k = extractBits(r.path, PATH_K, 5u);
+    const unsigned rc = extractBits(r.path, PATH_RC, 2u);
+    const unsigned end_type = extractBits(r.path, PATH_TYPE, 3u);
+    // Replaying stops sampling at x_k-1 for reconnections and at the path end otherwise
+    const unsigned stop = rc == RC_NONE ? end + (end_type == END_ENV ? 1u : 0u) : k - 1u;
+    float3 origin = dom.x1;
+    float3 direction = normalize(dom.x1 - dom.x0);
+    Hit hit = dom.hit;
+    float distance = length(dom.x1 - dom.x0);
+    float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
+    // Replaying the densities of the reconnection, generating the product of Russian roulette survival probabilities
+    float density = 1.0f;
     bool direct_light_emission = true;
-    float3 direction = normalize(scene.camera.x * (2 * (p.x + random(state)) / size.x - 1)
-                               + scene.camera.y * (1 - 2 * (p.y + random(state)) / size.y) + scene.camera.z);
-    for (int bounce = 0; bounce < MAX_BOUNCES; ++bounce) {
-        // Traverse only; hit data is read from the hit object below.
-        optixTraverse(scene.handle, origin, direction, 1e-4f, 1e16f, 0.0f, 255, OPTIX_RAY_FLAG_NONE, 0, 1, 0);
-        if (!optixHitObjectIsHit()) { // World: equirectangular texture along the direction
-            const Material world = scene.materials[scene.count];
-            radiance = radiance + throughput * shade(scene, world.program, direction,
-                0.5f - atan2f(direction.y, direction.x) / (2 * PI),
-                0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).emissive;
-            break;
+    float threshold = 0.0f;
+    float3 reconnection = origin;
+    Vertex prev = Vertex{false, 0u, 0.0f, 0.0f};
+    // Template for generated paths reconnecting at the first vertex meeting both footprint criteria
+    Reservoir chain = {};
+    chain.seed = r.seed;
+    float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
+    for (unsigned b = 0u; ; b++) {
+        const float3 geometry_n = faceNormal(scene, hit.triangle);
+        const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, geometry_n);
+        const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
+        if (b == 0u) {
+            // Primary ray footprint (Eq. 5)
+            threshold = RESTIR_FOOTPRINT / geometry_density;
         }
-        // Bounce data: position, face normal, material.
-        const unsigned i = optixHitObjectGetPrimitiveIndex();
-        const float3 a = scene.vertices[3 * i];
-        const float3 b = scene.vertices[3 * i + 1];
-        const float3 c = scene.vertices[3 * i + 2];
-        float3 normal = normalize(cross(b - a, c - a));
-        origin = origin + direction * optixHitObjectGetRayTmax();
-        const Material material = scene.materials[i];
-        if (bounce == 0 && material.hidden) {
-            --bounce;
-            continue;
-        }
-        // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
-        const float s = __uint_as_float(optixHitObjectGetAttribute_0());
-        const float t = __uint_as_float(optixHitObjectGetAttribute_1());
-        // Emitters seen by the camera or past a surface without light sampling; others reach them through it instead.
-        const Surface surface = shade(scene, i, s, t, normal);
-        if (direct_light_emission) radiance = radiance + throughput * surface.emissive;
+        // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5)
+        const bool footprint = prev.rough && prev.pdf * geometry_density * threshold <= 1.0f;
         const float n_dot_v = dot(surface.normal, - direction);
         const bool is_entering = n_dot_v < 0.0f;
         // Incident side is air, outgoing side is material (entering)
         const float eta_i = is_entering ? surface.ior : 1.0f;
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
-        direct_light_emission = !neeDecision(surface, n_dot_v, eta_i, eta_o);
-        // Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible.
-        const float total = scene.power[scene.count - 1];
-        const float pick = random(state) * total;
-        unsigned light = 0;
-        for (unsigned last = scene.count - 1; light < last;) {
-            const unsigned middle = (light + last) / 2;
-            if (scene.power[middle] < pick) light = middle + 1; else last = middle;
+        const bool nee = neeDecision(surface, n_dot_v, eta_i, eta_o);
+        const bool chain_found = extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE;
+        // Reconnection at this vertex for paths ending here
+        Reservoir here = chain;
+        here.path = b << PATH_K | RC_SURFACE << PATH_RC | prev.lobe << PATH_LOBE_PREV;
+        here.jac = prev.pdf * geometry_density;
+        here.rc = hit;
+        const bool arrived = replay && rc == RC_SURFACE && b == k;
+        if (arrived) {
+            // The stored path takes over at the reconnection vertex
+            if (hit.triangle != r.rc.triangle || !footprint) {
+                return fail;
+            }
+            throughput = throughput * geometry_density;
+            density *= geometry_density;
+            if (k == end && end_type == END_EMIT) {
+                if (!direct_light_emission) {
+                    return fail;
+                }
+                return Shift{throughput * surface.emissive / r.jac, density / r.jac};
+            }
+            if (k == end && end_type == END_NEE) {
+                if (!nee) {
+                    return fail;
+                }
+                return Shift{throughput * BSDF(direction, r.dir, surface.normal, geometry_n, surface, eta_i, eta_o,
+                    make_float2(0, 0)) * r.radiance / r.jac, density / r.jac};
+            }
+            if (nee != (extractBits(r.path, PATH_NEE, 1u) == 1u)) {
+                return fail;
+            }
+        } else if (replay && b == stop && rc != RC_SURFACE && rc != RC_ENV) {
+            if (rc == RC_LIGHT && nee && !footprint) {
+                // Forced reconnection to the light vertex of next event estimation (Sec. 6.2.3), the point its replayed
+                // random numbers pick again (unit Jacobian)
+                float3 light_dir;
+                const float3 radiance = sampleLight(scene, origin, surface.normal, stream(r.seed, b + STREAM_NEE),
+                    light_dir);
+                return rgb_to_greyscale(radiance) > 0.0f ? Shift{throughput * BSDF(direction, light_dir, surface.normal,
+                    geometry_n, surface, eta_i, eta_o, make_float2(0, 0)) * radiance, 1.0f} : fail;
+            }
+            // Emission seen right after a vertex that skipped next event estimation
+            if (rc == RC_NONE && end_type == END_EMIT && direct_light_emission && !footprint) {
+                return Shift{throughput * surface.emissive, 1.0f};
+            }
+            return fail;
+        } else if (!replay) {
+            // Emission seen directly carries no randomness to resample, shading adds it
+            if (direct_light_emission && b > 0u) {
+                Reservoir candidate = chain;
+                if (chain_found) {
+                    candidate.radiance = safeDivide(throughput * surface.emissive, chain_throughput);
+                } else if (footprint) {
+                    candidate = here;
+                }
+                offer(sel, withEnd(candidate, END_EMIT, b, throughput * surface.emissive),
+                    throughput * surface.emissive / density);
+            }
+            if (nee) {
+                float3 light_dir;
+                const float3 radiance = sampleLight(scene, origin, surface.normal, stream(r.seed, b + STREAM_NEE),
+                    light_dir);
+                const float3 f = rgb_to_greyscale(radiance) > 0.0f ? throughput * BSDF(direction, light_dir,
+                    surface.normal, geometry_n, surface, eta_i, eta_o, make_float2(0, 0)) * radiance : fail.f;
+                Reservoir candidate = chain;
+                if (chain_found) {
+                    candidate.radiance = safeDivide(f, chain_throughput);
+                } else if (footprint) {
+                    candidate = here;
+                    candidate.path |= 1u << PATH_NEE;
+                    candidate.dir = light_dir;
+                    candidate.radiance = radiance;
+                } else {
+                    // Forced reconnection to the light vertex (Sec. 6.2.3)
+                    candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
+                }
+                offer(sel, withEnd(candidate, END_NEE, b, f), f / density);
+            }
         }
-        const float3 la = scene.vertices[3 * light];
-        const float3 lb = scene.vertices[3 * light + 1];
-        const float3 lc = scene.vertices[3 * light + 2];
-        const float3 lightNormal = cross(lb - la, lc - la);
-        const float side = sqrtf(random(state));
-        const float along = random(state);
-        const float emitted = scene.materials[light].emitted;
-        const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
-        const float distance = sqrtf(dot(toLight, toLight));
-        const float cosine = dot(surface.normal, toLight) / distance;
-        if (!direct_light_emission && emitted > 0 && cosine > 0) {
-            optixTraverse(scene.handle, origin, toLight * (1 / distance), 1e-4f, distance * (1 - 1e-4f), 0.0f, 255,
-                OPTIX_RAY_FLAG_NONE, 0, 1, 0);
-            // BSDF with its cosine * emission * the light's cosine / distance^2 / pdf,
-            // pdf = power share / area and power = 2 * area * emitted.
-            if (!optixHitObjectIsHit()) radiance = radiance + throughput
-                * BSDF(direction, toLight * (1 / distance), surface.normal, normal, surface, eta_i, eta_o,
-                    make_float2(0, 0))
-                * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
-                * (total / (2 * emitted) * fabsf(dot(lightNormal, toLight))
-                / (distance * distance * distance * sqrtf(dot(lightNormal, lightNormal))));
+        direct_light_emission = !nee;
+        // Replaying, x_k-1 connects to the reconnection vertex and x_k leaves along the stored direction with the stored lobes
+        const bool connect = replay && b == stop;
+        unsigned lobe_index = extractBits(r.path, arrived ? PATH_LOBE : PATH_LOBE_PREV, 2u);
+        float3 dir = r.dir;
+        float3 sample_throughput = make_float3(0.0f, 0.0f, 0.0f);
+        // Density of the direction leaving this vertex
+        Lobe lobe = Lobe{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
+        if (connect) {
+            if (rc == RC_SURFACE) {
+                reconnection = hitPosition(scene, r.rc);
+                dir = normalize(reconnection - origin);
+            }
+        } else if (!arrived) {
+            const SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, surface, eta_i, eta_o,
+                stream(r.seed, b), make_float2(0, 0));
+            lobe_index = bsdf_sampled.lobe;
+            dir = bsdf_sampled.unit_direction;
+            sample_throughput = bsdf_sampled.throughput;
+            lobe.pdf = bsdf_sampled.pdf;
         }
-        // BSDF sampling: weight = f * cos / pdf.
-        const SampleBSDF sampled = sampleBSDF(direction, surface.normal, surface, eta_i, eta_o, state,
-            make_float2(0, 0));
-        state = sampled.random_state;
-        direction = sampled.unit_direction;
-        throughput = throughput * make_float3(fmaxf(sampled.throughput.x, 0), fmaxf(sampled.throughput.y, 0),
-            fmaxf(sampled.throughput.z, 0));
+        // Connections evaluate the given direction
+        if (connect || arrived) {
+            lobe = evalLobe(direction, dir, surface.normal, surface, eta_i, eta_o, lobe_index, stream(r.seed, b));
+        }
+        // Inverse ray footprint criterion for the density of the direction leaving this vertex (Eq. 5)
+        const bool inverse_footprint = lobe.pdf > 0.0f
+            && (lobe_index == LOBE_DIFFUSE || lobe.pdf * prev.cos / (distance * distance) * threshold <= 1.0f);
+        const bool rough = lobe.pdf > 0.0f && (lobe_index == LOBE_DIFFUSE || surface.roughness >= RESTIR_ROUGHNESS);
+        if (arrived) {
+            if (!inverse_footprint) {
+                return fail;
+            }
+            return Shift{throughput * lobe.f_cos * r.radiance / r.jac, density * lobe.pdf / r.jac};
+        }
+        // A replayed path meeting the criteria before x_k is not in the image of the shift
+        if ((replay && footprint && inverse_footprint) || (connect && !rough)) {
+            return fail;
+        }
+        if (connect) {
+            throughput = throughput * lobe.f_cos;
+            density = lobe.pdf;
+        } else {
+            throughput = throughput * make_float3(fmaxf(sample_throughput.x, 0.0f), fmaxf(sample_throughput.y, 0.0f),
+                fmaxf(sample_throughput.z, 0.0f));
+        }
+        if (!replay && !chain_found && footprint && inverse_footprint) {
+            chain = here;
+            chain.path |= lobe_index << PATH_LOBE | (nee ? 1u : 0u) << PATH_NEE;
+            chain.jac *= lobe.pdf;
+            chain.dir = dir;
+            chain_throughput = throughput;
+        }
+        prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
+        direction = dir;
+        if (!replay) {
+            const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
+                / density, 0.0f), 1.0f);
+            if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b + 1u >= MAX_BOUNCES) {
+                break;
+            }
+            density *= survival_probability;
+        }
+        // Only occluders in front of the reconnection vertex matter
+        const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
+        hit = traverse(scene, origin, direction, reconnecting ? length(reconnection - origin) * 1.001f : 1e16f,
+            distance);
+        // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
+        if (reconnecting && hit.triangle == r.rc.triangle) {
+            hit.uv = r.rc.uv;
+            distance = length(reconnection - origin);
+        }
+        // The connection to the environment direction has to escape the scene
+        if (replay && b == stop && rc == RC_ENV && hit.triangle != NONE) {
+            return fail;
+        }
+        if (hit.triangle == NONE) {
+            const float3 f = throughput * environment(scene, direction);
+            if (replay) {
+                if (b == stop && rc == RC_ENV) {
+                    return Shift{f / r.jac, density / r.jac};
+                }
+                if (rc == RC_NONE && end_type == END_ENV && b == end && !prev.rough) {
+                    return Shift{f, 1.0f};
+                }
+                return fail;
+            }
+            Reservoir candidate = chain;
+            if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
+                candidate.radiance = safeDivide(f, chain_throughput);
+            } else if (prev.rough) {
+                // Reconnection to the environment direction, guarded by the roughness threshold only (Sec. 4.2)
+                candidate.path = (b + 1u) << PATH_K | RC_ENV << PATH_RC | prev.lobe << PATH_LOBE_PREV;
+                candidate.jac = prev.pdf;
+                candidate.dir = direction;
+            }
+            offer(sel, withEnd(candidate, END_ENV, b, f), f / density);
+            break;
+        }
+        // Project ray origin to hit point
+        origin = origin + direction * distance;
     }
+    return fail;
+}
+
+// The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
+__device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
+    Selection sel;
+    if (r.w <= 0.0f) {
+        return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
+    }
+    const Domain dom = pixelDomain(scene, camera, pixel, size, r.seed);
+    if (dom.hit.triangle == NONE) {
+        return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
+    }
+    return walk(scene, dom, r, true, sel);
+}
+
+// Pixel coordinates a camera sees a position at
+__device__ float2 project(const Camera& camera, float3 position, uint3 size) {
+    const float3 d = position - camera.origin;
+    // d = (x * u + y * v + z) * depth
+    const float depth = dot(cross(camera.x, camera.y), d);
+    return make_float2((1 + dot(cross(d, camera.y), camera.z) / depth) * 0.5f * size.x,
+        (1 - dot(cross(camera.x, d), camera.z) / depth) * 0.5f * size.y);
+}
+
+// Index of the pixel at q if the previous frame left it a sample, -1 otherwise
+__device__ int previousValid(const Scene& scene, float2 q, uint3 size) {
+    const int x = int(floorf(q.x));
+    const int y = int(floorf(q.y));
+    const bool valid = x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)
+        && scene.previous[y * size.x + x].c > 0.0f;
+    return valid ? y * int(size.x) + x : -1;
+}
+
+// Backprojection of the camera motion, or the dual motion vector of the surface previously seen there (Sec. 6.4)
+__device__ int temporalNeighbor(const Scene& scene, uint3 p, uint3 size, const Domain& dom) {
+    const float2 q = project(scene.previousCamera, dom.x1, size);
+    const int index = previousValid(scene, q, size);
+    if (index < 0) {
+        return -1;
+    }
+    const float3 previous = pixelDomain(scene, scene.previousCamera, index, size, scene.previous[index].seed).x1;
+    if (length(previous - dom.x1) <= length(dom.x1 - dom.x0) * 8.0f / size.x) {
+        return index;
+    }
+    const float2 moved = project(scene.camera, previous, size);
+    return previousValid(scene, make_float2(p.x + floorf(q.x) + 1.0f - moved.x, p.y + floorf(q.y) + 1.0f - moved.y),
+        size);
+}
+
+// Index of the partner of p in reuse texture t, randomly flipped, transposed and offset every frame (Sec. 3.2),
+// -1 off the image
+__device__ int partner(const Scene& scene, uint3 p, uint3 size, unsigned t) {
+    const int sizes[] = {PAIRING_SIZES[0], PAIRING_SIZES[1], PAIRING_SIZES[2]};
+    const int texture = sizes[t];
+    const unsigned random = hash(scene.frame * 3u + t);
+    const int flip_x = (random & 1u) != 0u ? -1 : 1;
+    const int flip_y = (random & 2u) != 0u ? -1 : 1;
+    const bool transpose = (random & 4u) != 0u;
+    const int x = ((int(transpose ? p.y : p.x) * flip_x + int((random >> 8u) & 255u)) % texture + texture) % texture;
+    const int y = ((int(transpose ? p.x : p.y) * flip_y + int((random >> 16u) & 255u)) % texture + texture) % texture;
+    const char2 delta = scene.pairing[t][y * texture + x];
+    const int qx = int(p.x) + (transpose ? delta.y * flip_y : delta.x * flip_x);
+    const int qy = int(p.y) + (transpose ? delta.x * flip_x : delta.y * flip_y);
+    const bool valid = qx >= 0 && qy >= 0 && qx < int(size.x) && qy < int(size.y);
+    return valid ? qy * int(size.x) + qx : -1;
+}
+
+// Initial candidates: the path tree of the pixel's primary hit at a jitter of its own; it adds the radiance the camera
+// sees right there, of an emitter or the world, as it carries no randomness to resample. Without ReSTIR it adds the
+// path tree's estimate as well.
+extern "C" __global__ void __raygen__initial() {
+    const uint3 p = optixGetLaunchIndex();
+    const uint3 size = optixGetLaunchDimensions();
+    const unsigned index = p.y * size.x + p.x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    Reservoir r = {};
+    r.seed = stream(hash(scene.frame), index);
+    const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
+    Selection initial = {};
+    initial.random_state = stream(r.seed, STREAM_SELECT);
+    if (dom.hit.triangle != NONE) {
+        walk(scene, dom, r, false, initial);
+    }
+    // The pixel's own seed even without a sample, its domain for later passes
+    scene.initial[index] = finalize(initial, 1.0f);
+    scene.initial[index].seed = r.seed;
+    const float3 seen = dom.hit.triangle == NONE ? environment(scene, normalize(dom.x1 - dom.x0))
+        : shade(scene, dom.hit.triangle, dom.hit.uv.x, dom.hit.uv.y, faceNormal(scene, dom.hit.triangle)).emissive;
+    const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
+    float4& sum = scene.accumulation[index];
     sum = make_float4(sum.x + radiance.x, sum.y + radiance.y, sum.z + radiance.z, sum.w + 1);
+}
+
+// Temporal reuse: the initial sample against the one the previous frame left the pixel's temporal neighbor, which is
+// the pixel itself under a still camera, where both shifts are the identity
+extern "C" __global__ void __raygen__temporal() {
+    const uint3 p = optixGetLaunchIndex();
+    const uint3 size = optixGetLaunchDimensions();
+    const unsigned index = p.y * size.x + p.x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    Reservoir r = scene.initial[index];
+    const bool still = scene.camera.origin == scene.previousCamera.origin && scene.camera.x == scene.previousCamera.x
+        && scene.camera.y == scene.previousCamera.y && scene.camera.z == scene.previousCamera.z;
+    int q = scene.previous[index].c > 0.0f ? int(index) : -1;
+    if (!still) {
+        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
+        q = dom.hit.triangle == NONE ? -1 : temporalNeighbor(scene, p, size, dom);
+    }
+    if (q >= 0) {
+        const Reservoir temporal = scene.previous[q];
+        const float c_t = fminf(temporal.c, RESTIR_CAP);
+        const Shift to_current = still ? Shift{temporal.f, 1.0f} : shift(scene, scene.camera, index, size, temporal);
+        const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(scene, scene.previousCamera, q, size, r);
+        const float p_c = rgb_to_greyscale(r.f);
+        const float p_t = rgb_to_greyscale(temporal.f);
+        Selection sel = {};
+        sel.random_state = stream(r.seed, STREAM_SELECT + 1u);
+        offerShifted(sel, r, Shift{r.f, 1.0f}, r.c * p_c / (r.c * p_c + c_t * rgb_to_greyscale(to_previous.f)));
+        offerShifted(sel, temporal, to_current, c_t * p_t / (c_t * p_t + r.c * rgb_to_greyscale(to_current.f)));
+        r = finalize(sel, r.c + c_t);
+    }
+    scene.temporal[index] = r;
+}
+
+// Paired shifts (Sec. 3): the pixel's sample into the domain of its partner in the reuse texture of the launch's layer
+extern "C" __global__ void __raygen__shift() {
+    const uint3 p = optixGetLaunchIndex();
+    const uint3 size = optixGetLaunchDimensions();
+    const unsigned index = p.y * size.x + p.x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    const int q = partner(scene, p, size, p.z);
+    scene.shifts[3 * index + p.z] = q < 0 ? Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f}
+        : shift(scene, scene.camera, q, size, scene.temporal[index]);
+}
+
+// Paired spatial reuse with pairwise MIS (Sec. 3) and shading with vector-valued weights (Sec. 6.3)
+extern "C" __global__ void __raygen__spatial() {
+    const uint3 p = optixGetLaunchIndex();
+    const uint3 size = optixGetLaunchDimensions();
+    const unsigned index = p.y * size.x + p.x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    const Reservoir r = scene.temporal[index];
+    float count = 0.0f;
+    float c_sum = r.c;
+    for (unsigned t = 0u; t < 3u; t++) {
+        const int q = partner(scene, p, size, t);
+        if (q >= 0) {
+            count += 1.0f;
+            c_sum += scene.temporal[q].c;
+        }
+    }
+    // Confidence of the current pixel is split evenly across the pairs
+    const float c_pair = r.c / fmaxf(count, 1.0f);
+    const float p_c = rgb_to_greyscale(r.f);
+    float canonical_mis = count == 0.0f ? 1.0f : 0.0f;
+    Selection sel = {};
+    sel.random_state = stream(scene.initial[index].seed, STREAM_SELECT + 2u);
+    for (unsigned t = 0u; t < 3u; t++) {
+        const int q = partner(scene, p, size, t);
+        if (q >= 0) {
+            const Reservoir neighbor = scene.temporal[q];
+            const Shift to_here = scene.shifts[3 * q + t];
+            const Shift to_there = scene.shifts[3 * index + t];
+            const float share = (neighbor.c + c_pair) / c_sum;
+            const float p_n = rgb_to_greyscale(neighbor.f);
+            if (p_c > 0.0f) {
+                canonical_mis += share * c_pair * p_c / (c_pair * p_c + neighbor.c * rgb_to_greyscale(to_there.f));
+            }
+            offerShifted(sel, neighbor, to_here,
+                share * neighbor.c * p_n / (neighbor.c * p_n + c_pair * rgb_to_greyscale(to_here.f)));
+        }
+    }
+    offerShifted(sel, r, Shift{r.f, 1.0f}, canonical_mis);
+    scene.previous[index] = finalize(sel, c_sum);
+    float4& sum = scene.accumulation[index];
+    sum = make_float4(sum.x + sel.color.x, sum.y + sel.color.y, sum.z + sel.color.z, sum.w);
 }
