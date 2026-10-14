@@ -617,6 +617,16 @@ __device__ float3 faceNormal(const Scene& scene, unsigned triangle) {
     return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
 }
 
+__device__ float3 smoothNormal(const Scene& scene, Hit hit) {
+    const float3* normals = scene.normals + 3 * hit.triangle;
+    return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
+}
+
+// Whether a direction leaves a face to the other side than reflecting or refracting the incoming direction does
+__device__ bool wrongSide(float3 in_dir, bool refracted, float3 out_dir, float3 face) {
+    return (dot(in_dir, face) < 0 != refracted) != (dot(out_dir, face) > 0);
+}
+
 // Camera and primary hit of the ray through a pixel at the jitter its sample's seed draws, which makes the pixel's area
 // part of the sample's primary sample space; hidden surfaces let camera rays through. On a miss x1 is one along the ray.
 __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixel, uint3 size, unsigned seed) {
@@ -814,8 +824,12 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (unsigned b = 0u; ; b++) {
-        const float3 geometry_n = faceNormal(scene, hit.triangle);
-        const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, geometry_n);
+        const float3 face = faceNormal(scene, hit.triangle);
+        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit));
+        // Surfaces transmitting nothing face the ray, as in Cycles
+        const float facing = surface.transparency > 0 || dot(face, direction) < 0 ? 1.0f : -1.0f;
+        const float3 geometry_n = face * facing;
+        surface.normal = surface.normal * facing;
         const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
@@ -922,13 +936,27 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 reconnection = hitPosition(scene, r.rc);
                 dir = normalize(reconnection - origin);
             }
+            // The path tracer would resample such a direction against the geometry normal
+            if (wrongSide(direction, lobe_index == LOBE_REFRACT, dir, geometry_n)) {
+                return fail;
+            }
         } else if (!arrived) {
-            const SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, surface, eta_i, eta_o,
+            SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, surface, eta_i, eta_o,
                 stream(r.seed, b), make_float2(0, 0));
+            // Continue sampling with the face normal if the smooth normal sent the ray to the wrong side of the face,
+            // pretending the self reflection faces along it
+            const bool fallback = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, geometry_n);
+            if (fallback) {
+                const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, surface,
+                    eta_i, eta_o, bsdf_sampled.random_state, make_float2(0, 0));
+                bsdf_sampled.unit_direction = geometry_bsdf_sampled.unit_direction;
+                bsdf_sampled.throughput = geometry_bsdf_sampled.throughput;
+            }
             lobe_index = bsdf_sampled.lobe;
             dir = bsdf_sampled.unit_direction;
             sample_throughput = bsdf_sampled.throughput;
-            lobe.pdf = bsdf_sampled.pdf;
+            // Density of the direction is unknown after the fallback
+            lobe.pdf = fallback ? 0.0f : bsdf_sampled.pdf;
         }
         // Connections evaluate the given direction
         if (connect || arrived) {
