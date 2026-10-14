@@ -73,6 +73,12 @@ emitter.inputs['Emission Strength'].default_value = 1
 emitter.id_data.links.new(emitter.id_data.nodes.new('ShaderNodeTexImage').outputs['Color'],
     emitter.inputs['Emission Color'])
 emitter.id_data.nodes['Image Texture'].image = texture.image
+# Rendered through the outputs for Cycles, as versioning leaves materials saved without nodes: the one for EEVEE is not
+emitter.id_data.nodes['Material Output'].target = 'CYCLES'
+eevee = emitter.id_data.nodes.new('ShaderNodeOutputMaterial')
+eevee.target = 'EEVEE'
+emitter.id_data.links.new(emitter.id_data.nodes.new('ShaderNodeBsdfPrincipled').outputs[0], eevee.inputs['Surface'])
+scene.world.node_tree.nodes['World Output'].target = 'CYCLES'
 for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
     node.interpolation = 'Closest'  # Whole texels
 
