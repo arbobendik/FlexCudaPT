@@ -4,7 +4,7 @@
 // Perspective: the ray through NDC (u, v) leaves origin along x * u + y * v + z.
 struct Camera { float3 origin, x, y, z; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
-// there of the width * height sRGB texels from texel on or a color with the normal it encodes in tangent space, or
+// there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
 // combines the two or three topmost.
 enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, MAXIMUM, LOGARITHM,
     MULTIPLY_ADD };
@@ -46,7 +46,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // The frame's number seeds it.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals; float2* uvs; Material* materials;
-    double* power; Op* ops; uchar4* texels; unsigned count; Camera camera;
+    double* power; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
 };
