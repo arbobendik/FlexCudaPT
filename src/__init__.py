@@ -148,7 +148,7 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
         matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
 
 def settings(scene):  # The scene's settings of the renderer, in its order
-    return (scene.flex_restir,)
+    return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -331,8 +331,15 @@ class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex eng
     bl_context = 'render'
 
     def draw(self, context):
+        scene = context.scene
         self.layout.use_property_split = True
-        self.layout.prop(context.scene, 'flex_restir')
+        self.layout.prop(scene, 'flex_restir')
+        column = self.layout.column()
+        column.active = scene.flex_restir
+        column.prop(scene, 'flex_decorrelation')
+        if scene.flex_decorrelation:
+            column.label(text='Biased: trades correlation artifacts for energy loss', icon='ERROR')
+        column.prop(scene, 'flex_neighbors')
 
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
 def reload():
@@ -347,6 +354,11 @@ def register():
         default=1024, min=1)
     bpy.types.Scene.flex_restir = bpy.props.BoolProperty(name='ReSTIR',
         description='Reuse paths across pixels and samples with ReSTIR PT Enhanced', default=True)
+    bpy.types.Scene.flex_decorrelation = bpy.props.BoolProperty(name='Decorrelation', description='Reuse samples '
+        'repeated across the neighborhood less over time. Biased: trades correlation artifacts for energy loss')
+    bpy.types.Scene.flex_neighbors = bpy.props.IntProperty(name='Spatial Neighbors',
+        description='Pixels each pixel reuses paths from per sample, fewer trade quality for speed', default=3, min=1,
+        max=3)
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
     bpy.utils.register_class(RENDER_PT_flex_restir)
@@ -358,3 +370,5 @@ def unregister():
     bpy.utils.unregister_class(Flex)
     del bpy.types.Scene.flex_samples
     del bpy.types.Scene.flex_restir
+    del bpy.types.Scene.flex_decorrelation
+    del bpy.types.Scene.flex_neighbors
