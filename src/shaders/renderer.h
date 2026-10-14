@@ -30,9 +30,9 @@ struct Reservoir {
 };
 // Integrand of a sample shifted into another pixel times the Jacobian determinant of the shift, and the latter
 struct Shift { float3 f; float jac; };
-// Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, and
-// the spatial neighbors it reuses from
-struct Settings { unsigned restir, decorrelation, neighbors; };
+// Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, the
+// spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample
+struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle: three vertices and UVs, one material, cumulative emitted power; the world's material comes last.

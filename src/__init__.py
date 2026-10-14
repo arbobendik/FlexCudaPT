@@ -148,7 +148,7 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
         matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
 
 def settings(scene):  # The scene's settings of the renderer, in its order
-    return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors
+    return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors, scene.flex_bounces, scene.flex_paths
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -320,6 +320,8 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     def draw(self, context):
         self.layout.use_property_split = True
         self.layout.prop(context.scene, 'flex_samples')
+        self.layout.prop(context.scene, 'flex_bounces')
+        self.layout.prop(context.scene, 'flex_paths')
         for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
             self.layout.prop(context.scene.render, name)
 
@@ -352,6 +354,10 @@ def register():
     bpy.app.timers.register(reload, persistent=True)
     bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1)
+    bpy.types.Scene.flex_bounces = bpy.props.IntProperty(name='Max Bounces',
+        description='Bounces of a path after the surface the camera sees', default=7, min=0, max=16)
+    bpy.types.Scene.flex_paths = bpy.props.IntProperty(name='Paths per Sample',
+        description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32)
     bpy.types.Scene.flex_restir = bpy.props.BoolProperty(name='ReSTIR',
         description='Reuse paths across pixels and samples with ReSTIR PT Enhanced', default=True)
     bpy.types.Scene.flex_decorrelation = bpy.props.BoolProperty(name='Decorrelation', description='Reuse samples '
@@ -369,6 +375,8 @@ def unregister():
     bpy.utils.unregister_class(RENDER_PT_flex)
     bpy.utils.unregister_class(Flex)
     del bpy.types.Scene.flex_samples
+    del bpy.types.Scene.flex_bounces
+    del bpy.types.Scene.flex_paths
     del bpy.types.Scene.flex_restir
     del bpy.types.Scene.flex_decorrelation
     del bpy.types.Scene.flex_neighbors
