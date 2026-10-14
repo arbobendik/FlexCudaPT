@@ -9,7 +9,10 @@ struct Camera { float3 origin, x, y, z; };
 enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, STORE, LOAD };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
-struct Surface { float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; };
+struct Surface {
+    float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 absorption;
+    float density;
+};
 // Lights are sampled by emitted, their summed emission under white textures; hidden surfaces let camera rays through.
 struct Material { float emitted; unsigned program, hidden; };
 // Point of a triangle at its barycentrics, triangle NONE for no point
