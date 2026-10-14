@@ -7,7 +7,7 @@ struct Camera { float3 origin, x, y, z; };
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
 // combines the two or three topmost.
 enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, MAXIMUM, LOGARITHM,
-    MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, STORE, LOAD };
+    MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, STORE, LOAD };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {

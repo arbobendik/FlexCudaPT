@@ -478,6 +478,9 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
 // Of a to the base b, zero where undefined as Blender's
 __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
+__device__ float3 divide(float3 a, float3 b) {
+    return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
+}
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
@@ -515,6 +518,11 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
                 logarithm(top[-1].z, top->z));
             break;
         case MULTIPLY_ADD: top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
+        case DIVIDE: --top; top[-1] = divide(top[-1], *top); break;
+        case SNAP: { --top;
+            const float3 q = divide(top[-1], *top);
+            top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
+        } break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x};
