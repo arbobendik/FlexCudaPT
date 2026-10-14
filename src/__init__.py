@@ -167,7 +167,7 @@ def resolve(socket, groups=()):
 # The material's surface as rows, one or none: the row of its surface, absorbing as its volume; none for volumes
 # without a surface shader and for textured alpha
 def shade(material, program):
-    output = material.node_tree.get_output_node('ALL')
+    output = material.node_tree.get_output_node('CYCLES')
     shaders = [node for node in material.node_tree.nodes if node.type == 'BSDF_PRINCIPLED'][:1]
     if not (output and output.inputs['Surface'].is_linked) or any(isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
             for node in shaders):
@@ -259,7 +259,7 @@ class Flex(bpy.types.RenderEngine):
                         for c in (cofactors @ loop[normal] if normal else face.normal))
                     uvs.extend(c for loop in face.loops for c in loop[uv].uv)
                     materials.extend((*row, not ob.visible_camera))
-        world = scene.world and scene.world.node_tree.get_output_node('ALL')
+        world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         materials.extend((*program(resolve(world.inputs['Surface']) if world else BLACK), 0))
         triangles = numpy.array(vertices, 'f').reshape(-1, 3, 3)
         materials = numpy.array(materials).reshape(-1, 3)
