@@ -614,6 +614,34 @@ __device__ float3 faceNormal(const Scene& scene, unsigned triangle) {
     return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
 }
 
+__device__ float3 smoothNormal(const Scene& scene, Hit hit) {
+    const float3* normals = scene.normals + 3 * hit.triangle;
+    return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
+}
+
+// Distance along the smooth normal rays leave a hit at position from, to prevent unnatural hard shadow / reflection
+// borders due to the difference between the smooth normal and geometry: the corners' distances by the tangents of their
+// normals' angles to the face, limited to PI / 4, interpolated and kept within an eighth of the shortest edge
+__device__ float geometryOffset(const Scene& scene, Hit hit, float3 face, float3 position) {
+    const float3* vertex = scene.vertices + 3 * hit.triangle;
+    const float3* normal = scene.normals + 3 * hit.triangle;
+    const float weight[3] = {1 - hit.uv.x - hit.uv.y, hit.uv.x, hit.uv.y};
+    float offset = 0, edge = INFINITY;
+    for (int k = 0; k < 3; ++k) {
+        const float3 side = vertex[(k + 1) % 3] - vertex[k];
+        const float3 diff = position - vertex[k];
+        const float cosine = fabsf(dot(face, normalize(normal[k])));
+        edge = fminf(edge, sqrtf(dot(side, side)));
+        offset += weight[k] * sqrtf(dot(diff, diff)) * fminf(sqrtf(fmaxf(1 - cosine * cosine, 0)) / cosine, PI * 0.25f);
+    }
+    return fminf(fmaxf(offset, 0), edge * 0.125f);
+}
+
+// Whether a direction leaves a face to the other side than reflecting or refracting the incoming direction does
+__device__ bool wrongSide(float3 in_dir, bool refracted, float3 out_dir, float3 face) {
+    return (dot(in_dir, face) < 0 != refracted) != (dot(out_dir, face) > 0);
+}
+
 // Camera and primary hit of the ray through a pixel at the jitter its sample's seed draws, which makes the pixel's area
 // part of the sample's primary sample space; hidden surfaces let camera rays through. On a miss x1 is one along the ray.
 __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixel, uint3 size, unsigned seed) {
@@ -639,9 +667,10 @@ __device__ float3 environment(const Scene& scene, float3 direction) {
 }
 
 // Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible from in front of the
-// normal. Returns emission * the light's cosine / distance^2 / pdf arriving along direction,
+// normal, from offset along it. Returns emission * the light's cosine / distance^2 / pdf arriving along direction,
 // pdf = power share / area and power = 2 * area * emitted.
-__device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, unsigned state, float3& direction) {
+__device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float offset, unsigned state,
+    float3& direction) {
     // The first triangle whose cumulative power exceeds the pick, below the total: never one of no power
     const double total = scene.power[scene.count - 1];
     const double pick = random53(state) * total;
@@ -659,10 +688,12 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     const float emitted = scene.materials[light].emitted;
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
     const float distance = length(toLight);
+    // Visibility along the segment from the offset start to the sampled point
+    const float3 shadow = toLight - normal * offset;
     float occluder;
     direction = toLight * (1 / distance);
-    if (!(emitted > 0 && dot(normal, toLight) > 0)
-        || traverse(scene, origin, direction, distance * (1 - 1e-4f), occluder).triangle != NONE)
+    if (!(emitted > 0 && dot(normal, toLight) > 0) || traverse(scene, origin + normal * offset, normalize(shadow),
+            length(shadow) * (1 - 1e-4f), occluder).triangle != NONE)
         return make_float3(0, 0, 0);
     return shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
         * (float(total) / (2 * emitted) * fabsf(dot(lightNormal, toLight))
@@ -809,8 +840,13 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     chain.seed = r.seed;
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     for (unsigned b = 0u; ; b++) {
-        const float3 geometry_n = faceNormal(scene, hit.triangle);
-        const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, geometry_n);
+        const float3 face = faceNormal(scene, hit.triangle);
+        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit));
+        // Surfaces transmitting nothing face the ray, as in Cycles
+        const float facing = surface.transparency > 0 || dot(face, direction) < 0 ? 1.0f : -1.0f;
+        const float3 geometry_n = face * facing;
+        surface.normal = surface.normal * facing;
+        const float offset = geometryOffset(scene, hit, geometry_n, origin);
         const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
@@ -860,8 +896,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 // Forced reconnection to the light vertex of next event estimation (Sec. 6.2.3), the point its replayed
                 // random numbers pick again (unit Jacobian)
                 float3 light_dir;
-                const float3 radiance = sampleLight(scene, origin, surface.normal, stream(r.seed, b + STREAM_NEE),
-                    light_dir);
+                const float3 radiance = sampleLight(scene, origin, surface.normal, offset,
+                    stream(r.seed, b + STREAM_NEE), light_dir);
                 return rgb_to_greyscale(radiance) > 0.0f ? Shift{throughput * BSDF(direction, light_dir, surface.normal,
                     geometry_n, surface, eta_i, eta_o, make_float2(0, 0)) * radiance, 1.0f} : fail;
             }
@@ -884,8 +920,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             }
             if (nee) {
                 float3 light_dir;
-                const float3 radiance = sampleLight(scene, origin, surface.normal, stream(r.seed, b + STREAM_NEE),
-                    light_dir);
+                const float3 radiance = sampleLight(scene, origin, surface.normal, offset,
+                    stream(r.seed, b + STREAM_NEE), light_dir);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f ? throughput * BSDF(direction, light_dir,
                     surface.normal, geometry_n, surface, eta_i, eta_o, make_float2(0, 0)) * radiance : fail.f;
                 Reservoir candidate = chain;
@@ -914,15 +950,30 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (connect) {
             if (rc == RC_SURFACE) {
                 reconnection = hitPosition(scene, r.rc);
-                dir = normalize(reconnection - origin);
+                dir = normalize(reconnection - (origin
+                    + surface.normal * (offset * sign(dot(reconnection - origin, geometry_n)))));
+            }
+            // The path tracer would resample such a direction against the geometry normal
+            if (wrongSide(direction, lobe_index == LOBE_REFRACT, dir, geometry_n)) {
+                return fail;
             }
         } else if (!arrived) {
-            const SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, surface, eta_i, eta_o,
+            SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, surface, eta_i, eta_o,
                 stream(r.seed, b), make_float2(0, 0));
+            // Continue sampling with the face normal if the smooth normal sent the ray to the wrong side of the face,
+            // pretending the self reflection faces along it
+            const bool fallback = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, geometry_n);
+            if (fallback) {
+                const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, surface,
+                    eta_i, eta_o, bsdf_sampled.random_state, make_float2(0, 0));
+                bsdf_sampled.unit_direction = geometry_bsdf_sampled.unit_direction;
+                bsdf_sampled.throughput = geometry_bsdf_sampled.throughput;
+            }
             lobe_index = bsdf_sampled.lobe;
             dir = bsdf_sampled.unit_direction;
             sample_throughput = bsdf_sampled.throughput;
-            lobe.pdf = bsdf_sampled.pdf;
+            // Density of the direction is unknown after the fallback
+            lobe.pdf = fallback ? 0.0f : bsdf_sampled.pdf;
         }
         // Connections evaluate the given direction
         if (connect || arrived) {
@@ -958,6 +1009,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         }
         prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
         direction = dir;
+        // Off the side it leaves through
+        origin = origin + surface.normal * (offset * sign(dot(direction, geometry_n)));
         if (!replay) {
             const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
                 / density, 0.0f), 1.0f);
@@ -1095,7 +1148,7 @@ extern "C" __global__ void __raygen__initial() {
             walk(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
         }
         seen = seen + (dom.hit.triangle == NONE ? environment(scene, normalize(dom.x1 - dom.x0))
-            : shade(scene, dom.hit.triangle, dom.hit.uv.x, dom.hit.uv.y, faceNormal(scene, dom.hit.triangle)).emissive)
+            : shade(scene, dom.hit.triangle, dom.hit.uv.x, dom.hit.uv.y, smoothNormal(scene, dom.hit)).emissive)
             / scene.settings.paths;
     }
     scene.initial[index] = finalize(initial, 1.0f);

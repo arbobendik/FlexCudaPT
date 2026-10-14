@@ -146,6 +146,7 @@ class Flex(bpy.types.RenderEngine):
     def start(self, depsgraph):  # Starts the renderer on the exported scene
         scene = depsgraph.scene_eval
         vertices = []
+        corners = []  # Normals
         uvs = []
         materials = []
         ops = []  # Steps of all programs
@@ -158,7 +159,11 @@ class Flex(bpy.types.RenderEngine):
             bm = bmesh.new()
             if ob.hide_render: continue
             if ob.type in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META'}:
-                bm.from_mesh(ob.to_mesh())
+                mesh = ob.to_mesh()
+                vectors = numpy.empty(3 * len(mesh.loops), 'f')  # Normal per corner: smooth, sharp or custom
+                mesh.corner_normals.foreach_get('vector', vectors)
+                mesh.attributes.new('flex_normal', 'FLOAT_VECTOR', 'CORNER').data.foreach_set('vector', vectors)
+                bm.from_mesh(mesh)
                 ob.to_mesh_clear()
                 for slot in ob.material_slots:
                     if slot.material not in rows: rows[slot.material] = shade(slot.material, program)
@@ -185,6 +190,7 @@ class Flex(bpy.types.RenderEngine):
                 else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
             bm.transform(instance.matrix_world)
+            bm.normal_update()  # Of the faces of lights, which have no corner normals
             if ob.type == 'LIGHT':
                 area = sum(face.calc_area() for face in bm.faces if not face.material_index)
                 # Sun irradiance, else watts
@@ -192,9 +198,13 @@ class Flex(bpy.types.RenderEngine):
                 # Black reflects nothing
                 shades = [[program([*BLACK[:4], radiance * numpy.array(light.color), *BLACK[5:]])], [program(BLACK)]]
             uv = bm.loops.layers.uv.verify()
+            normal = bm.loops.layers.float_vector.get('flex_normal')
+            cofactors = instance.matrix_world.to_3x3().adjugated().transposed()  # Turn normals as the faces turn
             for face in bm.faces:
                 for row in shades[face.material_index]:  # No row for a surface that is not rendered
                     vertices.extend(c for vertex in face.verts for c in vertex.co)
+                    corners.extend(c for loop in face.loops
+                        for c in (cofactors @ loop[normal] if normal else face.normal))
                     uvs.extend(c for loop in face.loops for c in loop[uv].uv)
                     materials.extend((*row, not ob.visible_camera))
         world = scene.world and scene.world.node_tree.get_output_node('ALL')
@@ -206,8 +216,9 @@ class Flex(bpy.types.RenderEngine):
         # tiny emitters after bright ones keep intervals of their power.
         normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
         power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 0])
-        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex floats, 6 UV floats, a material of its
-        # emission, program and hidden flag (then the world's), the power; then the steps of 4 integers and the texels.
+        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal and 6 UV floats, a material
+        # of its emission, program and hidden flag (then the world's), the power; then the steps of 4 integers and the
+        # texels.
         # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process
         # runs: once the engine drops them, the renderer reads the end of its input and exits.
         process = subprocess.Popen(BINARY, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -217,7 +228,7 @@ class Flex(bpy.types.RenderEngine):
         # Frames arrive slowly and unevenly through the default 64 KiB
         fcntl.fcntl(self.answers, fcntl.F_SETPIPE_SZ, 1 << 20)
         self.requests.write(b''.join((struct.pack('<III', len(power), len(ops), len(texels) // 4), triangles.tobytes(),
-            numpy.array(uvs, 'f').tobytes(),
+            numpy.array(corners, 'f').tobytes(), numpy.array(uvs, 'f').tobytes(),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))).tobytes(),
             power.astype('d').tobytes(), numpy.array(ops, 'I').tobytes(), texels.tobytes())))
 
