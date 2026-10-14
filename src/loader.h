@@ -11,7 +11,7 @@
 
 inline CUdeviceptr allocate(size_t bytes, const void* data = nullptr) {
     CUdeviceptr ptr;
-    CHECK(cuMemAlloc(&ptr, bytes));
+    CHECK(cuMemAlloc(&ptr, bytes ? bytes : 1)); // CUDA allocates no empty arrays, as of scenes without triangles
     if (data) CHECK(cuMemcpyHtoD(ptr, data, bytes));
     return ptr;
 }
@@ -82,7 +82,7 @@ inline Scene loadScene(OptixDeviceContext context) {
     CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;
     unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
-        .vertexBuffers = &vertexBuffer, .numVertices = 3 * header.count,
+        .vertexBuffers = header.count ? &vertexBuffer : nullptr, .numVertices = 3 * header.count,
         .vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3, .flags = &flags, .numSbtRecords = 1}};
     OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
     OptixAccelBufferSizes sizes{};
