@@ -496,7 +496,8 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
         case MULTIPLY: --top; top[-1] = top[-1] * *top; break;
         case DOT_PRODUCT: --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
     }
-    return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x};
+    return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
+        stack[8].x};
 }
 // Of a triangle at its barycentrics
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
@@ -506,6 +507,13 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
         normalMapTBN(vertex[0], vertex[1], vertex[2], uv[0], uv[1], uv[2], normal),
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t);
+}
+// Beer's law for absorption over the distance through a medium: T = exp(-sigma_a * d), sigma_a = density * (1 - color)
+// as Cycles' Volume Absorption
+__device__ float3 beerLambert(float distance, const Surface& material) {
+    const float depth = distance * material.density;
+    return make_float3(expf(depth * (material.absorption.x - 1)), expf(depth * (material.absorption.y - 1)),
+        expf(depth * (material.absorption.z - 1)));
 }
 __device__ bool neeDecision(const Surface& material, float n_dot_v, float eta_i, float eta_o) {
     // Calculate fresnel term
@@ -847,6 +855,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
+        // Rays reaching the back of a face come through its medium
+        if (dot(direction, geometry_n) > 0) throughput = throughput * beerLambert(distance, surface);
         const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
