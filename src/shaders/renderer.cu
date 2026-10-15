@@ -55,6 +55,8 @@ __device__ Random pcg(unsigned state) {
     return Random{state, value};
 }
 __device__ float rgb_to_greyscale(float3 rgb) { return dot(rgb, make_float3(0.299f, 0.587f, 0.114f)); }
+// Brightest channel, by which Cycles' tinted specular layer dims the diffuse below it
+__device__ float brightest(float3 rgb) { return fmaxf(rgb.x, fmaxf(rgb.y, rgb.z)); }
 // Exact Smith masking of GGX, the visible normal density sampleGGXVNDF draws from
 __device__ float smithG1(float alpha, float n_dot_x) {
     const float alpha_sq = alpha * alpha;
@@ -143,6 +145,15 @@ __device__ float fresnel(float cos_theta, float eta_i, float eta_o) {
     }
 
     return kr;
+}
+// Fresnel reflectance tinted by the specular tint at normal incidence and white at grazing angles, as Cycles'
+// Principled BSDF fades its tinted f0, scaled by the specular level, to a white f90 along the curve of the ior with that
+// reflectance at normal incidence
+__device__ float3 tinted(const Surface& material, float cos_theta, float eta_i, float eta_o) {
+    const float root = (eta_i - eta_o) / (eta_i + eta_o) * sqrtf(material.level);
+    const float F = fresnel(cos_theta, 1.0f + root, 1.0f - root), F0 = root * root;
+    return make_float3(F, F, F)
+        - (make_float3(1.0f, 1.0f, 1.0f) - material.tint) * (F0 * (1.0f - F) / fmaxf(1.0f - F0, BIAS));
 }
 
 // Helper function for GGX importance sampling
@@ -259,14 +270,13 @@ __device__ float3 BSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, cons
         // Lambertian diffuse
         const float3 lambert = material.albedo * INV_PI;
         // Torrance-Sparrow
-        const float3 F = mix(make_float3(1.0f, 1.0f, 1.0f) * fresnel(fabsf(v_dot_h), eta_i, eta_o), material.albedo,
+        const float3 F = mix(tinted(material, fabsf(v_dot_h), eta_i, eta_o), material.albedo,
             material.metallic);
 
-        const float F_greyscale = rgb_to_greyscale(F);
         const float D = trowbridgeReitz(alpha, n_dot_h);
         // let G = smithAlt(alpha, pd_n_dot_v, pd_n_dot_l);
         const float G = smith(alpha, pd_n_dot_v, pd_n_dot_l);
-        const float diffuse_factor = (1.0f - F_greyscale) * (1.0f - material.metallic) * (1.0f - material.transparency);
+        const float diffuse_factor = (1.0f - brightest(F)) * (1.0f - material.metallic) * (1.0f - material.transparency);
         const float3 torrance_sparrow = D * F * G / fmaxf(4.0f * pd_n_dot_v * pd_n_dot_l, BIAS);
         const float3 radiance = diffuse_factor * lambert + torrance_sparrow;
         return radiance * n_dot_l;
@@ -282,7 +292,7 @@ __device__ float3 BSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, cons
         const float DT = trowbridgeReitz(alpha, fabsf(n_dot_ht));
         const float GT = smith(alpha, fabsf(n_dot_v), fabsf(n_dot_l));
 
-        const float3 FT = mix(make_float3(1.0f, 1.0f, 1.0f) * fresnel(fabsf(v_dot_ht), eta_i, eta_o), material.albedo,
+        const float3 FT = mix(tinted(material, fabsf(v_dot_ht), eta_i, eta_o), material.albedo,
             material.metallic);
         // Geometry term numerator and denominator
         const float numerator_geom = fabsf(v_dot_ht) * fabsf(l_dot_ht);
@@ -345,7 +355,7 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
     const float3 refracted = normalize(refract(in_dir, ggx_n, eta));
     // let refracted_sign = sign(length(refracted));
     // Calculate fresnel term
-    float3 F = mix(make_float3(1.0f, 1.0f, 1.0f) * fresnel(fabsf(v_dot_h), eta_i, eta_o), material.albedo,
+    float3 F = mix(tinted(material, fabsf(v_dot_h), eta_i, eta_o), material.albedo,
         material.metallic);
     /*
     if (screen_space.x > 0.0f) {
@@ -396,9 +406,8 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
         // Since cosine_hemisphere.y is n_dot_l over the unit hemisphere, we can simplify the throughput to:
         // => throughput = albedo * diffuse_weight
-        sample.throughput = diffuse_weight * material.albedo / p_diffuse * (1.0f - rgb_to_greyscale(mix(make_float3(1.0f,
-            1.0f, 1.0f) * fresnel(fabsf(dot(v, normalize(v + sample.unit_direction))), eta_i, eta_o), material.albedo,
-            material.metallic)));
+        sample.throughput = diffuse_weight * material.albedo / p_diffuse * (1.0f - brightest(mix(tinted(material,
+            fabsf(dot(v, normalize(v + sample.unit_direction))), eta_i, eta_o), material.albedo, material.metallic)));
         sample.pdf = n_i_dot_v > 0.0f ? p_diffuse * cosine_hemisphere.y * INV_PI : 0.0f;
         return sample;
     }
@@ -516,7 +525,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
         } break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
-        stack[8].x};
+        stack[8].x, stack[9], stack[10].x};
 }
 // Of a triangle at its barycentrics
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
@@ -536,7 +545,7 @@ __device__ float3 beerLambert(float distance, const Surface& material) {
 }
 __device__ bool neeDecision(const Surface& material, float n_dot_v, float eta_i, float eta_o) {
     // Calculate fresnel term
-    const float3 F_n = mix(make_float3(1.0f, 1.0f, 1.0f) * fresnel(fabsf(n_dot_v), eta_i, eta_o), material.albedo,
+    const float3 F_n = mix(tinted(material, fabsf(n_dot_v), eta_i, eta_o), material.albedo,
         material.metallic);
     const float F_n_greyscale = rgb_to_greyscale(F_n);
     const float diffuse_factor_estimate = fmaxf((1.0f - F_n_greyscale) * (1.0f - material.metallic)
@@ -758,7 +767,7 @@ __device__ Lobe evalLobe(float3 in_dir, float3 out_dir, float3 n, const Surface&
     const float l_dot_h = dot(out_dir, h);
     const float n_dot_l = dot(n_i, out_dir);
     const float n_dot_h = dot(n_i, h);
-    const float3 F = mix(make_float3(1.0f, 1.0f, 1.0f) * fresnel(fabsf(v_dot_h), eta_i, eta_o), material.albedo,
+    const float3 F = mix(tinted(material, fabsf(v_dot_h), eta_i, eta_o), material.albedo,
         material.metallic);
     const float F_greyscale = rgb_to_greyscale(F);
     const float eta = eta_i / eta_o;
@@ -776,9 +785,8 @@ __device__ Lobe evalLobe(float3 in_dir, float3 out_dir, float3 n, const Surface&
     }
     if (lobe == LOBE_DIFFUSE) {
         const float pdf = chance[0] * fmaxf(n_dot_l, 0.0f) * INV_PI;
-        return Lobe{pdf * diffuse_weight * material.albedo / p[0] * (1.0f - rgb_to_greyscale(mix(make_float3(1.0f, 1.0f,
-            1.0f) * fresnel(fabsf(dot(v, normalize(v + out_dir))), eta_i, eta_o), material.albedo, material.metallic))),
-            pdf};
+        return Lobe{pdf * diffuse_weight * material.albedo / p[0] * (1.0f - brightest(mix(tinted(material,
+            fabsf(dot(v, normalize(v + out_dir))), eta_i, eta_o), material.albedo, material.metallic))), pdf};
     }
     if (alpha == 0.0f || v_dot_h <= 0.0f || n_dot_h <= 0.0f) {
         return none;
