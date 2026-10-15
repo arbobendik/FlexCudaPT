@@ -46,12 +46,6 @@ __device__ unsigned hash(unsigned x) { // PCG
     return (x >> 22) ^ x;
 }
 __device__ float random(unsigned& state) { return ((state = hash(state)) >> 8) * 0x1p-24f; }
-// In [0, 1) to double precision, from 27 and 26 bits of two draws
-__device__ double random53(unsigned& state) {
-    const unsigned high = (state = hash(state)) >> 5;
-    const unsigned low = (state = hash(state)) >> 6;
-    return (high * 0x1p26 + low) * 0x1p-53;
-}
 struct Random { unsigned state; float value; };
 struct RandomSphere { unsigned state; float3 value; };
 struct RandomHemisphere { unsigned state; float3 value; };
@@ -709,26 +703,65 @@ __device__ float3 environment(const Scene& scene, float3 direction) {
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).emissive;
 }
 
-// Light sampling: a triangle picked by emitted power, a uniform point on it, counted if visible from in front of the
-// normal, from offset along it. Returns emission * the light's cosine / distance^2 / pdf arriving along direction,
-// pdf = power share / area and power = 2 * area * emitted.
+// Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
+__device__ float cosSubClamped(float sin_a, float cos_a, float sin_b, float cos_b) {
+    return cos_a > cos_b ? 1 : cos_a * cos_b + sin_a * sin_b;
+}
+__device__ float sinSubClamped(float sin_a, float cos_a, float sin_b, float cos_b) {
+    return cos_a > cos_b ? 0 : sin_a * cos_b - cos_a * sin_b;
+}
+// Of an angle in [0, PI] by its cosine
+__device__ float sine(float c) { return sqrtf(fmaxf(1 - c * c, 0)); }
+
+// Importance of a light BVH node to a point: power times bounds of the cosines at its emitters, two sided and diffuse,
+// and at the point, for light in front of the normal only as light sampling counts it, over the squared distance
+// (pbrt-v4's LightBounds::Importance)
+__device__ float importance(const LightNode& node, float3 p, float3 normal) {
+    const float3 center = (node.low + node.high) * 0.5f, diagonal = node.high - node.low, wi = normalize(p - center);
+    const float d2 = dot(p - center, p - center), r2 = dot(diagonal, diagonal) / 4;
+    const float cos_theta_w = fabsf(dot(node.w, wi)), sin_theta_o = sine(node.cos_theta_o);
+    // Directions of the bounding sphere of the bounds, all from inside it
+    const float cos_theta_b = d2 < r2 ? -1 : sqrtf(fmaxf(1 - r2 / d2, 0)), sin_theta_b = sine(cos_theta_b);
+    const float cos_theta_x = cosSubClamped(sine(cos_theta_w), cos_theta_w, sin_theta_o, node.cos_theta_o);
+    const float sin_theta_x = sinSubClamped(sine(cos_theta_w), cos_theta_w, sin_theta_o, node.cos_theta_o);
+    const float cos_theta_p = cosSubClamped(sin_theta_x, cos_theta_x, sin_theta_b, cos_theta_b);
+    // Diffuse emitters spread a quarter turn: cos theta_e = 0
+    if (cos_theta_p <= 0) return 0;
+    const float cos_theta_i = - dot(wi, normal);
+    return fmaxf(node.phi * cos_theta_p / fmaxf(d2, length(diagonal) / 2)
+        * cosSubClamped(sine(cos_theta_i), cos_theta_i, sin_theta_b, cos_theta_b), 0);
+}
+
+// Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from in front
+// of the normal, from offset along it. Returns emission * the light's cosine / distance^2 / pdf arriving along
+// direction, pdf = the triangle's probability / area.
 __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float offset, unsigned state,
     float3& direction) {
-    // The first triangle whose cumulative power exceeds the pick, below the total: never one of no power
-    const double total = scene.power[scene.count - 1];
-    const double pick = random53(state) * total;
-    unsigned light = 0;
-    for (unsigned last = scene.count - 1; light < last;) {
-        const unsigned middle = (light + last) / 2;
-        if (scene.power[middle] <= pick) light = middle + 1; else last = middle;
+    // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
+    // BVHLightSampler::Sample)
+    float pick = random(state), probability = 1;
+    unsigned node = 0;
+    while (!scene.lights[node].leaf) {
+        const unsigned children[2] = {node + 1, scene.lights[node].child};
+        const float shares[2] = {importance(scene.lights[children[0]], origin, normal),
+            importance(scene.lights[children[1]], origin, normal)};
+        if (shares[0] == 0 && shares[1] == 0)
+            return make_float3(0, 0, 0);
+        const float total = shares[0] + shares[1];
+        const unsigned child = shares[1] > 0 && pick * total >= shares[0];
+        pick = fminf((pick * total - child * shares[0]) / shares[child], 0x1.fffffep-1f);
+        probability *= shares[child] / total;
+        node = children[child];
     }
+    if (node == 0 && !(importance(scene.lights[0], origin, normal) > 0))
+        return make_float3(0, 0, 0);
+    const unsigned light = scene.lights[node].child;
     const float3 la = scene.vertices[3 * light];
     const float3 lb = scene.vertices[3 * light + 1];
     const float3 lc = scene.vertices[3 * light + 2];
     const float3 lightNormal = cross(lb - la, lc - la);
     const float side = sqrtf(random(state));
     const float along = random(state);
-    const float emitted = scene.materials[light].emitted;
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
     const float distance = length(toLight);
     // Visibility along the segment from the offset start to the sampled point
@@ -736,7 +769,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     float occluder, left = length(shadow) * (1 - 1e-4f);
     float3 from = origin + normal * offset, transmitted = make_float3(1, 1, 1);
     direction = toLight * (1 / distance);
-    if (!(emitted > 0 && dot(normal, toLight) > 0))
+    if (!(dot(normal, toLight) > 0))
         return make_float3(0, 0, 0);
     // Through occluders passing rays straight through, where uncovered or tinted by their transparency
     for (Hit hit; (hit = traverse(scene, from, toward, left, occluder)).triangle != NONE; left -= occluder) {
@@ -748,8 +781,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
         from = from + toward * occluder;
     }
     return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
-        * (float(total) / (2 * emitted) * fabsf(dot(lightNormal, toLight))
-        / (distance * distance * distance * length(lightNormal)));
+        * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
 }
 
 __device__ float3 safeDivide(float3 a, float3 b) {
