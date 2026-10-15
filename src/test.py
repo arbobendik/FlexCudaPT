@@ -205,3 +205,29 @@ bpy.data.objects['colored'].scale, scene.camera.data.angle = (100, 100, 1), math
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert abs(pixels.mean() - 0.118) < 0.004, 'grazing specular'
+# Light sampling keeps every emitting triangle's power, those of tiny emitters after a bright one too: the cumulative
+# power the engine writes the renderer steps by each triangle's doubled area times its summed emission
+def capture(*args, **kwargs):  # The renderer's process, keeping the scene the engine writes it first
+    process = popen(*args, **kwargs)
+    stream = process.stdin
+    def keep(parts):
+        del stream.writelines  # Writing on as before, the pipe then closes once the engine drops it
+        SCENES.append(parts := tuple(parts))
+        stream.writelines(parts)
+    stream.writelines = keep
+    return process
+
+bright = bpy.data.meshes.new('bright')  # A unit square, then four squares 1e-4 wide a unit apart
+squares = [(0, 1)] + [(x, 1e-4) for x in range(2, 6)]
+corners = [(x + dx * size, dy * size, -1) for x, size in squares for dx, dy in ((0, 0), (1, 0), (1, 1), (0, 1))]
+bright.from_pydata(corners, [], [range(4 * i, 4 * i + 4) for i in range(len(squares))])
+bright.materials.append(bpy.data.materials.new('bright'))
+emitter = bright.materials[0].node_tree.nodes['Principled BSDF']
+emitter.inputs['Emission Color'].default_value, emitter.inputs['Emission Strength'].default_value = (1, 1, 1, 1), 1000
+add(bright, (0, 0, 0))
+SCENES, popen, flex.subprocess.Popen, scene.flex_samples = [], flex.subprocess.Popen, capture, 1
+bpy.ops.render.render(scene=scene.name, write_still=True)
+flex.subprocess.Popen = popen
+triangles, emitted, power = SCENES[0][1], SCENES[0][4][:-1, 0].view('f'), SCENES[0][5]
+weights = numpy.linalg.norm(numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
+assert numpy.allclose(numpy.diff(power, prepend=0), weights * emitted, rtol=1e-6, atol=0), 'light sampling intervals'
