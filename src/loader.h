@@ -7,6 +7,7 @@
 #include <optix_stubs.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #define CHECK(call) do { int error = (call); if (error) { \
     std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::exit(1); } } while (0)
 
@@ -76,20 +77,124 @@ inline char2* loadPairing(int size) {
     return (char2*)allocate(deltas.size() * sizeof(char2), deltas.data());
 }
 
-// Array piped in by the extension, uploaded to the GPU.
-template <typename T> T* load(size_t count) {
-    std::vector<T> data(count);
+// Array piped in by the extension into data, uploaded to the GPU.
+template <typename T> T* load(size_t count, std::vector<T>& data) {
+    data.resize(count);
     std::fread(data.data(), sizeof(T), count, stdin);
     return (T*)allocate(count * sizeof(T), data.data());
+}
+template <typename T> T* load(size_t count) {
+    std::vector<T> data;
+    return load(count, data);
+}
+
+inline float3 operator+(float3 a, float3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+inline float3 operator-(float3 a, float3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+inline float3 operator*(float3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+inline float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline float3 cross(float3 a, float3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+inline float length(float3 a) { return std::sqrt(dot(a, a)); }
+inline float3 lower(float3 a, float3 b) { return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)}; }
+inline float3 upper(float3 a, float3 b) { return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)}; }
+
+// Union of light bounds and of their normal cones, either for the other of no power (pbrt-v4's Union)
+inline LightNode merge(const LightNode& a, const LightNode& b) {
+    if (a.phi == 0) return b;
+    if (b.phi == 0) return a;
+    LightNode node{lower(a.low, b.low), upper(a.high, b.high), a.w, a.phi + b.phi, a.cos_theta_o};
+    const float pi = M_PI, theta_a = std::acos(a.cos_theta_o), theta_b = std::acos(b.cos_theta_o);
+    const float theta_d = std::acos(std::clamp(dot(a.w, b.w), -1.0f, 1.0f));
+    if (std::min(theta_d + theta_b, pi) <= theta_a) return node;
+    if (std::min(theta_d + theta_a, pi) <= theta_b) return node.w = b.w, node.cos_theta_o = b.cos_theta_o, node;
+    // Spread over the entire sphere, else a's axis turned about the normal of both axes
+    const float theta_o = (theta_a + theta_d + theta_b) / 2;
+    const float3 wr = cross(a.w, b.w);
+    if (theta_o >= pi || dot(wr, wr) == 0) return node.cos_theta_o = -1, node;
+    node.w = a.w * std::cos(theta_o - theta_a) + cross(wr * (1 / length(wr)), a.w) * std::sin(theta_o - theta_a);
+    node.cos_theta_o = std::cos(theta_o);
+    return node;
+}
+
+// Surface area orientation heuristic of light bounds b in node bounds split along dimension, diffuse emitters spreading
+// a quarter turn (pbrt-v4's EvaluateCost)
+inline float cost(const LightNode& b, const LightNode& bounds, int dimension) {
+    const float pi = M_PI, theta_o = std::acos(b.cos_theta_o), theta_w = std::min(theta_o + pi / 2, pi);
+    const float sin_theta_o = std::sqrt(std::max(1 - b.cos_theta_o * b.cos_theta_o, 0.0f));
+    const float m_omega = 2 * pi * (1 - b.cos_theta_o) + pi / 2 * (2 * theta_w * sin_theta_o
+        - std::cos(theta_o - 2 * theta_w) - 2 * theta_o * sin_theta_o + b.cos_theta_o);
+    const float3 d = bounds.high - bounds.low, e = b.high - b.low;
+    return b.phi * m_omega * std::max({d.x, d.y, d.z}) / (&d.x)[dimension] * 2 * (e.x * e.y + e.y * e.z + e.z * e.x);
+}
+
+constexpr int LIGHT_BUCKETS = 12;
+
+// Light BVH over lights[start, end) appended to nodes, split between the buckets of their centroids per dimension of
+// least cost, else in the middle (pbrt-v4's buildBVH). Returns the bounds of its root.
+inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNode>& lights, size_t start, size_t end) {
+    if (end - start == 1) return nodes.push_back(lights[start]), lights[start];
+    LightNode bounds{};
+    float3 low{INFINITY, INFINITY, INFINITY}, high = low * -1;
+    for (size_t i = start; i < end; ++i) {
+        bounds = merge(bounds, lights[i]);
+        low = lower(low, (lights[i].low + lights[i].high) * 0.5f);
+        high = upper(high, (lights[i].low + lights[i].high) * 0.5f);
+    }
+    const auto bucket = [&](const LightNode& light, int dimension) {
+        const float3 centroid = (light.low + light.high) * 0.5f;
+        return std::min(int(LIGHT_BUCKETS * ((&centroid.x)[dimension] - (&low.x)[dimension])
+            / ((&high.x)[dimension] - (&low.x)[dimension])), LIGHT_BUCKETS - 1);
+    };
+    float least = INFINITY;
+    int along = -1, split = 0;
+    for (int dimension = 0; dimension < 3; ++dimension) if ((&high.x)[dimension] > (&low.x)[dimension]) {
+        LightNode buckets[LIGHT_BUCKETS] = {};
+        for (size_t i = start; i < end; ++i)
+            buckets[bucket(lights[i], dimension)] = merge(buckets[bucket(lights[i], dimension)], lights[i]);
+        for (int s = 1; s < LIGHT_BUCKETS - 1; ++s) {
+            LightNode below{}, above{};
+            for (int j = 0; j <= s; ++j) below = merge(below, buckets[j]);
+            for (int j = s + 1; j < LIGHT_BUCKETS; ++j) above = merge(above, buckets[j]);
+            const float total = cost(below, bounds, dimension) + cost(above, bounds, dimension);
+            if (total > 0 && total < least) least = total, along = dimension, split = s;
+        }
+    }
+    size_t middle = along < 0 ? start : std::partition(lights.begin() + start, lights.begin() + end,
+        [&](const LightNode& light) { return bucket(light, along) <= split; }) - lights.begin();
+    if (middle == start || middle == end) middle = (start + end) / 2;
+    const size_t index = nodes.size();
+    nodes.emplace_back();
+    const LightNode first = buildLights(nodes, lights, start, middle);
+    const unsigned second = nodes.size();
+    LightNode node = merge(first, buildLights(nodes, lights, middle, end));
+    node.child = second;
+    node.leaf = false;
+    return nodes[index] = node;
+}
+
+// Light BVH over the emitting triangles, as leaves of their bounds, normal and power pi * emitted * area, else a leaf
+// of no power, uploaded to the GPU
+inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Material>& materials) {
+    std::vector<LightNode> lights, nodes;
+    for (unsigned t = 0; t + 1 < materials.size(); ++t) {
+        const float3 a = vertices[3 * t], b = vertices[3 * t + 1], c = vertices[3 * t + 2], n = cross(b - a, c - a);
+        if (materials[t].emitted * length(n) > 0)
+            lights.push_back({lower(lower(a, b), c), upper(upper(a, b), c), n * (1 / length(n)),
+                float(M_PI) * materials[t].emitted * length(n) / 2, 1, t, true});
+    }
+    if (lights.empty()) lights.push_back({.leaf = true});
+    buildLights(nodes, lights, 0, lights.size());
+    return (LightNode*)allocate(nodes.size() * sizeof(LightNode), nodes.data());
 }
 
 // World-space scene piped in by the extension: triangle, step and texel counts, then the scene's arrays in order.
 inline Scene loadScene(OptixDeviceContext context) {
     struct { unsigned count, ops, texels; } header;
     std::fread(&header, sizeof(header), 1, stdin);
-    Scene scene{.vertices = load<float3>(3 * header.count), .normals = load<float3>(3 * header.count),
-        .uvs = load<float2>(3 * header.count),
-        .materials = load<Material>(header.count + 1), .power = load<double>(header.count),
+    std::vector<float3> vertices;
+    std::vector<Material> materials;
+    Scene scene{.vertices = load<float3>(3 * header.count, vertices), .normals = load<float3>(3 * header.count),
+        .uvs = load<float2>(3 * header.count), .materials = load<Material>(header.count + 1, materials),
+        .lights = loadLights(vertices, materials),
         .ops = load<Op>(header.ops), .texels = load<float4>(header.texels), .count = header.count,
         .pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]), loadPairing(PAIRING_SIZES[2])}};
     CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;

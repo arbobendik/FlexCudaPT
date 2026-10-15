@@ -284,13 +284,8 @@ class Flex(bpy.types.RenderEngine):
         materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0)])
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
-        # Cumulative doubled area times summed emission per triangle: the binary picks light samples by it. In doubles,
-        # tiny emitters after bright ones keep intervals of their power.
-        normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
-        power = numpy.cumsum(numpy.linalg.norm(normals, axis=1) * materials[:-1, 0])
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal and 6 UV floats, a material
-        # of its emission, program and hidden flag (then the world's), the power; then the steps of 4 integers and the
-        # texels.
+        # of its emission, program and hidden flag (then the world's); then the steps of 4 integers and the texels.
         # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process
         # runs: once the engine drops them, the renderer reads the end of its input and exits.
         process = subprocess.Popen(BINARY, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -299,10 +294,10 @@ class Flex(bpy.types.RenderEngine):
         process.stdin = process.stdout = None
         # Frames arrive slowly and unevenly through the default 64 KiB
         fcntl.fcntl(self.answers, fcntl.F_SETPIPE_SZ, 1 << 20)
-        self.requests.writelines((struct.pack('<III', len(power), len(ops), sum(map(len, texels)) // 4), triangles,
+        self.requests.writelines((struct.pack('<III', len(triangles), len(ops), sum(map(len, texels)) // 4), triangles,
             numpy.concatenate(corners, dtype='f'), numpy.concatenate(uvs, dtype='f'),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
-            power.astype('d'), numpy.array(ops, 'I'), *texels))
+            numpy.array(ops, 'I'), *texels))
 
     # Radiance sums and sample count per pixel, rows bottom to top, after up to launches more samples, samples at most,
     # of the view from the camera's matrix through its perspective projection under the settings; no rows if the view
