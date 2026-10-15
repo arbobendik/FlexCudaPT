@@ -14,7 +14,7 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 absorption;
     float density;
 };
-// Lights are sampled by emitted, their summed emission under white textures; hidden surfaces let camera rays through.
+// Lights are sampled by emitted, their summed emission under mean textures; hidden surfaces let camera rays through.
 struct Material { float emitted; unsigned program, hidden; };
 // Point of a triangle at its barycentrics, triangle NONE for no point
 constexpr unsigned NONE = ~0u;
