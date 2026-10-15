@@ -11,8 +11,8 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
-    float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 absorption;
-    float density;
+    float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
+    float level; float3 absorption; float density;
 };
 // Lights are sampled by emitted, their summed emission under mean textures; hidden surfaces let camera rays through.
 struct Material { float emitted; unsigned program, hidden; };
