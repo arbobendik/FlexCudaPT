@@ -534,7 +534,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Ma
         } break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
-        stack[8].x, stack[9], stack[10].x};
+        stack[8].x, stack[9].x, stack[10], stack[11].x};
 }
 // Of a triangle at its barycentrics
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
@@ -602,6 +602,7 @@ constexpr unsigned STREAM_NEE = 64u;
 constexpr unsigned STREAM_RR = 128u;
 constexpr unsigned STREAM_JITTER = 192u;
 constexpr unsigned STREAM_SELECT = 193u;
+constexpr unsigned STREAM_COVERAGE = 256u;
 
 // Camera and primary hit of a pixel
 struct Domain {
@@ -734,13 +735,22 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
     const float distance = length(toLight);
     // Visibility along the segment from the offset start to the sampled point
-    const float3 shadow = toLight - normal * offset;
-    float occluder;
+    const float3 shadow = toLight - normal * offset, toward = normalize(shadow);
+    float occluder, left = length(shadow) * (1 - 1e-4f);
+    float3 from = origin + normal * offset, transmitted = make_float3(1, 1, 1);
     direction = toLight * (1 / distance);
-    if (!(emitted > 0 && dot(normal, toLight) > 0) || traverse(scene, origin + normal * offset, normalize(shadow),
-            length(shadow) * (1 - 1e-4f), occluder).triangle != NONE)
+    if (!(emitted > 0 && dot(normal, toLight) > 0))
         return make_float3(0, 0, 0);
-    return shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
+    // Through occluders passing rays straight through, where uncovered or tinted by their transparency
+    for (Hit hit; (hit = traverse(scene, from, toward, left, occluder)).triangle != NONE; left -= occluder) {
+        const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit));
+        const float3 through = surface.ior == 1 ? surface.albedo * surface.transparency : make_float3(0, 0, 0);
+        transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
+        if (rgb_to_greyscale(transmitted) <= 0)
+            return make_float3(0, 0, 0);
+        from = from + toward * occluder;
+    }
+    return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
         * (float(total) / (2 * emitted) * fabsf(dot(lightNormal, toLight))
         / (distance * distance * distance * length(lightNormal)));
 }
@@ -886,6 +896,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     for (unsigned b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.triangle);
         Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit));
+        // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
+        if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
+            surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
+                make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density};
         // Surfaces transmitting nothing face the ray, as in Cycles
         const float facing = surface.transparency > 0 || dot(face, direction) < 0 ? 1.0f : -1.0f;
         const float3 geometry_n = face * facing;
@@ -986,7 +1000,6 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 offer(sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
             }
         }
-        direct_light_emission = !nee;
         // Replaying, x_k-1 connects to the reconnection vertex and x_k leaves along the stored direction with the stored lobes
         const bool connect = replay && b == stop;
         unsigned lobe_index = extractBits(r.path, arrived ? PATH_LOBE : PATH_LOBE_PREV, 2u);
@@ -1022,6 +1035,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // Density of the direction is unknown after the fallback
             lobe.pdf = fallback ? 0.0f : bsdf_sampled.pdf;
         }
+        // Rays passing straight through stay where light sampling, which passes them too, last was or was not
+        direct_light_emission = !nee && (direct_light_emission || lobe_index != LOBE_REFRACT || surface.ior != 1);
         // Connections evaluate the given direction
         if (connect || arrived) {
             lobe = evalLobe(direction, dir, surface.normal, surface, eta_i, eta_o, lobe_index, stream(r.seed, b));
