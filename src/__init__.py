@@ -24,9 +24,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
     'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
-# level, absorption and density
-GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 0]
-BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 0]
+# level, coverage, absorption and density
+GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
+BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0]
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Volume shaders on surfaces
 # reflect nothing, and rays pass through a portal without a position or direction; any other shader is diffuse.
@@ -124,8 +124,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
     'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 9)
-        else ('SUBTRACT', ('ADD', a, b), 1) if attribute == 6 else ('ADD', a, b)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10)
+        else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation) else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
@@ -162,35 +162,27 @@ def resolve(socket, groups=()):
         value = NODES[node.type](node, inputs, index)
         if node.type in ('MATH', 'MIX_RGB') and node.use_clamp or node.type == 'MIX' and node.clamp_result:
             value = clamp(value)
-    else:  # Alpha fades a shader into full transparency without refraction
+    else:  # Alpha covers a share of the shader, emitting by it; the rest passes rays straight through, as in Cycles
         albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density = (get(source)
             if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1))
             + VOLUMES.get(node.type, (1, 0)))
         # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'
         level = mix(('MULTIPLY', get('Specular IOR Level', 0.5), 2), 1, transparency)
-        value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness, ('MULTIPLY', emissive, strength),
-            mix(1, transparency, get('Alpha', 1)), mix(1, ior, get('Alpha', 1)), get('Specular Tint', 1), level,
-            absorption, density]
+        value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
+            ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), transparency, ior,
+            get('Specular Tint', 1), level, get('Alpha', 1), absorption, density]
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
 
-def upstream(socket, nodes):  # nodes, with those the socket receives from through links that are not muted added
-    for node in {link.from_node for link in socket.links if not link.is_muted} - nodes:
-        nodes.add(node)
-        for input in node.inputs: upstream(input, nodes)
-    return nodes
-
 # The material's surface as rows, one or none: the row of its surface, absorbing as its volume, black without an output;
-# none for volumes without a surface shader and for textured alpha of a Principled BSDF the surface receives from
+# none for volumes without a surface shader
 def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
-    if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked or any(
-            node.type == 'BSDF_PRINCIPLED' and isinstance(fold(resolve(node.inputs['Alpha'])), tuple)
-            for node in upstream(output.inputs['Surface'], set())):
+    if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         return []
-    return [program([*resolve(output.inputs['Surface'])[:9], *resolve(output.inputs['Volume'])[9:]])]
+    return [program([*resolve(output.inputs['Surface'])[:10], *resolve(output.inputs['Volume'])[10:]])]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
