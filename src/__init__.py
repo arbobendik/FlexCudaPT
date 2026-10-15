@@ -284,7 +284,6 @@ class Flex(bpy.types.RenderEngine):
         materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0)])
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
-        texels = numpy.concatenate(texels)
         # Cumulative doubled area times summed emission per triangle: the binary picks light samples by it. In doubles,
         # tiny emitters after bright ones keep intervals of their power.
         normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
@@ -300,10 +299,10 @@ class Flex(bpy.types.RenderEngine):
         process.stdin = process.stdout = None
         # Frames arrive slowly and unevenly through the default 64 KiB
         fcntl.fcntl(self.answers, fcntl.F_SETPIPE_SZ, 1 << 20)
-        self.requests.write(b''.join((struct.pack('<III', len(power), len(ops), len(texels) // 4), triangles.tobytes(),
-            numpy.concatenate(corners, dtype='f').tobytes(), numpy.concatenate(uvs, dtype='f').tobytes(),
-            numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))).tobytes(),
-            power.astype('d').tobytes(), numpy.array(ops, 'I').tobytes(), texels.tobytes())))
+        self.requests.writelines((struct.pack('<III', len(power), len(ops), sum(map(len, texels)) // 4), triangles,
+            numpy.concatenate(corners, dtype='f'), numpy.concatenate(uvs, dtype='f'),
+            numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
+            power.astype('d'), numpy.array(ops, 'I'), *texels))
 
     # Radiance sums and sample count per pixel, rows bottom to top, after up to launches more samples, samples at most,
     # of the view from the camera's matrix through its perspective projection under the settings; no rows if the view
