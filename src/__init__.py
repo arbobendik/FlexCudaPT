@@ -47,7 +47,7 @@ PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MA
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
 
-# First texel, width and height of an image or of a ramp node's 256 colors, added as linear floats at first use
+# First texel, width, height and mean of an image or of a ramp node's 256 colors, added as linear floats at first use
 def texture(source, textures, texels):
     if source not in textures:
         ramp = source.type == 'VALTORGB'
@@ -56,12 +56,13 @@ def texture(source, textures, texels):
         else: source.pixels.foreach_get(pixels)
         if not (ramp or source.is_float or source.colorspace_settings.is_data):
             pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
-        textures[source] = sum(map(len, texels)) // 4, *((256, 1) if ramp else source.size)
+        textures[source] = (sum(map(len, texels)) // 4, *((256, 1) if ramp else source.size),
+            pixels.reshape(-1, 4).mean(0))
         texels.append(pixels)
     return textures[source]
 
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
-# white textures
+# textures of their mean
 def emit(expression, ops, textures, texels):
     if isinstance(expression, list): expression = 'END', *expression
     if not isinstance(expression, tuple):
@@ -69,10 +70,10 @@ def emit(expression, ops, textures, texels):
         return expression
     name, *operands = expression
     payload = texture(operands.pop(), textures, texels) if name in ('IMAGE', 'ALPHA', 'IMAGE_LINEAR',
-        'ALPHA_LINEAR') else (0, 0, 0)
+        'ALPHA_LINEAR') else (0, 0, 0, numpy.ones(4))
     values = [emit(operand, ops, textures, texels) for operand in operands]
-    ops.append(([*OPS].index(name), *payload))
-    return OPS[name](*values) if OPS[name] else numpy.ones(3)
+    ops.append(([*OPS].index(name), *payload[:3]))
+    return OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
 
 def fold(expression):  # The expression with its operations on constants alone computed, as the shader would
     if isinstance(expression, list): return [fold(attribute) for attribute in expression]
@@ -192,7 +193,7 @@ class Flex(bpy.types.RenderEngine):
         uvs = []
         materials = []
         ops = []  # Steps of all programs
-        textures = {}  # First texel, width, height per image and ramp
+        textures = {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         program = lambda surface: [len(ops), emit(fold(surface), ops, textures, texels)][::-1]
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
