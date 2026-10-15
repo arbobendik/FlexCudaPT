@@ -213,3 +213,17 @@ bpy.data.objects['colored'].scale, scene.camera.data.angle = (100, 100, 1), math
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert abs(pixels.mean() - 0.118) < 0.004, 'grazing specular'
+# Light sampling finds a dim emitter by the points it lights, a bright light behind them outshining it: at a sample
+# every pixel is lit, where picking emitters by their power alone lights next to none
+for ob in scene.objects: ob.hide_render = ob != scene.camera
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.camera.data.angle, scene.flex_samples = math.pi / 2, 1
+plane('floor', 0, 0, 4)
+dim = plane('dim', 0, 0, 1)
+dim.inputs['Base Color'].default_value, dim.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+dim.inputs['Emission Strength'].default_value = 1
+bpy.data.objects['dim'].location.z, bpy.data.objects['dim'].visible_camera = 0.5, False
+add(bpy.data.lights.new('bright', 'POINT'), (0, 0, -1)).data.energy = 1e6
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+assert pixels.sum(2).min() > 0, 'many lights'
