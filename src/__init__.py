@@ -110,9 +110,9 @@ def clamp(value):
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
-# mapping of points scales and moves them without rotating. A normal map bends the normal by its strength toward the
-# color's normal in tangent space and keeps it in any other space. Added shaders sum their iors' excess over 1, as
-# Cycles sums their reflections.
+# mapping of points scales and moves them without rotating, one of textures undoes that. A normal map bends the normal
+# by its strength toward the color's normal in tangent space and keeps it in any other space. Added shaders sum their
+# iors' excess over 1, as Cycles sums their reflections.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
@@ -131,7 +131,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'COMBXYZ': lambda node, inputs, index: ('ADD', ('ADD', ('MULTIPLY', inputs[0], numpy.eye(3)[0]),
         ('MULTIPLY', inputs[1], numpy.eye(3)[1])), ('MULTIPLY', inputs[2], numpy.eye(3)[2])),
     'MAPPING': lambda node, inputs, index: ('ADD', ('MULTIPLY', inputs[0], inputs[3]), inputs[1])
-        if node.vector_type == 'POINT' else inputs[0]}
+        if node.vector_type == 'POINT' else ('DIVIDE', ('SUBTRACT', inputs[0], inputs[1]), inputs[3])
+        if node.vector_type == 'TEXTURE' else inputs[0]}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
