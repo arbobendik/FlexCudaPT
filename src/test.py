@@ -60,9 +60,10 @@ colored.id_data.links.new(ramp.outputs['Color'], colored.inputs['Base Color'])
 opaque = textured.id_data.nodes.new('ShaderNodeValue')  # Rendered: alpha linked from a constant
 opaque.outputs[0].default_value = 1
 textured.id_data.links.new(opaque.outputs[0], textured.inputs['Alpha'])
-cutout = plane('cutout', 0, 0, 4)  # Not rendered: textured alpha
+cutout = plane('cutout', 0, 0, 4)  # Passes rays straight through: textured alpha of 0
 alpha = cutout.id_data.nodes.new('ShaderNodeTexImage')
-alpha.image = texture.image
+alpha.image = bpy.data.images.new('clear', 1, 1, alpha=True)
+alpha.image.pixels.foreach_set((0, 0, 0, 0))
 cutout.id_data.links.new(alpha.outputs['Alpha'], cutout.inputs['Alpha'])
 fog = plane('fog', 0, 0, 4).id_data  # Not rendered: volume only
 output = fog.nodes['Material Output']
@@ -163,6 +164,11 @@ with offscreen.bind():
     while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)  # Until the sample limit
     drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
 assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
+# Light sampling passes through the cutout and emission it reaches is not added again: the cutout changes no light
+bpy.data.objects['cutout'].hide_render = True
+bpy.ops.render.render(scene=scene.name, write_still=True)
+uncut = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+assert numpy.allclose(uncut[18:46, 2:30].mean((0, 1)), pixels[18:46, 2:30].mean((0, 1)), rtol=0.1), 'straight through'
 # A black dielectric reflects in its specular tint, twice as much at a specular level of 1 without changing its ior,
 # turning white only at grazing angles
 colored.id_data.links.remove(colored.inputs['Base Color'].links[0])
@@ -177,6 +183,13 @@ bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
 assert green > 4 * max(red, blue), 'specular tint'
+# A black cutout covering half lets half the light through to the textured plane and half its light back
+alpha.image.pixels.foreach_set((0, 0, 0, 0.5))
+cutout.inputs['Base Color'].default_value = (0, 0, 0, 1)
+bpy.data.objects['cutout'].hide_render = False
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+assert 0.2 < pixels[18:46, 34:62].mean() / uncut[18:46, 34:62].mean() < 0.32, 'coverage'
 for ob in scene.objects: ob.hide_render = ob != scene.camera  # Nothing left to render but the sky
 bpy.ops.render.render(scene=scene.name, write_still=True)
 empty = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
