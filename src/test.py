@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gpu, math, numpy, types
+import bpy, bmesh, gpu, math, numpy, sys, types
 from mathutils import Matrix
 
 SIZE = 64
@@ -163,7 +163,40 @@ with offscreen.bind():
     while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)  # Until the sample limit
     drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
 assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
+# A black dielectric reflects in its specular tint, twice as much at a specular level of 1 without changing its ior,
+# turning white only at grazing angles
+colored.id_data.links.remove(colored.inputs['Base Color'].links[0])
+colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
+colored.inputs['IOR'].default_value = 1.5
+colored.inputs['Specular IOR Level'].default_value = 1
+colored.inputs['Specular Tint'].default_value = (0, 1, 0, 1)
+flex = sys.modules[Viewport.engine.__module__]
+surface = flex.fold(flex.resolve(colored.outputs[0].links[0].to_socket))
+assert numpy.allclose(numpy.array(surface[6:9]), ((1.5,) * 3, (0, 1, 0), (2,) * 3)), 'specular level'
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+red, green, blue = pixels[18:46, 2:30].mean((0, 1))
+assert green > 4 * max(red, blue), 'specular tint'
 for ob in scene.objects: ob.hide_render = ob != scene.camera  # Nothing left to render but the sky
 bpy.ops.render.render(scene=scene.name, write_still=True)
 empty = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert numpy.allclose(empty, SKY, atol=0.01), 'empty'
+# A white dielectric under a white sky reflects all its light and no more: its diffuse lies below its specular
+bpy.data.objects['colored'].hide_render = False
+colored.inputs['Base Color'].default_value = colored.inputs['Specular Tint'].default_value = (1, 1, 1, 1)
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+assert abs(pixels[18:46, 2:30].mean() - 1) < 0.02, 'furnace'
+colored.inputs['Specular Tint'].default_value = (1, 0.08, 0.375, 1)  # Diffuse dims by the tint's brightest channel
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+assert abs(pixels[18:46, 2:30].mean() - 0.96) < 0.02, 'tinted furnace'
+# Huge, black and turned 60 degrees under the white sky, the colored plane reflects its specular albedo at that angle
+colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
+colored.inputs['Specular Tint'].default_value, colored.inputs['Roughness'].default_value = (1, 1, 1, 1), 0.434
+bpy.data.objects['colored'].location, bpy.data.objects['colored'].rotation_euler = (0, 0, 0), (math.radians(60), 0, 0)
+bpy.data.objects['colored'].scale, scene.camera.data.angle = (100, 100, 1), math.radians(10)
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+assert abs(pixels.mean() - 0.118) < 0.004, 'grazing specular'
