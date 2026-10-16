@@ -100,35 +100,6 @@ __device__ float trowbridgeReitz(float alpha, float n_dot_h) {
 __device__ float G1(float alpha, float n_dot_x) {
     return smithG1(alpha, n_dot_x);
 }
-/*
-fn delta(v: vec3<f32>, alpha: f32) -> f32 {
-    let alpha_sq: f32 = alpha * alpha;
-    let nom: f32 = alpha_sq * (v.x + v.y)
-
-    let sqrt_term: f32 = sqrt(alpha * alpha + v.z * v.z);
-}
-*/
-
-__device__ float schlickBeckmann(float k, float n_dot_x) {
-    return n_dot_x / fmaxf(n_dot_x * (1.0f - k) + k, BIAS);
-}
-
-__device__ float smith(float alpha, float n_dot_v, float n_dot_l) {
-    return smithG1(alpha, n_dot_v) * smithG1(alpha, n_dot_l);
-}
-
-/*
-fn smithAlt(alpha: f32, n_dot_v: f32, n_dot_l: f32) -> f32 {
-    let k: f32 = alpha * 0.5f;
-    return 1.0f / max((n_dot_v * (1.0f - k) + k) * (n_dot_l * (1.0f - k) + k), BIAS);
-}
-*/
-/*
-fn fresnel_schlick(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
-    // Use Schlick approximation
-    return f0 + (1.0f - f0) * pow(1.0f - cos_theta, 5.0f);
-}
-*/
 
 __device__ float fresnel(float cos_theta, float eta_i, float eta_o) {
     // Compute sini using Snell's law
@@ -155,17 +126,6 @@ __device__ float3 tinted(const Surface& material, float cos_theta, float eta_i, 
     return make_float3(F, F, F)
         - (make_float3(1.0f, 1.0f, 1.0f) - material.tint) * (F0 * (1.0f - F) / fmaxf(1.0f - F0, BIAS));
 }
-
-// Helper function for GGX importance sampling
-// Corresponding PDF is: pdf = trowbridgeReitz(alpha, n_dot_h) * n_dot_h
-/*
-fn sampleTrowbridgeReitz(alpha: f32, random_1: f32, random_2: f32) -> vec3<f32> {
-    let theta: f32 = atan(alpha * sqrt(random_1) / sqrt(1.0f - random_1));
-    let phi: f32 = 2.0f * PI * random_2;
-    let sin_theta: f32 = sin(theta);
-    return vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos(theta));
-}
-*/
 
 // Sampling of the GGX VNDF
 __device__ float3 sampleGGXVNDF(float3 Ve, float alpha, float U1, float U2) {
@@ -244,73 +204,8 @@ __device__ float3 tangentToWorldNormalMap(float3 v, Matrix tbn) {
     return tbn.x * v.x + tbn.y * v.y + tbn.z * v.z;
 }
 
-// BSDF takes in incoming and outgoing directions and surface properties returning throughput for direct lighting
-// Only consider lighting on the surface of the object, not the inside. Assume direct light is always outside the object as shadowing also makes that assumption.
-__device__ float3 BSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, const Surface& material, float eta_i,
-    float eta_o, float2 screen_space) {
-    const float3 v = - in_dir;
-    // Precalculate dot products
-    const float n_dot_v = dot(n, v);
-    const float n_dot_l = dot(n, out_dir);
-    // Calculate material constants needed for BRDF and BTDF
-    float alpha = material.roughness * material.roughness;
-    // Precalculate dot products for geometry normal
-    const float g_n_dot_v = dot(g_n, v);
-    const float g_n_dot_l = dot(g_n, out_dir);
-    // Test if v and l are on the same side of the surface
-    if (g_n_dot_v * g_n_dot_l > 0.0f) {
-        // If v and l are on the same side of the surface do Torrance-Sparrow BRDF
-        // Positive definite dot products
-        const float pd_n_dot_v = fmaxf(n_dot_v, 0.0f);
-        const float pd_n_dot_l = fmaxf(n_dot_l, 0.0f);
-        // Precaluclate dot products and half vectors
-        const float3 h_r = normalize(out_dir + v);
-        const float v_dot_h = fmaxf(dot(v, h_r), 0.0f);
-        const float n_dot_h = fmaxf(dot(n, h_r), 0.0f);
-        // Lambertian diffuse
-        const float3 lambert = material.albedo * INV_PI;
-        // Torrance-Sparrow
-        const float3 F = mix(tinted(material, fabsf(v_dot_h), eta_i, eta_o), material.albedo,
-            material.metallic);
-
-        const float D = trowbridgeReitz(alpha, n_dot_h);
-        // let G = smithAlt(alpha, pd_n_dot_v, pd_n_dot_l);
-        const float G = smith(alpha, pd_n_dot_v, pd_n_dot_l);
-        const float diffuse_factor = (1.0f - brightest(F)) * (1.0f - material.metallic) * (1.0f - material.transparency);
-        const float3 torrance_sparrow = D * F * G / fmaxf(4.0f * pd_n_dot_v * pd_n_dot_l, BIAS);
-        const float3 radiance = diffuse_factor * lambert + torrance_sparrow;
-        return radiance * n_dot_l;
-    } else {
-        // Refractive half-vector (eq. 16)
-        const float3 ht_unorm = - (eta_i * v + eta_o * out_dir);
-        const float3 ht = normalize(ht_unorm);
-        // Precalculate dot products
-        const float v_dot_ht = dot(v, ht);
-        const float l_dot_ht = dot(out_dir, ht);
-        const float n_dot_ht = fabsf(dot(n, ht));
-        // Microfacet terms
-        const float DT = trowbridgeReitz(alpha, fabsf(n_dot_ht));
-        const float GT = smith(alpha, fabsf(n_dot_v), fabsf(n_dot_l));
-
-        const float3 FT = mix(tinted(material, fabsf(v_dot_ht), eta_i, eta_o), material.albedo,
-            material.metallic);
-        // Geometry term numerator and denominator
-        const float numerator_geom = fabsf(v_dot_ht) * fabsf(l_dot_ht);
-        const float denominator_geom = fabsf(n_dot_v) * fabsf(n_dot_l);
-        // Refractive term denominator
-        const float denom_f = eta_i * v_dot_ht + eta_o * l_dot_ht;
-        const float denom_f_sq = denom_f * denom_f;
-        // Check if refraction is possible
-        if (fabsf(denom_f) > BIAS && denominator_geom > BIAS) {
-            // Term is colored by albedo as the surface, the medium's absorption is Beer's law's
-            const float walter = (numerator_geom / denominator_geom) * (1.0f - rgb_to_greyscale(FT)) * DT * GT
-                * (eta_o * eta_o / denom_f_sq);
-            return material.albedo * (walter * material.transparency * n_dot_l);
-        }
-        // If refraction is not possible, return black this case should never happen
-        return make_float3(0.0f, 0.0f, 0.0f);
-    }
-}
+constexpr unsigned LOBE_DIFFUSE = 0u;
+constexpr unsigned LOBE_REFRACT = 1u;
 
 struct SampleBSDF {
     float3 unit_direction;
@@ -318,52 +213,47 @@ struct SampleBSDF {
     unsigned random_state;
     bool refracted;
     unsigned lobe;
-    // Solid angle density of the sampled direction as evalLobe defines it, zero for delta lobes
+    // Solid angle density of the sampled lobe and direction, zero for delta lobes
     float pdf;
 };
 
-// SampleBSDF takes in incoming direction, surface normal, material and random state and returns an outgoing direction with throughput according to the BSDF for global illumination
-__device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& material, float eta_i, float eta_o,
-    unsigned random_init, float2 screen_space) {
-    unsigned random_state = random_init;
-    // Basic dot products
-    const float3 v = - in_dir;
-    const float n_dot_v = dot(n, v);
-    float3 n_i = n * sign(n_dot_v);
-    const float n_i_dot_v = fabsf(n_dot_v);
-    // Material constants
-    const float alpha = material.roughness * material.roughness;
-    // Sample using GGX importance sampling for potential refractive or reflective case
-    float3 ggx_n = n_i;
+// Half vector dependent terms of sampleBSDF, shared with connections to a given direction
+struct BSDFLobes {
+    float v_dot_h;
+    float n_dot_h;
+    float3 refracted;
+    float3 F;
+    float F_greyscale;
+    float reflect_weight;
+    float diffuse_weight;
+    float refract_weight;
+    float p_diffuse;
+    float p_reflect;
+    float p_refract;
+};
+
+__device__ float3 sampleHalfVector(float3 v, float3 n_i, float alpha, unsigned& random_state) {
     // Generate random values for sampling
     const Random random_h_1 = pcg(random_state);
     const Random random_h_2 = pcg(random_h_1.state);
     random_state = random_h_2.state;
     const float3 v_tangent = worldToTangent(v, n_i);
-    ggx_n = xzy(sampleGGXVNDF(xzy(v_tangent), alpha, random_h_1.value, random_h_2.value));
+    const float3 ggx_n = xzy(sampleGGXVNDF(xzy(v_tangent), alpha, random_h_1.value, random_h_2.value));
     // Transform half vector back to world space
-    ggx_n = tangentToWorld(ggx_n, n_i);
+    return tangentToWorld(ggx_n, n_i);
+}
+
+__device__ BSDFLobes bsdfLobes(float3 in_dir, float3 v, float3 n_i, float3 ggx_n, const Surface& material, float eta_i,
+    float eta_o) {
     // Calculate shared half vector dot products
     const float v_dot_h = dot(ggx_n, v);
     const float n_dot_h = dot(n_i, ggx_n);
-    // Visible normal density of the unclamped GGX distribution for the sampled half vector
-    const float d_term = n_dot_h * n_dot_h * (alpha * alpha - 1.0f) + 1.0f;
-    const float pdf_h = alpha > 0.0f && v_dot_h > 0.0f && n_dot_h > 0.0f && n_i_dot_v > 0.0f
-        ? smithG1(alpha, n_i_dot_v) * v_dot_h * alpha * alpha / (PI * d_term * d_term * n_i_dot_v) : 0.0f;
     // Try refraction through the properly oriented half vector
     const float eta = eta_i / eta_o;
     const float3 refracted = normalize(refract(in_dir, ggx_n, eta));
-    // let refracted_sign = sign(length(refracted));
     // Calculate fresnel term
     float3 F = mix(tinted(material, fabsf(v_dot_h), eta_i, eta_o), material.albedo,
         material.metallic);
-    /*
-    if (screen_space.x > 0.0f) {
-        let f0_sqrt = (eta_i - eta_o) / (eta_i + eta_o);
-        let f0: vec3<f32> = mix(vec3<f32>(f0_sqrt * f0_sqrt), material.albedo, material.metallic);
-        F = fresnel_schlick(f0, n_i_dot_v);
-    }
-    */
     const float F_greyscale = rgb_to_greyscale(F);
     // BSDF weights (these are artistic choices to balance the lobes)
     const float reflect_weight = 1.0f;
@@ -380,25 +270,16 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
     const float p_diffuse = diffuse_component * total_component_inv;
     const float p_reflect = reflect_component * total_component_inv;
     const float p_refract = refract_component * total_component_inv;
-    //let p_total_reflect: f32 = total_reflection_component * total_component_inv;
+    return BSDFLobes{v_dot_h, n_dot_h, refracted, F, F_greyscale, reflect_weight, diffuse_weight, refract_weight,
+        p_diffuse, p_reflect, p_refract};
+}
 
-    SampleBSDF sample = SampleBSDF{make_float3(1.0f, 1.0f, 1.0f), make_float3(1.0f, 1.0f, 1.0f), 0u, false, 0u, 0.0f};
-    const Random random_p = pcg(random_state);
-    random_state = random_p.state;
-    // Diffuse case
-    if (random_p.value < p_diffuse) {
-        const Random random_d_1 = pcg(random_state);
-        const Random random_d_2 = pcg(random_d_1.state);
-        sample.random_state = random_d_2.state;
-        // Sample cosine weighted hemisphere
-        const float3 cosine_hemisphere = sampleCosWeightedHemisphere(random_d_1.value, random_d_2.value);
-        sample.unit_direction = tangentToWorld(cosine_hemisphere, n_i);
-
+// Throughput of sampleBSDF leaving along l by lobe
+__device__ float3 lobeThroughput(float3 v, float3 l, float3 n_i, float alpha, const Surface& material,
+    const BSDFLobes& lobes, float eta_i, float eta_o, unsigned lobe) {
+    if (lobe == LOBE_DIFFUSE) {
         // BSDF = diffuse_weight * albedo / PI
-        // => BSDF * n_dot_v = diffuse_weight * albedo * n_dot_l / PI
-
-        // PDF_COSINE_HEMISPHERE = cosine_hemisphere.y / PI
-        // => PDF = cosine_hemisphere.y / PI
+        // => BSDF * n_dot_l = diffuse_weight * albedo * n_dot_l / PI
 
         // throughput = BSDF * n_dot_l / PDF
         //            = diffuse_weight * albedo * n_dot_l / PI / cosine_hemisphere.y * PI
@@ -406,64 +287,29 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
         // Since cosine_hemisphere.y is n_dot_l over the unit hemisphere, we can simplify the throughput to:
         // => throughput = albedo * diffuse_weight
-        sample.throughput = diffuse_weight * material.albedo / p_diffuse * (1.0f - brightest(mix(tinted(material,
-            fabsf(dot(v, normalize(v + sample.unit_direction))), eta_i, eta_o), material.albedo, material.metallic)));
-        sample.pdf = n_i_dot_v > 0.0f ? p_diffuse * cosine_hemisphere.y * INV_PI : 0.0f;
-        return sample;
+        return lobes.diffuse_weight * material.albedo / lobes.p_diffuse * (1.0f - brightest(mix(tinted(material,
+            fabsf(dot(v, normalize(v + l))), eta_i, eta_o), material.albedo, material.metallic)));
     }
-    // Refractive case
-    if (random_p.value < p_diffuse + p_refract) {
-        // Refraction is valid
-        sample.unit_direction = refracted;
-        const float3 l = sample.unit_direction;
+    if (lobe == LOBE_REFRACT) {
         const float m_n_i_dot_l = - dot(n_i, l);
-        const float l_dot_h = dot(l, ggx_n);
-        const float denom = eta_i * v_dot_h + eta_o * l_dot_h;
-        sample.pdf = eta_i != eta_o && l_dot_h < 0.0f
-            ? p_refract * pdf_h * eta_o * eta_o * fabsf(l_dot_h) / (denom * denom) : 0.0f;
         // Microfacet term
-        // let GT: f32 = smith(alpha, n_i_dot_v, m_n_i_dot_l);
         const float G1_l = G1(alpha, fmaxf(m_n_i_dot_l, 0.0f));
-        // JACOBIAN = eta_o^2 * l_dot_h / (eta_i * v_dot_h + eta_o * l_dot_h)^2
-
         // BSDF = refract_weight * v_dot_h / n_dot_v / n_dot_l * D * G * (1 - F) * JACOBIAN
         // => BSDF * n_dot_l = refract_weight * v_dot_h / n_dot_v * D * G * (1 - F) * JACOBIAN
 
-        // PDF_VNDF = G1_v * v_dot_h * D / n_dot_v
-        // PDF_REFRACT = PDF_VNDF * JACOBIAN
-        //             = G1_v * v_dot_h * D / n_dot_v * JACOBIAN
-
-        // PDF = PDF_REFRACT
-        //     = G1_v * v_dot_h * D / n_dot_v * JACOBIAN
-
-        // throughput = BSDF * n_dot_l
+        // throughput = BSDF * n_dot_l / PDF
         //            = refract_weight * v_dot_h / n_dot_v * D * G * (1 - F) * JACOBIAN / G1_v / v_dot_h / D * n_dot_v / JACOBIAN
         //            = refract_weight * G * (1 - F) / G1_v
 
         // G = G1_v * G1_l
         // => throughput = refract_weight * G1_l * (1 - F)
-        sample.throughput = material.albedo * (refract_weight * G1_l * (1.0f - F_greyscale) / p_refract);
-        sample.random_state = random_state;
-        sample.refracted = true;
-        sample.lobe = 1u;
-        return sample;
+        return material.albedo * (lobes.refract_weight * G1_l * (1.0f - lobes.F_greyscale) / lobes.p_refract);
     }
-    // Otherwise assume reflective case.
-    sample.unit_direction = normalize(reflect(in_dir, ggx_n));
-    const float3 l = sample.unit_direction;
     const float n_i_dot_l = dot(n_i, l);
     // Torrance-Sparrow
     const float G1_l = G1(alpha, fmaxf(n_i_dot_l, 0.0f));
     // BSDF = reflect_weight * D * G * F / (4 * n_dot_v * n_dot_l)
     // => BSDF * n_dot_l = reflect_weight * D * G * F / (4 * n_dot_v)
-
-    // PDF_VNDF = G1_v * v_dot_h * D / n_dot_v
-    // JACOBIAN = 1 / (4 * v_dot_h)
-    // PDF_REFLECT = PDF_VNDF * JACOBIAN
-    // => PDF_REFLECT = G1_v * D / (4 * n_dot_v)
-
-    // PDF = PDF_REFLECT
-    // => PDF = G1_v * D / (4 * v_dot_n)
 
     // throughput = BSDF * n_dot_l / PDF
     //            = reflect_weight * D * G * F / (4 * n_dot_v) / G1_v / D * (4 * n_dot_v)
@@ -471,11 +317,134 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
 
     // G = G1_v * G1_l
     // => throughput = reflect_weight * G1_l * F
-    sample.throughput = reflect_weight * G1_l * F / p_reflect;
+    return lobes.reflect_weight * G1_l * lobes.F / lobes.p_reflect;
+}
+
+// Solid angle density of sampleBSDF choosing lobe through the half vector of lobes, leaving with cosine n_i_dot_l (diffuse)
+// or l_dot_h (refraction) toward its direction, zero for delta lobes.
+__device__ float lobeDensity(float n_i_dot_l, float l_dot_h, float n_i_dot_v, float alpha, const BSDFLobes& lobes,
+    float eta_i, float eta_o, unsigned lobe) {
+    if (lobe == LOBE_DIFFUSE) {
+        // PDF_COSINE_HEMISPHERE = cosine_hemisphere.y / PI
+        // => PDF = cosine_hemisphere.y / PI
+        return n_i_dot_v > 0.0f ? lobes.p_diffuse * n_i_dot_l * INV_PI : 0.0f;
+    }
+    // Visible normal density of the unclamped GGX distribution for the sampled half vector
+    const float d_term = lobes.n_dot_h * lobes.n_dot_h * (alpha * alpha - 1.0f) + 1.0f;
+    const float pdf_h = alpha > 0.0f && lobes.v_dot_h > 0.0f && lobes.n_dot_h > 0.0f && n_i_dot_v > 0.0f
+        ? smithG1(alpha, n_i_dot_v) * lobes.v_dot_h * alpha * alpha / (PI * d_term * d_term * n_i_dot_v) : 0.0f;
+    if (lobe == LOBE_REFRACT) {
+        // JACOBIAN = eta_o^2 * |l_dot_h| / (eta_i * v_dot_h + eta_o * l_dot_h)^2
+
+        // PDF_VNDF = G1_v * v_dot_h * D / n_dot_v
+        // PDF_REFRACT = PDF_VNDF * JACOBIAN
+        //             = G1_v * v_dot_h * D / n_dot_v * JACOBIAN
+
+        // PDF = PDF_REFRACT
+        //     = G1_v * v_dot_h * D / n_dot_v * JACOBIAN
+        const float denom = eta_i * lobes.v_dot_h + eta_o * l_dot_h;
+        return eta_i != eta_o && l_dot_h < 0.0f
+            ? lobes.p_refract * pdf_h * eta_o * eta_o * fabsf(l_dot_h) / (denom * denom) : 0.0f;
+    }
+    // PDF_VNDF = G1_v * v_dot_h * D / n_dot_v
+    // JACOBIAN = 1 / (4 * v_dot_h)
+    // PDF_REFLECT = PDF_VNDF * JACOBIAN
+    // => PDF_REFLECT = G1_v * D / (4 * n_dot_v)
+
+    // PDF = PDF_REFLECT
+    // => PDF = G1_v * D / (4 * v_dot_n)
+    return pdf_h > 0.0f ? lobes.p_reflect * pdf_h / (4.0f * lobes.v_dot_h) : 0.0f;
+}
+
+// SampleBSDF takes in incoming direction, surface normal, material and random state and returns an outgoing direction with throughput according to the BSDF for global illumination
+__device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& material, float eta_i, float eta_o,
+    unsigned random_init, float2 screen_space) {
+    unsigned random_state = random_init;
+    // Basic dot products
+    const float3 v = - in_dir;
+    const float n_dot_v = dot(n, v);
+    float3 n_i = n * sign(n_dot_v);
+    const float n_i_dot_v = fabsf(n_dot_v);
+    // Material constants
+    const float alpha = material.roughness * material.roughness;
+    // Sample using GGX importance sampling for potential refractive or reflective case
+    const float3 ggx_n = sampleHalfVector(v, n_i, alpha, random_state);
+    const BSDFLobes lobes = bsdfLobes(in_dir, v, n_i, ggx_n, material, eta_i, eta_o);
+
+    SampleBSDF sample = SampleBSDF{make_float3(1.0f, 1.0f, 1.0f), make_float3(1.0f, 1.0f, 1.0f), 0u, false, 0u, 0.0f};
+    const Random random_p = pcg(random_state);
+    random_state = random_p.state;
+    // Diffuse case
+    if (random_p.value < lobes.p_diffuse) {
+        const Random random_d_1 = pcg(random_state);
+        const Random random_d_2 = pcg(random_d_1.state);
+        sample.random_state = random_d_2.state;
+        // Sample cosine weighted hemisphere
+        const float3 cosine_hemisphere = sampleCosWeightedHemisphere(random_d_1.value, random_d_2.value);
+        sample.unit_direction = tangentToWorld(cosine_hemisphere, n_i);
+        sample.throughput = lobeThroughput(v, sample.unit_direction, n_i, alpha, material, lobes, eta_i, eta_o, 0u);
+        sample.pdf = lobeDensity(cosine_hemisphere.y, 0.0f, n_i_dot_v, alpha, lobes, eta_i, eta_o, 0u);
+        return sample;
+    }
+    // Refractive case
+    if (random_p.value < lobes.p_diffuse + lobes.p_refract) {
+        // Refraction is valid
+        sample.unit_direction = lobes.refracted;
+        sample.pdf = lobeDensity(0.0f, dot(sample.unit_direction, ggx_n), n_i_dot_v, alpha, lobes, eta_i, eta_o, 1u);
+        sample.throughput = lobeThroughput(v, sample.unit_direction, n_i, alpha, material, lobes, eta_i, eta_o, 1u);
+        sample.random_state = random_state;
+        sample.refracted = true;
+        sample.lobe = 1u;
+        return sample;
+    }
+    // Otherwise assume reflective case.
+    sample.unit_direction = normalize(reflect(in_dir, ggx_n));
+    sample.throughput = lobeThroughput(v, sample.unit_direction, n_i, alpha, material, lobes, eta_i, eta_o, 2u);
     sample.random_state = random_state;
     sample.lobe = 2u;
-    sample.pdf = pdf_h > 0.0f ? p_reflect * pdf_h / (4.0f * v_dot_h) : 0.0f;
+    sample.pdf = lobeDensity(0.0f, 0.0f, n_i_dot_v, alpha, lobes, eta_i, eta_o, 2u);
     return sample;
+}
+
+// The sample of sampleBSDF choosing lobe and leaving along out_dir, for connections to a given direction. The microfacet lobes
+// take the half vector mapping in_dir to out_dir, diffuse samples replay the visible normal steering their lobe choice.
+__device__ SampleBSDF connectBSDF(float3 in_dir, float3 out_dir, float3 n, const Surface& material, float eta_i,
+    float eta_o, unsigned lobe, unsigned random_init) {
+    unsigned random_state = random_init;
+    const float3 v = - in_dir;
+    const float n_dot_v = dot(n, v);
+    const float3 n_i = n * sign(n_dot_v);
+    const float alpha = material.roughness * material.roughness;
+    float3 ggx_n = normalize(v + out_dir);
+    if (lobe == LOBE_DIFFUSE) {
+        ggx_n = sampleHalfVector(v, n_i, alpha, random_state);
+    } else if (lobe == LOBE_REFRACT) {
+        const float3 h_t = - (eta_i * v + eta_o * out_dir);
+        ggx_n = normalize(h_t) * sign(dot(h_t, n_i));
+    }
+    const BSDFLobes lobes = bsdfLobes(in_dir, v, n_i, ggx_n, material, eta_i, eta_o);
+    const float pdf = lobeDensity(dot(n_i, out_dir), dot(out_dir, ggx_n), fabsf(n_dot_v), alpha, lobes, eta_i, eta_o,
+        lobe);
+    // Directions sampleBSDF can't produce by lobe carry no throughput
+    if (!(pdf > 0.0f)) {
+        return SampleBSDF{};
+    }
+    return SampleBSDF{out_dir, lobeThroughput(v, out_dir, n_i, alpha, material, lobes, eta_i, eta_o, lobe), random_state,
+        lobe == LOBE_REFRACT, lobe, pdf};
+}
+
+// BSDF times cosine toward out_dir as the path tracer samples it: the lobes of sampleBSDF on the side of the geometry normal
+// out_dir lies on, evaluated by connectBSDF. random_state replays the visible normal steering the diffuse lobe choice.
+__device__ float3 BSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, const Surface& material, float eta_i,
+    float eta_o, unsigned random_state) {
+    // Test if v and l are on the same side of the surface
+    if (dot(g_n, - in_dir) * dot(g_n, out_dir) > 0.0f) {
+        const SampleBSDF diffuse = connectBSDF(in_dir, out_dir, n, material, eta_i, eta_o, 0u, random_state);
+        const SampleBSDF reflection = connectBSDF(in_dir, out_dir, n, material, eta_i, eta_o, 2u, random_state);
+        return diffuse.throughput * diffuse.pdf + reflection.throughput * reflection.pdf;
+    }
+    const SampleBSDF refraction = connectBSDF(in_dir, out_dir, n, material, eta_i, eta_o, 1u, random_state);
+    return refraction.throughput * refraction.pdf;
 }
 
 // Of a to the base b, zero where undefined as Blender's
@@ -565,9 +534,6 @@ constexpr float RESTIR_CAP = 20.0f;
 constexpr float RESTIR_CAP_MIN = 1.0f;
 constexpr float RESTIR_DUPLICATION_ALPHA = 0.1f;
 
-constexpr unsigned LOBE_DIFFUSE = 0u;
-constexpr unsigned LOBE_REFRACT = 1u;
-
 // How a path ends: next event estimation, emissive surface or environment
 constexpr unsigned END_NEE = 0u;
 constexpr unsigned END_EMIT = 1u;
@@ -608,11 +574,6 @@ struct Vertex {
     unsigned lobe;
     float pdf;
     float cos;
-};
-
-struct Lobe {
-    float3 f_cos;
-    float pdf;
 };
 
 struct Selection {
@@ -788,74 +749,6 @@ __device__ float3 safeDivide(float3 a, float3 b) {
     return make_float3(b.x == 0.0f ? 0.0f : a.x / b.x, b.y == 0.0f ? 0.0f : a.y / b.y, b.z == 0.0f ? 0.0f : a.z / b.z);
 }
 
-// BSDF times cosine and solid angle density of sampleBSDF choosing lobe and producing out_dir.
-// Both are the ones sampleBSDF's throughput implies, delta lobes have no density and evaluate to zero.
-__device__ Lobe evalLobe(float3 in_dir, float3 out_dir, float3 n, const Surface& material, float eta_i, float eta_o,
-    unsigned lobe, unsigned random_state) {
-    const Lobe none = Lobe{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
-    const float3 v = - in_dir;
-    const float3 n_i = n * sign(dot(n, v));
-    const float n_i_dot_v = fabsf(dot(n, v));
-    const float alpha = material.roughness * material.roughness;
-    float3 h = normalize(v + out_dir);
-    if (lobe == LOBE_DIFFUSE) {
-        // The visible normal only steers the lobe choice of diffuse samples
-        const Random random_h_1 = pcg(random_state);
-        const Random random_h_2 = pcg(random_h_1.state);
-        h = tangentToWorld(xzy(sampleGGXVNDF(xzy(worldToTangent(v, n_i)), alpha, random_h_1.value, random_h_2.value)),
-            n_i);
-    } else if (lobe == LOBE_REFRACT) {
-        // Refraction without index change passes straight through
-        if (eta_i == eta_o) {
-            return none;
-        }
-        const float3 h_t = - (eta_i * v + eta_o * out_dir);
-        h = normalize(h_t) * sign(dot(h_t, n_i));
-    }
-    const float v_dot_h = dot(v, h);
-    const float l_dot_h = dot(out_dir, h);
-    const float n_dot_l = dot(n_i, out_dir);
-    const float n_dot_h = dot(n_i, h);
-    const float3 F = mix(tinted(material, fabsf(v_dot_h), eta_i, eta_o), material.albedo,
-        material.metallic);
-    const float F_greyscale = rgb_to_greyscale(F);
-    const float eta = eta_i / eta_o;
-    const float refractable = 1.0f - eta * eta * (1.0f - v_dot_h * v_dot_h) >= 0.0f ? 1.0f : 0.0f;
-    const float diffuse_weight = (1.0f - material.transparency) * (1.0f - material.metallic);
-    // Lobe probabilities as sampleBSDF uses them and the chance its random number lands in each lobe
-    const float components[3] = {fmaxf(diffuse_weight * (1.0f - F_greyscale), 0.0f),
-        fmaxf(material.transparency * (1.0f - F_greyscale) * refractable, 0.0f), fmaxf(F_greyscale, 0.0f)};
-    const float total = fmaxf(components[0] + components[1] + components[2], BIAS);
-    const float p[3] = {components[0] / total, components[1] / total, components[2] / total};
-    const float cdf[2] = {fminf(p[0], 1.0f), fminf(p[0] + p[1], 1.0f)};
-    const float chance[3] = {cdf[0], cdf[1] - cdf[0], 1.0f - cdf[1]};
-    if (chance[lobe] <= 0.0f || p[lobe] <= 0.0f || n_i_dot_v <= 0.0f) {
-        return none;
-    }
-    if (lobe == LOBE_DIFFUSE) {
-        const float pdf = chance[0] * fmaxf(n_dot_l, 0.0f) * INV_PI;
-        return Lobe{pdf * diffuse_weight * material.albedo / p[0] * (1.0f - brightest(mix(tinted(material,
-            fabsf(dot(v, normalize(v + out_dir))), eta_i, eta_o), material.albedo, material.metallic))), pdf};
-    }
-    if (alpha == 0.0f || v_dot_h <= 0.0f || n_dot_h <= 0.0f) {
-        return none;
-    }
-    // Visible normal density of the unclamped GGX distribution
-    const float d_term = n_dot_h * n_dot_h * (alpha * alpha - 1.0f) + 1.0f;
-    const float pdf_h = smithG1(alpha, n_i_dot_v) * v_dot_h * alpha * alpha / (PI * d_term * d_term * n_i_dot_v);
-    if (lobe == LOBE_REFRACT) {
-        if (l_dot_h >= 0.0f) {
-            return none;
-        }
-        const float denom = eta_i * v_dot_h + eta_o * l_dot_h;
-        const float pdf = chance[1] * pdf_h * eta_o * eta_o * fabsf(l_dot_h) / (denom * denom);
-        return Lobe{material.albedo
-            * (pdf * material.transparency * G1(alpha, fmaxf(- n_dot_l, 0.0f)) * (1.0f - F_greyscale) / p[1]), pdf};
-    }
-    const float pdf = chance[2] * pdf_h / (4.0f * v_dot_h);
-    return Lobe{pdf * G1(alpha, fmaxf(n_dot_l, 0.0f)) * F / p[2], pdf};
-}
-
 // Weighted reservoir sampling step, weight is the vector-valued resampling weight (Sec. 6.3)
 __device__ void offer(Selection& sel, const Reservoir& candidate, float3 weight) {
     const float w = rgb_to_greyscale(weight);
@@ -974,7 +867,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                     return fail;
                 }
                 return Shift{throughput * BSDF(direction, r.dir, surface.normal, geometry_n, surface, eta_i, eta_o,
-                    make_float2(0, 0)) * r.radiance / r.jac, density / r.jac};
+                    stream(r.seed, b)) * r.radiance / r.jac, density / r.jac};
             }
             if (nee != (extractBits(r.path, PATH_NEE, 1u) == 1u)) {
                 return fail;
@@ -987,7 +880,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 const float3 radiance = sampleLight(scene, origin, surface.normal, offset,
                     stream(r.seed, b + STREAM_NEE), light_dir);
                 return rgb_to_greyscale(radiance) > 0.0f ? Shift{throughput * BSDF(direction, light_dir, surface.normal,
-                    geometry_n, surface, eta_i, eta_o, make_float2(0, 0)) * radiance, 1.0f} : fail;
+                    geometry_n, surface, eta_i, eta_o, stream(r.seed, b)) * radiance, 1.0f} : fail;
             }
             // Emission seen right after a vertex that skipped next event estimation
             if (rc == RC_NONE && end_type == END_EMIT && direct_light_emission && !footprint) {
@@ -1011,7 +904,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 const float3 radiance = sampleLight(scene, origin, surface.normal, offset,
                     stream(r.seed, b + STREAM_NEE), light_dir);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f ? throughput * BSDF(direction, light_dir,
-                    surface.normal, geometry_n, surface, eta_i, eta_o, make_float2(0, 0)) * radiance : fail.f;
+                    surface.normal, geometry_n, surface, eta_i, eta_o, stream(r.seed, b)) * radiance : fail.f;
                 Reservoir candidate = chain;
                 if (chain_found) {
                     candidate.radiance = safeDivide(f, chain_throughput);
@@ -1031,9 +924,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const bool connect = replay && b == stop;
         unsigned lobe_index = extractBits(r.path, arrived ? PATH_LOBE : PATH_LOBE_PREV, 2u);
         float3 dir = r.dir;
-        float3 sample_throughput = make_float3(0.0f, 0.0f, 0.0f);
-        // Density of the direction leaving this vertex
-        Lobe lobe = Lobe{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
+        // Sample leaving this vertex
+        SampleBSDF lobe = SampleBSDF{};
         if (connect) {
             if (rc == RC_SURFACE) {
                 reconnection = hitPosition(scene, r.rc);
@@ -1058,7 +950,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             }
             lobe_index = bsdf_sampled.lobe;
             dir = bsdf_sampled.unit_direction;
-            sample_throughput = bsdf_sampled.throughput;
+            lobe = bsdf_sampled;
             // Density of the direction is unknown after the fallback
             lobe.pdf = fallback ? 0.0f : bsdf_sampled.pdf;
         }
@@ -1066,7 +958,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         direct_light_emission = !nee && (direct_light_emission || lobe_index != LOBE_REFRACT || surface.ior != 1);
         // Connections evaluate the given direction
         if (connect || arrived) {
-            lobe = evalLobe(direction, dir, surface.normal, surface, eta_i, eta_o, lobe_index, stream(r.seed, b));
+            lobe = connectBSDF(direction, dir, surface.normal, surface, eta_i, eta_o, lobe_index, stream(r.seed, b));
         }
         // Inverse ray footprint criterion for the density of the direction leaving this vertex (Eq. 5)
         const bool inverse_footprint = lobe.pdf > 0.0f
@@ -1076,18 +968,18 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (!inverse_footprint) {
                 return fail;
             }
-            return Shift{throughput * lobe.f_cos * r.radiance / r.jac, density * lobe.pdf / r.jac};
+            return Shift{throughput * (lobe.throughput * lobe.pdf) * r.radiance / r.jac, density * lobe.pdf / r.jac};
         }
         // A replayed path meeting the criteria before x_k is not in the image of the shift
         if ((replay && footprint && inverse_footprint) || (connect && !rough)) {
             return fail;
         }
         if (connect) {
-            throughput = throughput * lobe.f_cos;
+            throughput = throughput * (lobe.throughput * lobe.pdf);
             density = lobe.pdf;
         } else {
-            throughput = throughput * make_float3(fmaxf(sample_throughput.x, 0.0f), fmaxf(sample_throughput.y, 0.0f),
-                fmaxf(sample_throughput.z, 0.0f));
+            throughput = throughput * make_float3(fmaxf(lobe.throughput.x, 0.0f), fmaxf(lobe.throughput.y, 0.0f),
+                fmaxf(lobe.throughput.z, 0.0f));
         }
         if (!replay && !chain_found && footprint && inverse_footprint) {
             chain = here;
