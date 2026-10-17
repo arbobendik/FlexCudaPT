@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gpu, math, numpy, sys, types
+import bpy, bmesh, gpu, math, numpy, os, sys, types
 from mathutils import Matrix
 
 SIZE = 64
@@ -133,6 +133,7 @@ class Viewport:  # Stands in for the engine instance Blender creates for a viewp
     view_update = engine.view_update
     view_draw = engine.view_draw
     visible = ()
+    shared = open(os.memfd_create('flex'), 'rb', 0)
     def tag_redraw(self): self.redraw = True
     def bind_display_space_shader(self, scene): pass
     def unbind_display_space_shader(self): pass
