@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, fcntl, gpu, math, numpy, os, struct, subprocess, time
+import addon_utils, bpy, bmesh, gpu, math, mmap, numpy, os, struct, subprocess, time
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix
 
@@ -200,6 +200,7 @@ class Flex(bpy.types.RenderEngine):
         self.visible = ()  # Names of the instances the renderer was last started on
         self.texture = None  # The viewport's view as last traced
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
+        self.shared = open(os.memfd_create('flex'), 'rb', 0)  # In memory file the renderers leave their sums in
 
     def start(self, depsgraph):  # Starts the renderer on the exported scene
         scene = depsgraph.scene_eval
@@ -288,12 +289,11 @@ class Flex(bpy.types.RenderEngine):
         # of its emission, program and hidden flag (then the world's); then the steps of 4 integers and the texels.
         # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process
         # runs: once the engine drops them, the renderer reads the end of its input and exits.
-        process = subprocess.Popen(BINARY, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        process = subprocess.Popen((BINARY, str(self.shared.fileno())), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            pass_fds=(self.shared.fileno(),))
         self.requests = process.stdin
         self.answers = process.stdout
         process.stdin = process.stdout = None
-        # Frames arrive slowly and unevenly through the default 64 KiB
-        fcntl.fcntl(self.answers, fcntl.F_SETPIPE_SZ, 1 << 20)
         self.requests.writelines((struct.pack('<III', len(triangles), len(ops), sum(map(len, texels)) // 4), triangles,
             numpy.concatenate(corners, dtype='f'), numpy.concatenate(uvs, dtype='f'),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
@@ -314,8 +314,8 @@ class Flex(bpy.types.RenderEngine):
         self.requests.write(struct.pack(f'<{4 + len(settings)}I12f', samples, launches, width, height, *settings,
             *matrix.translation, *x, *y, *center))
         self.requests.flush()
-        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, then sums if any
-        sums = self.answers.read(16 * width * height * bool(launched))
+        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, sums if any
+        sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ) if launched else b''
         return numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
 
     # Shows the result after ever larger batches of samples, until it has them all or the render is cancelled
