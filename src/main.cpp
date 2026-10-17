@@ -3,9 +3,12 @@
 #include "loader.h"
 #include <cstring>
 #include <cstddef>
+#include <sys/mman.h>
+#include <unistd.h>
 #include "../build/shaders.h"
 
-int main() { // Usage: renderer < scene, then requests > an answer per request
+int main(int, char** argv) { // Usage: renderer file < scene, then requests > an answer per request, sums in the file
+    const int shared = std::atoi(argv[1]);
     // CUDA + OptiX contexts
     CUcontext cuda;
     OptixDeviceContext context;
@@ -46,11 +49,12 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
     for (unsigned pass = 0; pass < PASSES; ++pass) CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
     const CUdeviceptr table = allocate(sizeof(records));
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
-    // number launched, memory used and peak in MiB, followed by the sums if any were; a new view starts over, from the
-    // reservoirs of the last one if it has its size and settings
+    // number launched, memory used and peak in MiB, the sums left in the shared file if any were; a new view starts
+    // over, from the reservoirs of the last one if it has its size and settings
     struct View { unsigned width, height; Settings settings; Camera camera; } view{};
     struct { unsigned samples, launches; View view; } request;
-    std::vector<float4> sums;
+    size_t pixels = 1;
+    float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
     loadView(scene, 1); // For the first view to free like any later one's
     for (unsigned done = 0, launched; std::fread(&request, sizeof(request), 1, stdin); std::fflush(stdout)) {
         if (std::memcmp(&view, &request.view, sizeof(View))) {
@@ -59,13 +63,17 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
                     (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts})
                     release((CUdeviceptr)array);
                 loadView(scene, request.view.width * request.view.height);
+                CHECK(munmap(sums, pixels * sizeof(float4)));
+                pixels = request.view.width * request.view.height;
+                CHECK(ftruncate(shared, pixels * sizeof(float4)));
+                sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
+                CHECK(sums == MAP_FAILED);
             }
             view = request.view;
             done = 0;
             scene.camera = view.camera;
             scene.settings = view.settings;
-            sums.resize(view.width * view.height);
-            CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * sums.size()));
+            CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * pixels));
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
         // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs, the duplication
@@ -87,7 +95,6 @@ int main() { // Usage: renderer < scene, then requests > an answer per request
         std::fwrite(memory, sizeof(memory), 1, stdout);
         if (!launched) continue;
         // Raw linear sums with the sample count in w, rows top to bottom
-        CHECK(cuMemcpyDtoH(sums.data(), (CUdeviceptr)scene.accumulation, sums.size() * sizeof(float4)));
-        std::fwrite(sums.data(), sizeof(float4), sums.size(), stdout);
+        CHECK(cuMemcpyDtoH(sums, (CUdeviceptr)scene.accumulation, pixels * sizeof(float4)));
     }
 }
