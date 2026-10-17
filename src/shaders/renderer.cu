@@ -1,7 +1,7 @@
 #include "renderer.h"
 #include <optix.h>
 #include <cuda_runtime.h>
-#include "flexkernels/bsdf.cuh"
+#include "flexkernels/pathtracer.cuh"
 
 constexpr int STACK = 64;
 constexpr int SLOTS = 32; // Values a program keeps for reuse, as the extension's
