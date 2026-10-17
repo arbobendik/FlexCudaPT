@@ -13,7 +13,7 @@ build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
 
 build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h $(OPTIX_PATH)/include/optix.h
 	mkdir -p build
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
 	xxd -i build/shaders.ptx > $@
 
 $(OPTIX_PATH)/include/optix.h:
