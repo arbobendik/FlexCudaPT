@@ -1,12 +1,12 @@
 #include "renderer.h"
 #include <optix.h>
 #include <cuda_runtime.h>
+#include "flexkernels/bsdf.cuh"
 
 constexpr int STACK = 64;
 constexpr float PI = 3.14159265f;
 constexpr float INV_PI = 0.3183098861837907f;
 constexpr float BIAS = 0.0000152587890625f;
-constexpr float MAX_SAFE_INTEGER_FOR_F32 = 8388607.0f;
 // Columns
 struct Matrix { float3 x, y, z; };
 __device__ float3 operator+(float3 a, float3 b) { return make_float3(a.x + b.x, a.y + b.y, a.z + b.z); }
@@ -40,83 +40,13 @@ __device__ float length(float3 a) { return sqrtf(dot(a, a)); }
 __device__ bool operator==(float3 a, float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
 // Repeats into [0, 1)
 __device__ float wrap(float coordinate) { return fminf(coordinate - floorf(coordinate), 0x1.fffffep-1f); }
-__device__ unsigned hash(unsigned x) { // PCG
-    x = x * 747796405u + 2891336453u;
-    x = ((x >> ((x >> 28) + 4)) ^ x) * 277803737u;
-    return (x >> 22) ^ x;
-}
 __device__ float random(unsigned& state) { return ((state = hash(state)) >> 8) * 0x1p-24f; }
-struct Random { unsigned state; float value; };
-struct RandomSphere { unsigned state; float3 value; };
-struct RandomHemisphere { unsigned state; float3 value; };
-// The state advanced and the value drawn from it
-__device__ Random pcg(unsigned state) {
-    const float value = random(state);
-    return Random{state, value};
-}
-__device__ float rgb_to_greyscale(float3 rgb) { return dot(rgb, make_float3(0.299f, 0.587f, 0.114f)); }
 // Brightest channel, by which Cycles' tinted specular layer dims the diffuse below it
 __device__ float brightest(float3 rgb) { return fmaxf(rgb.x, fmaxf(rgb.y, rgb.z)); }
-// Exact Smith masking of GGX, the visible normal density sampleGGXVNDF draws from
-__device__ float smithG1(float alpha, float n_dot_x) {
-    const float alpha_sq = alpha * alpha;
-    return 2.0f * n_dot_x / (n_dot_x + sqrtf(alpha_sq + (1.0f - alpha_sq) * n_dot_x * n_dot_x));
-}
-
-
-__device__ Random normal_distribution(unsigned state) {
-    const Random r1 = pcg(state);
-    const Random r2 = pcg(r1.state);
-    // Sample normal distribution
-    const float theta = 2.0f * PI * r1.value;
-    const float rho = sqrtf(-2.0f * fminf(fmaxf(logf(r2.value), - MAX_SAFE_INTEGER_FOR_F32), 0.0f));
-    return Random{r2.state, rho * cosf(theta)};
-}
-
-__device__ RandomSphere random_sphere(unsigned state) {
-    const Random x = normal_distribution(state);
-    const Random y = normal_distribution(x.state);
-    const Random z = normal_distribution(y.state);
-    return RandomSphere{z.state, normalize(make_float3(x.value, y.value, z.value))};
-}
-
-__device__ RandomHemisphere random_hemisphere(unsigned state, float3 normal) {
-    const RandomSphere random_sphere = ::random_sphere(state);
-    // If the random sphere is in the same hemisphere as the normal, return it
-    if(dot(random_sphere.value, normal) > 0.0f) {
-        return RandomHemisphere{random_sphere.state, random_sphere.value};
-    } else {
-        // Otherwise, return the opposite direction
-        return RandomHemisphere{random_sphere.state, - random_sphere.value};
-    }
-}
-
-__device__ float trowbridgeReitz(float alpha, float n_dot_h) {
-    const float numerator = alpha * alpha;
-    const float denom = n_dot_h * n_dot_h * (numerator - 1.0f) + 1.0f;
-    return numerator / fmaxf(PI * denom * denom, BIAS);
-}
-
 __device__ float G1(float alpha, float n_dot_x) {
     return smithG1(alpha, n_dot_x);
 }
 
-__device__ float fresnel(float cos_theta, float eta_i, float eta_o) {
-    // Compute sini using Snell's law
-    const float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));
-    const float sin_psi = (eta_i / eta_o) * sin_theta;
-    // Total internal reflection
-    float kr = 1.0f;
-    if (sin_psi < 1.0f) {
-        const float cos_psi = sqrtf(fmaxf(0.0f, 1.0f - sin_psi * sin_psi));
-        // cos = abs(cosi);
-        const float Rs = ((eta_o * cos_theta) - (eta_i * cos_psi)) / ((eta_o * cos_theta) + (eta_i * cos_psi));
-        const float Rp = ((eta_i * cos_theta) - (eta_o * cos_psi)) / ((eta_i * cos_theta) + (eta_o * cos_psi));
-        kr = (Rs * Rs + Rp * Rp) / 2.0f;
-    }
-
-    return kr;
-}
 // Fresnel reflectance tinted by the specular tint at normal incidence and white at grazing angles, as Cycles'
 // Principled BSDF fades its tinted f0, scaled by the specular level, to a white f90 along the curve of the ior with that
 // reflectance at normal incidence
@@ -125,58 +55,6 @@ __device__ float3 tinted(const Surface& material, float cos_theta, float eta_i, 
     const float F = fresnel(cos_theta, 1.0f + root, 1.0f - root), F0 = root * root;
     return make_float3(F, F, F)
         - (make_float3(1.0f, 1.0f, 1.0f) - material.tint) * (F0 * (1.0f - F) / fmaxf(1.0f - F0, BIAS));
-}
-
-// Sampling of the GGX VNDF
-__device__ float3 sampleGGXVNDF(float3 Ve, float alpha, float U1, float U2) {
-    // The Ve argument is the view direction in tangent space, where the normal is (0, 0, 1).
-    // Section 3.2: transforming the view direction to the hemisphere configuration.
-    const float3 Vh = normalize(make_float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
-    // Section 4.1: orthonormal basis (with special case if cross product is zero).
-    const float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
-    const float3 T1 = lensq > 0.0f ? make_float3(-Vh.y, Vh.x, 0.0f) * rsqrtf(lensq) : make_float3(1.0f, 0.0f, 0.0f);
-    const float3 T2 = cross(Vh, T1);
-    // Section 4.2: parameterization of the projected area.
-    const float r = sqrtf(U1);
-    const float phi = 2.0f * PI * U2;
-    const float t1 = r * cosf(phi);
-    float t2 = r * sinf(phi);
-    const float s = 0.5f * (1.0f + Vh.z);
-    t2 = (1.0f - s) * sqrtf(fmaxf(0.0f, 1.0f - t1 * t1)) + s * t2;
-    // Section 4.3: reprojection onto hemisphere.
-    const float3 Nh = t1 * T1 + t2 * T2 + sqrtf(fmaxf(0.0f, 1.0f - t1 * t1 - t2 * t2)) * Vh;
-    // Section 3.4: transforming the normal back to the ellipsoid configuration.
-    return normalize(make_float3(alpha * Nh.x, alpha * Nh.y, fmaxf(0.0f, Nh.z)));
-}
-
-// Corresponding PDF is: pdf = cos(theta) / PI
-__device__ float3 sampleCosWeightedHemisphere(float random_1, float random_2) {
-    const float r = sqrtf(random_1);
-    const float theta = 2.0f * PI * random_2;
-    const float x = r * cosf(theta);
-    const float z = r * sinf(theta);
-    const float y = sqrtf(fmaxf(0.0f, 1.0f - x * x - z * z));
-    return make_float3(x, y, z);
-}
-
-__device__ float3 tangentToWorld(float3 v, float3 n) {
-    float3 a = make_float3(0.0f, 1.0f, 0.0f);
-    if (fabsf(dot(n, a)) > 1.0f - BIAS) {
-        a = make_float3(1.0f, 0.0f, 0.0f);
-    }
-    const float3 tangent = normalize(cross(n, a));
-    const float3 bitangent = cross(n, tangent);
-    return v.x * tangent + v.y * n + v.z * bitangent;
-}
-
-__device__ float3 worldToTangent(float3 v, float3 n) {
-    float3 a = make_float3(0.0f, 1.0f, 0.0f);
-    if (fabsf(dot(n, a)) > 1.0f - BIAS) {
-        a = make_float3(1.0f, 0.0f, 0.0f);
-    }
-    const float3 tangent = normalize(cross(n, a));
-    const float3 bitangent = cross(n, tangent);
-    return make_float3(dot(v, tangent), dot(v, n), dot(v, bitangent));
 }
 
 // Build TBN matrix for tangent-space normal mapping. Uses triangle edges and UV deltas to compute
@@ -231,17 +109,6 @@ struct BSDFLobes {
     float p_reflect;
     float p_refract;
 };
-
-__device__ float3 sampleHalfVector(float3 v, float3 n_i, float alpha, unsigned& random_state) {
-    // Generate random values for sampling
-    const Random random_h_1 = pcg(random_state);
-    const Random random_h_2 = pcg(random_h_1.state);
-    random_state = random_h_2.state;
-    const float3 v_tangent = worldToTangent(v, n_i);
-    const float3 ggx_n = xzy(sampleGGXVNDF(xzy(v_tangent), alpha, random_h_1.value, random_h_2.value));
-    // Transform half vector back to world space
-    return tangentToWorld(ggx_n, n_i);
-}
 
 __device__ BSDFLobes bsdfLobes(float3 in_dir, float3 v, float3 n_i, float3 ggx_n, const Surface& material, float eta_i,
     float eta_o) {
@@ -368,7 +235,7 @@ __device__ SampleBSDF sampleBSDF(float3 in_dir, float3 n, const Surface& materia
     // Material constants
     const float alpha = material.roughness * material.roughness;
     // Sample using GGX importance sampling for potential refractive or reflective case
-    const float3 ggx_n = sampleHalfVector(v, n_i, alpha, random_state);
+    const float3 ggx_n = sampleHalfVector(v, n_i, alpha, &random_state);
     const BSDFLobes lobes = bsdfLobes(in_dir, v, n_i, ggx_n, material, eta_i, eta_o);
 
     SampleBSDF sample = SampleBSDF{make_float3(1.0f, 1.0f, 1.0f), make_float3(1.0f, 1.0f, 1.0f), 0u, false, 0u, 0.0f};
@@ -417,7 +284,7 @@ __device__ SampleBSDF connectBSDF(float3 in_dir, float3 out_dir, float3 n, const
     const float alpha = material.roughness * material.roughness;
     float3 ggx_n = normalize(v + out_dir);
     if (lobe == LOBE_DIFFUSE) {
-        ggx_n = sampleHalfVector(v, n_i, alpha, random_state);
+        ggx_n = sampleHalfVector(v, n_i, alpha, &random_state);
     } else if (lobe == LOBE_REFRACT) {
         const float3 h_t = - (eta_i * v + eta_o * out_dir);
         ggx_n = normalize(h_t) * sign(dot(h_t, n_i));
@@ -583,10 +450,6 @@ struct Selection {
     unsigned random_state;
 };
 
-__device__ unsigned stream(unsigned seed, unsigned index) {
-    return hash(seed ^ hash(index));
-}
-
 __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) {
     return path >> offset & ((1u << count) - 1u);
 }
@@ -743,10 +606,6 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     }
     return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
         * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
-}
-
-__device__ float3 safeDivide(float3 a, float3 b) {
-    return make_float3(b.x == 0.0f ? 0.0f : a.x / b.x, b.y == 0.0f ? 0.0f : a.y / b.y, b.z == 0.0f ? 0.0f : a.z / b.z);
 }
 
 // Weighted reservoir sampling step, weight is the vector-valued resampling weight (Sec. 6.3)
