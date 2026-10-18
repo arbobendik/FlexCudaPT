@@ -7,7 +7,10 @@
 #include <unistd.h>
 #include "../build/shaders.h"
 
-int main(int, char** argv) { // Usage: renderer file < scene, then requests > an answer per request, sums in the file
+// Kinds of what the extension pipes in
+enum { SCENE, REQUEST };
+
+int main(int, char** argv) { // Usage: renderer file < scenes and requests > an answer per request, sums in the file
     const int shared = std::atoi(argv[1]);
     // CUDA + OptiX contexts
     CUcontext cuda;
@@ -20,8 +23,10 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
     unsigned rtcore;
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
-    // Build scene
-    Scene scene = loadScene(context);
+    // Scenes keep the reuse textures; the arrays of the last one loaded
+    Scene scene{.pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]),
+        loadPairing(PAIRING_SIZES[2])}};
+    std::vector<CUdeviceptr> arrays;
     // Unguided denoiser of the sums: the AOV model's autoexposure leaves their scale, but not alpha, the sample count
     OptixDenoiserOptions denoiserOptions{};
     OptixDenoiser denoiser;
@@ -54,17 +59,32 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
     const CUdeviceptr table = allocate(sizeof(records));
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
     // number launched, memory used and peak in MiB, the sums left in the shared file if any were; a new view starts
-    // over, from the reservoirs of the last one if it has its size and settings
+    // over, from the reservoirs of the last one if it has its size and settings, then reuse samples at most unless its
+    // camera jumped: moved farther than distance or turned further than the angle of cosine; so does the view after a
+    // new scene, from them only if it has as many triangles
     struct View { unsigned width, height; Settings settings; Camera camera; } view{};
-    struct { unsigned samples, launches; View view; } request;
+    struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
+    bool reused = false;
     size_t pixels = 1;
     float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
     loadView(scene, 1); // For the first view to free like any later one's
     OptixDenoiserSizes sizes; // Of a denoised view's state and scratch, besides its denoised sums
     CUdeviceptr state, scratch, denoised;
-    for (unsigned done = 0, launched; std::fread(&request, sizeof(request), 1, stdin); std::fflush(stdout)) {
+    for (unsigned done = 0, launched, kind; std::fread(&kind, sizeof(kind), 1, stdin); std::fflush(stdout)) {
+        if (kind == SCENE) {
+            const unsigned count = scene.count;
+            loadScene(context, scene, arrays);
+            view.camera = {};
+            if (scene.count != count) view.width = 0;
+            continue;
+        }
+        std::fread(&request, sizeof(request), 1, stdin);
         if (std::memcmp(&view, &request.view, sizeof(View))) {
+            const Camera &last = scene.previousCamera, &next = request.view.camera;
+            reused = length(next.origin - last.origin) <= request.distance
+                && dot(next.z, last.z) >= request.cosine * length(next.z) * length(last.z);
             if (std::memcmp(&view, &request.view, offsetof(View, camera))) {
+                reused = false;
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
                     (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts})
                     release((CUdeviceptr)array);
@@ -86,7 +106,7 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
                 }
             }
             view = request.view;
-            done = 0;
+            done = scene.frame = 0; // Random numbers repeat per view, the reservoirs persist
             scene.camera = view.camera;
             scene.settings = view.settings;
             CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * pixels));
@@ -97,7 +117,8 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
         const unsigned restir = scene.settings.restir;
         const unsigned depths[PASSES] = {1, restir, restir * scene.settings.neighbors, restir,
             restir * scene.settings.decorrelation};
-        for (launched = 0; launched < request.launches && done < request.samples; ++launched, ++done, ++scene.frame) {
+        const unsigned samples = reused ? request.reuse : request.samples;
+        for (launched = 0; launched < request.launches && done < samples; ++launched, ++done, ++scene.frame) {
             for (Record& record : records) record.data = scene;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
@@ -113,7 +134,7 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
         // Raw linear sums with the sample count in w, rows top to bottom, denoised if so set: once the view has its
         // samples, or every time at a denoise level above 1
         CUdeviceptr result = (CUdeviceptr)scene.accumulation;
-        const bool denoise = view.settings.denoise && (done == request.samples || view.settings.denoise > 1);
+        const bool denoise = view.settings.denoise && (done == samples || view.settings.denoise > 1);
         if (denoise) {
             const OptixImage2D image{result, view.width, view.height, view.width * unsigned(sizeof(float4)),
                 sizeof(float4), OPTIX_PIXEL_FORMAT_FLOAT4};
