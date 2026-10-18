@@ -99,7 +99,7 @@ __device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
     return (h & 1 ? -u : u) + (h & 2 ? -v : v);
 }
 __device__ float fade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-// Cycles' Perlin noise of a 3D point, normalized: its lattice's gradients blended by their faded distances
+// Cycles' signed Perlin noise of a 3D point: its lattice's gradients blended by their faded distances
 __device__ float noise(float3 p) {
     const float3 low = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), f = p - low;
     const float3 w = make_float3(fade(f.x), fade(f.y), fade(f.z));
@@ -109,7 +109,60 @@ __device__ float noise(float3 p) {
         sum += (d.x ? w.x : 1 - w.x) * (d.y ? w.y : 1 - w.y) * (d.z ? w.z : 1 - w.z)
             * gradient(int(low.x + d.x), int(low.y + d.y), int(low.z + d.z), f - d);
     }
-    return 0.5f * 0.9820f * sum + 0.5f;
+    return 0.9820f * sum;
+}
+// Cycles' fractal noise of a point: octaves of noise up to the detail, the last by its fraction, by type of extra as
+// fractal Brownian motion normalized or not, multifractal, heterogeneous terrain or hybrid or ridged multifractal
+__device__ float fractal(float3 p, float3 params, float3 extra) {
+    const float detail = fminf(fmaxf(params.x, 0), 15), roughness = fmaxf(params.y, 0), lacunarity = params.z;
+    const float offset = extra.x, gain = extra.y, rmd = detail - floorf(detail);
+    const int octaves = int(detail), type = int(extra.z);
+    if (type < 2) {
+        float scale = 1, amp = 1, maxamp = 0, sum = 0;
+        for (int i = 0; i <= octaves; ++i, amp *= roughness, scale *= lacunarity) {
+            sum += noise(p * scale) * amp;
+            maxamp += amp;
+        }
+        const float whole = type ? sum : 0.5f * sum / maxamp + 0.5f;
+        if (rmd == 0) return whole;
+        sum += noise(p * scale) * amp;
+        return whole * (1 - rmd) + (type ? sum : 0.5f * sum / (maxamp + amp) + 0.5f) * rmd;
+    }
+    float value = 0, pwr = 1, weight = 1, signal;
+    switch (type) {
+        case 2:
+            value = 1;
+            for (int i = 0; i <= octaves; ++i, pwr *= roughness, p = p * lacunarity) value *= pwr * noise(p) + 1;
+            return rmd != 0 ? value * (rmd * pwr * noise(p) + 1) : value;
+        case 3:
+            value = offset + noise(p);
+            pwr = roughness;
+            p = p * lacunarity;
+            for (int i = 1; i <= octaves; ++i, pwr *= roughness, p = p * lacunarity)
+                value += (noise(p) + offset) * pwr * value;
+            return rmd != 0 ? value + rmd * (noise(p) + offset) * pwr * value : value;
+        case 4:
+            for (int i = 0; weight > 0.001f && i <= octaves; ++i, p = p * lacunarity) {
+                weight = fminf(weight, 1);
+                signal = (noise(p) + offset) * pwr;
+                pwr *= roughness;
+                value += weight * signal;
+                weight *= gain * signal;
+            }
+            return rmd != 0 && weight > 0.001f ? value + rmd * fminf(weight, 1) * (noise(p) + offset) * pwr : value;
+        default:
+            signal = offset - fabsf(noise(p));
+            value = signal *= signal;
+            pwr = roughness;
+            for (int i = 1; i <= octaves; ++i, pwr *= roughness) {
+                p = p * lacunarity;
+                weight = fminf(fmaxf(signal * gain, 0), 1);
+                signal = offset - fabsf(noise(p));
+                signal *= signal * weight;
+                value += signal * pwr;
+            }
+            return value;
+    }
 }
 // Cycles' cubic B-spline weights of the four texels around a point t past the second
 __device__ float spline(float t, int k) {
@@ -169,7 +222,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
-        case NOISE: top[-1] = make_float3(1, 1, 1) * noise(top[-1]); break;
+        case NOISE: top -= 2; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1]); break;
         case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
         case POWER: --top; top[-1] = each(top[-1], *top, power); break;
         case EXPONENT: top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
