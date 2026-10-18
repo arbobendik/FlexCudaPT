@@ -250,6 +250,28 @@ __device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fra
     if (farthest > 0) sum.distance /= total * farthest, sum.color = sum.color / total;
     return extra.z == 0 ? make_float3(1, 1, 1) * sum.distance : extra.z == 1 ? sum.color : sum.position;
 }
+// Cycles' magic texture of a point by the scale, depth and distortion in params
+__device__ float3 magic(float3 p, float3 params) {
+    const float d = params.z;
+    const auto sine = [](float a) { return sinpif(a * INV_PI); };
+    const auto cosine = [](float a) { return cospif(a * INV_PI); };
+    p = make_float3(fmodf(p.x * params.x, 2 * PI), fmodf(p.y * params.x, 2 * PI), fmodf(p.z * params.x, 2 * PI));
+    float x = sine((p.x + p.y + p.z) * 5), y = cosine((-p.x + p.y - p.z) * 5), z = -cosine((-p.x - p.y + p.z) * 5);
+    if (params.y > 0) x *= d, y *= d, z *= d;
+    for (int i = 0; i < fminf(params.y, 10); ++i) switch (i) {
+        case 0: y = -cosine(x - y + z) * d; break;
+        case 1: x = cosine(x - y - z) * d; break;
+        case 2: z = sine(-x - y - z) * d; break;
+        case 3: x = -cosine(-x + y - z) * d; break;
+        case 4: y = -sine(-x + y + z) * d; break;
+        case 5: y = -cosine(-x + y + z) * d; break;
+        case 6: x = cosine(x + y + z) * d; break;
+        case 7: z = sine(x + y - z) * d; break;
+        case 8: x = -cosine(-x - y + z) * d; break;
+        default: y = -sine(x - y + z) * d; break;
+    }
+    return make_float3(0.5f, 0.5f, 0.5f) - make_float3(x, y, z) / (d != 0 ? 2 * d : 1);
+}
 // Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
 __device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
     const unsigned h = jenkins(3, x, y, z) & 15;
@@ -387,6 +409,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
+        case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
         case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
         case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
         case NOISE: top -= 2; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1]); break;
