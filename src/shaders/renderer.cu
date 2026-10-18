@@ -58,6 +58,34 @@ template <class F> __device__ float3 each(float3 a, F f) { return make_float3(f(
 template <class F> __device__ float3 each(float3 a, float3 b, F f) {
     return make_float3(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z));
 }
+// Cycles' conversions of RGB to HSV and HSL and back
+__device__ float3 toHsv(float3 c) {
+    const float high = fmaxf(c.x, fmaxf(c.y, c.z)), delta = high - fminf(c.x, fminf(c.y, c.z));
+    if (high == 0 || delta == 0) return make_float3(0, 0, high);
+    const float3 d = (make_float3(high, high, high) - c) / delta;
+    const float h = (c.x == high ? d.z - d.y : c.y == high ? 2 + d.x - d.z : 4 + d.y - d.x) / 6;
+    return make_float3(h < 0 ? h + 1 : h, delta / high, high);
+}
+__device__ float3 fromHsv(float3 c) {
+    const float s = c.y, v = c.z, h = (c.x == 1 ? 0 : c.x) * 6, i = floorf(h), f = h - i;
+    const float p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+    return s == 0 ? make_float3(v, v, v) : i == 0 ? make_float3(v, t, p) : i == 1 ? make_float3(q, v, p)
+        : i == 2 ? make_float3(p, v, t) : i == 3 ? make_float3(p, q, v) : i == 4 ? make_float3(t, p, v)
+        : make_float3(v, p, q);
+}
+__device__ float3 toHsl(float3 c) {
+    const float high = fmaxf(c.x, fmaxf(c.y, c.z)), low = fminf(c.x, fminf(c.y, c.z));
+    const float l = fminf(1, (high + low) / 2), delta = high - low;
+    if (delta == 0) return make_float3(0, 0, l);
+    const float h = c.x == high ? (c.y - c.z) / delta + (c.y < c.z ? 6 : 0) : c.y == high ? (c.z - c.x) / delta + 2
+        : (c.x - c.y) / delta + 4;
+    return make_float3(h / 6, l > 0.5f ? delta / (2 - high - low) : delta / (high + low), l);
+}
+__device__ float3 fromHsl(float3 c) {
+    const float3 n = make_float3(fabsf(c.x * 6 - 3) - 1, 2 - fabsf(c.x * 6 - 2), 2 - fabsf(c.x * 6 - 4));
+    const float chroma = (1 - fabsf(2 * c.z - 1)) * c.y;
+    return each(n, [&](float a) { return (fminf(fmaxf(a, 0), 1) - 0.5f) * chroma + c.z; });
+}
 __device__ float3 divide(float3 a, float3 b) {
     return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
 }
@@ -165,6 +193,10 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case COSH: top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
         case TANH: top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
         case CROSS_PRODUCT: --top; top[-1] = cross(top[-1], *top); break;
+        case RGB_TO_HSV: top[-1] = toHsv(top[-1]); break;
+        case HSV_TO_RGB: top[-1] = fromHsv(top[-1]); break;
+        case RGB_TO_HSL: top[-1] = toHsl(top[-1]); break;
+        case HSL_TO_RGB: top[-1] = fromHsl(top[-1]); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
