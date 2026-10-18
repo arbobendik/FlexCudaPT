@@ -423,12 +423,16 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 }
                 return Shift{throughput * surface.emissive / r.jac, density / r.jac};
             }
+            // Light sampling at the reconnection vertex replays its random numbers, as the light may have moved
             if (k == end && end_type == END_NEE) {
-                if (!nee) {
+                float3 light_dir;
+                const float3 radiance = nee ? sampleLight(scene, origin, surface.normal, offset,
+                    stream(r.seed, b + STREAM_NEE), light_dir) : make_float3(0.0f, 0.0f, 0.0f);
+                if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
-                return Shift{throughput * BSDF(direction, r.dir, surface.normal, geometry_n, material, eta_i, eta_o,
-                    stream(r.seed, b)) * r.radiance / r.jac, density / r.jac};
+                return Shift{throughput * BSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
+                    stream(r.seed, b)) * radiance / r.jac, density / r.jac};
             }
             if (nee != (extractBits(r.path, PATH_NEE, 1u) == 1u)) {
                 return fail;
