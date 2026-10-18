@@ -26,8 +26,8 @@ struct BSDFMaterial {
 // Lights are sampled by emitted, their summed emission under mean textures; hidden surfaces let camera rays through.
 struct Material { float emitted; unsigned program, hidden; };
 // Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index, its material's
-// pass index and its random number
-struct Info { float location[3], color[4], index, material, random; };
+// pass index and its random number, then its axes, which with its location transform it into the world
+struct Info { float location[3], color[4], index, material, random, axes[9]; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of
 // their points, their power and the cone of their normals around w. A leaf holds triangle child, an interior node is
 // followed by its first child, child is its second.
@@ -56,7 +56,7 @@ struct Shift { float3 f; float jac; };
 struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
-// Per triangle: three vertices, normals, generated points, points in their object, UVs and colors, an info and one
+// Per triangle: three vertices, normals, generated points, points in their object, UVs, colors and tangents, an info and one
 // material; the world's material last. The light BVH from its root.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
@@ -66,7 +66,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Of the scene the reservoirs a view's first frame reuses were traced in: its BVH, vertices, normals and light BVH.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated, *objects; float2* uvs;
-    float4* colors; Info* infos;
+    float4 *colors, *tangents; Info* infos;
     Material* materials; LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;

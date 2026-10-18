@@ -372,6 +372,14 @@ __device__ float spline(float t, int k) {
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
+// Normal transformed from its object into the world, or back, as Cycles'
+__device__ float3 normalTransform(float3 v, const Info& info, bool inverse) {
+    const float* a = info.axes;
+    const float3 x = make_float3(a[0], a[1], a[2]), y = make_float3(a[3], a[4], a[5]);
+    const float3 z = make_float3(a[6], a[7], a[8]);
+    if (inverse) return normalize(make_float3(dot(x, v), dot(y, v), dot(z, v)));
+    return normalize((cross(y, z) * v.x + cross(z, x) * v.y + cross(x, y) * v.z) / dot(x, cross(y, z)));
+}
 // Surface a program resolves to at a UV, generated point, point in its object and color, facing along the normal with
 // the tangent space tbn, at a position seen from the incoming direction, on the back of its face or not, for the ray,
 // of the info's object
@@ -420,7 +428,10 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
                 ? make_float3(color.x, color.y, color.z)
                 : make_float3(1, 1, 1) * color.w;
         } break;
-        case NORMAL_MAP: top[-1] = normalize(tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn)); break;
+        case NORMAL_MAP: {
+            const float3 n = normalTransform(tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), info, false);
+            top[-1] = isfinite(dot(n, n)) ? n : normal;
+        } break;
         case ADD: --top; top[-1] = top[-1] + *top; break;
         case SUBTRACT: --top; top[-1] = top[-1] - *top; break;
         case MULTIPLY: --top; top[-1] = top[-1] * *top; break;
@@ -488,6 +499,12 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
 }
+// Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
+__device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
+    const float3 a = make_float3(p[0].x, p[0].y, p[0].z), b = make_float3(p[1].x, p[1].y, p[1].z);
+    const float3 tangent = a + (b - a) * s + (make_float3(p[2].x, p[2].y, p[2].z) - a) * t;
+    return makeMatrix<float, 3, 3>(tangent, cross(n, tangent) * p[0].w, n);
+}
 // Of a triangle at its barycentrics, reached along the direction by the ray
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
     const Ray& ray) {
@@ -496,8 +513,12 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
     const float3* generated = scene.generated + 3 * triangle;
     const float3* object = scene.objects + 3 * triangle;
     const float4* color = scene.colors + 3 * triangle;
+    const float3* normals = scene.normals + 3 * triangle;
+    const float3 a = normalTransform(normals[0], scene.infos[triangle], true);
+    const float3 b = normalTransform(normals[1], scene.infos[triangle], true);
+    const float3 c = normalTransform(normals[2], scene.infos[triangle], true);
     return shade(scene, scene.materials[triangle].program, normal,
-        normalMapTBN(vertex[0], vertex[1], vertex[2], uv[0], uv[1], uv[2], normal),
+        tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
         generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
@@ -639,7 +660,8 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
-        direction, direction, make_float4(0, 0, 0, 0), direction, -direction, false, ray, Info{}).emissive;
+        direction, direction, make_float4(0, 0, 0, 0), direction, -direction, false, ray,
+        Info{{}, {}, 0, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
