@@ -44,6 +44,7 @@ WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3
 # Blender's material panels the engine shows: the slots, the surface's nodes and the generic ones
 PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
     'MATERIAL_PT_animation')
+SCENE, REQUEST = range(2)  # Kinds of what the renderer is piped
 
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
@@ -178,6 +179,13 @@ def settings(scene, viewport):  # The scene's settings of the renderer, in its o
     return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors, scene.flex_bounces, scene.flex_paths, \
         scene.flex_denoise * (1 + viewport)
 
+# The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
+# angle its camera moves and turns at most from the last one's to reuse them; a view following none jumps
+def sampling(scene, follows):
+    reuse = scene.flex_restir and scene.flex_reuse
+    return scene.flex_samples, scene.flex_reuse_samples if reuse else scene.flex_samples, \
+        scene.flex_jump_distance if follows else -1, math.cos(scene.flex_jump_angle)
+
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
@@ -187,9 +195,26 @@ class Flex(bpy.types.RenderEngine):
         self.visible = ()  # Names of the instances the renderer was last started on
         self.texture = None  # The viewport's view as last traced
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
-        self.shared = open(os.memfd_create('flex'), 'rb', 0)  # In memory file the renderers leave their sums in
+        self.following = None  # The frame after the last one rendered, which reuses its reservoirs in an animation
+        self.shared = open(os.memfd_create('flex'), 'rb', 0)  # In memory file the renderer leaves its sums in
+        self.spawn()
 
-    def start(self, depsgraph):  # Starts the renderer on the exported scene
+    # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process runs:
+    # once the engine drops them, the renderer reads the end of its input and exits.
+    def spawn(self):
+        process = subprocess.Popen((BINARY, str(self.shared.fileno())), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            pass_fds=(self.shared.fileno(),))
+        self.requests = process.stdin
+        self.answers = process.stdout
+        process.stdin = process.stdout = None
+
+    # Starts the renderer on the exported scene when what it renders changed. Blender also reports selection, scene
+    # settings and cameras, which need none.
+    def start(self, depsgraph):
+        visible = [instance.object.name for instance in depsgraph.object_instances]
+        if visible == self.visible and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
+                or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
+        self.visible = visible
         scene = depsgraph.scene_eval
         vertices = [numpy.empty((0, 3, 3), 'f')]  # Per object, after none for a scene without triangles
         corners = [numpy.empty((0, 3, 3), 'f')]  # Normals
@@ -275,36 +300,31 @@ class Flex(bpy.types.RenderEngine):
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated and 6 UV floats,
         # a material of its emission, program and hidden flag (then the world's); then the steps of 4 integers and the
         # texels.
-        # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process
-        # runs: once the engine drops them, the renderer reads the end of its input and exits.
-        process = subprocess.Popen((BINARY, str(self.shared.fileno())), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            pass_fds=(self.shared.fileno(),))
-        self.requests = process.stdin
-        self.answers = process.stdout
-        process.stdin = process.stdout = None
-        self.requests.writelines((struct.pack('<III', len(triangles), len(ops), sum(map(len, texels)) // 4), triangles,
+        self.requests.writelines((struct.pack('<4I', SCENE, len(triangles), len(ops), sum(map(len, texels)) // 4),
+            triangles,
             *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, uvs)),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels))
 
-    # Radiance sums and sample count per pixel, rows bottom to top, after up to launches more samples, samples at most,
-    # of the view from the camera's matrix through its perspective projection under the settings; no rows if the view
-    # already had its samples. A view other than the last starts over.
-    def trace(self, width, height, samples, launches, settings, matrix, projection):
+    # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
+    # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
+    # from the camera's matrix through its perspective projection under the settings; none launched if the view already
+    # had its samples. A view other than the last starts over.
+    def trace(self, width, height, sampling, launches, settings, matrix, projection):
         right = matrix.col[0].xyz
         up = matrix.col[1].xyz
         back = matrix.col[2].xyz
         x = right / projection[0][0]
         y = up / projection[1][1]
         center = x * projection[0][2] + y * projection[1][2] - back
-        # Request on stdin: samples, launches, size, settings, the camera's origin and its ray direction per NDC x, per
-        # NDC y and at the center.
-        self.requests.write(struct.pack(f'<{4 + len(settings)}I12f', samples, launches, width, height, *settings,
-            *matrix.translation, *x, *y, *center))
+        # Request on stdin: sampling, launches, size, settings, the camera's origin and its ray direction
+        # per NDC x, per NDC y and at the center.
+        self.requests.write(struct.pack(f'<3I2f{3 + len(settings)}I12f', REQUEST, *sampling, launches, width, height,
+            *settings, *matrix.translation, *x, *y, *center))
         self.requests.flush()
-        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, sums if any
-        sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ) if launched else b''
-        return numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
+        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
+        sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
+        return launched, numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
 
     # Shows the result after ever larger batches of samples, until it has them all or the render is cancelled
     def render(self, depsgraph):
@@ -320,10 +340,14 @@ class Flex(bpy.types.RenderEngine):
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)
         y = int(border.use_border * border.border_min_y * height)
+        follows = self.is_animation and scene.frame_current == self.following
+        self.following = scene.frame_current + scene.frame_step
         started = time.perf_counter()
-        count = 1
-        while (len(sums := self.trace(width, height, scene.flex_samples, min(count, RENDER_SAMPLES),
-                settings(scene, False), *camera)) and not self.test_break()):
+        count = 0  # Shown none yet: a view that already has its samples is shown once
+        while not self.test_break():
+            launched, sums = self.trace(width, height, sampling(scene, follows), min(count or 1, RENDER_SAMPLES),
+                settings(scene, False), *camera)
+            if count and not launched: break
             count = int(sums[0, 0, 3])
             pixels = sums[y:y + result.resolution_y, x:x + result.resolution_x] * (1 / count)
             result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
@@ -337,21 +361,15 @@ class Flex(bpy.types.RenderEngine):
                 f'Sample {count}/{scene.flex_samples} | {count / elapsed:.2f} samples/s')
         self.end_result(result)
 
-    # Restarts the renderer when what it renders changed. Blender also reports selection, scene settings and cameras
-    # here, which need none.
     def view_update(self, context, depsgraph):
-        visible = [instance.object.name for instance in depsgraph.object_instances]
-        if visible != self.visible or any(not isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
-                and getattr(update.id, 'type', '') != 'CAMERA' for update in depsgraph.updates):
-            self.visible = visible
-            self.start(depsgraph)
+        self.start(depsgraph)
 
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
         region = context.region
         scene = depsgraph.scene
-        sums = self.trace(region.width, region.height, scene.flex_samples, VIEWPORT_SAMPLES, settings(scene, True),
-            context.region_data.view_matrix.inverted(), context.region_data.window_matrix)
-        if len(sums):
+        launched, sums = self.trace(region.width, region.height, sampling(scene, True), VIEWPORT_SAMPLES,
+            settings(scene, True), context.region_data.view_matrix.inverted(), context.region_data.window_matrix)
+        if launched:
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
             self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',
                 data=gpu.types.Buffer('FLOAT', len(pixels), pixels))
@@ -377,7 +395,7 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         self.layout.prop(context.scene, 'flex_bounces')
         self.layout.prop(context.scene, 'flex_paths')
         self.layout.prop(context.scene, 'flex_denoise')
-        for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
+        for name in ('resolution_x', 'resolution_y', 'resolution_percentage', 'use_persistent_data'):
             self.layout.prop(context.scene.render, name)
 
 class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
@@ -397,6 +415,17 @@ class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex eng
         if scene.flex_decorrelation:
             column.label(text='Biased: trades correlation artifacts for energy loss', icon='ERROR')
         column.prop(scene, 'flex_neighbors')
+        row = column.row(heading='Reuse Samples')
+        row.prop(scene, 'flex_reuse', text='')
+        samples = row.row()
+        samples.active = scene.flex_reuse
+        samples.prop(scene, 'flex_reuse_samples', text='')
+        header, body = column.panel('RENDER_PT_flex_jump', default_closed=True)
+        header.label(text='Camera Jump')
+        if body:
+            body.active = scene.flex_reuse
+            body.prop(scene, 'flex_jump_distance')
+            body.prop(scene, 'flex_jump_angle')
 
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
 def reload():
@@ -422,6 +451,16 @@ def register():
     bpy.types.Scene.flex_neighbors = bpy.props.IntProperty(name='Spatial Neighbors',
         description='Pixels each pixel reuses paths from per sample, fewer trade quality for speed', default=3, min=1,
         max=3)
+    bpy.types.Scene.flex_reuse = bpy.props.BoolProperty(name='Reuse Samples', description='Trace fewer samples of a '
+        'view reusing the last one\'s paths, as an animation\'s frames do after its first and after camera jumps')
+    bpy.types.Scene.flex_reuse_samples = bpy.props.IntProperty(name='Reuse Samples',
+        description='Paths traced per pixel of a view reusing the last one\'s', default=128, min=1)
+    bpy.types.Scene.flex_jump_distance = bpy.props.FloatProperty(name='Distance', description='Farthest the camera '
+        'moves between views to reuse samples, a farther move jumps and traces all of them', default=1, min=0,
+        subtype='DISTANCE')
+    bpy.types.Scene.flex_jump_angle = bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
+        'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
+        max=math.pi, subtype='ANGLE')
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
     bpy.utils.register_class(RENDER_PT_flex_restir)
@@ -440,3 +479,7 @@ def unregister():
     del bpy.types.Scene.flex_restir
     del bpy.types.Scene.flex_decorrelation
     del bpy.types.Scene.flex_neighbors
+    del bpy.types.Scene.flex_reuse
+    del bpy.types.Scene.flex_reuse_samples
+    del bpy.types.Scene.flex_jump_distance
+    del bpy.types.Scene.flex_jump_angle
