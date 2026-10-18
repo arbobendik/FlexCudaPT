@@ -65,7 +65,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TANGENT': numpy.tan, 'ARCSINE': lambda a: numpy.arcsin(numpy.clip(a, -1, 1)),
     'ARCCOSINE': lambda a: numpy.arccos(numpy.clip(a, -1, 1)), 'ARCTANGENT': numpy.arctan, 'ARCTAN2': numpy.arctan2,
     'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, 'CROSS_PRODUCT': numpy.cross, 'RGB_TO_HSV': to_hsv,
-    'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl}
+    'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
+    'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
+        + k * numpy.dot(k, v) * (1 - numpy.cos(a))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -279,6 +281,29 @@ def hue_saturation(hue, saturation, value, factor, color):  # Of a hue saturatio
 MODES = {'RGB': (lambda c: c, lambda c: c), 'HSV': (lambda c: ('RGB_TO_HSV', c), lambda c: ('HSV_TO_RGB', c)),
     'HSL': (lambda c: ('RGB_TO_HSL', c), lambda c: ('HSL_TO_RGB', c))}
 
+def euler(vector, rotation, inverse=False):  # Turned by Blender's XYZ Euler angles, or back
+    for k in (2, 1, 0) if inverse else (0, 1, 2):
+        angle = 'DOT_PRODUCT', rotation, numpy.eye(3)[k]
+        vector = 'ROTATE', vector, numpy.eye(3)[k], ('SUBTRACT', 0, angle) if inverse else angle
+    return vector
+
+def mapping(node, inputs, index):  # Of a mapping node, as Cycles'
+    vector, *location, rotation, scale = inputs
+    if node.vector_type == 'TEXTURE': return 'DIVIDE', euler(('SUBTRACT', vector, *location), rotation, True), scale
+    if node.vector_type == 'NORMAL': return normalize(euler(('DIVIDE', vector, scale), rotation))
+    vector = euler(('MULTIPLY', vector, scale), rotation)
+    return ('ADD', vector, *location) if location else vector
+
+def vector_rotate(node, inputs, index):  # Of a vector rotate node about its center, as Cycles'
+    vector, center, *rotation = inputs
+    if node.rotation_type == 'EULER_XYZ':
+        return 'ADD', euler(('SUBTRACT', vector, center), rotation[0], node.invert), center
+    axis = normalize(rotation[0]) if node.rotation_type == 'AXIS_ANGLE' else numpy.eye(3)['XYZ'.index(
+        node.rotation_type[0])]
+    angle = ('SUBTRACT', 0, rotation[-1]) if node.invert else rotation[-1]
+    if node.rotation_type == 'AXIS_ANGLE': angle = 'MULTIPLY', angle, ('LESS_THAN', 0, length(rotation[0]))
+    return 'ADD', ('ROTATE', ('SUBTRACT', vector, center), axis, angle), center
+
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
 # colors from sRGB once interpolated.
@@ -294,11 +319,11 @@ def image(node, inputs, index):
     return color if node.image.is_float or data else ('DECODE', color)
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
-# image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
-# mapping of points scales and moves them without rotating, one of textures undoes that. A normal map bends the normal
-# by its strength toward the color's normal in tangent space and keeps it in any other space. Added shaders sum their
-# iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the generated ones are known;
-# noise is Cycles' of a 3D point, one octave of it normalized, at the generated point without a vector.
+# image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. A
+# normal map bends the normal by its strength toward the color's normal in tangent space and keeps it in any other
+# space. Added shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the
+# generated ones are known; noise is Cycles' of a 3D point, one octave of it normalized, at the generated point without
+# a vector.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
@@ -324,9 +349,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
     'COMBXYZ': lambda node, inputs, index: ('ADD', ('ADD', ('MULTIPLY', inputs[0], numpy.eye(3)[0]),
         ('MULTIPLY', inputs[1], numpy.eye(3)[1])), ('MULTIPLY', inputs[2], numpy.eye(3)[2])),
-    'MAPPING': lambda node, inputs, index: ('ADD', ('MULTIPLY', inputs[0], inputs[3]), inputs[1])
-        if node.vector_type == 'POINT' else ('DIVIDE', ('SUBTRACT', inputs[0], inputs[1]), inputs[3])
-        if node.vector_type == 'TEXTURE' else inputs[0],
+    'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
     'TEX_COORD': lambda node, inputs, index: resolve(node.outputs[index]) if index else ('GENERATED',),
     'TEX_NOISE': lambda node, inputs, index: ('NOISE', ('MULTIPLY', inputs[0] if node.inputs[0].is_linked
         else ('GENERATED',), inputs[1]))}
