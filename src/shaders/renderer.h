@@ -53,9 +53,13 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
 // The frame's number seeds it.
+// Denoised, per pixel: the mean radiance, the motion of what the pixel sees since the frame last denoised, through its
+// camera and vertices, how far the motion is trusted, and the triangle the pixel sees now and saw then.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated; float2* uvs;
     Material* materials; LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
+    float4* mean; float2* flow; float* trust; unsigned *seen, *previousSeen; float3* previousVertices;
+    Camera denoisedCamera;
 };
