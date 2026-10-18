@@ -15,6 +15,9 @@ def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
 def divide(a, b):
     return numpy.divide(a, b, out=numpy.zeros(3), where=b != 0)
 
+def decode(srgb):  # sRGB to linear
+    return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
@@ -22,7 +25,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
     'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('GENERATED', 'NOISE',
-    'IMAGE_CUBIC', 'ALPHA_CUBIC'))}
+    'IMAGE_CUBIC', 'ALPHA_CUBIC')), 'DECODE': decode}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -47,10 +50,8 @@ PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MA
     'MATERIAL_PT_animation')
 SCENE, REQUEST, UPDATE = range(3)  # Kinds of what the renderer is piped
 
-def decode(srgb):  # sRGB to linear
-    return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
-
-# First texel, width, height and mean of an image or of a ramp node's 256 colors, added as linear floats at first use
+# First texel, width, height and mean of an image or of a ramp node's 256 colors, added as floats at first use, 8 bit
+# images in sRGB
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     if source not in textures:
@@ -59,8 +60,6 @@ def texture(source, textures, texels):
         pixels = numpy.empty(1024 if ramp else len(image.pixels), 'f')
         if ramp: pixels[:] = numpy.ravel([source.color_ramp.evaluate(i / 255) for i in range(256)])
         else: image.pixels.foreach_get(pixels)
-        if not (ramp or image.is_float or image.colorspace_settings.is_data):
-            pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
         if not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data:  # As Cycles keeps
             pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
@@ -123,15 +122,18 @@ def clamp(value):
     return 'SUBTRACT', 1, ('MAXIMUM', 0, ('SUBTRACT', 1, ('MAXIMUM', 0, value)))
 
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
-# reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
+# reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
+# colors from sRGB once interpolated.
 def image(node, inputs, index):
     if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
     source = ImageRead(node, inputs[0] if node.inputs[0].is_linked else ('UV',))
     read = lambda name: (name + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation,
         ''), inputs[0] if node.inputs[0].is_linked else ('UV',), source)
-    if index or node.image.alpha_mode in (
-            'CHANNEL_PACKED', 'NONE') or node.image.colorspace_settings.is_data: return read(('IMAGE', 'ALPHA')[index])
-    return 'UNASSOCIATE', read('IMAGE'), read('ALPHA')
+    if index: return read('ALPHA')
+    data, color = node.image.colorspace_settings.is_data, read('IMAGE')
+    if node.image.alpha_mode not in ('CHANNEL_PACKED',
+        'NONE') and not data: color = 'UNASSOCIATE', color, read('ALPHA')
+    return color if node.image.is_float or data else ('DECODE', color)
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
