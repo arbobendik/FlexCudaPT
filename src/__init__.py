@@ -253,6 +253,12 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
         + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
+    'INVERT': lambda node, inputs, index: mix(inputs[1], ('SUBTRACT', 1, inputs[1]), inputs[0]),
+    'GAMMA': lambda node, inputs, index: mix(mix(inputs[0], ('POWER', *inputs), ('LESS_THAN', 0, inputs[0])), 1,
+        ('SUBTRACT', 1, ('LESS_THAN', 0, absolute(inputs[1])))),  # White for no gamma
+    'BRIGHTCONTRAST': lambda node, inputs, index: ('MAXIMUM', ('ADD', ('MULTIPLY', inputs[0], ('ADD', 1, inputs[2])),
+        ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
+    'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
