@@ -81,7 +81,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
-    'MAGIC', 'BRICK', 'STORE', 'LOAD'))}
+    'MAGIC', 'BRICK', 'OBJECT', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -469,6 +469,10 @@ def wave(node, inputs, index):  # Of a wave texture node at the generated point 
     return fraction(n) if node.wave_profile == 'SAW' else ('MULTIPLY', absolute(('SUBTRACT', n, ('FLOOR', ('ADD', n,
         0.5)))), 2)
 
+def transform(matrix, point):  # The point by the affine matrix
+    return 'ADD', vector(*(('DOT_PRODUCT', point, numpy.array(row[:3])) for row in matrix[:3])), \
+        numpy.array(matrix.translation)
+
 def facing(normal):  # Turned toward the incoming direction on the backs of faces, as Cycles' shading normals
     return 'MULTIPLY', normal, ('SUBTRACT', 1, ('MULTIPLY', ('BACKFACING',), 2))
 
@@ -530,7 +534,7 @@ def image(node, inputs, index):
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. A
 # normal map bends the normal by its strength toward the color's normal in tangent space and keeps it in any other
 # space. Added shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the
-# generated and reflection ones are known.
+# generated, object and reflection ones are known.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
@@ -560,7 +564,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
     'TEX_COORD': lambda node, inputs, index: ('GENERATED',) if not index else ('SUBTRACT', ('MULTIPLY',
         facing(('NORMAL',)), ('MULTIPLY', ('DOT_PRODUCT', facing(('NORMAL',)), ('INCOMING',)), 2)), ('INCOMING',))
-        if index == 6 else resolve(node.outputs[index]),
+        if index == 6 else (transform(node.object.matrix_world.inverted(), ('POSITION',)) if node.object
+        else ('OBJECT',)) if index == 3 else resolve(node.outputs[index]),
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
     'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
@@ -684,17 +689,23 @@ class Flex(bpy.types.RenderEngine):
     # visibility, those of their slots and a light's radiance.
     def start(self, depsgraph):
         visible = [instance.object.name for instance in depsgraph.object_instances]
-        if visible == self.visible and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
+        trees = (*bpy.data.node_groups, *(material.node_tree for material in (*bpy.data.materials, *bpy.data.worlds)))
+        references = {node.object.name for tree in trees if tree for node in tree.nodes
+            if node.type == 'TEX_COORD' and node.object}
+        changed = {update.id.name for update in depsgraph.updates}
+        if visible == self.visible and not references & changed and all(isinstance(update.id,
+                (bpy.types.Scene, bpy.types.Camera))
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
-        moved = visible == self.visible and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera,
-            bpy.types.Object, bpy.types.Action)) for update in depsgraph.updates) \
-            and {update.id.name for update in depsgraph.updates}
+        moved = visible == self.visible and not references & changed and all(isinstance(update.id,
+            (bpy.types.Scene, bpy.types.Camera, bpy.types.Object, bpy.types.Action)) for update in depsgraph.updates) \
+            and changed
         self.visible = visible
         scene = depsgraph.scene_eval
         vertices = [numpy.empty((0, 3, 3), 'f')]  # Per object, after none for a scene without triangles
         corners = [numpy.empty((0, 3, 3), 'f')]  # Normals
         uvs = [numpy.empty((0, 3, 2), 'f')]
         generated = [numpy.empty((0, 3, 3), 'f')]  # Texture coordinates, the points in the mesh's texture space
+        local = [numpy.empty((0, 3, 3), 'f')]  # Object coordinates, the points in the object's space
         materials = []
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height and mean per image and ramp
@@ -730,6 +741,7 @@ class Flex(bpy.types.RenderEngine):
                 normals = normal.reshape(-1, 3)[loops] @ numpy.array(instance.matrix_world.to_3x3().adjugated())
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
                 orco = orco[vertex[loops]].reshape(-1, 3, 3)
+                point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
                 for slot in ob.material_slots:
                     if slot.material not in rows: rows[slot.material] = shade(slot.material, program)
                 shades = [rows[slot.material] for slot in ob.material_slots] or [rows[None]]
@@ -765,7 +777,7 @@ class Flex(bpy.types.RenderEngine):
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv = numpy.zeros((len(bm.faces), 3, 2), 'f')
-                orco = numpy.zeros((len(bm.faces), 3, 3), 'f')
+                orco = point = numpy.zeros((len(bm.faces), 3, 3), 'f')
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
             # Triangles of the surfaces rendered, normals turned as the faces turn, a material of its row each
             rendered = numpy.array([bool(row) for row in shades])[index]
@@ -773,6 +785,7 @@ class Flex(bpy.types.RenderEngine):
             corners.append(normals.reshape(-1, 3, 3)[rendered])
             uvs.append(uv[rendered])
             generated.append(orco[rendered])
+            local.append(point[rendered])
             table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera, len(row)) for row in shades])
             materials.append(table[index[rendered]])
             slots.append((i, len(vertices[-1]), (ob.visible_camera, [slot.material and slot.material.name
@@ -784,7 +797,7 @@ class Flex(bpy.types.RenderEngine):
                 return self.start(depsgraph)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
-                *(arrays[k + 1].astype('f') for arrays in (vertices, corners, generated, uvs))))))
+                *(arrays[k + 1].astype('f') for arrays in (vertices, corners, generated, local, uvs))))))
             return
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
@@ -792,12 +805,12 @@ class Flex(bpy.types.RenderEngine):
         materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0, 1)])
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
-        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated and 6 UV floats,
-        # a material of its emission, program, hidden flag and layer count (then the world's); then the steps of 4
-        # integers and the texels.
+        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object and 6
+        # UV floats, a material of its emission, program, hidden flag and layer count (then the world's); then the steps
+        # of 4 integers and the texels.
         self.requests.writelines((struct.pack('<4I', SCENE, len(triangles), len(ops), sum(map(len, texels)) // 4),
             triangles,
-            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, uvs)),
+            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, local, uvs)),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels))
 

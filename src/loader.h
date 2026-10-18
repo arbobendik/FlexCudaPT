@@ -234,7 +234,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     struct { unsigned count, ops, texels; } header;
     std::fread(&header, sizeof(header), 1, stdin);
     scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
-    scene.generated = load<float3>(3 * header.count);
+    scene.generated = load<float3>(3 * header.count), scene.objects = load<float3>(3 * header.count);
     scene.uvs = load<float2>(3 * header.count), scene.materials = load<Material>(header.count + 1, loaded.materials);
     scene.lights = loadLights(loaded.vertices, loaded.materials);
     scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
@@ -242,7 +242,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         loaded.temp, loaded.output);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
-    loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated,
+    loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops,
         (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
 }
@@ -266,6 +266,7 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         update(scene.vertices, 3 * range.first, 3 * range.count, &loaded.vertices[3 * range.first]);
         update(scene.normals, 3 * range.first, 3 * range.count, points.data());
         update(scene.generated, 3 * range.first, 3 * range.count, points.data());
+        update(scene.objects, 3 * range.first, 3 * range.count, points.data());
         update(scene.uvs, 3 * range.first, 3 * range.count, uvs.data());
     }
     LightNode* const lights = loadLights(loaded.vertices, loaded.materials);
