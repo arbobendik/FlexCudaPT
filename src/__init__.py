@@ -366,17 +366,19 @@ def white_noise(node, inputs, index):
     return 'WHITE_NOISE', inputs[0], numpy.array((min(dimensions, 3), index, 0))
 
 # Of a Voronoi texture node's distance, color or position, as Cycles' fractal of 3D points, which it takes in any
-# dimension, at the generated point without a vector, normalized by the farthest distance its metric makes
+# dimension, at the generated point without a vector, normalized by the farthest distance its metric makes; or its
+# distance to edges or n-sphere radius
 def voronoi(node, inputs, index):
     get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
     point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
     metric = ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
+    feature = ('F1', 'F2', 'SMOOTH_F1', 'DISTANCE_TO_EDGE', 'N_SPHERE_RADIUS').index(node.feature)
     farthest = ('POWER', 3, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (3 ** 0.5, 3, 1)[metric]
-    farthest = 'MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))), ('MULTIPLY', farthest,
-        (2 if node.feature == 'F2' else 1) * node.normalize)
-    value = 'VORONOI', ('MULTIPLY', point, get('Scale')), vector(('F1', 'F2', 'SMOOTH_F1').index(node.feature), metric,
-        get('Exponent', 1)), vector(get('Randomness'), get('Smoothness', 0), index), vector(get('Detail'),
-        get('Roughness'), get('Lacunarity')), farthest
+    farthest = 'MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))), ('MULTIPLY', 1 if feature > 2
+        else farthest, (2 if feature == 1 else 1) * (node.normalize and feature < 4))
+    value = ('VORONOI', ('MULTIPLY', point, get('Scale')), vector(feature, metric, get('Exponent', 1)),
+        vector(get('Randomness'), get('Smoothness', 0), index), vector(get('Detail', 0), get('Roughness', 0),
+        get('Lacunarity', 0)), farthest)
     return ('DIVIDE', value, get('Scale')) if index == 2 else value
 
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
