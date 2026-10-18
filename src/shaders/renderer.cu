@@ -262,6 +262,26 @@ __device__ float3 magic(float3 p, float3 params) {
     }
     return make_float3(0.5f, 0.5f, 0.5f) - make_float3(x, y, z) / (d != 0 ? 2 * d : 1);
 }
+// Brick texture's tint and mortar; a: mortar size, smoothness, bias; b: width, height, offset; c: frequencies
+__device__ float3 brick(float3 p, float3 a, float3 b, float3 c) {
+    const int row = int(floorf(p.y / b.y)), offset_frequency = int(c.x), squash_frequency = int(c.z);
+    float width = b.x, offset = 0;
+    if (offset_frequency && squash_frequency) {
+        width *= row % squash_frequency ? 1 : c.y;
+        offset = row % offset_frequency ? 0 : width * b.z;
+    }
+    const int column = int(floorf((p.x + offset) / width));
+    const float x = p.x + offset - width * column, y = p.y - b.y * row;
+    unsigned n = ((row << 16) + (column & 0xFFFF) + 1013) & 0x7fffffff; // Integer noise of the brick
+    n = (n >> 13) ^ n;
+    const float noise = 0.5f * float((n * (n * n * 60493 + 19990303) + 1376312589) & 0x7fffffff) / 1073741824.0f;
+    float distance = fminf(fminf(x, y), fminf(width - x, b.y - y)), mortar = distance < a.x;
+    if (mortar && a.y != 0) {
+        distance = fminf(fmaxf((1 - distance / a.x) / a.y, 0), 1);
+        mortar = distance * distance * (3 - 2 * distance);
+    }
+    return make_float3(fminf(fmaxf(noise + a.z, 0), 1), mortar, 0);
+}
 // Gradient of a lattice point picked by Jenkins' hash, at offset f
 __device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
     const unsigned h = jenkins(3, x, y, z) & 15;
@@ -397,6 +417,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = safeDivide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
+        case BRICK: top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
         case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
         case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
         case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
