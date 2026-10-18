@@ -33,7 +33,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MODULO': lambda a, b: numpy.fmod(a, b, out=numpy.zeros(3), where=b != 0), 'SINE': numpy.sin, 'COSINE': numpy.cos,
     'TANGENT': numpy.tan, 'ARCSINE': lambda a: numpy.arcsin(numpy.clip(a, -1, 1)),
     'ARCCOSINE': lambda a: numpy.arccos(numpy.clip(a, -1, 1)), 'ARCTANGENT': numpy.arctan, 'ARCTAN2': numpy.arctan2,
-    'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, **dict.fromkeys(('STORE', 'LOAD'))}
+    'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, 'CROSS_PRODUCT': numpy.cross,
+    **dict.fromkeys(('STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -151,11 +152,23 @@ def absolute(value):
 def fraction(value):
     return 'SUBTRACT', value, ('FLOOR', value)
 
+def length(vector):
+    return 'POWER', ('DOT_PRODUCT', vector, vector), 0.5
+
+def normalize(vector):  # Zero for zero, as Blender's
+    return 'DIVIDE', vector, length(vector)
+
+def refract(a, b, eta):  # Of a through a surface along b, zero under total internal reflection, as Blender's
+    n, cosine = normalize(b), ('DOT_PRODUCT', a, normalize(b))
+    k = 'SUBTRACT', 1, ('MULTIPLY', ('MULTIPLY', eta, eta), ('SUBTRACT', 1, ('MULTIPLY', cosine, cosine)))
+    return 'MULTIPLY', ('SUBTRACT', ('MULTIPLY', a, eta), ('MULTIPLY', n, ('ADD', ('MULTIPLY', eta, cosine),
+        ('POWER', ('MAXIMUM', k, 0), 0.5)))), ('SUBTRACT', 1, ('LESS_THAN', k, 0))
+
 def smooth(a, b, c):  # Smooth minimum of a and b by c, as Blender's
     h = 'DIVIDE', ('MAXIMUM', ('SUBTRACT', c, absolute(('SUBTRACT', a, b))), 0), c
     return 'SUBTRACT', ('MINIMUM', a, b), ('MULTIPLY', ('MULTIPLY', ('MULTIPLY', h, h), h), ('MULTIPLY', c, 1 / 6))
 
-# Operations of math nodes composed of the shader's: their expressions of the operands, as Blender's
+# Operations of math and vector math nodes composed of the shader's: their expressions of the operands, as Blender's
 COMPOSITES = {'SQRT': lambda a: ('POWER', ('MAXIMUM', a, 0), 0.5),
     'INVERSE_SQRT': lambda a: ('DIVIDE', 1, ('POWER', ('MAXIMUM', a, 0), 0.5)), 'ABSOLUTE': absolute,
     'GREATER_THAN': lambda a, b: ('LESS_THAN', b, a),
@@ -170,7 +183,13 @@ COMPOSITES = {'SQRT': lambda a: ('POWER', ('MAXIMUM', a, 0), 0.5),
         ('SUBTRACT', b, c))), c), ('LESS_THAN', 0, absolute(('SUBTRACT', b, c))))),
     'PINGPONG': lambda a, b: absolute(('SUBTRACT', ('MULTIPLY', fraction(('DIVIDE', ('SUBTRACT', a, b),
         ('MULTIPLY', b, 2))), ('MULTIPLY', b, 2)), b)),
-    'RADIANS': lambda a: ('MULTIPLY', a, math.pi / 180), 'DEGREES': lambda a: ('MULTIPLY', a, 180 / math.pi)}
+    'RADIANS': lambda a: ('MULTIPLY', a, math.pi / 180), 'DEGREES': lambda a: ('MULTIPLY', a, 180 / math.pi),
+    'PROJECT': lambda a, b: ('MULTIPLY', b, ('DIVIDE', ('DOT_PRODUCT', a, b), ('DOT_PRODUCT', b, b))),
+    'REFLECT': lambda a, b: ('SUBTRACT', a, ('MULTIPLY', normalize(b), ('MULTIPLY', ('DOT_PRODUCT', a, normalize(b)),
+        2))), 'REFRACT': refract,
+    'FACEFORWARD': lambda a, b, c: ('MULTIPLY', a, ('SUBTRACT', ('MULTIPLY', ('LESS_THAN', ('DOT_PRODUCT', c, b), 0),
+        2), 1)), 'DISTANCE': lambda a, b: length(('SUBTRACT', a, b)), 'LENGTH': length,
+    'SCALE': lambda a, b: ('MULTIPLY', a, b), 'NORMALIZE': normalize}
 
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
