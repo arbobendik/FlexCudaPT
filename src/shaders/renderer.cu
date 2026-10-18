@@ -178,12 +178,59 @@ __device__ Cell voronoi(float3 p, float3 kind, float3 extra) {
     const int f = feature == 1;
     return {reach == 2 ? smooth : best[f], colors[f], positions[f] + cell};
 }
+// Cycles' distance of a 3D point to the edge of its Voronoi cell, or its cell's n-sphere radius, by the randomness
+__device__ float edge(float3 p, float randomness, bool sphere) {
+    const float3 cell = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), local = p - cell;
+    const auto point = [&](int i, int j, int k) {
+        return make_float3(i, j, k) + site(int(cell.x) + i, int(cell.y) + j, int(cell.z) + k) * randomness;
+    };
+    float best = 3.402823e38f;
+    float3 closest = {};
+    int3 offset = {};
+    for (int k = -1; k <= 1; ++k) for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
+        const float3 v = point(i, j, k) - local;
+        if (dot(v, v) < best) best = dot(v, v), closest = v, offset = make_int3(i, j, k);
+    }
+    best = 3.402823e38f;
+    float3 nearest = {};
+    for (int k = -1; k <= 1; ++k) for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
+        if (sphere) { // The nearest other point to the closest
+            if (i == 0 && j == 0 && k == 0) continue;
+            const float3 v = point(offset.x + i, offset.y + j, offset.z + k) - local - closest;
+            if (dot(v, v) < best) best = dot(v, v), nearest = v;
+            continue;
+        }
+        const float3 v = point(i, j, k) - local, perpendicular = v - closest;
+        if (dot(perpendicular, perpendicular) > 0.0001f)
+            best = fminf(best, dot((closest + v) / 2, normalize(perpendicular)));
+    }
+    return sphere ? length(nearest) / 2 : best;
+}
 // Cycles' fractal of Voronoi octaves up to the detail, as of noise: the distance, color or position, the output in
-// extra, normalized by the farthest distance unless zero
+// extra, normalized by the farthest distance unless zero; or the distance to edges, of fractal minima, or the n-sphere
+// radius
 __device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fractal, float farthest) {
     const float detail = fminf(fmaxf(fractal.x, 0), 15), roughness = fminf(fmaxf(fractal.y, 0), 1);
-    const float rmd = detail - floorf(detail);
+    const float rmd = detail - floorf(detail), randomness = fminf(fmaxf(extra.x, 0), 1);
+    if (kind.x == 4) return make_float3(1, 1, 1) * edge(p, randomness, true);
     float amplitude = 1, total = 0, scale = 1;
+    if (kind.x == 3) {
+        float distance = 8;
+        total = farthest;
+        for (int i = 0; i <= ceilf(detail); ++i) {
+            const float octave = edge(p * scale, randomness, false);
+            if (detail == 0 || roughness == 0) {
+                distance = octave;
+                break;
+            }
+            const float weight = amplitude * (i <= detail ? 1 : rmd);
+            total = total * (1 - weight) + farthest / scale * weight;
+            distance = distance * (1 - weight) + fminf(distance, octave / scale) * weight;
+            scale *= fractal.z;
+            amplitude *= roughness;
+        }
+        return make_float3(1, 1, 1) * (farthest > 0 ? distance / total : distance);
+    }
     Cell sum = {};
     for (int i = 0; i <= ceilf(detail); ++i) {
         const Cell octave = voronoi(p * scale, kind, extra);
