@@ -330,6 +330,21 @@ def vector_rotate(node, inputs, index):  # Of a vector rotate node about its cen
     if node.rotation_type == 'AXIS_ANGLE': angle = 'MULTIPLY', angle, ('LESS_THAN', 0, length(rotation[0]))
     return 'ADD', ('ROTATE', ('SUBTRACT', vector, center), axis, angle), center
 
+def vector(x, y, z):
+    return 'ADD', ('ADD', ('MULTIPLY', x, numpy.eye(3)[0]), ('MULTIPLY', y, numpy.eye(3)[1])), \
+        ('MULTIPLY', z, numpy.eye(3)[2])
+
+# Of a noise texture node, as Cycles' of 3D points, which it takes in any dimension, at the generated point without a
+# vector: its fractal, the type of which the renderer numbers
+def noise(node, inputs, index):
+    get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
+    point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
+    kind = 'UNNORMALIZED' if node.noise_type == 'FBM' and not node.normalize else node.noise_type
+    kind = ('FBM', 'UNNORMALIZED', 'MULTIFRACTAL', 'HETERO_TERRAIN', 'HYBRID_MULTIFRACTAL',
+        'RIDGED_MULTIFRACTAL').index(kind)
+    return 'NOISE', ('MULTIPLY', point, get('Scale')), vector(get('Detail'), get('Roughness'), get('Lacunarity')), \
+        vector(get('Offset', 0), get('Gain', 0), kind)
+
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where reading it unless the image packs channels, ignores its
 # alpha, which is one then, or holds data.
@@ -349,8 +364,7 @@ def image(node, inputs, index):
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. A
 # normal map bends the normal by its strength toward the color's normal in tangent space and keeps it in any other
 # space. Added shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the
-# generated ones are known; noise is Cycles' of a 3D point, one octave of it normalized, at the generated point without
-# a vector.
+# generated ones are known.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
@@ -374,12 +388,10 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
         else COMPOSITES[node.operation](*inputs) if node.operation in COMPOSITES else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
-    'COMBXYZ': lambda node, inputs, index: ('ADD', ('ADD', ('MULTIPLY', inputs[0], numpy.eye(3)[0]),
-        ('MULTIPLY', inputs[1], numpy.eye(3)[1])), ('MULTIPLY', inputs[2], numpy.eye(3)[2])),
+    'COMBXYZ': lambda node, inputs, index: vector(*inputs),
     'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
     'TEX_COORD': lambda node, inputs, index: resolve(node.outputs[index]) if index else ('GENERATED',),
-    'TEX_NOISE': lambda node, inputs, index: ('NOISE', ('MULTIPLY', inputs[0] if node.inputs[0].is_linked
-        else ('GENERATED',), inputs[1]))}
+    'TEX_NOISE': noise}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
