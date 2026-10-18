@@ -17,6 +17,10 @@ def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
 def divide(a, b):
     return numpy.divide(a, b, out=numpy.zeros(3), where=b != 0)
 
+def power(a, b):  # Of a to the power of b, zero where undefined as Blender's on the GPU
+    with numpy.errstate(all='ignore'):
+        return numpy.where(b == 0, 1, numpy.where((a == 0) | (a < 0) & (b != numpy.trunc(b)), 0, numpy.power(a, b)))
+
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
@@ -24,7 +28,12 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
     'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('GENERATED', 'NOISE',
-    'IMAGE_CUBIC', 'ALPHA_CUBIC', 'STORE', 'LOAD'))}
+    'IMAGE_CUBIC', 'ALPHA_CUBIC')), 'POWER': power, 'EXPONENT': numpy.exp,
+    'MINIMUM': numpy.minimum, 'LESS_THAN': lambda a, b: (a < b) * 1.0, 'FLOOR': numpy.floor,
+    'MODULO': lambda a, b: numpy.fmod(a, b, out=numpy.zeros(3), where=b != 0), 'SINE': numpy.sin, 'COSINE': numpy.cos,
+    'TANGENT': numpy.tan, 'ARCSINE': lambda a: numpy.arcsin(numpy.clip(a, -1, 1)),
+    'ARCCOSINE': lambda a: numpy.arccos(numpy.clip(a, -1, 1)), 'ARCTANGENT': numpy.arctan, 'ARCTAN2': numpy.arctan2,
+    'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, **dict.fromkeys(('STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -136,6 +145,33 @@ def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by a
 def clamp(value):
     return 'SUBTRACT', 1, ('MAXIMUM', 0, ('SUBTRACT', 1, ('MAXIMUM', 0, value)))
 
+def absolute(value):
+    return 'MAXIMUM', value, ('SUBTRACT', 0, value)
+
+def fraction(value):
+    return 'SUBTRACT', value, ('FLOOR', value)
+
+def smooth(a, b, c):  # Smooth minimum of a and b by c, as Blender's
+    h = 'DIVIDE', ('MAXIMUM', ('SUBTRACT', c, absolute(('SUBTRACT', a, b))), 0), c
+    return 'SUBTRACT', ('MINIMUM', a, b), ('MULTIPLY', ('MULTIPLY', ('MULTIPLY', h, h), h), ('MULTIPLY', c, 1 / 6))
+
+# Operations of math nodes composed of the shader's: their expressions of the operands, as Blender's
+COMPOSITES = {'SQRT': lambda a: ('POWER', ('MAXIMUM', a, 0), 0.5),
+    'INVERSE_SQRT': lambda a: ('DIVIDE', 1, ('POWER', ('MAXIMUM', a, 0), 0.5)), 'ABSOLUTE': absolute,
+    'GREATER_THAN': lambda a, b: ('LESS_THAN', b, a),
+    'SIGN': lambda a: ('SUBTRACT', ('LESS_THAN', 0, a), ('LESS_THAN', a, 0)),
+    'COMPARE': lambda a, b, c: ('SUBTRACT', 1, ('LESS_THAN', ('MAXIMUM', c, 2 ** -23), absolute(('SUBTRACT', a, b)))),
+    'SMOOTH_MIN': smooth, 'SMOOTH_MAX': lambda a, b, c: ('SUBTRACT', 0, smooth(('SUBTRACT', 0, a),
+        ('SUBTRACT', 0, b), c)), 'ROUND': lambda a: ('FLOOR', ('ADD', a, 0.5)),
+    'CEIL': lambda a: ('SUBTRACT', 0, ('FLOOR', ('SUBTRACT', 0, a))),
+    'TRUNC': lambda a: ('SUBTRACT', a, ('MODULO', a, 1)), 'FRACT': fraction, 'FRACTION': fraction,
+    'FLOORED_MODULO': lambda a, b: ('MULTIPLY', ('SUBTRACT', a, ('SNAP', a, b)), ('LESS_THAN', 0, absolute(b))),
+    'WRAP': lambda a, b, c: ('ADD', c, ('MULTIPLY', ('SUBTRACT', ('SUBTRACT', a, ('SNAP', ('SUBTRACT', a, c),
+        ('SUBTRACT', b, c))), c), ('LESS_THAN', 0, absolute(('SUBTRACT', b, c))))),
+    'PINGPONG': lambda a, b: absolute(('SUBTRACT', ('MULTIPLY', fraction(('DIVIDE', ('SUBTRACT', a, b),
+        ('MULTIPLY', b, 2))), ('MULTIPLY', b, 2)), b)),
+    'RADIANS': lambda a: ('MULTIPLY', a, math.pi / 180), 'DEGREES': lambda a: ('MULTIPLY', a, 180 / math.pi)}
+
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
 def image(node, inputs, index):
@@ -164,7 +200,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
-    'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation) else inputs[0],
+    'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
+        else COMPOSITES[node.operation](*inputs) if node.operation in COMPOSITES else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
     'COMBXYZ': lambda node, inputs, index: ('ADD', ('ADD', ('MULTIPLY', inputs[0], numpy.eye(3)[0]),
         ('MULTIPLY', inputs[1], numpy.eye(3)[1])), ('MULTIPLY', inputs[2], numpy.eye(3)[2])),
