@@ -236,6 +236,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
     scene.generated = load<float3>(3 * header.count), scene.objects = load<float3>(3 * header.count);
     scene.uvs = load<float2>(3 * header.count), scene.colors = load<float4>(3 * header.count);
+    scene.tangents = load<float4>(3 * header.count);
     scene.infos = load<Info>(header.count);
     scene.materials = load<Material>(header.count + 1, loaded.materials);
     scene.lights = loadLights(loaded.vertices, loaded.materials);
@@ -245,7 +246,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
-        (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.infos, (CUdeviceptr)scene.materials,
+        (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.infos,
+        (CUdeviceptr)scene.materials,
         (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
 }
 
@@ -273,6 +275,7 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         update(scene.objects, 3 * range.first, 3 * range.count, points.data());
         update(scene.uvs, 3 * range.first, 3 * range.count, uvs.data());
         update(scene.colors, 3 * range.first, 3 * range.count, colors.data());
+        update(scene.tangents, 3 * range.first, 3 * range.count, colors.data());
         update(scene.infos, range.first, range.count, infos.data());
     }
     LightNode* const lights = loadLights(loaded.vertices, loaded.materials);
