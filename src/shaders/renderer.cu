@@ -305,72 +305,82 @@ __device__ float3 box(float3 n, float blend) {
     if (n.y < (1 - limit) * (n.x + n.z)) return make_float3(ramp(n.x, n.z), 0, 1 - ramp(n.x, n.z));
     return (n * (2 - limit) + make_float3(1, 1, 1) * (limit - 1)) / (2 * limit - 1);
 }
-// Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
-__device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
-    const unsigned h = jenkins(3, x, y, z) & 15;
-    const float u = h < 8 ? f.x : f.y, v = h < 4 ? f.y : h == 12 || h == 14 ? f.x : f.z;
-    return (h & 1 ? -u : u) + (h & 2 ? -v : v);
+// Cycles' gradient of a lattice point of the dimensions picked by its hash, at the offset f from it
+__device__ float gradient(unsigned h, const float* f, int dims) {
+    if (dims == 1) return (h & 8 ? -1 : 1) * float(1 + (h & 7)) * f[0];
+    if (dims == 2) return (h & 1 ? -1 : 1) * f[(h & 7) >= 4] + (h & 2 ? -2 : 2) * f[(h & 7) < 4];
+    if (dims == 3) h &= 15;
+    const float u = f[(h & 31) >= (dims == 3 ? 8 : 24)], v = dims == 3 ? f[h < 4 ? 1 : h == 12 || h == 14 ? 0 : 2]
+        : f[(h & 31) < 16 ? 1 : 2], s = dims == 3 ? 0 : f[(h & 31) < 8 ? 2 : 3];
+    return (h & 1 ? -u : u) + (h & 2 ? -v : v) + (h & 4 ? -s : s);
 }
 __device__ float fade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-// Cycles' signed Perlin noise of a 3D point: its lattice's gradients blended by their faded distances
-__device__ float noise(float3 p) {
-    const float3 low = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), f = p - low;
-    const float3 w = make_float3(fade(f.x), fade(f.y), fade(f.z));
+// Cycles' signed Perlin noise of a point of the dimensions, of p's first and w as the fourth: its lattice's gradients
+// blended by their faded distances
+__device__ float noise(float3 p, float w, int dims) {
+    const float q[4] = {p.x, p.y, p.z, w}, scales[4] = {0.25f, 0.6616f, 0.9820f, 0.8344f};
     float sum = 0;
-    for (unsigned corner = 0; corner < 8; ++corner) {
-        const float3 d = make_float3(corner & 1, corner >> 1 & 1, corner >> 2);
-        sum += (d.x ? w.x : 1 - w.x) * (d.y ? w.y : 1 - w.y) * (d.z ? w.z : 1 - w.z)
-            * gradient(int(low.x + d.x), int(low.y + d.y), int(low.z + d.z), f - d);
+    for (int corner = 0; corner < 1 << dims; ++corner) {
+        float weight = 1, f[4];
+        int x[4] = {};
+        for (int k = 0; k < dims; ++k) {
+            const int b = corner >> k & 1;
+            x[k] = int(floorf(q[k])) + b, f[k] = q[k] - floorf(q[k]) - b;
+            weight *= b ? fade(f[k] + 1) : 1 - fade(f[k]);
+        }
+        sum += weight * gradient(jenkins(dims, x[0], x[1], x[2], x[3]), f, dims);
     }
-    return 0.9820f * sum;
+    return scales[dims - 1] * sum;
 }
 // Cycles' fractal noise of a point: octaves of noise up to the detail, the last by its fraction, by type of extra as
 // fractal Brownian motion normalized or not, multifractal, heterogeneous terrain or hybrid or ridged multifractal
-__device__ float fractal(float3 p, float3 params, float3 extra) {
+__device__ float fractal(float3 p, float3 params, float3 extra, float w, int dims) {
     const float detail = fminf(fmaxf(params.x, 0), 15), roughness = fmaxf(params.y, 0), lacunarity = params.z;
     const float offset = extra.x, gain = extra.y, rmd = detail - floorf(detail);
     const int octaves = int(detail), type = int(extra.z);
     if (type < 2) {
         float scale = 1, amp = 1, maxamp = 0, sum = 0;
         for (int i = 0; i <= octaves; ++i, amp *= roughness, scale *= lacunarity) {
-            sum += noise(p * scale) * amp;
+            sum += noise(p * scale, w * scale, dims) * amp;
             maxamp += amp;
         }
         const float whole = type ? sum : 0.5f * sum / maxamp + 0.5f;
         if (rmd == 0) return whole;
-        sum += noise(p * scale) * amp;
+        sum += noise(p * scale, w * scale, dims) * amp;
         return whole * (1 - rmd) + (type ? sum : 0.5f * sum / (maxamp + amp) + 0.5f) * rmd;
     }
     float value = 0, pwr = 1, weight = 1, signal;
     switch (type) {
         case 2:
             value = 1;
-            for (int i = 0; i <= octaves; ++i, pwr *= roughness, p = p * lacunarity) value *= pwr * noise(p) + 1;
-            return rmd != 0 ? value * (rmd * pwr * noise(p) + 1) : value;
+            for (int i = 0; i <= octaves; ++i, pwr *= roughness, p = p * lacunarity, w *= lacunarity)
+                value *= pwr * noise(p, w, dims) + 1;
+            return rmd != 0 ? value * (rmd * pwr * noise(p, w, dims) + 1) : value;
         case 3:
-            value = offset + noise(p);
+            value = offset + noise(p, w, dims);
             pwr = roughness;
-            p = p * lacunarity;
-            for (int i = 1; i <= octaves; ++i, pwr *= roughness, p = p * lacunarity)
-                value += (noise(p) + offset) * pwr * value;
-            return rmd != 0 ? value + rmd * (noise(p) + offset) * pwr * value : value;
+            p = p * lacunarity, w *= lacunarity;
+            for (int i = 1; i <= octaves; ++i, pwr *= roughness, p = p * lacunarity, w *= lacunarity)
+                value += (noise(p, w, dims) + offset) * pwr * value;
+            return rmd != 0 ? value + rmd * (noise(p, w, dims) + offset) * pwr * value : value;
         case 4:
-            for (int i = 0; weight > 0.001f && i <= octaves; ++i, p = p * lacunarity) {
+            for (int i = 0; weight > 0.001f && i <= octaves; ++i, p = p * lacunarity, w *= lacunarity) {
                 weight = fminf(weight, 1);
-                signal = (noise(p) + offset) * pwr;
+                signal = (noise(p, w, dims) + offset) * pwr;
                 pwr *= roughness;
                 value += weight * signal;
                 weight *= gain * signal;
             }
-            return rmd != 0 && weight > 0.001f ? value + rmd * fminf(weight, 1) * (noise(p) + offset) * pwr : value;
+            return rmd != 0 && weight > 0.001f ? value + rmd * fminf(weight, 1) * (noise(p, w, dims) + offset) * pwr
+                : value;
         default:
-            signal = offset - fabsf(noise(p));
+            signal = offset - fabsf(noise(p, w, dims));
             value = signal *= signal;
             pwr = roughness;
             for (int i = 1; i <= octaves; ++i, pwr *= roughness) {
-                p = p * lacunarity;
+                p = p * lacunarity, w *= lacunarity;
                 weight = fminf(fmaxf(signal * gain, 0), 1);
-                signal = offset - fabsf(noise(p));
+                signal = offset - fabsf(noise(p, w, dims));
                 signal *= signal * weight;
                 value += signal * pwr;
             }
@@ -505,7 +515,8 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
         case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
         case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
-        case NOISE: top -= 2; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1]); break;
+        case NOISE: top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
+            break;
         case POWER: --top; top[-1] = each(top[-1], *top, power); break;
         case EXPONENT: top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
         case MINIMUM: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fminf(a, b); }); break;
