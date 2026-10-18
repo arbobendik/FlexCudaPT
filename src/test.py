@@ -349,6 +349,21 @@ node_matches(image.outputs['Color'])
 other.interpolation = 'Closest'
 node_matches(image.outputs['Color'])
 tree.links.remove(emission.inputs['Strength'].links[0])
+normal = tree.nodes.new('ShaderNodeNormalMap')
+normal.inputs['Color'].default_value = (0.8, 0.7, 1, 1)
+ob = bpy.data.objects['nodes']
+ob.rotation_euler, ob.scale = (0.2, 0.3, -0.4), (1.7, 0.6, 1.2)
+node_matches(normal.outputs[0])
+ob.data.normals_split_custom_set(((0.2, 0.1, 1), (0.8, 0.1, 0.5), (0.1, 0.9, 0.5), (0.1, 0.3, 1)))
+node_matches(normal.outputs[0])
+normal.inputs['Strength'].default_value = 0
+node_matches(normal.outputs[0])
+normal.inputs['Strength'].default_value = 1
+ob.data.uv_layers.remove(ob.data.uv_layers[0])
+node_matches(normal.outputs[0])
+ob.data.clear_geometry()
+ob.data.from_pydata([(-2, -2, 0), (2, -2, 0), (2, 0, 0), (2, 2, 0), (-2, 2, 0)], [], [(0, 1, 2, 3, 4)])
+node_matches(normal.outputs[0])
 reference = bpy.data.objects.new('coordinate reference', None)
 scene.collection.objects.link(reference)
 coordinates = tree.nodes.new('ShaderNodeTexCoord')
