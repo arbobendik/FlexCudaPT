@@ -5,9 +5,9 @@
 struct Camera { float3 origin, x, y, z; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
-// combines the two or three topmost.
+// combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there.
 enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, MAXIMUM, LOGARITHM,
-    MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP };
+    MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, GENERATED, NOISE };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
@@ -48,13 +48,14 @@ struct Shift { float3 f; float jac; };
 struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
-// Per triangle: three vertices, normals and UVs, one material; the world's material last. The light BVH from its root.
+// Per triangle: three vertices, normals, generated points and UVs, one material; the world's material last. The light
+// BVH from its root.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
 // The frame's number seeds it.
 struct Scene {
-    float4* accumulation; unsigned long long handle; float3 *vertices, *normals; float2* uvs; Material* materials;
-    LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
+    float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated; float2* uvs;
+    Material* materials; LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
 };
