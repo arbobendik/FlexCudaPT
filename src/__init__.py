@@ -21,6 +21,35 @@ def power(a, b):  # Of a to the power of b, zero where undefined as Blender's on
     with numpy.errstate(all='ignore'):
         return numpy.where(b == 0, 1, numpy.where((a == 0) | (a < 0) & (b != numpy.trunc(b)), 0, numpy.power(a, b)))
 
+def to_hsv(c):  # RGB to HSV, as Cycles'
+    c = numpy.resize(c, 3)
+    high, delta = max(c), max(c) - min(c)
+    if not (high and delta): return numpy.array((0, 0, high))
+    d = (high - c) / delta
+    h = (d[2] - d[1] if c[0] == high else 2 + d[0] - d[2] if c[1] == high else 4 + d[1] - d[0]) / 6
+    return numpy.array((h + (h < 0), delta / high, high))
+
+def from_hsv(c):  # HSV to RGB, as Cycles'
+    h, s, v = numpy.resize(c, 3)
+    if not s: return numpy.full(3, v)
+    i, f = divmod(0 if h == 1 else 6 * h, 1)
+    p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
+    return numpy.array(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v))[int(i)] if 0 <= i < 5 else (v, p, q))
+
+def to_hsl(c):  # RGB to HSL, as Cycles'
+    c = numpy.resize(c, 3)
+    high, low = max(c), min(c)
+    l, delta = min(1, (high + low) / 2), high - low
+    if not delta: return numpy.array((0, 0, l))
+    h = (c[1] - c[2]) / delta + 6 * (c[1] < c[2]) if c[0] == high else (c[2] - c[0]) / delta + 2 if c[1] == high \
+        else (c[0] - c[1]) / delta + 4
+    return numpy.array((h / 6, delta / (2 - high - low) if l > 0.5 else delta / (high + low), l))
+
+def from_hsl(c):  # HSL to RGB, as Cycles'
+    h, s, l = numpy.resize(c, 3)
+    n = numpy.clip((abs(h * 6 - 3) - 1, 2 - abs(h * 6 - 2), 2 - abs(h * 6 - 4)), 0, 1)
+    return (n - 0.5) * (1 - abs(2 * l - 1)) * s + l
+
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
@@ -33,8 +62,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MODULO': lambda a, b: numpy.fmod(a, b, out=numpy.zeros(3), where=b != 0), 'SINE': numpy.sin, 'COSINE': numpy.cos,
     'TANGENT': numpy.tan, 'ARCSINE': lambda a: numpy.arcsin(numpy.clip(a, -1, 1)),
     'ARCCOSINE': lambda a: numpy.arccos(numpy.clip(a, -1, 1)), 'ARCTANGENT': numpy.arctan, 'ARCTAN2': numpy.arctan2,
-    'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, 'CROSS_PRODUCT': numpy.cross,
-    **dict.fromkeys(('STORE', 'LOAD'))}
+    'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, 'CROSS_PRODUCT': numpy.cross, 'RGB_TO_HSV': to_hsv,
+    'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl, **dict.fromkeys(('STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -242,6 +271,17 @@ def map_range(node, inputs, index):
         value = 'MULTIPLY', value, ('LESS_THAN', 0, absolute(('SUBTRACT', high, low)))
     return between(value, to_low, to_high) if node.clamp else value
 
+def hue_saturation(hue, saturation, value, factor, color):  # Of a hue saturation value node, as Cycles'
+    hsv = 'RGB_TO_HSV', color
+    hsv = 'ADD', ('ADD', ('MULTIPLY', fraction(('ADD', hsv, ('ADD', hue, 0.5))), numpy.eye(3)[0]),
+        ('MULTIPLY', clamp(('MULTIPLY', hsv, saturation)), numpy.eye(3)[1])), ('MULTIPLY', ('MULTIPLY', hsv, value),
+        numpy.eye(3)[2])
+    return 'MAXIMUM', mix(color, ('HSV_TO_RGB', hsv), factor), 0
+
+# Conversions of colors from RGB into the modes of separate and combine color nodes and back
+MODES = {'RGB': (lambda c: c, lambda c: c), 'HSV': (lambda c: ('RGB_TO_HSV', c), lambda c: ('HSV_TO_RGB', c)),
+    'HSL': (lambda c: ('RGB_TO_HSL', c), lambda c: ('HSL_TO_RGB', c))}
+
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
 def image(node, inputs, index):
@@ -271,6 +311,9 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'BRIGHTCONTRAST': lambda node, inputs, index: ('MAXIMUM', ('ADD', ('MULTIPLY', inputs[0], ('ADD', 1, inputs[2])),
         ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
+    'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
+    'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),
+    'COMBINE_COLOR': lambda node, inputs, index: MODES[node.mode][1](NODES['COMBXYZ'](node, inputs, index)),
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
