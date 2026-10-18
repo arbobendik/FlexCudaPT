@@ -78,7 +78,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
-    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE'))}
+    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -364,6 +364,20 @@ def white_noise(node, inputs, index):
     dimensions = int(node.noise_dimensions[0])
     return 'WHITE_NOISE', inputs[0], numpy.array((min(dimensions, 3), index, 0))
 
+# Of a Voronoi texture node's distance, color or position, as Cycles' of 3D points, which it takes in any dimension, at
+# the generated point without a vector, the distance normalized by the farthest its metric makes it
+def voronoi(node, inputs, index):
+    get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
+    point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
+    metric = ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
+    value = 'VORONOI', ('MULTIPLY', point, get('Scale')), vector(('F1', 'F2', 'SMOOTH_F1').index(node.feature), metric,
+        get('Exponent', 1)), vector(get('Randomness'), get('Smoothness', 0), index)
+    if index == 2: return 'DIVIDE', value, get('Scale')
+    if index or not node.normalize: return value
+    farthest = ('POWER', 3, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (3 ** 0.5, 3, 1)[metric]
+    return 'DIVIDE', value, ('MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))),
+        ('MULTIPLY', farthest, 2 if node.feature == 'F2' else 1))
+
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
     p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
     x, y = ('DOT_PRODUCT', p, numpy.eye(3)[0]), ('DOT_PRODUCT', p, numpy.eye(3)[1])
@@ -491,7 +505,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
         if index in (0, 1, 2, 3, 5, 6, 8, 9) else resolve(node.outputs[index]),
     'TEX_NOISE': noise, 'TEX_WHITE_NOISE': white_noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker,
-    'TEX_WAVE': wave}
+    'TEX_WAVE': wave, 'TEX_VORONOI': voronoi}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
