@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, gpu, math, mmap, numpy, os, struct, subprocess, time
+import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix
 from bl_ui.properties_data_camera import classes as CAMERA_PANELS
@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
-    'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA'))}
+    'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -365,14 +365,15 @@ def vector(x, y, z):
     return 'ADD', ('ADD', ('MULTIPLY', x, numpy.eye(3)[0]), ('MULTIPLY', y, numpy.eye(3)[1])), \
         ('MULTIPLY', z, numpy.eye(3)[2])
 
+def hashed(x, y):  # Jenkins' hash of two keys in [0, 1], as Cycles'
+    v = [(0xdeadbeef + 21 + key) & 0xFFFFFFFF for key in (x, y, 0)]
+    for t, s, k in ((2, 1, 14), (0, 2, 11), (1, 0, 25), (2, 1, 16), (0, 2, 4), (1, 0, 14), (2, 1, 24)):
+        v[t] = ((v[t] ^ v[s]) - (v[s] << k | v[s] >> 32 - k)) & 0xFFFFFFFF
+    return v[2] / 0xFFFFFFFF
+
 def offset(seed):  # Cycles' random offset of noise by the seed: Jenkins' hash of it with each axis, as floats
-    def hash(*keys):
-        v = [(0xdeadbeef + 21 + key) & 0xFFFFFFFF for key in (*keys, 0)]
-        for t, s, k in ((2, 1, 14), (0, 2, 11), (1, 0, 25), (2, 1, 16), (0, 2, 4), (1, 0, 14), (2, 1, 24)):
-            v[t] = ((v[t] ^ v[s]) - (v[s] << k | v[s] >> 32 - k)) & 0xFFFFFFFF
-        return v[2] / 0xFFFFFFFF
     bits = lambda value: struct.unpack('<I', struct.pack('<f', value))[0]
-    return numpy.array([100 + 100 * hash(bits(seed), bits(axis)) for axis in range(3)])
+    return numpy.array([100 + 100 * hashed(bits(seed), bits(axis)) for axis in range(3)])
 
 # Of a noise texture node, as Cycles' of 3D points, which it takes in any dimension, at the generated point without a
 # vector: its fractal, the type of which the renderer numbers, at the point distorted by signed noise, for its color
@@ -557,6 +558,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
     'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight,
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
+    'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
         node.attribute_name in mesh.color_attributes for mesh in bpy.data.meshes) else resolve(node.outputs[index]),
@@ -699,6 +701,8 @@ class Flex(bpy.types.RenderEngine):
         generated = [numpy.empty((0, 3, 3), 'f')]  # Texture coordinates, the points in the mesh's texture space
         local = [numpy.empty((0, 3, 3), 'f')]  # Object coordinates, the points in the object's space
         colors = [numpy.empty((0, 3, 4), 'f')]  # Of the render color attributes, zero without, as Cycles' missing ones
+        infos = [numpy.empty((0, 10), 'f')]  # Per triangle: its object's location, color, pass index, random number and
+        # its material's pass index, as Cycles' object info node tells
         materials = []
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height and mean per image and ramp
@@ -783,6 +787,14 @@ class Flex(bpy.types.RenderEngine):
             generated.append(orco[rendered])
             local.append(point[rendered])
             colors.append(color[rendered])
+            passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
+            # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
+            random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
+                lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
+            info = numpy.tile([*instance.matrix_world.translation, *ob.color, ob.pass_index, 0, random],
+                (len(index), 1))
+            info[:, 8] = passes[numpy.minimum(index, len(passes) - 1)]
+            infos.append(info[rendered])
             table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera, len(row)) for row in shades])
             materials.append(table[index[rendered]])
             slots.append((i, len(vertices[-1]), (ob.visible_camera, [slot.material and slot.material.name
@@ -795,7 +807,7 @@ class Flex(bpy.types.RenderEngine):
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
                 *(arrays[k + 1].astype('f') for arrays in (vertices, corners, generated, local, uvs,
-                colors))))))
+                colors, infos))))))
             return
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
@@ -803,12 +815,12 @@ class Flex(bpy.types.RenderEngine):
         materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0, 1)])
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
-        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV
-        # and 12 color floats, a material of its emission, program, hidden flag and layer count (then the world's); then
-        # the steps of 4 integers and the texels.
+        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
+        # 12 color and 10 info floats, a material of its emission, program, hidden flag and layer count (then the
+        # world's); then the steps of 4 integers and the texels.
         self.requests.writelines((struct.pack('<4I', SCENE, len(triangles), len(ops), sum(map(len, texels)) // 4),
             triangles,
-            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, local, uvs, colors)),
+            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, local, uvs, colors, infos)),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels))
 
