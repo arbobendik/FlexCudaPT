@@ -71,6 +71,11 @@ __device__ float noise(float3 p) {
     }
     return 0.5f * 0.9820f * sum + 0.5f;
 }
+// Cycles' cubic B-spline weights of the four texels around a point t past the second
+__device__ float spline(float t, int k) {
+    return k == 0 ? (1 - t) * (1 - t) * (1 - t) / 6 : k == 1 ? (t * t * (3 * t - 6) + 4) / 6
+        : k == 2 ? (t * (t * (3 - 3 * t) + 3) + 1) / 6 : t * t * t / 6;
+}
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
@@ -83,7 +88,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case UV: *top++ = make_float3(u, v, 0); break;
         case GENERATED: *top++ = generated; break;
         case NORMAL: *top++ = normal; break;
-        case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: { // Repeating
+        case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             float x = wrap(top[-1].x) * op->width, y = wrap(top[-1].y) * op->height;
             float4 color = texel(scene, *op, int(x), int(y));
             if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
@@ -92,7 +97,18 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
                 color = mix(mix(texel(scene, *op, i, j), texel(scene, *op, i + 1, j), x - i),
                     mix(texel(scene, *op, i, j + 1), texel(scene, *op, i + 1, j + 1), x - i), y - j);
             }
-            top[-1] = op->code == IMAGE || op->code == IMAGE_LINEAR ? make_float3(color.x, color.y, color.z)
+            if (op->code == IMAGE_CUBIC || op->code == ALPHA_CUBIC) {
+                x -= 0.5f; y -= 0.5f;
+                const int i = int(floorf(x)), j = int(floorf(y));
+                color = make_float4(0, 0, 0, 0);
+                for (int k = 0; k < 16; ++k) {
+                    const float4 t = texel(scene, *op, i + k % 4 - 1, j + k / 4 - 1);
+                    const float w = spline(x - i, k % 4) * spline(y - j, k / 4);
+                    color = make_float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
+                }
+            }
+            top[-1] = op->code == IMAGE || op->code == IMAGE_LINEAR || op->code == IMAGE_CUBIC
+                ? make_float3(color.x, color.y, color.z)
                 : make_float3(1, 1, 1) * color.w;
         } break;
         case NORMAL_MAP: top[-1] = normalize(tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn)); break;
