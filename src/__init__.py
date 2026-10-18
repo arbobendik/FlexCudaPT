@@ -22,7 +22,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
-    'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('STORE', 'LOAD'))}
+    'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('GENERATED', 'NOISE',
+    'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -113,7 +114,8 @@ def clamp(value):
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
 # mapping of points scales and moves them without rotating, one of textures undoes that. A normal map bends the normal
 # by its strength toward the color's normal in tangent space and keeps it in any other space. Added shaders sum their
-# iors' excess over 1, as Cycles sums their reflections.
+# iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the generated ones are known;
+# noise is Cycles' of a 3D point, one octave of it normalized, at the generated point without a vector.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
@@ -133,7 +135,10 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         ('MULTIPLY', inputs[1], numpy.eye(3)[1])), ('MULTIPLY', inputs[2], numpy.eye(3)[2])),
     'MAPPING': lambda node, inputs, index: ('ADD', ('MULTIPLY', inputs[0], inputs[3]), inputs[1])
         if node.vector_type == 'POINT' else ('DIVIDE', ('SUBTRACT', inputs[0], inputs[1]), inputs[3])
-        if node.vector_type == 'TEXTURE' else inputs[0]}
+        if node.vector_type == 'TEXTURE' else inputs[0],
+    'TEX_COORD': lambda node, inputs, index: resolve(node.outputs[index]) if index else ('GENERATED',),
+    'TEX_NOISE': lambda node, inputs, index: ('NOISE', ('MULTIPLY', inputs[0] if node.inputs[0].is_linked
+        else ('GENERATED',), inputs[1]))}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
@@ -207,6 +212,7 @@ class Flex(bpy.types.RenderEngine):
         vertices = [numpy.empty((0, 3, 3), 'f')]  # Per object, after none for a scene without triangles
         corners = [numpy.empty((0, 3, 3), 'f')]  # Normals
         uvs = [numpy.empty((0, 3, 2), 'f')]
+        generated = [numpy.empty((0, 3, 3), 'f')]  # Texture coordinates, the points in the mesh's texture space
         materials = []
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height and mean per image and ramp
@@ -233,11 +239,13 @@ class Flex(bpy.types.RenderEngine):
                 mesh.loops.foreach_get('vertex_index', vertex)
                 mesh.corner_normals.foreach_get('vector', normal)
                 if mesh.uv_layers.active: mesh.uv_layers.active.uv.foreach_get('vector', uv)
+                orco = (co.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
                 ob.to_mesh_clear()
                 matrix = numpy.array(instance.matrix_world)
                 positions = (co.reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3])[vertex[loops]].reshape(-1, 3, 3)
                 normals = normal.reshape(-1, 3)[loops] @ numpy.array(instance.matrix_world.to_3x3().adjugated())
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
+                orco = orco[vertex[loops]].reshape(-1, 3, 3)
                 for slot in ob.material_slots:
                     if slot.material not in rows: rows[slot.material] = shade(slot.material, program)
                 shades = [rows[slot.material] for slot in ob.material_slots] or [rows[None]]
@@ -273,20 +281,23 @@ class Flex(bpy.types.RenderEngine):
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv = numpy.zeros((len(bm.faces), 3, 2), 'f')
+                orco = numpy.zeros((len(bm.faces), 3, 3), 'f')
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
             # Triangles of the surfaces rendered, normals turned as the faces turn, a material of its row each
             rendered = numpy.array([bool(row) for row in shades])[index]
             vertices.append(positions[rendered])
             corners.append(normals.reshape(-1, 3, 3)[rendered])
             uvs.append(uv[rendered])
+            generated.append(orco[rendered])
             table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera) for row in shades])
             materials.append(table[index[rendered]])
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0)])
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
-        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal and 6 UV floats, a material
-        # of its emission, program and hidden flag (then the world's); then the steps of 4 integers and the texels.
+        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated and 6 UV floats,
+        # a material of its emission, program and hidden flag (then the world's); then the steps of 4 integers and the
+        # texels.
         # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process
         # runs: once the engine drops them, the renderer reads the end of its input and exits.
         process = subprocess.Popen((BINARY, str(self.shared.fileno())), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -295,7 +306,7 @@ class Flex(bpy.types.RenderEngine):
         self.answers = process.stdout
         process.stdin = process.stdout = None
         self.requests.writelines((struct.pack('<III', len(triangles), len(ops), sum(map(len, texels)) // 4), triangles,
-            numpy.concatenate(corners, dtype='f'), numpy.concatenate(uvs, dtype='f'),
+            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, uvs)),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels))
 
