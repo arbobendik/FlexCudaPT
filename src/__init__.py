@@ -176,6 +176,39 @@ COMPOSITES = {'SQRT': lambda a: ('POWER', ('MAXIMUM', a, 0), 0.5),
         2), 1)), 'DISTANCE': lambda a, b: length(('SUBTRACT', a, b)), 'LENGTH': length,
     'SCALE': lambda a, b: ('MULTIPLY', a, b), 'NORMALIZE': normalize}
 
+def screen(t, a, b):
+    return 'SUBTRACT', 1, ('MULTIPLY', ('ADD', ('SUBTRACT', 1, t), ('MULTIPLY', t, ('SUBTRACT', 1, b))),
+        ('SUBTRACT', 1, a))
+
+def overlay(t, a, b):
+    return mix(screen(t, a, ('SUBTRACT', ('MULTIPLY', b, 2), 1)), ('MULTIPLY', a, ('ADD', ('SUBTRACT', 1, t),
+        ('MULTIPLY', ('MULTIPLY', t, 2), b))), ('LESS_THAN', a, 0.5))
+
+def burn(t, a, b):
+    tmp = 'ADD', ('SUBTRACT', 1, t), ('MULTIPLY', t, b)
+    return 'MULTIPLY', clamp(('SUBTRACT', 1, ('DIVIDE', ('SUBTRACT', 1, a), tmp))), ('LESS_THAN', 0, tmp)
+
+def dodge(t, a, b):
+    tmp = 'SUBTRACT', 1, ('MULTIPLY', t, b)
+    return 'MULTIPLY', mix(1, ('MINIMUM', ('DIVIDE', a, tmp), 1), ('LESS_THAN', 0, tmp)), ('LESS_THAN', 0, absolute(a))
+
+# Blends of color mix nodes besides fading into an operation's result: their expressions of the factor and the colors,
+# as Cycles'
+BLENDS = {'DARKEN': lambda t, a, b: mix(a, ('MINIMUM', a, b), t),
+    'LIGHTEN': lambda t, a, b: mix(a, ('MAXIMUM', a, b), t),
+    'DIFFERENCE': lambda t, a, b: mix(a, absolute(('SUBTRACT', a, b)), t),
+    'EXCLUSION': lambda t, a, b: ('MAXIMUM', mix(a, ('SUBTRACT', ('ADD', a, b), ('MULTIPLY', ('MULTIPLY', a, b), 2)),
+        t), 0), 'SCREEN': screen, 'OVERLAY': overlay,
+    'SOFT_LIGHT': lambda t, a, b: mix(a, ('MULTIPLY', a, ('ADD', ('MULTIPLY', ('SUBTRACT', 1, a), b), screen(1, a, b))),
+        t), 'LINEAR_LIGHT': lambda t, a, b: ('ADD', a, ('MULTIPLY', t, ('SUBTRACT', ('MULTIPLY', b, 2), 1))),
+    'DIVIDE': lambda t, a, b: mix(a, ('ADD', ('DIVIDE', a, b), ('MULTIPLY', a, ('SUBTRACT', 1, ('LESS_THAN', 0,
+        absolute(b))))), t), 'BURN': burn, 'DODGE': dodge}
+
+def blend(node, inputs, index):  # Of a mix node: its inputs faded into one another or blended as its colors
+    kind = getattr(node, 'blend_type', 'MIX') if getattr(node, 'data_type', 'RGBA') == 'RGBA' else 'MIX'
+    if kind in BLENDS: return BLENDS[kind](*inputs[:3])
+    return mix(inputs[1], (kind, *inputs[1:]) if OPS.get(kind) else inputs[2], inputs[0])
+
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
 # colors from sRGB once interpolated.
@@ -202,8 +235,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
         + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
-    'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
-        if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
+    'MIX': blend,
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
