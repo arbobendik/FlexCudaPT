@@ -392,6 +392,14 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case UV: *top++ = make_float3(u, v, 0); break;
         case GENERATED: *top++ = generated; break;
         case OBJECT: *top++ = object; break;
+        case CAMERA_POINT: case WINDOW: { // In the camera's space, right, up and forward, or of its window, of the
+            const Camera& c = scene.camera; // world along its direction from the camera, as Cycles'
+            const float3 d = program == scene.materials[scene.count].program ? position : position - c.origin;
+            const float3 forward = normalize(cross(c.y, c.x));
+            const float3 q = d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its image plane
+            *top++ = op->code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
+                dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
+        } break;
         case VERTEX_COLOR: *top++ = make_float3(color.x, color.y, color.z); break;
         case VERTEX_ALPHA: *top++ = make_float3(1, 1, 1) * color.w; break;
         case OBJECT_INFO: { // Its location, color, alpha, pass index, material's pass index or random number
