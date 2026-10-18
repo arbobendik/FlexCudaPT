@@ -301,6 +301,37 @@ def hue_saturation(hue, saturation, value, factor, color):  # Of a hue saturatio
         numpy.eye(3)[2])
     return 'MAXIMUM', mix(color, ('HSV_TO_RGB', hsv), factor), 0
 
+# Cycles' fit of blackbody colors in Rec.709 from each temperature on: a / t + b t + c for red and green and
+# ((a t + b) t + c) t + d for blue, constant below and above the fit
+BLACKBODY = ((0, (5.413294490189271, -0.20319390035873933, -0.0822535242887164)),
+    (800, (1.61919106e+03, -2.05010916e-03, 5.02995757e+00), (-4.88999748e+02, 6.04330754e-04, -7.55807526e-02),
+        (5.96945309e-11, -4.85742887e-08, -9.70622247e-05, -4.07936148e-03)),
+    (965, (2.48845471e+03, -1.11330907e-03, 3.22621544e+00), (-7.55994277e+02, 3.16730098e-04, 4.78306139e-01),
+        (2.40430366e-11, 5.55021075e-08, -1.98503712e-04, 2.89312858e-02)),
+    (1167, (3.34143193e+03, -4.86551192e-04, 1.76486769e+00), (-1.02363977e+03, 1.20223470e-04, 9.36662319e-01),
+        (-1.40949732e-11, 1.89878968e-07, -3.56632824e-04, 9.10767778e-02)),
+    (1449, (4.09461742e+03, -1.27446582e-04, 7.25731635e-01), (-1.26571316e+03, 4.87340896e-06, 1.27054498e+00),
+        (-3.61460868e-11, 2.84822009e-07, -4.93211319e-04, 1.56723440e-01)),
+    (1902, (4.67028036e+03, 2.91258199e-05, 1.26703442e-01), (-1.42529332e+03, -4.01150431e-05, 1.43972784e+00),
+        (-1.97075738e-11, 1.75359352e-07, -2.50542825e-04, -2.22783266e-02)),
+    (3315, (4.59509185e+03, 2.87495649e-05, 1.50345020e-01), (-1.17554822e+03, -2.16378048e-05, 1.30408023e+00),
+        (-1.61997957e-13, -1.64216008e-08, 3.86216271e-04, -7.38077418e-01)),
+    (6365, (3.78717450e+03, 9.35907826e-06, 3.99075871e-01), (-5.00799571e+02, -4.59832026e-06, 1.09098763e+00),
+        (6.72650283e-13, -2.73078809e-08, 4.24098264e-04, -7.52335691e-01)),
+    (12000, (0.8262954810464208, 0.9945080501520986, 1.566307710274283)))
+
+def blackbody(t):  # Cycles' color of a blackbody at the temperature, for scene linear Rec.709
+    def fit(r, g, b):
+        rg = 'ADD', ('ADD', ('MULTIPLY', numpy.array((r[0], g[0], 0)), ('DIVIDE', 1, t)),
+            ('MULTIPLY', numpy.array((r[1], g[1], 0)), t)), numpy.array((r[2], g[2], 0))
+        cubic = 'ADD', ('MULTIPLY', ('ADD', ('MULTIPLY', ('ADD', ('MULTIPLY', b[0], t), b[1]), t), b[2]), t), b[3]
+        return 'ADD', rg, ('MULTIPLY', cubic, numpy.eye(3)[2])
+    colors = [numpy.array(fits[0]) if len(fits) == 1 else fit(*fits) for _, *fits in BLACKBODY]
+    color = colors[0]
+    for (low, *_), before, after in zip(BLACKBODY[1:], colors, colors[1:]):
+        color = 'ADD', color, ('MULTIPLY', ('SUBTRACT', 1, ('LESS_THAN', t, low)), ('SUBTRACT', after, before))
+    return 'MAXIMUM', color, 0
+
 # Conversions of colors from RGB into the modes of separate and combine color nodes and back
 MODES = {'RGB': (lambda c: c, lambda c: c), 'HSV': (lambda c: ('RGB_TO_HSV', c), lambda c: ('HSV_TO_RGB', c)),
     'HSL': (lambda c: ('RGB_TO_HSL', c), lambda c: ('HSL_TO_RGB', c))}
@@ -485,6 +516,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'BRIGHTCONTRAST': lambda node, inputs, index: ('MAXIMUM', ('ADD', ('MULTIPLY', inputs[0], ('ADD', 1, inputs[2])),
         ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
+    'BLACKBODY': lambda node, inputs, index: blackbody(inputs[0]),
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
     'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),
     'COMBINE_COLOR': lambda node, inputs, index: MODES[node.mode][1](NODES['COMBXYZ'](node, inputs, index)),
