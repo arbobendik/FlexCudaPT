@@ -306,6 +306,15 @@ def node_matches(socket):
             24:40, 24:40, :3].mean((0, 1)))
     assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
 
+zero = tree.nodes.new('ShaderNodeVectorMath')
+zero.operation, zero.inputs['Scale'].default_value = 'SCALE', 0
+tree.links.new(tree.nodes.new('ShaderNodeTexCoord').outputs['Generated'], zero.inputs[0])
+mapped = tree.nodes.new('ShaderNodeMapRange')
+mapped.clamp = False
+for socket, value in zip(mapped.inputs, (0.2, 0, 0, 2, 4)): socket.default_value = value
+node_matches(mapped.outputs[0])
+tree.links.new(zero.outputs[0], mapped.inputs['Value'])
+node_matches(mapped.outputs[0])
 image = tree.nodes.new('ShaderNodeTexImage')
 image.image = bpy.data.images.new('alpha regression', 1, 1, alpha=True, float_buffer=True)
 image.image.pixels.foreach_set((0.8, 0.2, 0.1, 0.25))
