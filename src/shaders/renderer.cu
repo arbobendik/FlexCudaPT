@@ -47,6 +47,16 @@ constexpr unsigned LOBE_REFRACT = 1u;
 __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
 // sRGB to linear, as Cycles'
 __device__ float decode(float c) { return c < 0.04045f ? fmaxf(c, 0) / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
+// Of a to the power of b, zero where undefined as Blender's on the GPU
+__device__ float power(float a, float b) {
+    return b == 0 ? 1 : a == 0 || a < 0 && b != truncf(b) ? 0 : a > 0 ? powf(a, b)
+        : (fmodf(b, 2) == 0 ? 1 : -1) * powf(-a, b);
+}
+// Of f per component
+template <class F> __device__ float3 each(float3 a, F f) { return make_float3(f(a.x), f(a.y), f(a.z)); }
+template <class F> __device__ float3 each(float3 a, float3 b, F f) {
+    return make_float3(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z));
+}
 __device__ float3 divide(float3 a, float3 b) {
     return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
 }
@@ -133,6 +143,24 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         } break;
         case NOISE: top[-1] = make_float3(1, 1, 1) * noise(top[-1]); break;
         case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
+        case POWER: --top; top[-1] = each(top[-1], *top, power); break;
+        case EXPONENT: top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
+        case MINIMUM: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fminf(a, b); }); break;
+        case LESS_THAN: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return float(a < b); }); break;
+        case FLOOR: top[-1] = each(top[-1], [](float a) { return floorf(a); }); break;
+        case MODULO: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; });
+            break;
+        // Reduced exactly, which fast math's sines are not
+        case SINE: top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI); }); break;
+        case COSINE: top[-1] = each(top[-1], [](float a) { return cospif(a * INV_PI); }); break;
+        case TANGENT: top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); break;
+        case ARCSINE: top[-1] = each(top[-1], [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
+        case ARCCOSINE: top[-1] = each(top[-1], [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
+        case ARCTANGENT: top[-1] = each(top[-1], [](float a) { return atanf(a); }); break;
+        case ARCTAN2: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return atan2f(a, b); }); break;
+        case SINH: top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
+        case COSH: top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
+        case TANH: top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
