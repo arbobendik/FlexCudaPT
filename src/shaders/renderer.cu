@@ -107,12 +107,34 @@ __device__ float3 divide(float3 a, float3 b) {
     return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
 }
 __device__ unsigned rotate(unsigned x, int k) { return x << k | x >> (32 - k); }
-// Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
-__device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
-    unsigned a = 0xdeadbeef + 25 + x, b = 0xdeadbeef + 25 + y, c = 0xdeadbeef + 25 + z;
+// Bob Jenkins' lookup3 hash of n keys, as Cycles'
+__device__ unsigned jenkins(int n, unsigned x, unsigned y = 0, unsigned z = 0, unsigned w = 0) {
+    unsigned a = 0xdeadbeef + (n << 2) + 13 + x, b = 0xdeadbeef + (n << 2) + 13 + y, c = 0xdeadbeef + (n << 2) + 13 + z;
+    if (n == 4) {
+        a -= c; a ^= rotate(c, 4); c += b; b -= a; b ^= rotate(a, 6); a += c; c -= b; c ^= rotate(b, 8); b += a;
+        a -= c; a ^= rotate(c, 16); c += b; b -= a; b ^= rotate(a, 19); a += c; c -= b; c ^= rotate(b, 4); b += a;
+        a += w;
+    }
     c ^= b; c -= rotate(b, 14); a ^= c; a -= rotate(c, 11); b ^= a; b -= rotate(a, 25); c ^= b; c -= rotate(b, 16);
     a ^= c; a -= rotate(c, 4); b ^= a; b -= rotate(a, 14); c ^= b; c -= rotate(b, 24);
-    const unsigned h = c & 15;
+    return c;
+}
+// Of the bits of n floats, in [0, 1], as Cycles'
+__device__ float hashed(int n, float x, float y = 0, float z = 0, float w = 0) {
+    return float(jenkins(n, __float_as_uint(x), __float_as_uint(y), __float_as_uint(z), __float_as_uint(w)))
+        / float(0xFFFFFFFFu);
+}
+// Cycles' white noise of the first dims components of p, its value or color
+__device__ float3 white(float3 p, int dims, bool color) {
+    const float v = dims == 1 ? hashed(1, p.x) : dims == 2 ? hashed(2, p.x, p.y) : hashed(3, p.x, p.y, p.z);
+    if (!color) return make_float3(v, v, v);
+    return dims == 1 ? make_float3(v, hashed(2, p.x, 1), hashed(2, p.x, 2)) : dims == 2
+        ? make_float3(v, hashed(3, p.x, p.y, 1), hashed(3, p.x, p.y, 2))
+        : make_float3(v, hashed(4, p.x, p.y, p.z, 1), hashed(4, p.x, p.y, p.z, 2));
+}
+// Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
+__device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
+    const unsigned h = jenkins(3, x, y, z) & 15;
     const float u = h < 8 ? f.x : f.y, v = h < 4 ? f.y : h == 12 || h == 14 ? f.x : f.z;
     return (h & 1 ? -u : u) + (h & 2 ? -v : v);
 }
@@ -247,6 +269,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
+        case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
         case NOISE: top -= 2; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1]); break;
         case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
         case POWER: --top; top[-1] = each(top[-1], *top, power); break;

@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
-    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'STORE', 'LOAD'))}
+    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -373,6 +373,11 @@ def noise(node, inputs, index):
     if not index: return fractal(point)
     return vector(fractal(point), fractal(('ADD', point, offset(3))), fractal(('ADD', point, offset(4))))
 
+# Of a white noise texture node, its value or color, of four dimensions as of three, as Cycles'
+def white_noise(node, inputs, index):
+    dimensions = int(node.noise_dimensions[0])
+    return 'WHITE_NOISE', inputs[0], numpy.array((min(dimensions, 3), index, 0))
+
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
     p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
     x, y = ('DOT_PRODUCT', p, numpy.eye(3)[0]), ('DOT_PRODUCT', p, numpy.eye(3)[1])
@@ -499,7 +504,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
     'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
         if index in (0, 1, 2, 3, 5, 6, 8, 9) else resolve(node.outputs[index]),
-    'TEX_NOISE': noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker, 'TEX_WAVE': wave}
+    'TEX_NOISE': noise, 'TEX_WHITE_NOISE': white_noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker,
+    'TEX_WAVE': wave}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
