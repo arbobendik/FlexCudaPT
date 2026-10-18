@@ -164,6 +164,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case SINH: top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
         case COSH: top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
         case TANH: top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
+        case CROSS_PRODUCT: --top; top[-1] = cross(top[-1], *top); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
