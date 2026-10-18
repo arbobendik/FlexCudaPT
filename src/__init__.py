@@ -44,7 +44,7 @@ WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3
 # Blender's material panels the engine shows: the slots, the surface's nodes and the generic ones
 PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
     'MATERIAL_PT_animation')
-SCENE, REQUEST = range(2)  # Kinds of what the renderer is piped
+SCENE, REQUEST, UPDATE = range(3)  # Kinds of what the renderer is piped
 
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
@@ -194,6 +194,7 @@ class Flex(bpy.types.RenderEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.visible = ()  # Names of the instances the renderer was last started on
+        self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
         self.texture = None  # The viewport's view as last traced
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
         self.following = None  # The frame after the last one rendered, which reuses its reservoirs in an animation
@@ -210,11 +211,16 @@ class Flex(bpy.types.RenderEngine):
         process.stdin = process.stdout = None
 
     # Starts the renderer on the exported scene when what it renders changed. Blender also reports selection, scene
-    # settings and cameras, which need none.
+    # settings and cameras, which need none. Objects that only moved or deformed update their triangles in place, as
+    # FlexLight updates the slots of its instances, while they keep their count and the key of their materials: camera
+    # visibility, those of their slots and a light's radiance.
     def start(self, depsgraph):
         visible = [instance.object.name for instance in depsgraph.object_instances]
         if visible == self.visible and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
+        moved = visible == self.visible and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera,
+            bpy.types.Object, bpy.types.Action)) for update in depsgraph.updates) \
+            and {update.id.name for update in depsgraph.updates}
         self.visible = visible
         scene = depsgraph.scene_eval
         vertices = [numpy.empty((0, 3, 3), 'f')]  # Per object, after none for a scene without triangles
@@ -227,10 +233,12 @@ class Flex(bpy.types.RenderEngine):
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         program = lambda surface: [len(ops), emit(fold(surface), ops, textures, texels)][::-1]
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
-        for instance in depsgraph.object_instances:
+        slots = []  # Index, triangle count and key of each instance exported
+        for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
-            if ob.hide_render or ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'LIGHT'}: continue
+            if ob.hide_render or ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'LIGHT'} \
+                or moved and ob.name not in moved: continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
                 loops, index = (numpy.empty(n * len(mesh.loop_triangles), 'i') for n in (3, 1))
@@ -294,6 +302,19 @@ class Flex(bpy.types.RenderEngine):
             generated.append(orco[rendered])
             table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera) for row in shades])
             materials.append(table[index[rendered]])
+            slots.append((i, len(vertices[-1]), (ob.visible_camera, [slot.material and slot.material.name
+                for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
+        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
+        if moved:
+            if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
+                self.visible = None
+                return self.start(depsgraph)
+            self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
+                enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
+                *(arrays[k + 1].astype('f') for arrays in (vertices, corners, generated, uvs))))))
+            return
+        firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
+        self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0)])
         triangles = numpy.concatenate(vertices, dtype='f')
