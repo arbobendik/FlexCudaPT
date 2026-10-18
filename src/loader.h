@@ -193,6 +193,7 @@ inline Scene loadScene(OptixDeviceContext context) {
     std::vector<float3> vertices;
     std::vector<Material> materials;
     Scene scene{.vertices = load<float3>(3 * header.count, vertices), .normals = load<float3>(3 * header.count),
+        .generated = load<float3>(3 * header.count),
         .uvs = load<float2>(3 * header.count), .materials = load<Material>(header.count + 1, materials),
         .lights = loadLights(vertices, materials),
         .ops = load<Op>(header.ops), .texels = load<float4>(header.texels), .count = header.count,
