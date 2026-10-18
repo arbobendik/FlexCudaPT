@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
-    **dict.fromkeys(('STORE', 'LOAD'))}
+    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -391,6 +391,23 @@ def wave(node, inputs, index):  # Of a wave texture node at the generated point 
     return fraction(n) if node.wave_profile == 'SAW' else ('MULTIPLY', absolute(('SUBTRACT', n, ('FLOOR', ('ADD', n,
         0.5)))), 2)
 
+def facing(normal):  # Turned toward the incoming direction on the backs of faces, as Cycles' shading normals
+    return 'MULTIPLY', normal, ('SUBTRACT', 1, ('MULTIPLY', ('BACKFACING',), 2))
+
+def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
+    eta = 'MAXIMUM', inputs[0], 1e-5
+    return 'DIELECTRIC', ('DOT_PRODUCT', ('INCOMING',), facing(inputs[1])), mix(eta, ('DIVIDE', 1, eta),
+        ('BACKFACING',))
+
+def layer_weight(node, inputs, index):  # Of a layer weight node, as Cycles'
+    blend, cosine = inputs[0], ('DOT_PRODUCT', ('INCOMING',), facing(inputs[1]))
+    if not index:
+        eta = 'MAXIMUM', ('SUBTRACT', 1, blend), 1e-5
+        return 'DIELECTRIC', cosine, mix(('DIVIDE', 1, eta), eta, ('BACKFACING',))
+    blend = 'MINIMUM', ('MAXIMUM', blend, 0), 1 - 1e-5
+    exponent = mix(('DIVIDE', 0.5, ('SUBTRACT', 1, blend)), ('MULTIPLY', blend, 2), ('LESS_THAN', blend, 0.5))
+    return 'SUBTRACT', 1, ('POWER', absolute(cosine), exponent)
+
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
@@ -413,7 +430,7 @@ def image(node, inputs, index):
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. A
 # normal map bends the normal by its strength toward the color's normal in tangent space and keeps it in any other
 # space. Added shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the
-# generated ones are known.
+# generated and reflection ones are known.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
@@ -439,7 +456,12 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
     'COMBXYZ': lambda node, inputs, index: vector(*inputs),
     'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
-    'TEX_COORD': lambda node, inputs, index: resolve(node.outputs[index]) if index else ('GENERATED',),
+    'TEX_COORD': lambda node, inputs, index: ('GENERATED',) if not index else ('SUBTRACT', ('MULTIPLY',
+        facing(('NORMAL',)), ('MULTIPLY', ('DOT_PRODUCT', facing(('NORMAL',)), ('INCOMING',)), 2)), ('INCOMING',))
+        if index == 6 else resolve(node.outputs[index]),
+    'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
+        6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
+    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight,
     'TEX_NOISE': noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker, 'TEX_WAVE': wave}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}

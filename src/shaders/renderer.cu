@@ -173,9 +173,10 @@ __device__ float spline(float t, int k) {
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
-// Surface a program resolves to at a UV and generated point, facing along the normal with the tangent space tbn
+// Surface a program resolves to at a UV and generated point, facing along the normal with the tangent space tbn, at a
+// position seen from the incoming direction, on the back of its face or not
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
-    float v, float3 generated) {
+    float v, float3 generated, float3 position, float3 incoming, bool backfacing) {
     float3 stack[STACK], *top = stack, saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
@@ -184,6 +185,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case UV: *top++ = make_float3(u, v, 0); break;
         case GENERATED: *top++ = generated; break;
         case NORMAL: *top++ = normal; break;
+        case POSITION: *top++ = position; break;
+        case INCOMING: *top++ = incoming; break;
+        case BACKFACING: *top++ = make_float3(1, 1, 1) * backfacing; break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             float x = wrap(top[-1].x) * op->width, y = wrap(top[-1].y) * op->height;
             float4 color = texel(scene, *op, int(x), int(y));
@@ -266,12 +270,14 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             d = d / (d.y < 0 ? 2 * sqrtf(-0.5f * d.y) : 1);
             top[-1] = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
         } break;
+        case DIELECTRIC: --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
 }
-// Of a triangle at its barycentrics, in a layer of its material
-__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, unsigned layer = 0) {
+// Of a triangle at its barycentrics, reached along the direction, in a layer of its material
+__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
+    unsigned layer = 0) {
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* generated = scene.generated + 3 * triangle;
@@ -282,7 +288,9 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
         normalMapTBN(vertex[0], vertex[1], vertex[2], uv[0], uv[1], uv[2], normal),
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
-        generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t);
+        generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
+        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, -direction,
+        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -433,7 +441,7 @@ __device__ float3 environment(const Scene& scene, float3 direction) {
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
-        direction).emissive;
+        direction, direction, -direction, false).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
@@ -507,7 +515,8 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency
     for (Hit hit; (hit = traverse(scene, from, toward, left, occluder)).triangle != NONE; left -= occluder) {
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
-            const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), layer);
+            const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
+                layer);
             const float3 through = surface.ior == 1 ? surface.albedo * surface.transparency : make_float3(0, 0, 0);
             transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
         }
@@ -515,7 +524,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
             return make_float3(0, 0, 0);
         from = from + toward * occluder;
     }
-    return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
+    return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal, direction).emissive
         * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
 }
 
@@ -553,7 +562,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     for (unsigned b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.triangle);
-        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), layer);
+        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), direction, layer);
         // Only the top layer emits, where the ray first meets it
         if (passed) surface.emissive = make_float3(0, 0, 0);
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
