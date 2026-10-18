@@ -240,21 +240,40 @@ __device__ bool wrongSide(float3 in_dir, bool refracted, float3 out_dir, float3 
     return (dot(in_dir, face) < 0 != refracted) != (dot(out_dir, face) > 0);
 }
 
-// Camera and primary hit of the ray through a pixel at the jitter its sample's seed draws, which makes the pixel's area
-// part of the sample's primary sample space; hidden surfaces let camera rays through. On a miss x1 is one along the ray.
+// Uniform point of the circular or polygonal aperture, squeezed horizontally as in Cycles.
+__device__ float2 aperture(const Lens& lens, unsigned state) {
+    float angle = 2 * PI * random(state), radius = lens.aperture * sqrtf(random(state)), x = radius, y = 0;
+    if (lens.blades >= 3) {
+        const float sector = angle * lens.blades / (2 * PI), half = PI / lens.blades;
+        x = radius * cosf(half), y = radius * (2 * (sector - floorf(sector)) - 1) * sinf(half);
+        angle = 2 * half * floorf(sector) + lens.rotation;
+    }
+    return make_float2((x * cosf(angle) - y * sinf(angle)) / lens.ratio, x * sinf(angle) + y * cosf(angle));
+}
+
+// Camera and primary hit through the pixel jitter and lens point its seed draws, both replayed when ReSTIR shifts a
+// sample; hidden surfaces let camera rays through. On a miss x1 is one along the ray.
 __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixel, uint3 size, unsigned seed) {
     unsigned state = stream(seed, STREAM_JITTER);
     const float x = pixel % size.x + random(state);
     const float y = pixel / size.x + random(state);
-    const float3 direction = normalize(camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z);
+    float3 direction = normalize(camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z);
     float3 origin = camera.origin;
+    if (camera.lens.aperture > 0) {
+        const float2 point = aperture(camera.lens, state);
+        const float3 offset = normalize(camera.x) * point.x + normalize(camera.y) * point.y;
+        const float3 forward = normalize(cross(camera.y, camera.x));
+        direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
+        origin = origin + offset;
+    }
+    const float3 start = origin;
     Hit hit;
     do {
         float distance = 0;
         hit = traverse(scene, origin, direction, 1e16f, distance);
         origin = origin + direction * distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden);
-    return {camera.origin, hit.triangle == NONE ? camera.origin + direction : hitPosition(scene.vertices, hit), hit};
+    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, hit), hit};
 }
 
 // World: equirectangular texture along the direction

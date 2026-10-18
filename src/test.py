@@ -146,8 +146,9 @@ viewport = Viewport()
 offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
 region = types.SimpleNamespace(width=SIZE, height=SIZE)
 region_data = types.SimpleNamespace(view_matrix=scene.camera.matrix_world.inverted(),
-    window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE))
-context = types.SimpleNamespace(region=region, region_data=region_data)
+    window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA')
+context = types.SimpleNamespace(region=region, region_data=region_data,
+    space_data=types.SimpleNamespace(camera=scene.camera))
 with offscreen.bind():
     gpu.matrix.load_matrix(Matrix.Identity(4))
     # Pixel space, as in a viewport
@@ -248,3 +249,41 @@ glass.inputs['Base Color'].default_value = (*COLOR, 1)
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.array(COLOR) ** 2, rtol=0.02), 'glass'
+
+# Camera controls remain visible with Flex selected; a small emitter on black measures its lens's bokeh.
+context = types.SimpleNamespace(engine='FLEX', camera=scene.camera.data)
+for name in ('DATA_PT_lens', 'DATA_PT_camera', 'DATA_PT_camera_dof', 'DATA_PT_camera_dof_aperture'):
+    assert getattr(bpy.types, name).poll(context), name
+for ob in scene.objects: ob.hide_render = ob != scene.camera
+scene.render.use_border = False
+scene.camera.data.angle, scene.flex_samples = math.pi / 2, 512
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+bokeh = plane('bokeh', 0, size=0.125)
+bokeh.inputs['Base Color'].default_value, bokeh.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+bokeh.inputs['Emission Strength'].default_value = 1
+dof = scene.camera.data.dof
+dof.aperture_fstop = fstop = scene.camera.data.lens * 1e-3  # Radius 0.5, measurable at 64 pixels
+
+def camera_render(**values):  # Image, bokeh variance and skew on each image axis
+    for name, value in values.items(): setattr(dof, name, value)
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+    weights = pixels.mean(2) / pixels.mean(2).sum()
+    coordinates = numpy.indices(weights.shape)[::-1]
+    centered = coordinates - (coordinates * weights).sum((1, 2))[:, None, None]
+    variance = (centered ** 2 * weights).sum((1, 2))
+    return pixels, variance, (centered ** 3 * weights).sum((1, 2)) / variance ** 1.5
+
+sharp, variance, _ = camera_render(use_dof=False)
+assert numpy.allclose(camera_render(use_dof=True, focus_distance=1)[0], sharp, atol=0.01), 'focus plane'
+_, spread, _ = camera_render(focus_distance=2)
+assert numpy.all(spread > 4 * variance), 'depth of field'
+_, stopped, _ = camera_render(aperture_fstop=2 * fstop)
+assert numpy.all((stopped / spread > 0.2) & (stopped / spread < 0.45)), 'f-stop'
+_, squeezed, _ = camera_render(aperture_fstop=fstop, aperture_ratio=2)
+assert squeezed[0] < spread[0] / 2 and abs(squeezed[1] / spread[1] - 1) < 0.1, 'aperture ratio'
+_, _, triangle = camera_render(aperture_ratio=1, aperture_blades=3)
+_, _, rotated = camera_render(aperture_rotation=math.pi / 2)
+assert abs(triangle[0]) > 0.3 and abs(triangle[1]) < 0.15, 'aperture blades'
+assert abs(rotated[1]) > 0.3 and abs(rotated[0]) < 0.15, 'aperture rotation'
+assert numpy.allclose(camera_render(focus_object=bpy.data.objects['textured'])[0], sharp, atol=0.01), 'focus object'

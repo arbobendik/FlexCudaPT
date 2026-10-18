@@ -94,7 +94,8 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
             reused = length(next.origin - last.origin) <= request.distance
-                && dot(next.z, last.z) >= request.cosine * length(next.z) * length(last.z);
+                && dot(next.z, last.z) >= request.cosine * length(next.z) * length(last.z)
+                && !std::memcmp(&next.lens, &last.lens, sizeof(Lens));
             if (!reused || std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 reused = false;
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
