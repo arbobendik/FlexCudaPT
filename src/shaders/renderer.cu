@@ -200,6 +200,16 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float c = cospif(top[1].x * INV_PI), s = sinpif(top[1].x * INV_PI);
             top[-1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
         } break;
+        case EQUIRECTANGULAR: { // Image coordinates of a direction, as Cycles'
+            const float3 d = top[-1];
+            top[-1] = make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI),
+                0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI, 0);
+        } break;
+        case MIRROR_BALL: { // Image coordinates of a direction on a mirror ball, as Cycles'
+            float3 d = top[-1] / (length(top[-1]) > 0 ? length(top[-1]) : 1) - make_float3(0, 1, 0);
+            d = d / (d.y < 0 ? 2 * sqrtf(-0.5f * d.y) : 1);
+            top[-1] = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
+        } break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
