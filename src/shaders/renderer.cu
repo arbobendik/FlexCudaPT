@@ -373,10 +373,11 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
 // Surface a program resolves to at a UV, generated point, point in its object and color, facing along the normal with
-// the tangent space tbn, at a position seen from the incoming direction, on the back of its face or not, for the ray
+// the tangent space tbn, at a position seen from the incoming direction, on the back of its face or not, for the ray,
+// of the info's object
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
     float v, float3 generated, float3 object, float4 color, float3 position, float3 incoming, bool backfacing,
-    const Ray& ray) {
+    const Ray& ray, const Info& info) {
     float3 stack[STACK], *top = stack;
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
@@ -385,6 +386,12 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case OBJECT: *top++ = object; break;
         case VERTEX_COLOR: *top++ = make_float3(color.x, color.y, color.z); break;
         case VERTEX_ALPHA: *top++ = make_float3(1, 1, 1) * color.w; break;
+        case OBJECT_INFO: { // Its location, color, alpha, pass index, material's pass index or random number
+            const int output = int(top[-1].x);
+            top[-1] = output == 0 ? make_float3(info.location[0], info.location[1], info.location[2]) : output == 1
+                ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
+                * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? info.material : info.random);
+        } break;
         case NORMAL: *top++ = normal; break;
         case POSITION: *top++ = position; break;
         case INCOMING: *top++ = incoming; break;
@@ -500,7 +507,7 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
             color[0].z + (color[1].z - color[0].z) * s + (color[2].z - color[0].z) * t,
             color[0].w + (color[1].w - color[0].w) * s + (color[2].w - color[0].w) * t),
         vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, -direction,
-        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray);
+        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, scene.infos[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -632,7 +639,7 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
-        direction, direction, make_float4(0, 0, 0, 0), direction, -direction, false, ray).emissive;
+        direction, direction, make_float4(0, 0, 0, 0), direction, -direction, false, ray, Info{}).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
