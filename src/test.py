@@ -328,14 +328,19 @@ node_matches(rotated.outputs[0])
 image = tree.nodes.new('ShaderNodeTexImage')
 image.image = bpy.data.images.new('alpha regression', 1, 1, alpha=True, float_buffer=True)
 image.image.pixels.foreach_set((0.8, 0.2, 0.1, 0.25))
-image.image.alpha_mode = 'NONE'
+image.image.alpha_mode, image.extension = 'NONE', 'CLIP'
+point = tree.nodes.new('ShaderNodeCombineXYZ')
+point.inputs[0].default_value, point.inputs[1].default_value = -0.1, 0.7
+tree.links.new(point.outputs[0], image.inputs[0])
 node_matches(image.outputs['Alpha'])
 image.image.alpha_mode = 'STRAIGHT'
 tree.links.new(image.outputs['Alpha'], tree.nodes.new('ShaderNodeMath').inputs[0])  # An unused alpha link
 node_matches(image.outputs['Color'])
 tree.links.remove(image.outputs['Alpha'].links[0])
+point.inputs[0].default_value = 0.5
 other = tree.nodes.new('ShaderNodeTexImage')
 other.image, other.extension = image.image, image.extension
+tree.links.new(point.outputs[0], other.inputs[0])
 tree.links.new(other.outputs['Alpha'], emission.inputs['Strength'])
 node_matches(image.outputs['Color'])
 other.interpolation = 'Closest'
