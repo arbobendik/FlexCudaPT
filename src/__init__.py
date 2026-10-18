@@ -50,6 +50,17 @@ def from_hsl(c):  # HSL to RGB, as Cycles'
     n = numpy.clip((abs(h * 6 - 3) - 1, 2 - abs(h * 6 - 2), 2 - abs(h * 6 - 4)), 0, 1)
     return (n - 0.5) * (1 - abs(2 * l - 1)) * s + l
 
+def equirectangular(d):  # Image coordinates of a direction, as Cycles'
+    d = numpy.resize(d, 3)
+    return numpy.array((0.5 - math.atan2(d[1], d[0]) / (2 * math.pi), 0.5 + math.atan2(d[2], math.hypot(*d[:2]))
+        / math.pi, 0))
+
+def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cycles'
+    d = numpy.resize(d, 3)
+    d = d / (numpy.linalg.norm(d) or 1) - (0, 1, 0)
+    d = d / (2 * math.sqrt(max(-0.5 * d[1], 0)) or 1)
+    return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
+
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
 # emission
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
@@ -65,7 +76,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, 'CROSS_PRODUCT': numpy.cross, 'RGB_TO_HSV': to_hsv,
     'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
-        + k * numpy.dot(k, v) * (1 - numpy.cos(a, 'STORE', 'LOAD'))}
+        + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
+    **dict.fromkeys(('STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -318,13 +330,17 @@ def vector_rotate(node, inputs, index):  # Of a vector rotate node about its cen
     if node.rotation_type == 'AXIS_ANGLE': angle = 'MULTIPLY', angle, ('LESS_THAN', 0, length(rotation[0]))
     return 'ADD', ('ROTATE', ('SUBTRACT', vector, center), axis, angle), center
 
-# Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
-# reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
+# Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
+# direction. Cycles dissociates colors from their alpha where reading it unless the image packs channels, ignores its
+# alpha, which is one then, or holds data.
 def image(node, inputs, index):
     if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
     source = ImageRead(node, inputs[0] if node.inputs[0].is_linked else ('UV',))
+    vector = inputs[0] if node.inputs[0].is_linked else ('UV',)
+    if node.type == 'TEX_ENVIRONMENT':
+        vector = node.projection, inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
     read = lambda name: (name + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation,
-        ''), inputs[0] if node.inputs[0].is_linked else ('UV',), source)
+        ''), vector, source)
     if index or node.image.alpha_mode in (
             'CHANNEL_PACKED', 'NONE') or node.image.colorspace_settings.is_data: return read(('IMAGE', 'ALPHA')[index])
     return 'UNASSOCIATE', read('IMAGE'), read('ALPHA')
