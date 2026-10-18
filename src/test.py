@@ -315,6 +315,10 @@ for socket, value in zip(mapped.inputs, (0.2, 0, 0, 2, 4)): socket.default_value
 node_matches(mapped.outputs[0])
 tree.links.new(zero.outputs[0], mapped.inputs['Value'])
 node_matches(mapped.outputs[0])
+rotated = tree.nodes.new('ShaderNodeVectorRotate')
+rotated.inputs['Vector'].default_value, rotated.inputs['Angle'].default_value = (0.2, 0.7, 0.4), 0.7
+tree.links.new(zero.outputs[0], rotated.inputs['Axis'])
+node_matches(rotated.outputs[0])
 image = tree.nodes.new('ShaderNodeTexImage')
 image.image = bpy.data.images.new('alpha regression', 1, 1, alpha=True, float_buffer=True)
 image.image.pixels.foreach_set((0.8, 0.2, 0.1, 0.25))
