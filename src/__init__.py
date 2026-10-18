@@ -223,6 +223,24 @@ def blend(node, inputs, index):  # Of a mix node: its inputs faded into one anot
     if kind in BLENDS: return BLENDS[kind](*inputs[:3])
     return mix(inputs[1], (kind, *inputs[1:]) if OPS.get(kind) else inputs[2], inputs[0])
 
+def between(value, a, b):  # Clamped to the range from a to b, either the larger, as Blender's
+    return 'MINIMUM', ('MAXIMUM', value, ('MINIMUM', a, b)), ('MAXIMUM', a, b)
+
+# Of a map range node, clamping as a clamp node of the range it maps to, of values from none to zero, as Cycles'
+def map_range(node, inputs, index):
+    value, low, high, to_low, to_high, *steps = inputs
+    t, kind = ('DIVIDE', ('SUBTRACT', value, low), ('SUBTRACT', high, low)), node.interpolation_type
+    if kind == 'STEPPED': t = 'MULTIPLY', ('DIVIDE', ('FLOOR', ('MULTIPLY', t, ('ADD', steps[0], 1))), steps[0]), \
+        ('LESS_THAN', 0, steps[0])
+    if kind in ('SMOOTHSTEP', 'SMOOTHERSTEP'): t = clamp(t)
+    if kind == 'SMOOTHSTEP': t = 'MULTIPLY', ('MULTIPLY', t, t), ('SUBTRACT', 3, ('MULTIPLY', t, 2))
+    if kind == 'SMOOTHERSTEP': t = 'MULTIPLY', ('MULTIPLY', ('MULTIPLY', t, t), t), ('ADD', ('MULTIPLY', t,
+        ('SUBTRACT', ('MULTIPLY', t, 6), 15)), 10)
+    value = 'ADD', to_low, ('MULTIPLY', t, ('SUBTRACT', to_high, to_low))
+    if node.data_type == 'FLOAT' and any(isinstance(fold(v), tuple) for v in inputs):
+        value = 'MULTIPLY', value, ('LESS_THAN', 0, absolute(('SUBTRACT', high, low)))
+    return between(value, to_low, to_high) if node.clamp else value
+
 # Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
 # colors from sRGB once interpolated.
@@ -249,7 +267,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
         + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
-    'MIX': blend,
+    'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
+        if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
