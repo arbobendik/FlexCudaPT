@@ -707,12 +707,18 @@ extern "C" __global__ void __raygen__temporal() {
     const unsigned index = p.y * size.x + p.x;
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
     Reservoir r = scene.initial[index];
-    const bool still = scene.camera.origin == scene.previousCamera.origin && scene.camera.x == scene.previousCamera.x
-        && scene.camera.y == scene.previousCamera.y && scene.camera.z == scene.previousCamera.z;
+    const bool still = scene.frame > 0u && scene.camera.origin == scene.previousCamera.origin
+        && scene.camera.x == scene.previousCamera.x && scene.camera.y == scene.previousCamera.y
+        && scene.camera.z == scene.previousCamera.z;
+    Scene before = scene;
+    if (scene.frame == 0u) {
+        before.handle = scene.anchorHandle, before.vertices = scene.anchorVertices;
+        before.normals = scene.anchorNormals, before.lights = scene.anchorLights;
+    }
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        q = dom.hit.triangle == NONE ? -1 : temporalNeighbor(scene, p, size, dom);
+        q = dom.hit.triangle == NONE ? -1 : temporalNeighbor(before, p, size, dom);
     }
     if (q >= 0) {
         const Reservoir temporal = scene.previous[q];
@@ -721,7 +727,7 @@ extern "C" __global__ void __raygen__temporal() {
         const float cap = RESTIR_CAP + (RESTIR_CAP_MIN - RESTIR_CAP) * powf(duplicated, RESTIR_DUPLICATION_ALPHA);
         const float c_t = fminf(temporal.c, cap);
         const Shift to_current = still ? Shift{temporal.f, 1.0f} : shift(scene, scene.camera, index, size, temporal);
-        const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(scene, scene.previousCamera, q, size, r);
+        const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(before, scene.previousCamera, q, size, r);
         const float p_c = rgb_to_greyscale(r.f);
         const float p_t = rgb_to_greyscale(temporal.f);
         Selection sel = {};
