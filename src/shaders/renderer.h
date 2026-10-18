@@ -45,7 +45,7 @@ struct Reservoir {
 struct Shift { float3 f; float jac; };
 // Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, the
 // spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample
-struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths; };
+struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle: three vertices, normals, generated points and UVs, one material; the world's material last. The light
