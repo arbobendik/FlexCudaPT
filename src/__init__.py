@@ -394,33 +394,40 @@ def vector(x, y, z):
     return 'ADD', ('ADD', ('MULTIPLY', x, numpy.eye(3)[0]), ('MULTIPLY', y, numpy.eye(3)[1])), \
         ('MULTIPLY', z, numpy.eye(3)[2])
 
-def hashed(x, y):  # Jenkins' hash of two keys in [0, 1], as Cycles'
-    v = [(0xdeadbeef + 21 + key) & 0xFFFFFFFF for key in (x, y, 0)]
+def hashed(*keys):  # Jenkins' hash of up to three keys in [0, 1], as Cycles'
+    v = [(0xdeadbeef + (len(keys) << 2) + 13 + key) & 0xFFFFFFFF for key in (*keys, 0, 0)[:3]]
     for t, s, k in ((2, 1, 14), (0, 2, 11), (1, 0, 25), (2, 1, 16), (0, 2, 4), (1, 0, 14), (2, 1, 24)):
         v[t] = ((v[t] ^ v[s]) - (v[s] << k | v[s] >> 32 - k)) & 0xFFFFFFFF
     return v[2] / 0xFFFFFFFF
 
-def offset(seed):  # Cycles' random offset of noise by the seed: Jenkins' hash of it with each axis, as floats
+# Cycles' random offset of noise of the dimensions by the seed, of its point and W: Jenkins' hash of the seed, with each
+# axis but in one dimension, as floats
+def offset(seed, dimensions):
     bits = lambda value: struct.unpack('<I', struct.pack('<f', value))[0]
-    return numpy.array([100 + 100 * hashed(bits(seed), bits(axis)) for axis in range(3)])
+    shifts = [100 + 100 * hashed(bits(seed), *[bits(axis)] * (dimensions > 1)) for axis in range(dimensions)]
+    return numpy.array((shifts + [0, 0])[:3]), shifts[3] if dimensions == 4 else 0
 
-# Of a noise texture node, as Cycles' of 3D points, which it takes in any dimension, at the generated point without a
-# vector: its fractal, the type of which the renderer numbers, at the point distorted by signed noise, for its color
-# also at two offsets
+# Of a noise texture node of 1D to 4D points, at the generated point without a vector, as Cycles': its fractal, the
+# type of which the renderer numbers, at the point distorted by signed noise, for its color also at two offsets
 def noise(node, inputs, index):
-    get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
+    get, dimensions = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get, \
+        int(node.noise_dimensions[0])
     point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
+    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point, get('W', 0))
     kind = 'UNNORMALIZED' if node.noise_type == 'FBM' and not node.normalize else node.noise_type
     kind = ('FBM', 'UNNORMALIZED', 'MULTIFRACTAL', 'HETERO_TERRAIN', 'HYBRID_MULTIFRACTAL',
         'RIDGED_MULTIFRACTAL').index(kind)
-    fractal = lambda p: ('NOISE', p, vector(get('Detail'), get('Roughness'), get('Lacunarity')),
-        vector(get('Offset', 0), get('Gain', 0), kind))
-    point, distortion = ('MULTIPLY', point, get('Scale')), get('Distortion')
+    fractal = lambda p, w, params=vector(get('Detail'), get('Roughness'), get('Lacunarity')), extra=vector(
+        get('Offset', 0), get('Gain', 0), kind): ('NOISE', p, params, extra, vector(w, dimensions, 0))
+    at = lambda seed, p, w, *kind: fractal(('ADD', p, offset(seed, dimensions)[0]), ('ADD', w, offset(seed,
+        dimensions)[1]), *kind)  # Offset by the seed
+    point, w, distortion = ('MULTIPLY', point, get('Scale')), ('MULTIPLY', w, get('Scale')), get('Distortion')
     if isinstance(distortion, tuple) or numpy.any(distortion):
-        signed = lambda seed: ('NOISE', ('ADD', point, offset(seed)), numpy.array((0, 0, 1)), numpy.array((0, 0, 1)))
-        point = 'ADD', point, ('MULTIPLY', vector(signed(0), signed(1), signed(2)), distortion)
-    if not index: return fractal(point)
-    return vector(fractal(point), fractal(('ADD', point, offset(3))), fractal(('ADD', point, offset(4))))
+        signed = [at(seed, point, w, numpy.array((0, 0, 1)), numpy.array((0, 0, 1))) for seed in range(dimensions)]
+        point = 'ADD', point, ('MULTIPLY', vector(*(signed + [0, 0])[:3]), distortion)
+        if dimensions == 4: w = 'ADD', w, ('MULTIPLY', signed[3], distortion)
+    if not index: return fractal(point, w)
+    return vector(fractal(point, w), at(dimensions, point, w), at(dimensions + 1, point, w))
 
 # Of a white noise texture node, its value or color, of four dimensions as of three, as Cycles'
 def white_noise(node, inputs, index):
@@ -480,7 +487,8 @@ def wave(node, inputs, index):  # Of a wave texture node at the generated point 
         if node.rings_direction != 'SPHERICAL' else 1)), 20
     n = 'ADD', n, phase
     if isinstance(distortion, tuple) or numpy.any(distortion): n = 'ADD', n, ('MULTIPLY', distortion, ('SUBTRACT',
-        ('MULTIPLY', ('NOISE', ('MULTIPLY', p, detail_scale), vector(detail, roughness, 2), numpy.zeros(3)), 2), 1))
+        ('MULTIPLY', ('NOISE', ('MULTIPLY', p, detail_scale), vector(detail, roughness, 2), numpy.zeros(3),
+        numpy.array((0, 3, 0))), 2), 1))
     if node.wave_profile == 'SIN': return 'ADD', 0.5, ('MULTIPLY', 0.5, ('SINE', ('SUBTRACT', n, math.pi / 2)))
     n = 'DIVIDE', n, 2 * math.pi
     return fraction(n) if node.wave_profile == 'SAW' else ('MULTIPLY', absolute(('SUBTRACT', n, ('FLOOR', ('ADD', n,
