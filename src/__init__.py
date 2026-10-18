@@ -82,7 +82,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
-    'STORE', 'LOAD'))}
+    'TRANSFORM', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -367,6 +367,17 @@ def mapping(node, inputs, index):  # Of a mapping node, as Cycles'
     vector = euler(('MULTIPLY', vector, scale), rotation)
     return ('ADD', vector, *location) if location else vector
 
+# Of a vector transform node, through the world, normals normalized by every transform, as Cycles'
+def vector_transform(node, inputs, index):
+    v, kind, spaces = inputs[0], ('POINT', 'VECTOR', 'NORMAL').index(node.vector_type), (node.convert_from,
+        node.convert_to)
+    camera = lambda v, mode: normalize(('TRANSFORM', v, mode)) if kind == 2 else ('TRANSFORM', v, mode)
+    if spaces[0] == 'CAMERA' != spaces[1]: v = camera(v, 8 + min(kind, 1))  # Into the world
+    if spaces[0] == 'OBJECT' != spaces[1]: v = 'TRANSFORM', v, kind
+    if spaces[1] == 'OBJECT' != spaces[0]: v = 'TRANSFORM', v, 3 + kind  # Out of it
+    if spaces[1] == 'CAMERA' != spaces[0]: v = camera(v, 6 + min(kind, 1))
+    return v
+
 def vector_rotate(node, inputs, index):  # Of a vector rotate node about its center, as Cycles'
     vector, center, *rotation = inputs
     if node.rotation_type == 'EULER_XYZ':
@@ -484,8 +495,8 @@ def coordinates(node, inputs, index):  # Of a texture coordinate node, as Cycles
     if index == 3: return transform(node.object.matrix_world.inverted(), ('POSITION',)) if node.object else ('OBJECT',)
     reflection = 'SUBTRACT', ('MULTIPLY', facing(('NORMAL',)), ('MULTIPLY', ('DOT_PRODUCT', facing(('NORMAL',)),
         ('INCOMING',)), 2)), ('INCOMING',)
-    return {0: ('GENERATED',), 4: ('CAMERA_POINT',), 5: ('WINDOW',), 6: reflection}.get(index) or resolve(
-        node.outputs[index])
+    return {0: ('GENERATED',), 1: ('TRANSFORM', facing(('NORMAL',)), 5), 4: ('CAMERA_POINT',), 5: ('WINDOW',),
+        6: reflection}.get(index) or resolve(node.outputs[index])
 
 def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
     eta = 'MAXIMUM', inputs[0], 1e-5
@@ -523,17 +534,16 @@ def curves(node, inputs, index):  # Of an RGB, vector or float curves node, each
         numpy.eye(3)[k]), k) for k in range(3)))
     return mix(value, looked, factor)
 
-# Of a normal map node, as Cycles': its strength scaling the normal in tangent space, else fading into it, of object
-# space the normal unknown
+# Of a normal map node, as Cycles': its strength scaling the normal in tangent space, else fading into it
 def normal_map(node, inputs, index):
     strength, color = inputs
     if node.space == 'TANGENT':
         color = 'ADD', ('MULTIPLY', ('SUBTRACT', color, 0.5), vector(strength, strength, clamp(strength))), \
             ('MULTIPLY', ('SUBTRACT', 1, clamp(strength)), numpy.array((0, 0, 0.5)))
         return 'NORMAL_MAP', ('ADD', color, 0.5)
-    if 'WORLD' not in node.space: return ('NORMAL',)
     color = normalize(('MULTIPLY', ('SUBTRACT', ('MULTIPLY', color, 2), 1), numpy.array((1, -1, -1))
-        if node.space == 'BLENDER_WORLD' else 1))
+        if 'BLENDER' in node.space else 1))
+    if 'OBJECT' in node.space: color = 'TRANSFORM', color, 2
     return normalize(mix(('NORMAL',), color, ('MAXIMUM', strength, 0)))
 
 # Color or alpha of an image node at its vector, projected and extended, pink when missing, of an environment node along
@@ -562,8 +572,7 @@ def image(node, inputs, index):
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. Added
-# shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the generated,
-# object, camera, window and reflection ones are known.
+# shaders sum their iors' excess over 1, as Cycles sums their reflections. Of UV maps only the active one is known.
 NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
@@ -589,7 +598,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         else COMPOSITES[node.operation](*inputs) if node.operation in COMPOSITES else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
     'COMBXYZ': lambda node, inputs, index: vector(*inputs),
-    'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
+    'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate, 'VECT_TRANSFORM': vector_transform,
     'TEX_COORD': coordinates, 'CAMERA': lambda node, inputs, index: (normalize(('CAMERA_POINT',)),
         ('DOT_PRODUCT', ('CAMERA_POINT',), numpy.eye(3)[2]), length(('CAMERA_POINT',)))[index],
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
