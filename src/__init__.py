@@ -318,16 +318,32 @@ def vector(x, y, z):
     return 'ADD', ('ADD', ('MULTIPLY', x, numpy.eye(3)[0]), ('MULTIPLY', y, numpy.eye(3)[1])), \
         ('MULTIPLY', z, numpy.eye(3)[2])
 
+def offset(seed):  # Cycles' random offset of noise by the seed: Jenkins' hash of it with each axis, as floats
+    def hash(*keys):
+        v = [(0xdeadbeef + 21 + key) & 0xFFFFFFFF for key in (*keys, 0)]
+        for t, s, k in ((2, 1, 14), (0, 2, 11), (1, 0, 25), (2, 1, 16), (0, 2, 4), (1, 0, 14), (2, 1, 24)):
+            v[t] = ((v[t] ^ v[s]) - (v[s] << k | v[s] >> 32 - k)) & 0xFFFFFFFF
+        return v[2] / 0xFFFFFFFF
+    bits = lambda value: struct.unpack('<I', struct.pack('<f', value))[0]
+    return numpy.array([100 + 100 * hash(bits(seed), bits(axis)) for axis in range(3)])
+
 # Of a noise texture node, as Cycles' of 3D points, which it takes in any dimension, at the generated point without a
-# vector: its fractal, the type of which the renderer numbers
+# vector: its fractal, the type of which the renderer numbers, at the point distorted by signed noise, for its color
+# also at two offsets
 def noise(node, inputs, index):
     get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
     point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
     kind = 'UNNORMALIZED' if node.noise_type == 'FBM' and not node.normalize else node.noise_type
     kind = ('FBM', 'UNNORMALIZED', 'MULTIFRACTAL', 'HETERO_TERRAIN', 'HYBRID_MULTIFRACTAL',
         'RIDGED_MULTIFRACTAL').index(kind)
-    return 'NOISE', ('MULTIPLY', point, get('Scale')), vector(get('Detail'), get('Roughness'), get('Lacunarity')), \
-        vector(get('Offset', 0), get('Gain', 0), kind)
+    fractal = lambda p: ('NOISE', p, vector(get('Detail'), get('Roughness'), get('Lacunarity')),
+        vector(get('Offset', 0), get('Gain', 0), kind))
+    point, distortion = ('MULTIPLY', point, get('Scale')), get('Distortion')
+    if isinstance(distortion, tuple) or numpy.any(distortion):
+        signed = lambda seed: ('NOISE', ('ADD', point, offset(seed)), numpy.array((0, 0, 1)), numpy.array((0, 0, 1)))
+        point = 'ADD', point, ('MULTIPLY', vector(signed(0), signed(1), signed(2)), distortion)
+    if not index: return fractal(point)
+    return vector(fractal(point), fractal(('ADD', point, offset(3))), fractal(('ADD', point, offset(4))))
 
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where
