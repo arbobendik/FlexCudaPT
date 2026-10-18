@@ -2,6 +2,7 @@
 import addon_utils, bpy, bmesh, gpu, math, mmap, numpy, os, struct, subprocess, time
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix
+from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 
 SUN_DISTANCE = 1e5
 VIEWPORT_SAMPLES = 4  # Per redraw
@@ -43,9 +44,9 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
 VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density'), 'PRINCIPLED_VOLUME': ('Absorption Color', 'Density')}
 # Luminance of a color and mean of a vector, as Blender converts them to values
 WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
-# Blender's material panels the engine shows: the slots, the surface's nodes and the generic ones
+# Blender's material and camera panels the engine shows
 PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
-    'MATERIAL_PT_animation')
+    'MATERIAL_PT_animation', *(panel.__name__ for panel in CAMERA_PANELS))
 SCENE, REQUEST, UPDATE = range(3)  # Kinds of what the renderer is piped
 
 def decode(srgb):  # sRGB to linear
@@ -214,6 +215,20 @@ def sampling(scene, follows):
     return scene.flex_samples, scene.flex_reuse_samples if reuse else scene.flex_samples, \
         scene.flex_jump_distance if follows else -1, math.cos(scene.flex_jump_angle)
 
+def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blades, rotation and anamorphic ratio
+    if camera is None or camera.type != 'CAMERA' or camera.data.type != 'PERSP' or not camera.data.dof.use_dof:
+        return 0, 0, 0, 0, 1
+    dof = camera.data.dof
+    distance = dof.focus_distance
+    target = dof.focus_object
+    if target:
+        matrix = target.matrix_world
+        bone = target.pose and target.pose.bones.get(dof.focus_subtarget)
+        if bone: matrix = matrix @ bone.matrix
+        distance = abs((camera.matrix_world.normalized().inverted() @ matrix).translation.z)
+    return camera.data.lens * 1e-3 / (2 * max(dof.aperture_fstop, 1e-5)), max(distance, 1e-5), \
+        dof.aperture_blades if dof.aperture_blades >= 3 else 0, dof.aperture_rotation, dof.aperture_ratio
+
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
@@ -364,7 +379,7 @@ class Flex(bpy.types.RenderEngine):
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
     # from the camera's matrix through its perspective projection under the settings; none launched if the view already
     # had its samples. A view other than the last starts over.
-    def trace(self, width, height, sampling, launches, settings, matrix, projection):
+    def trace(self, width, height, sampling, launches, settings, matrix, projection, camera=None):
         right = matrix.col[0].xyz
         up = matrix.col[1].xyz
         back = matrix.col[2].xyz
@@ -372,9 +387,9 @@ class Flex(bpy.types.RenderEngine):
         y = up / projection[1][1]
         center = x * projection[0][2] + y * projection[1][2] - back
         # Request on stdin: sampling, launches, size, settings, the camera's origin and its ray direction
-        # per NDC x, per NDC y and at the center.
-        self.requests.write(struct.pack(f'<3I2f{3 + len(settings)}I12f', REQUEST, *sampling, launches, width, height,
-            *settings, *matrix.translation, *x, *y, *center))
+        # per NDC x, per NDC y and at the center, then the thin lens.
+        self.requests.write(struct.pack(f'<3I2f{3 + len(settings)}I17f', REQUEST, *sampling, launches, width, height,
+            *settings, *matrix.translation, *x, *y, *center, *lens(camera)))
         self.requests.flush()
         launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
         sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
@@ -389,7 +404,8 @@ class Flex(bpy.types.RenderEngine):
         self.update_stats('', f'{scene.name} | Syncing scene')
         self.start(depsgraph)
         camera = (scene.camera.matrix_world.normalized(),
-            scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y))
+            scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y),
+            scene.camera)
         result = self.begin_result(0, 0, width, height)  # Blender clips the result to the render border
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)
@@ -421,8 +437,10 @@ class Flex(bpy.types.RenderEngine):
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
         region = context.region
         scene = depsgraph.scene
+        camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
         launched, sums = self.trace(region.width, region.height, sampling(scene, True), VIEWPORT_SAMPLES,
-            settings(scene, True), context.region_data.view_matrix.inverted(), context.region_data.window_matrix)
+            settings(scene, True), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
+            camera.evaluated_get(depsgraph) if camera else None)
         if launched:
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
             self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',
