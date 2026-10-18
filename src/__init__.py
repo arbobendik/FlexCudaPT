@@ -54,28 +54,49 @@ def decode(srgb):  # sRGB to linear
 
 # First texel, width, height and mean of an image or of a ramp node's 256 colors, added as linear floats at first use
 def texture(source, textures, texels):
+    if isinstance(source, ImageRead): source = source.node
     if source not in textures:
         ramp = source.type == 'VALTORGB'
-        pixels = numpy.empty(1024 if ramp else len(source.pixels), 'f')
+        image = source if ramp else source.image
+        pixels = numpy.empty(1024 if ramp else len(image.pixels), 'f')
         if ramp: pixels[:] = numpy.ravel([source.color_ramp.evaluate(i / 255) for i in range(256)])
-        else: source.pixels.foreach_get(pixels)
-        if not (ramp or source.is_float or source.colorspace_settings.is_data):
+        else: image.pixels.foreach_get(pixels)
+        if not (ramp or image.is_float or image.colorspace_settings.is_data):
             pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
-        textures[source] = (sum(map(len, texels)) // 4, *((256, 1) if ramp else source.size),
+        if not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data:  # As Cycles keeps
+            pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
+        if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
+        textures[source] = (sum(map(len, texels)) // 4, *((256, 1) if ramp else image.size),
             pixels.reshape(-1, 4).mean(0))
         texels.append(pixels)
     return textures[source]
 
 def expression_key(expression):
     if isinstance(expression, tuple): return tuple(map(expression_key, expression))
+    if isinstance(expression, ImageRead): return expression.key
     if isinstance(expression, (int, float, numpy.number, numpy.ndarray)):
         return tuple(numpy.resize(expression, 3).astype('f'))
     return expression
 
+class ImageRead:  # Samples Cycles can merge share whether their alpha is read
+    def __init__(self, node, point):
+        self.node = node
+        self.key = (node.image, node.interpolation, node.projection, getattr(node, 'projection_blend', 0),
+            getattr(node, 'extension', 'REPEAT'), expression_key(fold(point)))
+
+def alpha_reads(expression):  # Image samples whose alpha contributes to the resolved surface
+    if isinstance(expression, list):
+        for part in expression: yield from alpha_reads(part)
+    elif isinstance(expression, tuple):
+        name, *operands = expression
+        if name in ('ALPHA', 'ALPHA_LINEAR', 'ALPHA_CUBIC') and isinstance(operands[-1], ImageRead):
+            yield operands[-1].key
+        for part in operands[:1] if name == 'UNASSOCIATE' else operands: yield from alpha_reads(part)
+
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
 # textures of their mean. Without slots it counts in uses each expression met, entering none twice; with them those met
 # again are kept in a slot and loaded.
-def emit(expression, ops, textures, texels, uses, slots=None):
+def emit(expression, ops, textures, texels, alphas, uses, slots=None):
     if isinstance(expression, list): expression = 'END', *expression
     if not isinstance(expression, tuple):
         ops.append((1, *numpy.resize(expression, 3).astype('f').view('I')))
@@ -86,9 +107,12 @@ def emit(expression, ops, textures, texels, uses, slots=None):
         if slots is None: uses[key][0] += 1
         else: ops.append(([*OPS].index('LOAD'), slots[key], 0, 0))
         return uses[key][1]
+    if name == 'UNASSOCIATE':
+        return emit(('DIVIDE', *operands) if operands[1][-1].key in alphas else operands[0], ops, textures, texels,
+            alphas, uses, slots)
     payload = texture(operands.pop(), textures, texels) if name in ('IMAGE', 'ALPHA', 'IMAGE_LINEAR',
         'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC') else (0, 0, 0, numpy.ones(4))
-    values = [emit(operand, ops, textures, texels, uses, slots) for operand in operands]
+    values = [emit(operand, ops, textures, texels, alphas, uses, slots) for operand in operands]
     ops.append(([*OPS].index(name), *payload[:3]))
     value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
     if slots is None: uses[key] = [1, value]
@@ -101,7 +125,7 @@ def fold(expression):  # The expression with its operations on constants alone c
     if isinstance(expression, list): return [fold(attribute) for attribute in expression]
     if not isinstance(expression, tuple): return expression
     name, *operands = (fold(part) if isinstance(part, tuple) else part for part in expression)
-    if OPS[name] and not any(isinstance(operand, tuple) for operand in operands):
+    if name != 'UNASSOCIATE' and OPS[name] and not any(isinstance(operand, tuple) for operand in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     return name, *operands
 
@@ -112,6 +136,17 @@ def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by a
 def clamp(value):
     return 'SUBTRACT', 1, ('MAXIMUM', 0, ('SUBTRACT', 1, ('MAXIMUM', 0, value)))
 
+# Color or alpha of an image node at its vector, pink when missing. Cycles dissociates colors from their alpha where
+# reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
+def image(node, inputs, index):
+    if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
+    source = ImageRead(node, inputs[0] if node.inputs[0].is_linked else ('UV',))
+    read = lambda name: (name + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation,
+        ''), inputs[0] if node.inputs[0].is_linked else ('UV',), source)
+    if index or node.image.alpha_mode in (
+            'CHANNEL_PACKED', 'NONE') or node.image.colorspace_settings.is_data: return read(('IMAGE', 'ALPHA')[index])
+    return 'UNASSOCIATE', read('IMAGE'), read('ALPHA')
+
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation; a
 # mapping of points scales and moves them without rotating, one of textures undoes that. A normal map bends the normal
@@ -120,10 +155,7 @@ def clamp(value):
 # noise is Cycles' of a 3D point, one octave of it normalized, at the generated point without a vector.
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
-    'TEX_IMAGE': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
-        + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation, ''),
-        inputs[0] if node.inputs[0].is_linked else ('UV',), node.image) if node.image and node.image.size[0]
-        else numpy.array((1, 0, 1)),
+    'TEX_IMAGE': image,
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
         + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
@@ -275,9 +307,9 @@ class Flex(bpy.types.RenderEngine):
         textures = {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         def program(surface):  # Counted, then emitted keeping what it uses again
-            surface, first, uses, slots = fold(surface), len(ops), {}, {}
-            emit(surface, [], textures, texels, uses)
-            emitted = emit(surface, ops, textures, texels, uses, slots)
+            surface, first, alpha, uses, slots = fold(surface), len(ops), set(alpha_reads(surface)), {}, {}
+            emit(surface, [], textures, texels, alpha, uses)
+            emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
             assert len(slots) <= SLOTS, 'values a program keeps for reuse'
             return emitted, first
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
