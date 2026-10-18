@@ -295,3 +295,38 @@ _, _, rotated = camera_render(aperture_rotation=math.pi / 2)
 assert abs(triangle[0]) > 0.3 and abs(triangle[1]) < 0.15, 'aperture blades'
 assert abs(rotated[1]) > 0.3 and abs(rotated[0]) < 0.15, 'aperture rotation'
 assert numpy.allclose(camera_render(focus_object=bpy.data.objects['textured'])[0], sharp, atol=0.01), 'focus object'
+# Node regressions compared to Cycles through emission, independently of the engines' different BSDFs
+for ob in scene.objects: ob.hide_render = ob != scene.camera
+scene.camera.data.angle, scene.flex_samples, dof.use_dof = 0.1, 16, False
+tree = plane('nodes', 0, 0, 100).id_data
+emission = tree.nodes.new('ShaderNodeEmission')
+tree.links.new(emission.outputs[0], tree.nodes['Material Output'].inputs['Surface'])
+scene.cycles.samples, scene.cycles.use_denoising = 16, False
+scene.cycles.pixel_filter_type, scene.cycles.filter_width = 'BOX', 1
+
+def node_matches(socket):
+    tree.links.new(socket, emission.inputs['Color'])
+    colors = []
+    for engine in ('FLEX', 'CYCLES'):
+        scene.render.engine = engine
+        bpy.ops.render.render(scene=scene.name, write_still=True)
+        colors.append(numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[
+            24:40, 24:40, :3].mean((0, 1)))
+    assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
+
+image = tree.nodes.new('ShaderNodeTexImage')
+image.image = bpy.data.images.new('alpha regression', 1, 1, alpha=True, float_buffer=True)
+image.image.pixels.foreach_set((0.8, 0.2, 0.1, 0.25))
+image.image.alpha_mode = 'NONE'
+node_matches(image.outputs['Alpha'])
+image.image.alpha_mode = 'STRAIGHT'
+tree.links.new(image.outputs['Alpha'], tree.nodes.new('ShaderNodeMath').inputs[0])  # An unused alpha link
+node_matches(image.outputs['Color'])
+tree.links.remove(image.outputs['Alpha'].links[0])
+other = tree.nodes.new('ShaderNodeTexImage')
+other.image, other.extension = image.image, image.extension
+tree.links.new(other.outputs['Alpha'], emission.inputs['Strength'])
+node_matches(image.outputs['Color'])
+other.interpolation = 'Closest'
+node_matches(image.outputs['Color'])
+tree.links.remove(emission.inputs['Strength'].links[0])
