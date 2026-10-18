@@ -379,19 +379,19 @@ def white_noise(node, inputs, index):
     dimensions = int(node.noise_dimensions[0])
     return 'WHITE_NOISE', inputs[0], numpy.array((min(dimensions, 3), index, 0))
 
-# Of a Voronoi texture node's distance, color or position, as Cycles' of 3D points, which it takes in any dimension, at
-# the generated point without a vector, the distance normalized by the farthest its metric makes it
+# Of a Voronoi texture node's distance, color or position, as Cycles' fractal of 3D points, which it takes in any
+# dimension, at the generated point without a vector, normalized by the farthest distance its metric makes
 def voronoi(node, inputs, index):
     get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
     point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
     metric = ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
-    value = 'VORONOI', ('MULTIPLY', point, get('Scale')), vector(('F1', 'F2', 'SMOOTH_F1').index(node.feature), metric,
-        get('Exponent', 1)), vector(get('Randomness'), get('Smoothness', 0), index)
-    if index == 2: return 'DIVIDE', value, get('Scale')
-    if index or not node.normalize: return value
     farthest = ('POWER', 3, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (3 ** 0.5, 3, 1)[metric]
-    return 'DIVIDE', value, ('MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))),
-        ('MULTIPLY', farthest, 2 if node.feature == 'F2' else 1))
+    farthest = 'MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))), ('MULTIPLY', farthest,
+        (2 if node.feature == 'F2' else 1) * node.normalize)
+    value = 'VORONOI', ('MULTIPLY', point, get('Scale')), vector(('F1', 'F2', 'SMOOTH_F1').index(node.feature), metric,
+        get('Exponent', 1)), vector(get('Randomness'), get('Smoothness', 0), index), vector(get('Detail'),
+        get('Roughness'), get('Lacunarity')), farthest
+    return ('DIVIDE', value, get('Scale')) if index == 2 else value
 
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
     p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)

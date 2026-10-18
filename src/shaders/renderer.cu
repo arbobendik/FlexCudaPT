@@ -141,10 +141,11 @@ __device__ float3 site(int x, int y, int z) { // By the PCG hash of its integer 
     return make_float3(float(v.x & 0x7FFFFFFF), float(v.y & 0x7FFFFFFF), float(v.z & 0x7FFFFFFF))
         * (1.0f / float(0x7FFFFFFF));
 }
-// Cycles' Voronoi texture of a 3D point by its feature, F1, F2 or smooth F1, and metric of exponent in kind: the
-// distance, color or position of the output in extra, also holding randomness and smoothness
-__device__ float3 voronoi(float3 p, float3 kind, float3 extra) {
-    const int feature = int(kind.x), metric = int(kind.y), output = int(extra.z);
+struct Cell { float distance; float3 color, position; };
+// Cycles' Voronoi texture of a 3D point by its feature, F1, F2 or smooth F1, and metric of exponent in kind, the
+// randomness and smoothness in extra
+__device__ Cell voronoi(float3 p, float3 kind, float3 extra) {
+    const int feature = int(kind.x), metric = int(kind.y);
     const float randomness = fminf(fmaxf(extra.x, 0), 1), smoothness = fminf(fmaxf(extra.y / 2, 0), 0.5f);
     const float3 cell = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), local = p - cell;
     const auto distance = [&](float3 d) {
@@ -175,8 +176,32 @@ __device__ float3 voronoi(float3 p, float3 kind, float3 extra) {
         } else if (d < best[1]) best[1] = d, colors[1] = color, positions[1] = position;
     }
     const int f = feature == 1;
-    const float d = reach == 2 ? smooth : best[f];
-    return output == 0 ? make_float3(d, d, d) : output == 1 ? colors[f] : positions[f] + cell;
+    return {reach == 2 ? smooth : best[f], colors[f], positions[f] + cell};
+}
+// Cycles' fractal of Voronoi octaves up to the detail, as of noise: the distance, color or position, the output in
+// extra, normalized by the farthest distance unless zero
+__device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fractal, float farthest) {
+    const float detail = fminf(fmaxf(fractal.x, 0), 15), roughness = fminf(fmaxf(fractal.y, 0), 1);
+    const float rmd = detail - floorf(detail);
+    float amplitude = 1, total = 0, scale = 1;
+    Cell sum = {};
+    for (int i = 0; i <= ceilf(detail); ++i) {
+        const Cell octave = voronoi(p * scale, kind, extra);
+        if (detail == 0 || roughness == 0) {
+            total = 1;
+            sum = octave;
+            break;
+        }
+        const float weight = i <= detail ? 1 : rmd;
+        total += amplitude * weight;
+        sum.distance += octave.distance * amplitude * weight;
+        sum.color = sum.color + octave.color * (amplitude * weight);
+        sum.position = mix(sum.position, octave.position / scale, amplitude * weight);
+        scale *= fractal.z;
+        amplitude *= roughness;
+    }
+    if (farthest > 0) sum.distance /= total * farthest, sum.color = sum.color / total;
+    return extra.z == 0 ? make_float3(1, 1, 1) * sum.distance : extra.z == 1 ? sum.color : sum.position;
 }
 // Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
 __device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
@@ -315,7 +340,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
-        case VORONOI: top -= 2; top[-1] = voronoi(top[-1], top[0], top[1]); break;
+        case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
         case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
         case NOISE: top -= 2; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1]); break;
         case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
