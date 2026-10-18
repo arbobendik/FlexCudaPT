@@ -12,7 +12,7 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     POWER, EXPONENT, MINIMUM, LESS_THAN, FLOOR, MODULO, SINE, COSINE, TANGENT, ARCSINE, ARCCOSINE, ARCTANGENT, ARCTAN2,
     SINH, COSH, TANH, CROSS_PRODUCT, RGB_TO_HSV, HSV_TO_RGB, RGB_TO_HSL, HSL_TO_RGB,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
-    LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK };
+    LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
@@ -53,8 +53,8 @@ struct Shift { float3 f; float jac; };
 struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
-// Per triangle: three vertices, normals, generated points and UVs, one material; the world's material last. The light
-// BVH from its root.
+// Per triangle: three vertices, normals, generated points, points in their object and UVs, one material; the world's
+// material last. The light BVH from its root.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
 // The frame's number seeds it.
@@ -62,7 +62,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // camera and vertices, how far the motion is trusted, and the triangle the pixel sees now and saw then.
 // Of the scene the reservoirs a view's first frame reuses were traced in: its BVH, vertices, normals and light BVH.
 struct Scene {
-    float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated; float2* uvs;
+    float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated, *objects; float2* uvs;
     Material* materials; LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;

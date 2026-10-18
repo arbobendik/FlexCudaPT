@@ -372,15 +372,16 @@ __device__ float spline(float t, int k) {
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
-// Surface a program resolves to at a UV and generated point, facing along the normal with the tangent space tbn, at a
-// position seen from the incoming direction, on the back of its face or not, for the ray
+// Surface a program resolves to at a UV, generated point and point in its object, facing along the normal with the
+// tangent space tbn, at a position seen from the incoming direction, on the back of its face or not, for the ray
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
-    float v, float3 generated, float3 position, float3 incoming, bool backfacing, const Ray& ray) {
+    float v, float3 generated, float3 object, float3 position, float3 incoming, bool backfacing, const Ray& ray) {
     float3 stack[STACK], *top = stack;
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
         case UV: *top++ = make_float3(u, v, 0); break;
         case GENERATED: *top++ = generated; break;
+        case OBJECT: *top++ = object; break;
         case NORMAL: *top++ = normal; break;
         case POSITION: *top++ = position; break;
         case INCOMING: *top++ = incoming; break;
@@ -483,11 +484,13 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* generated = scene.generated + 3 * triangle;
+    const float3* object = scene.objects + 3 * triangle;
     return shade(scene, scene.materials[triangle].program, normal,
         normalMapTBN(vertex[0], vertex[1], vertex[2], uv[0], uv[1], uv[2], normal),
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
         generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
+        object[0] + (object[1] - object[0]) * s + (object[2] - object[0]) * t,
         vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, -direction,
         dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray);
 }
@@ -621,7 +624,7 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
-        direction, direction, -direction, false, ray).emissive;
+        direction, direction, direction, -direction, false, ray).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
