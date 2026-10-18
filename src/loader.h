@@ -187,9 +187,12 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 }
 
 // World-space scene piped in by the extension into scene, in place of the one of arrays, then its arrays: triangle,
-// step and texel counts, then the scene's arrays in order.
+// step and texel counts, then the scene's arrays in order. The vertices last denoised stay the previous ones while the
+// triangle count does, others are freed.
 inline void loadScene(OptixDeviceContext context, Scene& scene, std::vector<CUdeviceptr>& arrays) {
     for (CUdeviceptr array : arrays) release(array);
+    float3* const last = scene.vertices;
+    const unsigned count = scene.count;
     struct { unsigned count, ops, texels; } header;
     std::fread(&header, sizeof(header), 1, stdin);
     std::vector<float3> vertices;
@@ -210,7 +213,9 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, std::vector<CUde
     const CUdeviceptr temp = allocate(sizes.tempSizeInBytes), output = allocate(sizes.outputSizeInBytes);
     CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, sizes.tempSizeInBytes, output,
         sizes.outputSizeInBytes, &scene.handle, nullptr, 0));
-    arrays = {(CUdeviceptr)scene.vertices, (CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated,
+    if (last != scene.previousVertices) release((CUdeviceptr)last);
+    if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
+    arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops,
         (CUdeviceptr)scene.texels, temp, output};
 }
