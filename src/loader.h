@@ -235,7 +235,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     std::fread(&header, sizeof(header), 1, stdin);
     scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
     scene.generated = load<float3>(3 * header.count), scene.objects = load<float3>(3 * header.count);
-    scene.uvs = load<float2>(3 * header.count), scene.materials = load<Material>(header.count + 1, loaded.materials);
+    scene.uvs = load<float2>(3 * header.count), scene.colors = load<float4>(3 * header.count);
+    scene.materials = load<Material>(header.count + 1, loaded.materials);
     scene.lights = loadLights(loaded.vertices, loaded.materials);
     scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
@@ -243,8 +244,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
-        (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops,
-        (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
+        (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights,
+        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
 }
 
 // Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
@@ -263,11 +264,13 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         std::fread(&range, sizeof(range), 1, stdin);
         std::vector<float3> points(3 * range.count);
         std::vector<float2> uvs(3 * range.count);
+        std::vector<float4> colors(3 * range.count);
         update(scene.vertices, 3 * range.first, 3 * range.count, &loaded.vertices[3 * range.first]);
         update(scene.normals, 3 * range.first, 3 * range.count, points.data());
         update(scene.generated, 3 * range.first, 3 * range.count, points.data());
         update(scene.objects, 3 * range.first, 3 * range.count, points.data());
         update(scene.uvs, 3 * range.first, 3 * range.count, uvs.data());
+        update(scene.colors, 3 * range.first, 3 * range.count, colors.data());
     }
     LightNode* const lights = loadLights(loaded.vertices, loaded.materials);
     std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
