@@ -411,9 +411,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float facing = surface.transparency > 0 || dot(face, direction) < 0 ? 1.0f : -1.0f;
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
-        // As FlexLight's Material, which the shared BSDF takes
+        // As FlexLight's Material, which the shared BSDF takes, absorbing the volume's transmittance over unit distance
         const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
-            surface.transparency, surface.ior, surface.absorption};
+            surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
+            expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1)))};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Rays reaching the back of a face come through its medium
         if (dot(direction, geometry_n) > 0)

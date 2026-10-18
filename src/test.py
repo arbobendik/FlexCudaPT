@@ -223,8 +223,8 @@ add(bpy.data.lights.new('bright', 'POINT'), (0, 0, -1)).data.energy = 1e6
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert pixels.sum(2).min() > 0, 'many lights'
-# Through a slab of white glass of IOR 1 and depth 0.5 under the white sky, a Volume Absorption of the color passes the
-# color to the power of the depth, as FlexLight's Beer's law
+# Through a slab of white glass of IOR 1 and depth 0.5 under the white sky, a Volume Absorption of the color and density 1
+# passes its transmittance over unit distance, exp(color - 1), to the power of depth, as FlexLight's Beer's law
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
 scene.camera.data.angle, scene.flex_samples = 0.1, 16
@@ -242,7 +242,7 @@ absorption.inputs['Color'].default_value = (*COLOR, 1)
 glass.id_data.links.new(absorption.outputs[0], glass.id_data.nodes['Material Output'].inputs['Volume'])
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
-assert numpy.allclose(pixels.mean((0, 1)), numpy.array(COLOR) ** 0.5, rtol=0.02), 'absorption'
+assert numpy.allclose(pixels.mean((0, 1)), numpy.exp(numpy.array(COLOR) - 1) ** 0.5, rtol=0.02), 'absorption'
 # Colored instead, the slab tints the light by its base color at each of its two sides, by the color squared
 glass.id_data.links.remove(glass.id_data.nodes['Material Output'].inputs['Volume'].links[0])
 glass.inputs['Base Color'].default_value = (*COLOR, 1)
