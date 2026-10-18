@@ -186,18 +186,19 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
     return (LightNode*)allocate(nodes.size() * sizeof(LightNode), nodes.data());
 }
 
-// World-space scene piped in by the extension: triangle, step and texel counts, then the scene's arrays in order.
-inline Scene loadScene(OptixDeviceContext context) {
+// World-space scene piped in by the extension into scene, in place of the one of arrays, then its arrays: triangle,
+// step and texel counts, then the scene's arrays in order.
+inline void loadScene(OptixDeviceContext context, Scene& scene, std::vector<CUdeviceptr>& arrays) {
+    for (CUdeviceptr array : arrays) release(array);
     struct { unsigned count, ops, texels; } header;
     std::fread(&header, sizeof(header), 1, stdin);
     std::vector<float3> vertices;
     std::vector<Material> materials;
-    Scene scene{.vertices = load<float3>(3 * header.count, vertices), .normals = load<float3>(3 * header.count),
-        .generated = load<float3>(3 * header.count),
-        .uvs = load<float2>(3 * header.count), .materials = load<Material>(header.count + 1, materials),
-        .lights = loadLights(vertices, materials),
-        .ops = load<Op>(header.ops), .texels = load<float4>(header.texels), .count = header.count,
-        .pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]), loadPairing(PAIRING_SIZES[2])}};
+    scene.vertices = load<float3>(3 * header.count, vertices), scene.normals = load<float3>(3 * header.count);
+    scene.generated = load<float3>(3 * header.count);
+    scene.uvs = load<float2>(3 * header.count), scene.materials = load<Material>(header.count + 1, materials);
+    scene.lights = loadLights(vertices, materials);
+    scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
     CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;
     unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
@@ -206,7 +207,10 @@ inline Scene loadScene(OptixDeviceContext context) {
     OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
     OptixAccelBufferSizes sizes{};
     CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
-    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, allocate(sizes.tempSizeInBytes), sizes.tempSizeInBytes,
-        allocate(sizes.outputSizeInBytes), sizes.outputSizeInBytes, &scene.handle, nullptr, 0));
-    return scene;
+    const CUdeviceptr temp = allocate(sizes.tempSizeInBytes), output = allocate(sizes.outputSizeInBytes);
+    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, sizes.tempSizeInBytes, output,
+        sizes.outputSizeInBytes, &scene.handle, nullptr, 0));
+    arrays = {(CUdeviceptr)scene.vertices, (CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated,
+        (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops,
+        (CUdeviceptr)scene.texels, temp, output};
 }
