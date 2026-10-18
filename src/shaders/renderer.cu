@@ -42,6 +42,23 @@ __device__ float random(unsigned& state) { return ((state = hash(state)) >> 8) *
 
 constexpr unsigned LOBE_DIFFUSE = 0u;
 constexpr unsigned LOBE_REFRACT = 1u;
+constexpr unsigned LOBE_REFLECT = 2u;
+constexpr unsigned LOBE_NONE = 3u;
+// Of the ray a surface or the world is shaded for, as Cycles' light path node tells: whether it left the camera or
+// tests a shadow, the lobe it left by, its bounce, a bounce further for the world, and its length, none for the world
+struct Ray { bool camera, shadow; unsigned lobe; float depth, length; };
+__device__ float lightPath(const Ray& ray, int output) {
+    switch (output) {
+        case 0: return ray.camera;
+        case 1: return ray.shadow;
+        case 2: return ray.lobe == LOBE_DIFFUSE;
+        case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT;
+        case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT;
+        case 6: return ray.lobe == LOBE_REFRACT;
+        case 8: return ray.length;
+        default: return ray.depth;
+    }
+}
 
 // Of a to the base b, zero where undefined as Blender's
 __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
@@ -173,9 +190,9 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
 // Surface a program resolves to at a UV and generated point, facing along the normal with the tangent space tbn, at a
-// position seen from the incoming direction, on the back of its face or not
+// position seen from the incoming direction, on the back of its face or not, for the ray
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
-    float v, float3 generated, float3 position, float3 incoming, bool backfacing) {
+    float v, float3 generated, float3 position, float3 incoming, bool backfacing, const Ray& ray) {
     float3 stack[STACK], *top = stack;
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
@@ -185,6 +202,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case POSITION: *top++ = position; break;
         case INCOMING: *top++ = incoming; break;
         case BACKFACING: *top++ = make_float3(1, 1, 1) * backfacing; break;
+        case LIGHT_PATH: top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             float x = wrap(top[-1].x) * op->width, y = wrap(top[-1].y) * op->height;
             float4 color = texel(scene, *op, int(x), int(y));
@@ -272,9 +290,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
 }
-// Of a triangle at its barycentrics, reached along the direction, in a layer of its material
+// Of a triangle at its barycentrics, reached along the direction by the ray, in a layer of its material
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
-    unsigned layer = 0) {
+    const Ray& ray, unsigned layer = 0) {
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* generated = scene.generated + 3 * triangle;
@@ -287,7 +305,7 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
         generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
         vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, -direction,
-        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0);
+        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -434,11 +452,11 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
 }
 
 // World: equirectangular texture along the direction
-__device__ float3 environment(const Scene& scene, float3 direction) {
+__device__ float3 environment(const Scene& scene, float3 direction, const Ray& ray) {
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
-        direction, direction, -direction, false).emissive;
+        direction, direction, -direction, false, ray).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
@@ -472,9 +490,10 @@ __device__ float importance(const LightNode& node, float3 p, float3 normal) {
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from in front
 // of the normal, from offset along it. Returns emission * the light's cosine / distance^2 / pdf arriving along
-// direction, pdf = the triangle's probability / area.
+// direction, pdf = the triangle's probability / area. The ray reached origin; shadows are tested for it, emission is
+// shaded for no ray, both a bounce further, as Cycles shades them.
 __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float offset, unsigned state,
-    float3& direction) {
+    float3& direction, Ray ray) {
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
     float pick = random(state), probability = 1;
@@ -513,7 +532,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     for (Hit hit; (hit = traverse(scene, from, toward, left, occluder)).triangle != NONE; left -= occluder) {
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
             const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
-                layer);
+                Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
             const float3 through = surface.ior == 1 ? surface.albedo * surface.transparency : make_float3(0, 0, 0);
             transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
         }
@@ -521,7 +540,8 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
             return make_float3(0, 0, 0);
         from = from + toward * occluder;
     }
-    return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal, direction).emissive
+    return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
+        Ray{false, false, LOBE_NONE, ray.depth + 1, distance}).emissive
         * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
 }
 
@@ -558,7 +578,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     for (unsigned b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.triangle);
-        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), direction, layer);
+        const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance};
+        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), direction, ray,
+            layer);
         // Only the top layer emits, where the ray first meets it
         if (passed) surface.emissive = make_float3(0, 0, 0);
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
@@ -616,7 +638,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (k == end && end_type == END_NEE) {
                 float3 light_dir;
                 const float3 radiance = nee ? sampleLight(scene, origin, surface.normal, offset,
-                    stream(r.seed, b + STREAM_NEE), light_dir) : make_float3(0.0f, 0.0f, 0.0f);
+                    stream(r.seed, b + STREAM_NEE), light_dir, ray) : make_float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -632,7 +654,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 // random numbers pick again (unit Jacobian)
                 float3 light_dir;
                 const float3 radiance = sampleLight(scene, origin, surface.normal, offset,
-                    stream(r.seed, b + STREAM_NEE), light_dir);
+                    stream(r.seed, b + STREAM_NEE), light_dir, ray);
                 return rgb_to_greyscale(radiance) > 0.0f ? Shift{throughput * BSDF(direction, light_dir, surface.normal,
                     geometry_n, material, eta_i, eta_o, stream(r.seed, b)) * radiance, 1.0f} : fail;
             }
@@ -656,7 +678,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (nee) {
                 float3 light_dir;
                 const float3 radiance = sampleLight(scene, origin, surface.normal, offset,
-                    stream(r.seed, b + STREAM_NEE), light_dir);
+                    stream(r.seed, b + STREAM_NEE), light_dir, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f ? throughput * BSDF(direction, light_dir,
                     surface.normal, geometry_n, material, eta_i, eta_o, stream(r.seed, b)) * radiance : fail.f;
                 Reservoir candidate = chain;
@@ -777,7 +799,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             return fail;
         }
         if (hit.triangle == NONE) {
-            const float3 f = throughput * environment(scene, direction);
+            const float3 f = throughput * environment(scene, direction, Ray{false, false, prev.lobe, float(b + 2u), 0});
             if (replay) {
                 if (b == stop && rc == RC_ENV) {
                     return Shift{f / r.jac, density / r.jac};
@@ -891,9 +913,10 @@ extern "C" __global__ void __raygen__initial() {
         if (dom.hit.triangle != NONE) {
             walk(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
         }
-        seen = seen + (dom.hit.triangle == NONE ? environment(scene, normalize(dom.x1 - dom.x0))
+        seen = seen + (dom.hit.triangle == NONE
+            ? environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
             : shade(scene, dom.hit.triangle, dom.hit.uv.x, dom.hit.uv.y, smoothNormal(scene, dom.hit),
-            normalize(dom.x1 - dom.x0)).emissive)
+            normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 0, length(dom.x1 - dom.x0)}).emissive)
             / scene.settings.paths;
     }
     scene.initial[index] = finalize(initial, 1.0f);
