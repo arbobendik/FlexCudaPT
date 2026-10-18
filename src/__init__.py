@@ -345,6 +345,22 @@ def noise(node, inputs, index):
     if not index: return fractal(point)
     return vector(fractal(point), fractal(('ADD', point, offset(3))), fractal(('ADD', point, offset(4))))
 
+def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
+    p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+    x, y = ('DOT_PRODUCT', p, numpy.eye(3)[0]), ('DOT_PRODUCT', p, numpy.eye(3)[1])
+    r = 'MAXIMUM', ('SUBTRACT', 0.999999, length(p)), 0
+    return clamp({'LINEAR': x, 'QUADRATIC': ('MULTIPLY', ('MAXIMUM', x, 0), ('MAXIMUM', x, 0)),
+        'EASING': ('MULTIPLY', ('MULTIPLY', clamp(x), clamp(x)), ('SUBTRACT', 3, ('MULTIPLY', clamp(x), 2))),
+        'DIAGONAL': ('MULTIPLY', ('ADD', x, y), 0.5),
+        'RADIAL': ('ADD', ('DIVIDE', ('ARCTAN2', y, x), 2 * math.pi), 0.5), 'SPHERICAL': r,
+        'QUADRATIC_SPHERE': ('MULTIPLY', r, r)}[node.gradient_type])
+
+def checker(node, inputs, index):  # Of a checker texture node at the generated point without a vector, as Cycles'
+    p, color1, color2, scale = inputs
+    p = 'MULTIPLY', ('ADD', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), 1e-6), 0.999999
+    factor = absolute(('MODULO', ('DOT_PRODUCT', ('FLOOR', p), numpy.ones(3)), 2))  # Whether the floors' sum is odd
+    return factor if index else mix(color2, color1, factor)
+
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
@@ -394,7 +410,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'COMBXYZ': lambda node, inputs, index: vector(*inputs),
     'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
     'TEX_COORD': lambda node, inputs, index: resolve(node.outputs[index]) if index else ('GENERATED',),
-    'TEX_NOISE': noise}
+    'TEX_NOISE': noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
