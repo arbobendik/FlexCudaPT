@@ -361,6 +361,21 @@ def checker(node, inputs, index):  # Of a checker texture node at the generated 
     factor = absolute(('MODULO', ('DOT_PRODUCT', ('FLOOR', p), numpy.ones(3)), 2))  # Whether the floors' sum is odd
     return factor if index else mix(color2, color1, factor)
 
+def wave(node, inputs, index):  # Of a wave texture node at the generated point without a vector, as Cycles'
+    p, scale, distortion, detail, detail_scale, roughness, phase = inputs
+    p = 'MULTIPLY', ('ADD', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), 1e-6), 0.999999
+    if node.wave_type == 'BANDS': n = 'DOT_PRODUCT', p, numpy.eye(3)['XYZ'.index(node.bands_direction)] * 20 \
+        if node.bands_direction != 'DIAGONAL' else numpy.full(3, 10)
+    else: n = 'MULTIPLY', length(('MULTIPLY', p, numpy.ones(3) - numpy.eye(3)['XYZ'.index(node.rings_direction)]
+        if node.rings_direction != 'SPHERICAL' else 1)), 20
+    n = 'ADD', n, phase
+    if isinstance(distortion, tuple) or numpy.any(distortion): n = 'ADD', n, ('MULTIPLY', distortion, ('SUBTRACT',
+        ('MULTIPLY', ('NOISE', ('MULTIPLY', p, detail_scale), vector(detail, roughness, 2), numpy.zeros(3)), 2), 1))
+    if node.wave_profile == 'SIN': return 'ADD', 0.5, ('MULTIPLY', 0.5, ('SINE', ('SUBTRACT', n, math.pi / 2)))
+    n = 'DIVIDE', n, 2 * math.pi
+    return fraction(n) if node.wave_profile == 'SAW' else ('MULTIPLY', absolute(('SUBTRACT', n, ('FLOOR', ('ADD', n,
+        0.5)))), 2)
+
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
@@ -410,7 +425,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'COMBXYZ': lambda node, inputs, index: vector(*inputs),
     'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
     'TEX_COORD': lambda node, inputs, index: resolve(node.outputs[index]) if index else ('GENERATED',),
-    'TEX_NOISE': noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker}
+    'TEX_NOISE': noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker, 'TEX_WAVE': wave}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
