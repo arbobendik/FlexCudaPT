@@ -131,6 +131,52 @@ __device__ float3 white(float3 p, int dims, bool color) {
         ? make_float3(v, hashed(3, p.x, p.y, 1), hashed(3, p.x, p.y, 2))
         : make_float3(v, hashed(4, p.x, p.y, p.z, 1), hashed(4, p.x, p.y, p.z, 2));
 }
+// Cycles' point of a Voronoi cell, its color by its randomness 1
+__device__ float3 site(int x, int y, int z) { // By the PCG hash of its integer position, shifting signed
+    uint3 v = make_uint3(x * 1664525u + 1013904223u, y * 1664525u + 1013904223u, z * 1664525u + 1013904223u);
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v.x ^= int(v.x) >> 16; v.y ^= int(v.y) >> 16; v.z ^= int(v.z) >> 16;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return make_float3(float(v.x & 0x7FFFFFFF), float(v.y & 0x7FFFFFFF), float(v.z & 0x7FFFFFFF))
+        * (1.0f / float(0x7FFFFFFF));
+}
+// Cycles' Voronoi texture of a 3D point by its feature, F1, F2 or smooth F1, and metric of exponent in kind: the
+// distance, color or position of the output in extra, also holding randomness and smoothness
+__device__ float3 voronoi(float3 p, float3 kind, float3 extra) {
+    const int feature = int(kind.x), metric = int(kind.y), output = int(extra.z);
+    const float randomness = fminf(fmaxf(extra.x, 0), 1), smoothness = fminf(fmaxf(extra.y / 2, 0), 0.5f);
+    const float3 cell = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), local = p - cell;
+    const auto distance = [&](float3 d) {
+        d = make_float3(fabsf(d.x), fabsf(d.y), fabsf(d.z));
+        return metric == 0 ? length(d) : metric == 1 ? d.x + d.y + d.z : metric == 2 ? fmaxf(d.x, fmaxf(d.y, d.z))
+            : powf(powf(d.x, kind.z) + powf(d.y, kind.z) + powf(d.z, kind.z), 1 / kind.z);
+    };
+    float best[2] = {3.402823e38f, 3.402823e38f}, smooth = 0, h = -1;
+    float3 colors[2] = {}, positions[2] = {};
+    const int reach = feature == 2 && smoothness != 0 ? 2 : 1;
+    for (int k = -reach; k <= reach; ++k) for (int j = -reach; j <= reach; ++j) for (int i = -reach; i <= reach; ++i) {
+        const float3 color = site(int(cell.x) + i, int(cell.y) + j, int(cell.z) + k);
+        const float3 position = make_float3(i, j, k) + color * randomness;
+        const float d = distance(position - local);
+        if (reach == 2) { // Smooth F1, blending every cell's in
+            if (h == -1) h = 1;
+            else {
+                const float x = fminf(fmaxf(0.5f + 0.5f * (smooth - d) / smoothness, 0), 1);
+                h = x * x * (3 - 2 * x);
+            }
+            const float correction = smoothness * h * (1 - h);
+            smooth = smooth * (1 - h) + d * h - correction;
+            colors[0] = mix(colors[0], color, h) - make_float3(1, 1, 1) * (correction / (1 + 3 * smoothness));
+            positions[0] = mix(positions[0], position, h) - make_float3(1, 1, 1) * (correction / (1 + 3 * smoothness));
+        } else if (d < best[0]) {
+            best[1] = best[0], colors[1] = colors[0], positions[1] = positions[0];
+            best[0] = d, colors[0] = color, positions[0] = position;
+        } else if (d < best[1]) best[1] = d, colors[1] = color, positions[1] = position;
+    }
+    const int f = feature == 1;
+    const float d = reach == 2 ? smooth : best[f];
+    return output == 0 ? make_float3(d, d, d) : output == 1 ? colors[f] : positions[f] + cell;
+}
 // Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
 __device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
     const unsigned h = jenkins(3, x, y, z) & 15;
@@ -266,6 +312,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
+        case VORONOI: top -= 2; top[-1] = voronoi(top[-1], top[0], top[1]); break;
         case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
         case NOISE: top -= 2; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1]); break;
         case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
