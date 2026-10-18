@@ -7,8 +7,6 @@ constexpr int STACK = 64;
 constexpr float PI = 3.14159265f;
 constexpr float INV_PI = 0.3183098861837907f;
 constexpr float BIAS = 0.0000152587890625f;
-// Columns
-struct Matrix { float3 x, y, z; };
 __device__ float3 operator+(float3 a, float3 b) { return make_float3(a.x + b.x, a.y + b.y, a.z + b.z); }
 __device__ float3 operator-(float3 a, float3 b) { return make_float3(a.x - b.x, a.y - b.y, a.z - b.z); }
 __device__ float3 operator-(float3 a) { return make_float3(-a.x, -a.y, -a.z); }
@@ -43,9 +41,6 @@ __device__ float wrap(float coordinate) { return fminf(coordinate - floorf(coord
 __device__ float random(unsigned& state) { return ((state = hash(state)) >> 8) * 0x1p-24f; }
 // Brightest channel, by which Cycles' tinted specular layer dims the diffuse below it
 __device__ float brightest(float3 rgb) { return fmaxf(rgb.x, fmaxf(rgb.y, rgb.z)); }
-__device__ float G1(float alpha, float n_dot_x) {
-    return smithG1(alpha, n_dot_x);
-}
 
 // Fresnel reflectance tinted by the specular tint at normal incidence and white at grazing angles, as Cycles'
 // Principled BSDF fades its tinted f0, scaled by the specular level, to a white f90 along the curve of the ior with that
@@ -55,31 +50,6 @@ __device__ float3 tinted(const Surface& material, float cos_theta, float eta_i, 
     const float F = fresnel(cos_theta, 1.0f + root, 1.0f - root), F0 = root * root;
     return make_float3(F, F, F)
         - (make_float3(1.0f, 1.0f, 1.0f) - material.tint) * (F0 * (1.0f - F) / fmaxf(1.0f - F0, BIAS));
-}
-
-// Build TBN matrix for tangent-space normal mapping. Uses triangle edges and UV deltas to compute
-// tangent (U direction) and bitangent (V direction), with handedness fix.
-__device__ Matrix normalMapTBN(float3 p0, float3 p1, float3 p2, float2 uv0, float2 uv1, float2 uv2, float3 n) {
-    const float3 e1 = p1 - p0;
-    const float3 e2 = p2 - p0;
-    const float2 duv1 = uv1 - uv0;
-    const float2 duv2 = uv2 - uv0;
-    // Compute inverse determinant for UV to world space transformation.
-    const float det = duv1.x * duv2.y - duv1.y * duv2.x;
-    const float inv_det = 1.0f / det;
-    float3 t = (e1 * duv2.y - e2 * duv1.y) * inv_det;
-    const float3 b_geom = (e2 * duv1.x - e1 * duv2.x) * inv_det;
-
-    // Gram-Schmidt: make tangent perpendicular to interpolated normal.
-    t = normalize(t - n * dot(n, t));
-    // Handedness: bitangent along the geometric b, mirrored with the UVs, as Blender's tangent space.
-    const float3 b = cross(n, t) * sign(dot(cross(n, t), b_geom));
-
-    return Matrix{t, b, n};
-}
-
-__device__ float3 tangentToWorldNormalMap(float3 v, Matrix tbn) {
-    return tbn.x * v.x + tbn.y * v.y + tbn.z * v.z;
 }
 
 constexpr unsigned LOBE_DIFFUSE = 0u;
@@ -323,7 +293,8 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
 // Surface a program resolves to at a UV, facing along the normal with the tangent space tbn
-__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Matrix tbn, float u, float v) {
+__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
+    float v) {
     float3 stack[STACK], *top = stack;
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
@@ -522,7 +493,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
 
 // World: equirectangular texture along the direction
 __device__ float3 environment(const Scene& scene, float3 direction) {
-    return shade(scene, scene.materials[scene.count].program, direction, Matrix{},
+    return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).emissive;
 }
