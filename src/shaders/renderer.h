@@ -55,6 +55,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // The frame's number seeds it.
 // Denoised, per pixel: the mean radiance, the motion of what the pixel sees since the frame last denoised, through its
 // camera and vertices, how far the motion is trusted, and the triangle the pixel sees now and saw then.
+// Of the scene the reservoirs a view's first frame reuses were traced in: its BVH, vertices, normals and light BVH.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated; float2* uvs;
     Material* materials; LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
@@ -62,4 +63,5 @@ struct Scene {
     unsigned frame; Camera previousCamera; Settings settings;
     float4* mean; float2* flow; float* trust; unsigned *seen, *previousSeen; float3* previousVertices;
     Camera denoisedCamera;
+    unsigned long long anchorHandle; float3 *anchorVertices, *anchorNormals; LightNode* anchorLights;
 };

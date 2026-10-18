@@ -30,6 +30,16 @@ inline void release(CUdeviceptr ptr) {
     memory_used -= bytes;
 }
 
+// Copy of an array on the GPU
+inline CUdeviceptr copy(CUdeviceptr array) {
+    CUdeviceptr base;
+    size_t bytes;
+    CHECK(cuMemGetAddressRange(&base, &bytes, array));
+    const CUdeviceptr ptr = allocate(bytes);
+    CHECK(cuMemcpyDtoD(ptr, array, bytes));
+    return ptr;
+}
+
 // Zeroed array on the GPU
 template <typename T> T* zeros(size_t count) {
     const CUdeviceptr ptr = allocate(count * sizeof(T));
