@@ -14,6 +14,8 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density;
 };
+// FlexLight's Material, which the shared BSDF takes of a surface
+struct BSDFMaterial { float3 albedo, emissive; float roughness, metallic, transmission, ior; };
 // Lights are sampled by emitted, their summed emission under mean textures; hidden surfaces let camera rays through.
 struct Material { float emitted; unsigned program, hidden; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of
