@@ -104,15 +104,27 @@ PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MA
     'MATERIAL_PT_animation', *(panel.__name__ for panel in CAMERA_PANELS))
 SCENE, REQUEST, UPDATE = range(3)  # Kinds of what the renderer is piped
 
-# First texel, width, height and mean of an image or of a ramp node's 256 colors, added as floats at first use, 8 bit
-# images in sRGB
+def span(node):  # Of the points of a curves node's curves
+    curves = node.mapping.curves
+    return min(curve.points[0].location[0] for curve in curves), max(curve.points[-1].location[0] for curve in curves)
+
+def table(node):  # 256 colors of a ramp, or of a curves node's curves over their span, of RGB curves after the combined
+    if node.type == 'VALTORGB': return [node.color_ramp.evaluate(i / 255) for i in range(256)]
+    mapping, curves = node.mapping, [*node.mapping.curves]
+    mapping.initialize()
+    rgb = node.type == 'CURVE_RGB'
+    return [[*(mapping.evaluate(curve, mapping.evaluate(curves[3], x) if rgb else x) for curve in (curves * 3)[:3]), 1]
+        for x in numpy.linspace(*span(node), 256)]
+
+# First texel, width, height and mean of an image or of a ramp or curves node's 256 colors, added as floats at first
+# use, 8 bit images in sRGB
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     if source not in textures:
-        ramp = source.type == 'VALTORGB'
+        ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
         image = source if ramp else source.image
         pixels = numpy.empty(1024 if ramp else len(image.pixels), 'f')
-        if ramp: pixels[:] = numpy.ravel([source.color_ramp.evaluate(i / 255) for i in range(256)])
+        if ramp: pixels[:] = numpy.ravel(table(source))
         else: image.pixels.foreach_get(pixels)
         if not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data:  # As Cycles keeps
             pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
@@ -396,6 +408,28 @@ def layer_weight(node, inputs, index):  # Of a layer weight node, as Cycles'
     exponent = mix(('DIVIDE', 0.5, ('SUBTRACT', 1, blend)), ('MULTIPLY', blend, 2), ('LESS_THAN', blend, 0.5))
     return 'SUBTRACT', 1, ('POWER', absolute(cosine), exponent)
 
+def lookup(node, f, k):  # Component k of a curves node's colors f along them, beyond them extended or extrapolated
+    inside = 'DOT_PRODUCT', ('IMAGE_LINEAR', ('ADD', ('MULTIPLY', clamp(f), 255 / 256), 0.5 / 256), node), \
+        numpy.eye(3)[k]
+    if node.mapping.extend != 'EXTRAPOLATED': return inside
+    colors = numpy.array(table(node))[:, k]
+    below = 'SUBTRACT', colors[0], ('MULTIPLY', f, (colors[0] - colors[1]) * 255)
+    above = 'ADD', colors[255], ('MULTIPLY', ('SUBTRACT', f, 1), (colors[255] - colors[254]) * 255)
+    return mix(mix(inside, above, ('LESS_THAN', 1, f)), below, ('LESS_THAN', f, 0))
+
+def curves(node, inputs, index):  # Of an RGB, vector or float curves node, each channel along its curve, as Cycles'
+    factor, value = inputs
+    if node.type == 'CURVE_FLOAT' and not any(isinstance(fold(v), tuple) for v in inputs):
+        node.mapping.initialize()
+        looked = node.mapping.evaluate(node.mapping.curves[0], float(numpy.resize(fold(value), 3)[0]))
+        return mix(value, between(looked, node.mapping.clip_min_y, node.mapping.clip_max_y)
+            if node.mapping.use_clip else looked, factor)
+    low, high = span(node)
+    f = 'DIVIDE', ('SUBTRACT', value, low), high - low
+    looked = lookup(node, f, 0) if node.type == 'CURVE_FLOAT' else vector(*(lookup(node, ('DOT_PRODUCT', f,
+        numpy.eye(3)[k]), k) for k in range(3)))
+    return mix(value, looked, factor)
+
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
@@ -434,6 +468,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
     'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),
     'COMBINE_COLOR': lambda node, inputs, index: MODES[node.mode][1](NODES['COMBXYZ'](node, inputs, index)),
+    'CURVE_RGB': curves, 'CURVE_VEC': curves, 'CURVE_FLOAT': curves,
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
