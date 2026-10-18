@@ -370,8 +370,14 @@ __device__ float spline(float t, int k) {
     return k == 0 ? (1 - t) * (1 - t) * (1 - t) / 6 : k == 1 ? (t * t * (3 * t - 6) + 4) / 6
         : k == 2 ? (t * (t * (3 - 3 * t) + 3) + 1) / 6 : t * t * t / 6;
 }
+// Of the op's image by its extension: repeated, extended, clipped to none or mirrored
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
-    return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
+    const int width = op.width, height = op.height & 0xFFFFFF, extension = op.height >> 24;
+    if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return make_float4(0, 0, 0, 0);
+    if (extension == 1) x = min(max(x, 0), width - 1), y = min(max(y, 0), height - 1);
+    x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height);
+    if (extension == 3) x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
+    return scene.texels[op.texel + y % height * width + x % width];
 }
 // Normal transformed from its object into the world, or back, as Cycles'
 __device__ float3 normalTransform(float3 v, const Info& info, bool inverse) {
@@ -417,8 +423,10 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case BACKFACING: *top++ = make_float3(1, 1, 1) * backfacing; break;
         case LIGHT_PATH: top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
-            float x = wrap(top[-1].x) * op->width, y = wrap(top[-1].y) * op->height;
-            float4 color = texel(scene, *op, int(x), int(y));
+            const bool repeat = op->height >> 24 == 0;
+            float x = (repeat ? wrap(top[-1].x) : top[-1].x) * op->width;
+            float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
+            float4 color = texel(scene, *op, int(floorf(x)), int(floorf(y)));
             if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
