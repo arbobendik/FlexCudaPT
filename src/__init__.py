@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
-    'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO'))}
+    'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -464,6 +464,13 @@ def transform(matrix, point):  # The point by the affine matrix
 def facing(normal):  # Turned toward the incoming direction on the backs of faces, as Cycles' shading normals
     return 'MULTIPLY', normal, ('SUBTRACT', 1, ('MULTIPLY', ('BACKFACING',), 2))
 
+def coordinates(node, inputs, index):  # Of a texture coordinate node, as Cycles'
+    if index == 3: return transform(node.object.matrix_world.inverted(), ('POSITION',)) if node.object else ('OBJECT',)
+    reflection = 'SUBTRACT', ('MULTIPLY', facing(('NORMAL',)), ('MULTIPLY', ('DOT_PRODUCT', facing(('NORMAL',)),
+        ('INCOMING',)), 2)), ('INCOMING',)
+    return {0: ('GENERATED',), 4: ('CAMERA_POINT',), 5: ('WINDOW',), 6: reflection}.get(index) or resolve(
+        node.outputs[index])
+
 def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
     eta = 'MAXIMUM', inputs[0], 1e-5
     return 'DIELECTRIC', ('DOT_PRODUCT', ('INCOMING',), facing(inputs[1])), mix(eta, ('DIVIDE', 1, eta),
@@ -534,7 +541,7 @@ def image(node, inputs, index):
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
 # image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. Added
 # shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the generated,
-# object and reflection ones are known.
+# object, camera, window and reflection ones are known.
 NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
@@ -561,10 +568,8 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
     'COMBXYZ': lambda node, inputs, index: vector(*inputs),
     'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate,
-    'TEX_COORD': lambda node, inputs, index: ('GENERATED',) if not index else ('SUBTRACT', ('MULTIPLY',
-        facing(('NORMAL',)), ('MULTIPLY', ('DOT_PRODUCT', facing(('NORMAL',)), ('INCOMING',)), 2)), ('INCOMING',))
-        if index == 6 else (transform(node.object.matrix_world.inverted(), ('POSITION',)) if node.object
-        else ('OBJECT',)) if index == 3 else resolve(node.outputs[index]),
+    'TEX_COORD': coordinates, 'CAMERA': lambda node, inputs, index: (normalize(('CAMERA_POINT',)),
+        ('DOT_PRODUCT', ('CAMERA_POINT',), numpy.eye(3)[2]), length(('CAMERA_POINT',)))[index],
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
     'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight,
