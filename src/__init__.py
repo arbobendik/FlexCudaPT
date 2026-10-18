@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
-    'MAGIC'))}
+    'MAGIC', 'BRICK'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -418,6 +418,13 @@ def magic(node, inputs, index):  # Of a magic texture node at the generated poin
         inputs[2])
     return ('DOT_PRODUCT', color, numpy.full(3, 1 / 3)) if index else color
 
+def brick(node, inputs, index):  # Of a brick texture node at the generated point without a vector, as Cycles'
+    p, color1, color2, mortar, scale, size, smooth, bias, width, height = inputs
+    f = 'BRICK', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), vector(size, smooth, bias), \
+        vector(width, height, node.offset), numpy.array((node.offset_frequency, node.squash, node.squash_frequency))
+    tint, factor = ('DOT_PRODUCT', f, numpy.eye(3)[0]), ('DOT_PRODUCT', f, numpy.eye(3)[1])
+    return factor if index else mix(mix(color1, color2, tint), mortar, factor)
+
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
     p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
     x, y = ('DOT_PRODUCT', p, numpy.eye(3)[0]), ('DOT_PRODUCT', p, numpy.eye(3)[1])
@@ -546,7 +553,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
     'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
         if index in (0, 1, 2, 3, 5, 6, 8, 9) else resolve(node.outputs[index]),
     'TEX_NOISE': noise, 'TEX_WHITE_NOISE': white_noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker,
-    'TEX_WAVE': wave, 'TEX_VORONOI': voronoi, 'TEX_MAGIC': magic}
+    'TEX_WAVE': wave, 'TEX_VORONOI': voronoi, 'TEX_MAGIC': magic, 'TEX_BRICK': brick}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
