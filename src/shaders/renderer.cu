@@ -102,13 +102,6 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t);
 }
-// Beer's law for absorption over the distance through a medium: T = exp(-sigma_a * d), sigma_a = density * (1 - color)
-// as Cycles' Volume Absorption
-__device__ float3 beerLambert(float distance, const Surface& material) {
-    const float depth = distance * material.density;
-    return make_float3(expf(depth * (material.absorption.x - 1)), expf(depth * (material.absorption.y - 1)),
-        expf(depth * (material.absorption.z - 1)));
-}
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
 // Paths live in primary sample space, vertex b draws its random numbers from stream(seed, b).
@@ -162,13 +155,6 @@ struct Vertex {
     unsigned lobe;
     float pdf;
     float cos;
-};
-
-struct Selection {
-    Reservoir r;
-    float w_sum;
-    float3 color;
-    unsigned random_state;
 };
 
 __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) {
@@ -329,43 +315,6 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
         * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
 }
 
-// Weighted reservoir sampling step, weight is the vector-valued resampling weight (Sec. 6.3)
-__device__ void offer(Selection& sel, const Reservoir& candidate, float3 weight) {
-    const float w = rgb_to_greyscale(weight);
-    // Also rejects NaN and infinite weights of degenerate samples
-    if (!(w > 0.0f && w < 3.0e38f)) {
-        return;
-    }
-    sel.w_sum += w;
-    sel.color = sel.color + weight;
-    if (random(sel.random_state) * sel.w_sum <= w) {
-        sel.r = candidate;
-    }
-}
-
-// Resample a shifted sample with MIS weight mis, keeping its Jacobian for later shifts
-__device__ void offerShifted(Selection& sel, const Reservoir& r, Shift shifted, float mis) {
-    Reservoir candidate = r;
-    candidate.f = shifted.f / shifted.jac;
-    candidate.jac = r.jac * shifted.jac;
-    offer(sel, candidate, mis * shifted.f * r.w);
-}
-
-__device__ Reservoir finalize(const Selection& sel, float c) {
-    Reservoir r = sel.r;
-    const float p_hat = rgb_to_greyscale(r.f);
-    r.w = p_hat > 0.0f ? sel.w_sum / p_hat : 0.0f;
-    r.c = c;
-    return r;
-}
-
-__device__ Reservoir withEnd(const Reservoir& r, unsigned end_type, unsigned end, float3 f) {
-    Reservoir candidate = r;
-    candidate.path = r.path | end << PATH_END | end_type << PATH_TYPE;
-    candidate.f = f;
-    return candidate;
-}
-
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
 // vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
 // dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
@@ -410,7 +359,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             surface.transparency, surface.ior, surface.absorption};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Rays reaching the back of a face come through its medium
-        if (dot(direction, geometry_n) > 0) throughput = throughput * beerLambert(distance, surface);
+        if (dot(direction, geometry_n) > 0)
+            throughput = throughput * beerLambert(distance, material.absorption);
         const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
@@ -479,7 +429,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 } else if (footprint) {
                     candidate = here;
                 }
-                offer(sel, withEnd(candidate, END_EMIT, b, throughput * surface.emissive),
+                offer(&sel, withEnd(candidate, END_EMIT, b, throughput * surface.emissive),
                     throughput * surface.emissive * scale / density);
             }
             if (nee) {
@@ -500,7 +450,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                     // Forced reconnection to the light vertex (Sec. 6.2.3)
                     candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
                 }
-                offer(sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
+                offer(&sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
             }
         }
         // Replaying, x_k-1 connects to the reconnection vertex and x_k leaves along the stored direction with the stored lobes
@@ -616,7 +566,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 candidate.jac = prev.pdf;
                 candidate.dir = direction;
             }
-            offer(sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
+            offer(&sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
             break;
         }
         // Project ray origin to hit point
@@ -748,8 +698,8 @@ extern "C" __global__ void __raygen__temporal() {
         const float p_t = rgb_to_greyscale(temporal.f);
         Selection sel = {};
         sel.random_state = stream(r.seed, STREAM_SELECT + 1u);
-        offerShifted(sel, r, Shift{r.f, 1.0f}, r.c * p_c / (r.c * p_c + c_t * rgb_to_greyscale(to_previous.f)));
-        offerShifted(sel, temporal, to_current, c_t * p_t / (c_t * p_t + r.c * rgb_to_greyscale(to_current.f)));
+        offerShifted(&sel, r, Shift{r.f, 1.0f}, r.c * p_c / (r.c * p_c + c_t * rgb_to_greyscale(to_previous.f)));
+        offerShifted(&sel, temporal, to_current, c_t * p_t / (c_t * p_t + r.c * rgb_to_greyscale(to_current.f)));
         r = finalize(sel, r.c + c_t);
     }
     scene.temporal[index] = r;
@@ -799,11 +749,11 @@ extern "C" __global__ void __raygen__spatial() {
             if (p_c > 0.0f) {
                 canonical_mis += share * c_pair * p_c / (c_pair * p_c + neighbor.c * rgb_to_greyscale(to_there.f));
             }
-            offerShifted(sel, neighbor, to_here,
+            offerShifted(&sel, neighbor, to_here,
                 share * neighbor.c * p_n / (neighbor.c * p_n + c_pair * rgb_to_greyscale(to_here.f)));
         }
     }
-    offerShifted(sel, r, Shift{r.f, 1.0f}, canonical_mis);
+    offerShifted(&sel, r, Shift{r.f, 1.0f}, canonical_mis);
     scene.previous[index] = finalize(sel, c_sum);
     float4& sum = scene.accumulation[index];
     sum = make_float4(sum.x + sel.color.x, sum.y + sel.color.y, sum.z + sel.color.z, sum.w);
