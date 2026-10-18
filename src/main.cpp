@@ -22,6 +22,10 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
     // Build scene
     Scene scene = loadScene(context);
+    // Unguided denoiser of the sums: the AOV model's autoexposure leaves their scale, but not alpha, the sample count
+    OptixDenoiserOptions denoiserOptions{};
+    OptixDenoiser denoiser;
+    CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_AOV, &denoiserOptions, &denoiser));
 
     // Load embedded PTX
     OptixPipelineCompileOptions compile{};
@@ -56,6 +60,8 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
     size_t pixels = 1;
     float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
     loadView(scene, 1); // For the first view to free like any later one's
+    OptixDenoiserSizes sizes; // Of a denoised view's state and scratch, besides its denoised sums
+    CUdeviceptr state, scratch, denoised;
     for (unsigned done = 0, launched; std::fread(&request, sizeof(request), 1, stdin); std::fflush(stdout)) {
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             if (std::memcmp(&view, &request.view, offsetof(View, camera))) {
@@ -68,6 +74,16 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
                 CHECK(ftruncate(shared, pixels * sizeof(float4)));
                 sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
                 CHECK(sums == MAP_FAILED);
+                if (view.settings.denoise) for (CUdeviceptr array : {state, scratch, denoised}) release(array);
+                if (request.view.settings.denoise) {
+                    const unsigned width = request.view.width, height = request.view.height;
+                    CHECK(optixDenoiserComputeMemoryResources(denoiser, width, height, &sizes));
+                    state = allocate(sizes.stateSizeInBytes);
+                    scratch = allocate(sizes.withoutOverlapScratchSizeInBytes);
+                    denoised = allocate(pixels * sizeof(float4));
+                    CHECK(optixDenoiserSetup(denoiser, nullptr, width, height, state, sizes.stateSizeInBytes, scratch,
+                        sizes.withoutOverlapScratchSizeInBytes));
+                }
             }
             view = request.view;
             done = 0;
@@ -94,7 +110,21 @@ int main(int, char** argv) { // Usage: renderer file < scene, then requests > an
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
         std::fwrite(memory, sizeof(memory), 1, stdout);
         if (!launched) continue;
-        // Raw linear sums with the sample count in w, rows top to bottom
-        CHECK(cuMemcpyDtoH(sums, (CUdeviceptr)scene.accumulation, pixels * sizeof(float4)));
+        // Raw linear sums with the sample count in w, rows top to bottom, denoised if so set: once the view has its
+        // samples, or every time at a denoise level above 1
+        CUdeviceptr result = (CUdeviceptr)scene.accumulation;
+        const bool denoise = view.settings.denoise && (done == request.samples || view.settings.denoise > 1);
+        if (denoise) {
+            const OptixImage2D image{result, view.width, view.height, view.width * unsigned(sizeof(float4)),
+                sizeof(float4), OPTIX_PIXEL_FORMAT_FLOAT4};
+            OptixDenoiserLayer layer{.input = image, .output = image};
+            layer.output.data = result = denoised;
+            const OptixDenoiserParams params{};
+            const OptixDenoiserGuideLayer guide{};
+            CHECK(optixDenoiserInvoke(denoiser, nullptr, &params, state, sizes.stateSizeInBytes, &guide, &layer, 1, 0,
+                0, scratch, sizes.withoutOverlapScratchSizeInBytes));
+        }
+        CHECK(cuMemcpyDtoH(sums, result, pixels * sizeof(float4)));
+        if (denoise) for (size_t i = 0; i < pixels; ++i) sums[i].w = done;
     }
 }
