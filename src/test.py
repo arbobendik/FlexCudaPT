@@ -315,6 +315,12 @@ for socket, value in zip(mapped.inputs, (0.2, 0, 0, 2, 4)): socket.default_value
 node_matches(mapped.outputs[0])
 tree.links.new(zero.outputs[0], mapped.inputs['Value'])
 node_matches(mapped.outputs[0])
+curve = tree.nodes.new('ShaderNodeFloatCurve')
+curve.inputs['Factor'].default_value, curve.inputs['Value'].default_value = 0.7, -1.3
+curve.mapping.initialize()
+curve.mapping.curves[0].points.new(0.3, 0.8)
+curve.mapping.update()
+node_matches(curve.outputs[0])
 rotated = tree.nodes.new('ShaderNodeVectorRotate')
 rotated.inputs['Vector'].default_value, rotated.inputs['Angle'].default_value = (0.2, 0.7, 0.4), 0.7
 tree.links.new(zero.outputs[0], rotated.inputs['Axis'])
