@@ -199,8 +199,8 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
         __uint_as_float(optixHitObjectGetAttribute_1()))};
 }
 
-__device__ float3 hitPosition(const Scene& scene, Hit hit) {
-    const float3* vertices = scene.vertices + 3 * hit.triangle;
+__device__ float3 hitPosition(const float3* vertices, Hit hit) { // On the triangles of vertices
+    vertices += 3 * hit.triangle;
     return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
 }
 
@@ -251,7 +251,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
         hit = traverse(scene, origin, direction, 1e16f, distance);
         origin = origin + direction * distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden);
-    return {camera.origin, hit.triangle == NONE ? camera.origin + direction : hitPosition(scene, hit), hit};
+    return {camera.origin, hit.triangle == NONE ? camera.origin + direction : hitPosition(scene.vertices, hit), hit};
 }
 
 // World: equirectangular texture along the direction
@@ -489,7 +489,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         SampleBSDF lobe = SampleBSDF{};
         if (connect) {
             if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene, r.rc);
+                reconnection = hitPosition(scene.vertices, r.rc);
                 dir = normalize(reconnection - (origin
                     + surface.normal * (offset * sign(dot(reconnection - origin, geometry_n)))));
             }
@@ -697,6 +697,29 @@ extern "C" __global__ void __raygen__initial() {
     const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
     float4& sum = scene.accumulation[index];
     sum = make_float4(sum.x + radiance.x, sum.y + radiance.y, sum.z + radiance.z, sum.w + 1);
+}
+
+// Denoiser input and guides of the pixel, then the triangle it sees for the next denoising: the mean radiance, and the
+// motion of what the pixel sees since the frame last denoised, a point of the previous vertices or a direction of the
+// world, trusted where it was in front of that frame's camera at a pixel that saw the same triangle
+extern "C" __global__ void __raygen__denoise() {
+    const uint3 p = optixGetLaunchIndex();
+    const uint3 size = optixGetLaunchDimensions();
+    const unsigned index = p.y * size.x + p.x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    const float4 sum = scene.accumulation[index];
+    scene.mean[index] = make_float4(sum.x / sum.w, sum.y / sum.w, sum.z / sum.w, 1.0f);
+    const Domain dom = pixelDomain(scene, scene.camera, index, size, index);
+    const Camera& last = scene.denoisedCamera;
+    const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
+        : hitPosition(scene.previousVertices, dom.hit);
+    const float2 then = project(last, before, size);
+    scene.flow[index] = project(scene.camera, dom.x1, size) - then;
+    const int x = int(floorf(then.x)), y = int(floorf(then.y));
+    const float3 back = cross(last.x, last.y);
+    scene.trust[index] = dot(back, before - last.origin) * dot(back, last.z) > 0.0f && x >= 0 && y >= 0
+        && x < int(size.x) && y < int(size.y) && scene.previousSeen[y * size.x + x] == dom.hit.triangle;
+    scene.seen[index] = dom.hit.triangle;
 }
 
 // Temporal reuse: the initial sample against the one the previous frame left the pixel's temporal neighbor, which is

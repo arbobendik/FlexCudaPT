@@ -180,7 +180,8 @@ def settings(scene, viewport):  # The scene's settings of the renderer, in its o
         scene.flex_denoise * (1 + viewport)
 
 # The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
-# angle its camera moves and turns at most from the last one's to reuse them; a view following none jumps
+# angle its camera moves and turns at most from the last one's to reuse them and continue its denoised sequence; a view
+# following none jumps
 def sampling(scene, follows):
     reuse = scene.flex_restir and scene.flex_reuse
     return scene.flex_samples, scene.flex_reuse_samples if reuse else scene.flex_samples, \
