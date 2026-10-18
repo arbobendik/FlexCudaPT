@@ -62,7 +62,8 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     // over: it persists the last one if it has its size and settings and its camera did not jump, move farther than
     // distance or turn further than the angle of cosine, keeping its reservoirs and denoised sequence and tracing reuse
     // samples at most; otherwise all of the view's arrays are freed and allocated zeroed. So does the view after a new
-    // scene, persisting the last one only if it has as many triangles.
+    // scene, persisting the last one only if it has as many triangles. A persisted view starts from the reservoirs the
+    // last view starting over ended with, against the scene they were traced in, and jumps by that view's camera.
     struct View { unsigned width, height; Settings settings; Camera camera; } view{};
     struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
     bool reused = false;
@@ -70,6 +71,12 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
     loadView(scene, 1); // For the first view to free like any later one's
     scene.vertices = scene.previousVertices = (float3*)allocate(0); // For the first scene to keep or free
+    // The reservoirs the last view starting over ended with and their duplication, its camera and the scratch and
+    // output of the BVH of the scene it was traced in
+    CUdeviceptr anchor = allocate(0), anchorTemp = allocate(0), anchorOutput = allocate(0);
+    Camera anchorCamera{};
+    scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
+    scene.anchorLights = (LightNode*)allocate(0);
     // Of a denoised view's state and scratch, besides its denoised means and the internal guides of the frame last
     // denoised and the next; whether those hold one of its sequence
     OptixDenoiserSizes sizes;
@@ -85,13 +92,13 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         }
         std::fread(&request, sizeof(request), 1, stdin);
         if (std::memcmp(&view, &request.view, sizeof(View))) {
-            const Camera &last = scene.previousCamera, &next = request.view.camera;
+            const Camera &last = anchorCamera, &next = request.view.camera;
             reused = length(next.origin - last.origin) <= request.distance
                 && dot(next.z, last.z) >= request.cosine * length(next.z) * length(last.z);
             if (!reused || std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 reused = false;
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
-                    (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts})
+                    (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts, (void*)anchor})
                     release((CUdeviceptr)array);
                 loadView(scene, request.view.width * request.view.height);
                 CHECK(munmap(sums, pixels * sizeof(float4)));
@@ -99,6 +106,8 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                 CHECK(ftruncate(shared, pixels * sizeof(float4)));
                 sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
                 CHECK(sums == MAP_FAILED);
+                anchor = (CUdeviceptr)zeros<char>(pixels * (sizeof(Reservoir) + sizeof(float)));
+                anchorCamera = request.view.camera;
                 if (view.settings.denoise) for (CUdeviceptr array : {state, scratch, denoised, guides[0], guides[1],
                     (CUdeviceptr)scene.mean, (CUdeviceptr)scene.flow, (CUdeviceptr)scene.trust,
                     (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen}) release(array);
@@ -116,6 +125,11 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                     CHECK(optixDenoiserSetup(denoiser, nullptr, width, height, state, sizes.stateSizeInBytes, scratch,
                         sizes.withoutOverlapScratchSizeInBytes));
                 }
+            } else {
+                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previous, anchor, pixels * sizeof(Reservoir)));
+                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.duplication, anchor + pixels * sizeof(Reservoir),
+                    pixels * sizeof(float)));
+                scene.previousCamera = anchorCamera;
             }
             view = request.view;
             history = history && reused;
@@ -139,6 +153,18 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                 CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
+        }
+        if (!reused && launched && done == samples) {
+            CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * sizeof(Reservoir)));
+            CHECK(cuMemcpyDtoD(anchor + pixels * sizeof(Reservoir), (CUdeviceptr)scene.duplication,
+                pixels * sizeof(float)));
+            for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
+                (CUdeviceptr)scene.anchorLights, anchorTemp, anchorOutput}) release(array);
+            scene.anchorVertices = (float3*)copy((CUdeviceptr)scene.vertices);
+            scene.anchorNormals = (float3*)copy((CUdeviceptr)scene.normals);
+            scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
+            scene.anchorHandle = buildBVH(context, (CUdeviceptr)scene.anchorVertices, scene.count,
+                OPTIX_BUILD_OPERATION_BUILD, anchorTemp, anchorOutput);
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
