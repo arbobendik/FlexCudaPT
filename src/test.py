@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gpu, math, numpy, os, sys, types
+import bpy, bmesh, gpu, io, math, numpy, os, sys, types
 from mathutils import Matrix
 
 SIZE = 64
@@ -349,3 +349,18 @@ node_matches(image.outputs['Color'])
 other.interpolation = 'Closest'
 node_matches(image.outputs['Color'])
 tree.links.remove(emission.inputs['Strength'].links[0])
+reference = bpy.data.objects.new('coordinate reference', None)
+scene.collection.objects.link(reference)
+coordinates = tree.nodes.new('ShaderNodeTexCoord')
+coordinates.object = reference
+tree.links.new(coordinates.outputs['Object'], emission.inputs['Color'])
+bpy.context.view_layer.update()
+depsgraph = bpy.context.evaluated_depsgraph_get()
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, depsgraph)
+reference.location.x = 1
+bpy.context.view_layer.update()
+exporter.requests = io.BytesIO()
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=reference)]))
+assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.SCENE, 'reference coordinates update'
