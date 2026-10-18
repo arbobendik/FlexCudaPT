@@ -49,18 +49,42 @@ __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ?
 __device__ float3 divide(float3 a, float3 b) {
     return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
 }
+__device__ unsigned rotate(unsigned x, int k) { return x << k | x >> (32 - k); }
+// Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
+__device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
+    unsigned a = 0xdeadbeef + 25 + x, b = 0xdeadbeef + 25 + y, c = 0xdeadbeef + 25 + z;
+    c ^= b; c -= rotate(b, 14); a ^= c; a -= rotate(c, 11); b ^= a; b -= rotate(a, 25); c ^= b; c -= rotate(b, 16);
+    a ^= c; a -= rotate(c, 4); b ^= a; b -= rotate(a, 14); c ^= b; c -= rotate(b, 24);
+    const unsigned h = c & 15;
+    const float u = h < 8 ? f.x : f.y, v = h < 4 ? f.y : h == 12 || h == 14 ? f.x : f.z;
+    return (h & 1 ? -u : u) + (h & 2 ? -v : v);
+}
+__device__ float fade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+// Cycles' Perlin noise of a 3D point, normalized: its lattice's gradients blended by their faded distances
+__device__ float noise(float3 p) {
+    const float3 low = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), f = p - low;
+    const float3 w = make_float3(fade(f.x), fade(f.y), fade(f.z));
+    float sum = 0;
+    for (unsigned corner = 0; corner < 8; ++corner) {
+        const float3 d = make_float3(corner & 1, corner >> 1 & 1, corner >> 2);
+        sum += (d.x ? w.x : 1 - w.x) * (d.y ? w.y : 1 - w.y) * (d.z ? w.z : 1 - w.z)
+            * gradient(int(low.x + d.x), int(low.y + d.y), int(low.z + d.z), f - d);
+    }
+    return 0.5f * 0.9820f * sum + 0.5f;
+}
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     return scene.texels[op.texel + ((y + op.height) % op.height) * op.width + (x + op.width) % op.width];
 }
-// Surface a program resolves to at a UV, facing along the normal with the tangent space tbn
+// Surface a program resolves to at a UV and generated point, facing along the normal with the tangent space tbn
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
-    float v) {
+    float v, float3 generated) {
     float3 stack[STACK], *top = stack, saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
         case STORE: saved[op->texel] = top[-1]; break;
         case LOAD: *top++ = saved[op->texel]; break;
         case UV: *top++ = make_float3(u, v, 0); break;
+        case GENERATED: *top++ = generated; break;
         case NORMAL: *top++ = normal; break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: { // Repeating
             float x = wrap(top[-1].x) * op->width, y = wrap(top[-1].y) * op->height;
@@ -92,6 +116,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
+        case NOISE: top[-1] = make_float3(1, 1, 1) * noise(top[-1]); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
@@ -100,10 +125,12 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
+    const float3* generated = scene.generated + 3 * triangle;
     return shade(scene, scene.materials[triangle].program, normal,
         normalMapTBN(vertex[0], vertex[1], vertex[2], uv[0], uv[1], uv[2], normal),
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
-        uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t);
+        uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
+        generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -234,7 +261,8 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
 __device__ float3 environment(const Scene& scene, float3 direction) {
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
         0.5f - atan2f(direction.y, direction.x) / (2 * PI),
-        0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI).emissive;
+        0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
+        direction).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
