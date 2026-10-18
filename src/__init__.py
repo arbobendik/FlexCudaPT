@@ -21,7 +21,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
-    'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('GENERATED', 'NOISE'))}
+    'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('GENERATED', 'NOISE',
+    'IMAGE_CUBIC', 'ALPHA_CUBIC'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -72,7 +73,7 @@ def emit(expression, ops, textures, texels):
         return expression
     name, *operands = expression
     payload = texture(operands.pop(), textures, texels) if name in ('IMAGE', 'ALPHA', 'IMAGE_LINEAR',
-        'ALPHA_LINEAR') else (0, 0, 0, numpy.ones(4))
+        'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC') else (0, 0, 0, numpy.ones(4))
     values = [emit(operand, ops, textures, texels) for operand in operands]
     ops.append(([*OPS].index(name), *payload[:3]))
     return OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
@@ -101,8 +102,9 @@ def clamp(value):
 NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
         if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
-        + ('_LINEAR' if node.interpolation == 'Linear' else ''), inputs[0] if node.inputs[0].is_linked
-        else ('UV',), node.image) if node.image and node.image.size[0] else numpy.array((1, 0, 1)),
+        + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation, ''),
+        inputs[0] if node.inputs[0].is_linked else ('UV',), node.image) if node.image and node.image.size[0]
+        else numpy.array((1, 0, 1)),
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
         + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
