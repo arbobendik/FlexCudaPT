@@ -119,12 +119,13 @@ def table(node):  # 256 colors of a ramp, or of a curves node's curves over thei
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
 
-# First texel, width, height and mean of an image or of a ramp or curves node's 256 colors, added as linear floats at
-# first use
+# First texel, width, height, its top byte the extension, and mean of an image node's image or of a ramp or curves
+# node's 256 colors, added as linear floats at first use
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
-    if source not in textures:
-        ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
+    ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
+    key = source if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
+    if key not in textures:
         image = source if ramp else source.image
         pixels = numpy.empty(1024 if ramp else len(image.pixels), 'f')
         if ramp: pixels[:] = numpy.ravel(table(source))
@@ -134,10 +135,11 @@ def texture(source, textures, texels):
         if not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data:  # As Cycles keeps
             pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
-        textures[source] = (sum(map(len, texels)) // 4, *((256, 1) if ramp else image.size),
-            pixels.reshape(-1, 4).mean(0))
+        width, height = (256, 1) if ramp else image.size
+        textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
+            'REPEAT' if ramp else key[1]) << 24, pixels.reshape(-1, 4).mean(0))
         texels.append(pixels)
-    return textures[source]
+    return textures[key]
 
 def expression_key(expression):
     if isinstance(expression, tuple): return tuple(map(expression_key, expression))
@@ -536,17 +538,24 @@ def normal_map(node, inputs, index):
         if node.space == 'BLENDER_WORLD' else 1))
     return normalize(mix(('NORMAL',), color, ('MAXIMUM', strength, 0)))
 
-# Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
-# direction. Cycles dissociates colors from their alpha where reading it unless the image packs channels, ignores its
-# alpha, which is one then, or holds data.
+# Color or alpha of an image node at its vector, projected and extended, pink when missing, of an environment node along
+# its projected direction. Cycles dissociates colors from their alpha where reading it unless the image packs channels,
+# ignores its alpha, which is one then, or holds data.
 def image(node, inputs, index):
     if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
     source = ImageRead(node, inputs[0] if node.inputs[0].is_linked else ('UV',))
-    vector = inputs[0] if node.inputs[0].is_linked else ('UV',)
+    point = inputs[0] if node.inputs[0].is_linked else ('UV',)
     if node.type == 'TEX_ENVIRONMENT':
-        vector = node.projection, inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+        point = node.projection, inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+    elif node.projection in ('SPHERE', 'TUBE'):  # Around the center of the unit cube
+        x, y, z = (('DOT_PRODUCT', ('SUBTRACT', ('MULTIPLY', point, 2), 1), axis) for axis in numpy.eye(3))
+        around = ('ADD', 0.5, ('DIVIDE', ('ARCTAN2', x, y), -2 * math.pi)), ('ADD', ('MULTIPLY', z, 0.5), 0.5)
+        if node.projection == 'SPHERE': around = around[0], ('SUBTRACT', 1, ('DIVIDE', ('ARCCOSINE', ('MULTIPLY', z,
+            COMPOSITES['INVERSE_SQRT'](('ADD', ('ADD', ('MULTIPLY', x, x), ('MULTIPLY', y, y)), ('MULTIPLY', z, z))))),
+            math.pi))
+        point = vector(*around, 0)
     read = lambda name: (name + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation,
-        ''), vector, source)
+        ''), point, source)
     if index or node.image.alpha_mode in (
             'CHANNEL_PACKED', 'NONE') or node.image.colorspace_settings.is_data: return read(('IMAGE', 'ALPHA')[index])
     return 'UNASSOCIATE', read('IMAGE'), read('ALPHA')
