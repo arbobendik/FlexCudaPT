@@ -134,6 +134,7 @@ class Viewport:  # Stands in for the engine instance Blender creates for a viewp
     view_draw = engine.view_draw
     visible = ()
     shared = open(os.memfd_create('flex'), 'rb', 0)
+    __init__ = engine.spawn
     def tag_redraw(self): self.redraw = True
     def bind_display_space_shader(self, scene): pass
     def unbind_display_space_shader(self): pass
