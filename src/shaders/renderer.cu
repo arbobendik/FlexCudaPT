@@ -194,6 +194,12 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case HSV_TO_RGB: top[-1] = fromHsv(top[-1]); break;
         case RGB_TO_HSL: top[-1] = toHsl(top[-1]); break;
         case HSL_TO_RGB: top[-1] = fromHsl(top[-1]); break;
+        case ROTATE: { // Around the unit axis by the angle, as Rodrigues'
+            top -= 2;
+            const float3 v = top[-1], k = top[0];
+            const float c = cospif(top[1].x * INV_PI), s = sinpif(top[1].x * INV_PI);
+            top[-1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
+        } break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
