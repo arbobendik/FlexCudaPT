@@ -292,6 +292,20 @@ __device__ float3 brick(float3 p, float3 a, float3 b, float3 c) {
     }
     return make_float3(fminf(fmaxf(noise + a.z, 0), 1), mortar, 0);
 }
+// Cycles' weights of the samples of a box projected image along each axis of its object, the normal's there
+__device__ float3 box(float3 n, float blend) {
+    n = make_float3(fabsf(n.x), fabsf(n.y), fabsf(n.z)) / (fabsf(n.x) + fabsf(n.y) + fabsf(n.z));
+    const float limit = 0.5f * (1 + blend);
+    const auto ramp = [&](float a, float b) { return fminf(fmaxf((a / (a + b) - 0.5f * (1 - blend)) / blend, 0), 1); };
+    if (n.x > limit * (n.x + n.y) && n.x > limit * (n.x + n.z)) return make_float3(1, 0, 0);
+    if (n.y > limit * (n.x + n.y) && n.y > limit * (n.y + n.z)) return make_float3(0, 1, 0);
+    if (n.z > limit * (n.x + n.z) && n.z > limit * (n.y + n.z)) return make_float3(0, 0, 1);
+    if (blend <= 0) return make_float3(1, 0, 0);
+    if (n.z < (1 - limit) * (n.y + n.x)) return make_float3(ramp(n.x, n.y), 1 - ramp(n.x, n.y), 0);
+    if (n.x < (1 - limit) * (n.y + n.z)) return make_float3(0, ramp(n.y, n.z), 1 - ramp(n.y, n.z));
+    if (n.y < (1 - limit) * (n.x + n.z)) return make_float3(ramp(n.x, n.z), 0, 1 - ramp(n.x, n.z));
+    return (n * (2 - limit) + make_float3(1, 1, 1) * (limit - 1)) / (2 * limit - 1);
+}
 // Cycles' gradient of a lattice point picked by Jenkins' hash, at the offset f from it
 __device__ float gradient(unsigned x, unsigned y, unsigned z, float3 f) {
     const unsigned h = jenkins(3, x, y, z) & 15;
@@ -482,6 +496,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
+        case BOX: --top; top[-1] = box(top[-1], top->x); break;
         case BRICK: top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
         case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
         case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
