@@ -8,7 +8,7 @@
 #include "../build/shaders.h"
 
 // Kinds of what the extension pipes in
-enum { SCENE, REQUEST };
+enum { SCENE, REQUEST, UPDATE };
 
 int main(int, char** argv) { // Usage: renderer file < scenes and requests > an answer per request, sums in the file
     const int shared = std::atoi(argv[1]);
@@ -26,7 +26,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     // Scenes keep the reuse textures; the arrays of the last one loaded
     Scene scene{.pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]),
         loadPairing(PAIRING_SIZES[2])}};
-    std::vector<CUdeviceptr> arrays;
+    Loaded loaded;
     // Temporal denoiser of the means, guided by their motion
     OptixDenoiserOptions denoiserOptions{};
     OptixDenoiser denoiser;
@@ -76,9 +76,9 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     CUdeviceptr state, scratch, denoised, guides[2];
     bool history = false;
     for (unsigned done = 0, launched, kind; std::fread(&kind, sizeof(kind), 1, stdin); std::fflush(stdout)) {
-        if (kind == SCENE) {
+        if (kind != REQUEST) {
             const unsigned count = scene.count;
-            loadScene(context, scene, arrays);
+            kind == SCENE ? loadScene(context, scene, loaded) : updateScene(context, scene, loaded);
             view.camera = {};
             if (scene.count != count) view.width = 0;
             continue;

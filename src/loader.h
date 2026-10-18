@@ -87,6 +87,11 @@ template <typename T> T* load(size_t count) {
     std::vector<T> data;
     return load(count, data);
 }
+// Count elements piped in by the extension into data, uploaded into array from first on
+template <typename T> void update(T* array, size_t first, size_t count, T* data) {
+    std::fread(data, sizeof(T), count, stdin);
+    CHECK(cuMemcpyHtoD((CUdeviceptr)(array + first), data, count * sizeof(T)));
+}
 
 inline float3 operator+(float3 a, float3 b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline float3 operator-(float3 a, float3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -186,36 +191,77 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
     return (LightNode*)allocate(nodes.size() * sizeof(LightNode), nodes.data());
 }
 
+// Of the scene last loaded: its arrays besides the vertices, the vertices and materials its light BVH is built from and
+// the scratch and output its BVH is refit in
+struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Material> materials;
+    CUdeviceptr temp, output; };
+
+// Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
+inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
+    OptixBuildOperation operation, CUdeviceptr& temp, CUdeviceptr& output) {
+    unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
+    OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
+        .vertexBuffers = count ? &vertices : nullptr, .numVertices = 3 * count,
+        .vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3, .flags = &flags, .numSbtRecords = 1}};
+    OptixAccelBuildOptions build{.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE, .operation = operation};
+    OptixAccelBufferSizes sizes{};
+    CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
+    const size_t scratch = std::max(sizes.tempSizeInBytes, sizes.tempUpdateSizeInBytes);
+    if (operation == OPTIX_BUILD_OPERATION_BUILD) temp = allocate(scratch), output = allocate(sizes.outputSizeInBytes);
+    unsigned long long handle;
+    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, scratch, output, sizes.outputSizeInBytes, &handle,
+        nullptr, 0));
+    return handle;
+}
+
 // World-space scene piped in by the extension into scene, in place of the one of arrays, then its arrays: triangle,
 // step and texel counts, then the scene's arrays in order. The vertices last denoised stay the previous ones while the
 // triangle count does, others are freed.
-inline void loadScene(OptixDeviceContext context, Scene& scene, std::vector<CUdeviceptr>& arrays) {
-    for (CUdeviceptr array : arrays) release(array);
+inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
+    for (CUdeviceptr array : loaded.arrays) release(array);
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
     struct { unsigned count, ops, texels; } header;
     std::fread(&header, sizeof(header), 1, stdin);
-    std::vector<float3> vertices;
-    std::vector<Material> materials;
-    scene.vertices = load<float3>(3 * header.count, vertices), scene.normals = load<float3>(3 * header.count);
+    scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
     scene.generated = load<float3>(3 * header.count);
-    scene.uvs = load<float2>(3 * header.count), scene.materials = load<Material>(header.count + 1, materials);
-    scene.lights = loadLights(vertices, materials);
+    scene.uvs = load<float2>(3 * header.count), scene.materials = load<Material>(header.count + 1, loaded.materials);
+    scene.lights = loadLights(loaded.vertices, loaded.materials);
     scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
-    CUdeviceptr vertexBuffer = (CUdeviceptr)scene.vertices;
-    unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
-    OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
-        .vertexBuffers = header.count ? &vertexBuffer : nullptr, .numVertices = 3 * header.count,
-        .vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3, .flags = &flags, .numSbtRecords = 1}};
-    OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
-    OptixAccelBufferSizes sizes{};
-    CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
-    const CUdeviceptr temp = allocate(sizes.tempSizeInBytes), output = allocate(sizes.outputSizeInBytes);
-    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, sizes.tempSizeInBytes, output,
-        sizes.outputSizeInBytes, &scene.handle, nullptr, 0));
+    scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
+        loaded.temp, loaded.output);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
-    arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated,
+    loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops,
-        (CUdeviceptr)scene.texels, temp, output};
+        (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
+}
+
+// Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
+// the slots of its instances: a count of ranges, then per range its first triangle and triangle count and theirs in
+// the scene's order. The light BVH is built anew and the BVH refit. The vertices last denoised stay the previous ones.
+inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
+    const size_t bytes = loaded.vertices.size() * sizeof(float3);
+    if (scene.previousVertices == scene.vertices) {
+        scene.previousVertices = (float3*)allocate(bytes);
+        CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previousVertices, (CUdeviceptr)scene.vertices, bytes));
+    }
+    unsigned ranges;
+    std::fread(&ranges, sizeof(ranges), 1, stdin);
+    for (unsigned r = 0; r < ranges; ++r) {
+        struct { unsigned first, count; } range;
+        std::fread(&range, sizeof(range), 1, stdin);
+        std::vector<float3> points(3 * range.count);
+        std::vector<float2> uvs(3 * range.count);
+        update(scene.vertices, 3 * range.first, 3 * range.count, &loaded.vertices[3 * range.first]);
+        update(scene.normals, 3 * range.first, 3 * range.count, points.data());
+        update(scene.generated, 3 * range.first, 3 * range.count, points.data());
+        update(scene.uvs, 3 * range.first, 3 * range.count, uvs.data());
+    }
+    LightNode* const lights = loadLights(loaded.vertices, loaded.materials);
+    std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
+    release((CUdeviceptr)scene.lights);
+    scene.lights = lights;
+    scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, scene.count, OPTIX_BUILD_OPERATION_UPDATE,
+        loaded.temp, loaded.output);
 }
