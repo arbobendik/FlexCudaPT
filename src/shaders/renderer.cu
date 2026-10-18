@@ -45,6 +45,8 @@ constexpr unsigned LOBE_REFRACT = 1u;
 
 // Of a to the base b, zero where undefined as Blender's
 __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
+// sRGB to linear, as Cycles'
+__device__ float decode(float c) { return c < 0.04045f ? fmaxf(c, 0) / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
 __device__ float3 divide(float3 a, float3 b) {
     return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
 }
@@ -130,6 +132,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
         case NOISE: top[-1] = make_float3(1, 1, 1) * noise(top[-1]); break;
+        case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
