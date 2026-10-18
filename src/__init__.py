@@ -500,6 +500,19 @@ def curves(node, inputs, index):  # Of an RGB, vector or float curves node, each
         numpy.eye(3)[k]), k) for k in range(3)))
     return mix(value, looked, factor)
 
+# Of a normal map node, as Cycles': its strength scaling the normal in tangent space, else fading into it, of object
+# space the normal unknown
+def normal_map(node, inputs, index):
+    strength, color = inputs
+    if node.space == 'TANGENT':
+        color = 'ADD', ('MULTIPLY', ('SUBTRACT', color, 0.5), vector(strength, strength, clamp(strength))), \
+            ('MULTIPLY', ('SUBTRACT', 1, clamp(strength)), numpy.array((0, 0, 0.5)))
+        return 'NORMAL_MAP', ('ADD', color, 0.5)
+    if 'WORLD' not in node.space: return ('NORMAL',)
+    color = normalize(('MULTIPLY', ('SUBTRACT', ('MULTIPLY', color, 2), 1), numpy.array((1, -1, -1))
+        if node.space == 'BLENDER_WORLD' else 1))
+    return normalize(mix(('NORMAL',), color, ('MAXIMUM', strength, 0)))
+
 # Color or alpha of an image node at its vector, pink when missing, of an environment node along its projected
 # direction. Cycles dissociates colors from their alpha where
 # reading it unless the image packs channels, ignores its alpha, which is one then, or holds data, and decodes 8 bit
@@ -519,12 +532,10 @@ def image(node, inputs, index):
     return color if node.image.is_float or data else ('DECODE', color)
 
 # The nodes resolved exactly: the expression of an output by its index, given those of the node's enabled inputs. An
-# image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. A
-# normal map bends the normal by its strength toward the color's normal in tangent space and keeps it in any other
-# space. Added shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the
-# generated, object and reflection ones are known.
-NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP', inputs[1]), inputs[0])
-        if node.space == 'TANGENT' else ('NORMAL',), 'REROUTE': lambda node, inputs, index: inputs[0],
+# image is read at the UV without a vector and is pink when missing; mixes blend plainly unless by an operation. Added
+# shaders sum their iors' excess over 1, as Cycles sums their reflections. Of texture coordinates only the generated,
+# object and reflection ones are known.
+NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs[0],
     'TEX_IMAGE': image,
     'VALTORGB': lambda node, inputs, index: (('ALPHA' if index else 'IMAGE')
         + ('_LINEAR' if node.color_ramp.interpolation != 'CONSTANT' else ''),
@@ -701,8 +712,9 @@ class Flex(bpy.types.RenderEngine):
         generated = [numpy.empty((0, 3, 3), 'f')]  # Texture coordinates, the points in the mesh's texture space
         local = [numpy.empty((0, 3, 3), 'f')]  # Object coordinates, the points in the object's space
         colors = [numpy.empty((0, 3, 4), 'f')]  # Of the render color attributes, zero without, as Cycles' missing ones
-        infos = [numpy.empty((0, 10), 'f')]  # Per triangle: its object's location, color, pass index, random number and
-        # its material's pass index, as Cycles' object info node tells
+        tangents = [numpy.empty((0, 3, 4), 'f')]  # MikkTSpace tangents and their handedness, in object space
+        infos = [numpy.empty((0, 19), 'f')]  # Per triangle: its object's location, color, pass index, random number and
+        # its material's pass index, as Cycles' object info node tells, then the object's axes
         materials = []
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height and mean per image and ramp
@@ -717,6 +729,10 @@ class Flex(bpy.types.RenderEngine):
                 or moved and ob.name not in moved: continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
+                if any(face.loop_total > 4 for face in mesh.polygons):
+                    bm.from_mesh(mesh)
+                    bmesh.ops.triangulate(bm, faces=[face for face in bm.faces if len(face.verts) > 4])
+                    bm.to_mesh(mesh)
                 loops, index = (numpy.empty(n * len(mesh.loop_triangles), 'i') for n in (3, 1))
                 co, vertex = numpy.empty(3 * len(mesh.vertices), 'f'), numpy.empty(len(mesh.loops), 'i')
                 normal, uv = numpy.empty(3 * len(mesh.loops), 'f'), numpy.zeros(2 * len(mesh.loops), 'f')
@@ -726,6 +742,18 @@ class Flex(bpy.types.RenderEngine):
                 mesh.loops.foreach_get('vertex_index', vertex)
                 mesh.corner_normals.foreach_get('vector', normal)
                 if mesh.uv_layers.active: mesh.uv_layers.active.uv.foreach_get('vector', uv)
+                else:  # Cycles makes default tangents from spherical coordinates of the mesh's positions
+                    p = co.reshape(-1, 3)[vertex]
+                    lengths = numpy.linalg.norm(p, axis=1)
+                    sphere = numpy.column_stack((numpy.where(numpy.any(p[:, :2], axis=1),
+                        0.5 - numpy.arctan2(p[:, 0], p[:, 1]) / (2 * math.pi), 0), numpy.where(lengths > 0,
+                        1 - numpy.arccos(numpy.clip(p[:, 2] / numpy.maximum(lengths, 1e-30), -1, 1)) / math.pi, 0)))
+                    mesh.uv_layers.new().uv.foreach_set('vector', sphere.ravel())
+                if mesh.polygons: mesh.calc_tangents()  # Of faces, which curves without a bevel have none of
+                tangent, sign = numpy.empty(3 * len(mesh.loops), 'f'), numpy.empty(len(mesh.loops), 'f')
+                mesh.loops.foreach_get('tangent', tangent)
+                mesh.loops.foreach_get('bitangent_sign', sign)
+                tangent = numpy.column_stack((tangent.reshape(-1, 3), sign))[loops].reshape(-1, 3, 4)
                 color = numpy.zeros((len(mesh.loops), 4), 'f')
                 if (layer := mesh.color_attributes.render_color_index) >= 0:
                     attribute = mesh.color_attributes[layer]
@@ -737,6 +765,7 @@ class Flex(bpy.types.RenderEngine):
                 matrix = numpy.array(instance.matrix_world)
                 positions = (co.reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3])[vertex[loops]].reshape(-1, 3, 3)
                 normals = normal.reshape(-1, 3)[loops] @ numpy.array(instance.matrix_world.to_3x3().adjugated())
+                normals /= numpy.linalg.norm(normals, axis=1, keepdims=True)
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
                 orco = orco[vertex[loops]].reshape(-1, 3, 3)
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
@@ -778,6 +807,7 @@ class Flex(bpy.types.RenderEngine):
                 uv = numpy.zeros((len(bm.faces), 3, 2), 'f')
                 orco = point = numpy.zeros((len(bm.faces), 3, 3), 'f')
                 color = numpy.zeros((len(bm.faces), 3, 4), 'f')
+                tangent = numpy.zeros((len(bm.faces), 3, 4), 'f')
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
             # Triangles of the surfaces rendered, normals turned as the faces turn, a material of its row each
             rendered = numpy.array([bool(row) for row in shades])[index]
@@ -787,12 +817,13 @@ class Flex(bpy.types.RenderEngine):
             generated.append(orco[rendered])
             local.append(point[rendered])
             colors.append(color[rendered])
+            tangents.append(tangent[rendered])
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
             # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
             random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
                 lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
-            info = numpy.tile([*instance.matrix_world.translation, *ob.color, ob.pass_index, 0, random],
-                (len(index), 1))
+            info = numpy.tile([*instance.matrix_world.translation, *ob.color, ob.pass_index, 0, random,
+                *numpy.array(instance.matrix_world.to_3x3()).T.ravel()], (len(index), 1))
             info[:, 8] = passes[numpy.minimum(index, len(passes) - 1)]
             infos.append(info[rendered])
             table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera, len(row)) for row in shades])
@@ -807,7 +838,7 @@ class Flex(bpy.types.RenderEngine):
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
                 *(arrays[k + 1].astype('f') for arrays in (vertices, corners, generated, local, uvs,
-                colors, infos))))))
+                colors, tangents, infos))))))
             return
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
@@ -816,11 +847,11 @@ class Flex(bpy.types.RenderEngine):
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
-        # 12 color and 10 info floats, a material of its emission, program, hidden flag and layer count (then the
-        # world's); then the steps of 4 integers and the texels.
+        # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag and layer count (then
+        # the world's); then the steps of 4 integers and the texels.
         self.requests.writelines((struct.pack('<4I', SCENE, len(triangles), len(ops), sum(map(len, texels)) // 4),
             triangles,
-            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, local, uvs, colors, infos)),
+            *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, local, uvs, colors, tangents, infos)),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels))
 
