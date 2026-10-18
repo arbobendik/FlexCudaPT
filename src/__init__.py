@@ -221,6 +221,12 @@ def dodge(t, a, b):
     tmp = 'SUBTRACT', 1, ('MULTIPLY', t, b)
     return 'MULTIPLY', mix(1, ('MINIMUM', ('DIVIDE', a, tmp), 1), ('LESS_THAN', 0, tmp)), ('LESS_THAN', 0, absolute(a))
 
+def saturated(color):  # One where the color has a saturation, else zero
+    return 'LESS_THAN', 0, absolute(('DOT_PRODUCT', ('RGB_TO_HSV', color), numpy.eye(3)[1]))
+
+def recolor(color, hsv, mask):  # The color with the components of its HSV the mask selects taken from hsv
+    return 'HSV_TO_RGB', mix(('RGB_TO_HSV', color), hsv, mask)
+
 # Blends of color mix nodes besides fading into an operation's result: their expressions of the factor and the colors,
 # as Cycles'
 BLENDS = {'DARKEN': lambda t, a, b: mix(a, ('MINIMUM', a, b), t),
@@ -231,7 +237,12 @@ BLENDS = {'DARKEN': lambda t, a, b: mix(a, ('MINIMUM', a, b), t),
     'SOFT_LIGHT': lambda t, a, b: mix(a, ('MULTIPLY', a, ('ADD', ('MULTIPLY', ('SUBTRACT', 1, a), b), screen(1, a, b))),
         t), 'LINEAR_LIGHT': lambda t, a, b: ('ADD', a, ('MULTIPLY', t, ('SUBTRACT', ('MULTIPLY', b, 2), 1))),
     'DIVIDE': lambda t, a, b: mix(a, ('ADD', ('DIVIDE', a, b), ('MULTIPLY', a, ('SUBTRACT', 1, ('LESS_THAN', 0,
-        absolute(b))))), t), 'BURN': burn, 'DODGE': dodge}
+        absolute(b))))), t), 'BURN': burn, 'DODGE': dodge,
+    'HUE': lambda t, a, b: mix(a, mix(a, recolor(a, ('RGB_TO_HSV', b), numpy.eye(3)[0]), t), saturated(b)),
+    'COLOR': lambda t, a, b: mix(a, mix(a, recolor(a, ('RGB_TO_HSV', b), numpy.array((1, 1, 0))), t), saturated(b)),
+    'SATURATION': lambda t, a, b: mix(a, recolor(a, mix(('RGB_TO_HSV', a), ('RGB_TO_HSV', b), t), numpy.eye(3)[1]),
+        saturated(a)),
+    'VALUE': lambda t, a, b: recolor(a, mix(('RGB_TO_HSV', a), ('RGB_TO_HSV', b), t), numpy.eye(3)[2])}
 
 def blend(node, inputs, index):  # Of a mix node: its inputs faded into one another or blended as its colors
     kind = getattr(node, 'blend_type', 'MIX') if getattr(node, 'data_type', 'RGBA') == 'RGBA' else 'MIX'
