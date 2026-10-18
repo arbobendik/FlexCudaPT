@@ -382,13 +382,29 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
         x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
     return scene.texels[op.texel + y * width + x];
 }
-// Normal transformed from its object into the world, or back, as Cycles'
-__device__ float3 normalTransform(float3 v, const Info& info, bool inverse) {
+// The vector transformed from its object into the world or back, or from the world into the camera's space or back, by
+// the mode: as a point, direction or normal of the object, of the world, then as a point or direction of the camera
+__device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& info) {
     const float* a = info.axes;
     const float3 x = make_float3(a[0], a[1], a[2]), y = make_float3(a[3], a[4], a[5]);
     const float3 z = make_float3(a[6], a[7], a[8]);
-    if (inverse) return normalize(make_float3(dot(x, v), dot(y, v), dot(z, v)));
-    return normalize((cross(y, z) * v.x + cross(z, x) * v.y + cross(x, y) * v.z) / dot(x, cross(y, z)));
+    const float3 t = make_float3(info.location[0], info.location[1], info.location[2]);
+    const Camera& c = scene.camera;
+    const float3 r = normalize(c.x), u = normalize(c.y), f = normalize(cross(c.y, c.x));
+    const float3 i = cross(y, z) / dot(x, cross(y, z)), j = cross(z, x) / dot(x, cross(y, z));
+    const float3 k = cross(x, y) / dot(x, cross(y, z)); // The rows of the axes' inverse
+    if (mode == 3) v = v - t;
+    if (mode == 6) v = v - c.origin;
+    switch (mode) {
+        case 0: return x * v.x + y * v.y + z * v.z + t;
+        case 1: return x * v.x + y * v.y + z * v.z;
+        case 2: return normalize(i * v.x + j * v.y + k * v.z);
+        case 3: case 4: return make_float3(dot(i, v), dot(j, v), dot(k, v));
+        case 5: return normalize(make_float3(dot(x, v), dot(y, v), dot(z, v)));
+        case 6: case 7: return make_float3(dot(r, v), dot(u, v), dot(f, v));
+        case 8: return c.origin + r * v.x + u * v.y + f * v.z;
+        default: return r * v.x + u * v.y + f * v.z;
+    }
 }
 // Surface a program resolves to at a UV, generated point, point in its object and color, facing along the normal with
 // the tangent space tbn, at a position seen from the incoming direction, on the back of its face or not, for the ray,
@@ -404,6 +420,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case UV: *top++ = make_float3(u, v, 0); break;
         case GENERATED: *top++ = generated; break;
         case OBJECT: *top++ = object; break;
+        case TRANSFORM: --top; top[-1] = transform(scene, top[-1], int(top->x), info); break;
         case CAMERA_POINT: case WINDOW: { // In the camera's space, right, up and forward, or of its window, of the
             const Camera& c = scene.camera; // world along its direction from the camera, as Cycles'
             const float3 d = program == scene.materials[scene.count].program ? position : position - c.origin;
@@ -451,7 +468,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
                 : make_float3(1, 1, 1) * color.w;
         } break;
         case NORMAL_MAP: {
-            const float3 n = normalTransform(tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), info, false);
+            const float3 n = transform(scene, tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), 2, info);
             top[-1] = isfinite(dot(n, n)) ? n : normal;
         } break;
         case ADD: --top; top[-1] = top[-1] + *top; break;
@@ -536,9 +553,9 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
     const float3* object = scene.objects + 3 * triangle;
     const float4* color = scene.colors + 3 * triangle;
     const float3* normals = scene.normals + 3 * triangle;
-    const float3 a = normalTransform(normals[0], scene.infos[triangle], true);
-    const float3 b = normalTransform(normals[1], scene.infos[triangle], true);
-    const float3 c = normalTransform(normals[2], scene.infos[triangle], true);
+    const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
+    const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
+    const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
     unsigned program = scene.materials[triangle].program;
     // Each layer's program follows the end of the one above it
     while (layer) layer -= scene.ops[program++].code == END;
