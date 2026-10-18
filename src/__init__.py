@@ -77,7 +77,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
-    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'STORE', 'LOAD'))}
+    **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -167,6 +167,7 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None):
         'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC') else (0, 0, 0, numpy.ones(4))
     values = [emit(operand, ops, textures, texels, alphas, uses, slots) for operand in operands]
     ops.append(([*OPS].index(name), *payload[:3]))
+    if name == 'LIGHT_PATH': return float(values[0] >= 8)  # Of no ray, length and depth one, as light sampling shades
     value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
     if slots is None: uses[key] = [1, value]
     elif uses[key][0] > 1:
@@ -459,7 +460,8 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         if index == 6 else resolve(node.outputs[index]),
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
-    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight,
+    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
+        if index in (0, 1, 2, 3, 5, 6, 8, 9) else resolve(node.outputs[index]),
     'TEX_NOISE': noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker, 'TEX_WAVE': wave}
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
