@@ -1,8 +1,10 @@
 #pragma once
 #include <vector_types.h>
 
-// Perspective: the ray through NDC (u, v) leaves origin along x * u + y * v + z.
-struct Camera { float3 origin, x, y, z; };
+// Thin lens: aperture radius, depth of its focus plane, polygon sides (0 for a disk), rotation and anamorphic ratio.
+struct Lens { float aperture, focus, blades, rotation, ratio; };
+// Perspective: the pinhole ray through NDC (u, v) leaves origin along x * u + y * v + z.
+struct Camera { float3 origin, x, y, z; Lens lens; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
 // combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there.
