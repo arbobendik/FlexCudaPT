@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
-    'TRANSFORM'))}
+    'TRANSFORM', 'BOX'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -548,6 +548,20 @@ def image(node, inputs, index):
             COMPOSITES['INVERSE_SQRT'](('ADD', ('ADD', ('MULTIPLY', x, x), ('MULTIPLY', y, y)), ('MULTIPLY', z, z))))),
             math.pi))
         point = vector(*around, 0)
+    elif node.projection == 'BOX':  # Of a sample along each axis of the object, by Cycles' weights of the normal
+        normal = 'TRANSFORM', facing(('NORMAL',)), 5
+        weights = 'BOX', normal, node.projection_blend
+        x, y, z, nx, ny, nz = (('DOT_PRODUCT', v, axis) for v in (point, normal) for axis in numpy.eye(3))
+        flip = lambda c, n, positive: mix(c, ('SUBTRACT', 1, c), ('LESS_THAN', 0, n) if positive
+            else ('LESS_THAN', n, 0))
+        uvs = (flip(y, nx, False), z), (flip(x, ny, True), z), (flip(y, nz, True), x)
+        terms = [('MULTIPLY', ('DOT_PRODUCT', weights, axis), sample(source, index, vector(u, v, 0)))
+            for axis, (u, v) in zip(numpy.eye(3), uvs)]
+        return 'ADD', ('ADD', terms[0], terms[1]), terms[2]
+    return sample(source, index, point)
+
+def sample(source, index, point):  # Of an image node at a point, as Cycles reads images
+    node = source.node
     read = lambda name: (name + {'Linear': '_LINEAR', 'Cubic': '_CUBIC', 'Smart': '_CUBIC'}.get(node.interpolation,
         ''), point, source)
     if index: return read('ALPHA')
