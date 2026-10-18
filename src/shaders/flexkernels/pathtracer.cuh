@@ -728,6 +728,11 @@ __device__ SampleBSDF sampleBSDF(float3  in_dir_3, float3  n_7, BSDFMaterial mat
     return sample_0;
 }
 
+__device__ float3  pointLightRadiance(float3  color_0, float intensity_0, float radius_0)
+{
+    return color_0 * make_float3 (intensity_0) / make_float3 (3.14159274101257324f * radius_0 * radius_0);
+}
+
 __device__ float3  beerLambert(float distance_0, float3  absorption_0)
 {
     float3  _S195 = max_0(absorption_0, make_float3 (0.0000152587890625f));
