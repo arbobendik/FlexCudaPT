@@ -20,4 +20,5 @@ the world through perspective cameras. Material node trees resolve to a smooth o
 metallic, roughness, emission, transparency and IOR per hit, and their volumes to the absorption color and density that
 media absorb by. Max samples, max bounces, paths per sample and resolution are set in the Flex panel of the render
 properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation and the number of spatial neighbors.
+Camera properties include Cycles' depth of field and aperture settings, used in final renders and rendered camera views.
 `make test` renders a small scene headlessly and checks the result.
