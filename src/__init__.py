@@ -108,7 +108,7 @@ NODES = {'NORMAL_MAP': lambda node, inputs, index: mix(('NORMAL',), ('NORMAL_MAP
         ('ADD', ('MULTIPLY', clamp(inputs[0]), 255 / 256), 0.5 / 256), node),
     'MIX': lambda node, inputs, index: mix(inputs[1], (node.blend_type, *inputs[1:])
         if OPS.get(getattr(node, 'blend_type', 0)) else inputs[2], inputs[0]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation) else inputs[0],
@@ -132,7 +132,7 @@ def resolve(socket, groups=()):
     if not link and socket.type == 'SHADER': return BLACK
     if not link:  # A virtual socket has no value
         value = numpy.resize(getattr(socket, 'default_value', 0), 3)
-        return {'Normal': ('NORMAL',), 'UV': ('UV',)}.get(socket.name, value)
+        return {'Normal': ('NORMAL',), 'Coat Normal': ('NORMAL',), 'UV': ('UV',)}.get(socket.name, value)
     node, output = link.from_node, link.from_socket
     index = [*node.outputs].index(output)
     get = lambda name, default=0: resolve(node.inputs[name], groups) if name in node.inputs else default
@@ -158,18 +158,26 @@ def resolve(socket, groups=()):
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
             ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), transparency, ior,
             get('Specular Tint', 1), level, get('Alpha', 1), absorption, density]
+        # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
+        weight = get('Coat Weight')
+        if isinstance(weight, tuple) or numpy.any(weight):
+            value.append([get('Coat Normal'), get('Coat Tint'), 0, get('Coat Roughness'), 0, 1, get('Coat IOR'), 1, 1,
+                ('MULTIPLY', weight, get('Alpha', 1))])
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
 
-# The material's surface as rows, one or none: the row of its surface, absorbing as its volume, black without an output;
-# none for volumes without a surface shader
+# The material's surface as rows, one per layer from the top or none: the row of its surface, absorbing as its volume,
+# under that of a coat emitting in its place; black without an output; none for volumes without a surface shader
 def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         return []
-    return [program([*resolve(output.inputs['Surface'])[:10], *resolve(output.inputs['Volume'])[10:]])]
+    surface, volume = resolve(output.inputs['Surface']), resolve(output.inputs['Volume'])[10:12]
+    layers = [surface[:10]] if len(surface) == 12 else [[*surface[12][:4], surface[4], *surface[12][5:]],
+        [*surface[:4], 0, *surface[5:10]]]
+    return [program([*layer, *volume]) for layer in layers]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
@@ -300,7 +308,7 @@ class Flex(bpy.types.RenderEngine):
             corners.append(normals.reshape(-1, 3, 3)[rendered])
             uvs.append(uv[rendered])
             generated.append(orco[rendered])
-            table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera) for row in shades])
+            table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera, len(row)) for row in shades])
             materials.append(table[index[rendered]])
             slots.append((i, len(vertices[-1]), (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
@@ -316,12 +324,12 @@ class Flex(bpy.types.RenderEngine):
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
-        materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0)])
+        materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0, 1)])
         triangles = numpy.concatenate(vertices, dtype='f')
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated and 6 UV floats,
-        # a material of its emission, program and hidden flag (then the world's); then the steps of 4 integers and the
-        # texels.
+        # a material of its emission, program, hidden flag and layer count (then the world's); then the steps of 4
+        # integers and the texels.
         self.requests.writelines((struct.pack('<4I', SCENE, len(triangles), len(ops), sum(map(len, texels)) // 4),
             triangles,
             *(numpy.concatenate(arrays, dtype='f') for arrays in (corners, generated, uvs)),

@@ -118,12 +118,15 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x};
 }
-// Of a triangle at its barycentrics
-__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal) {
+// Of a triangle at its barycentrics, in a layer of its material
+__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, unsigned layer = 0) {
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* generated = scene.generated + 3 * triangle;
-    return shade(scene, scene.materials[triangle].program, normal,
+    unsigned program = scene.materials[triangle].program;
+    // Each layer's program follows the end of the one above it
+    while (layer) layer -= scene.ops[program++].code == END;
+    return shade(scene, program, normal,
         normalMapTBN(vertex[0], vertex[1], vertex[2], uv[0], uv[1], uv[2], normal),
         uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
@@ -330,11 +333,13 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     direction = toLight * (1 / distance);
     if (!(dot(normal, toLight) > 0))
         return make_float3(0, 0, 0);
-    // Through occluders passing rays straight through, where uncovered or tinted by their transparency
+    // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency
     for (Hit hit; (hit = traverse(scene, from, toward, left, occluder)).triangle != NONE; left -= occluder) {
-        const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit));
-        const float3 through = surface.ior == 1 ? surface.albedo * surface.transparency : make_float3(0, 0, 0);
-        transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
+        for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
+            const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), layer);
+            const float3 through = surface.ior == 1 ? surface.albedo * surface.transparency : make_float3(0, 0, 0);
+            transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
+        }
         if (rgb_to_greyscale(transmitted) <= 0)
             return make_float3(0, 0, 0);
         from = from + toward * occluder;
@@ -367,13 +372,18 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     float threshold = 0.0f;
     float3 reconnection = origin;
     Vertex prev = Vertex{false, 0u, 0.0f, 0.0f};
+    // Layer of the hit's material the ray meets, and whether it came there from another layer of the hit, between them
+    unsigned layer = 0u;
+    bool passed = false;
     // Template for generated paths reconnecting at the first vertex meeting both footprint criteria
     Reservoir chain = {};
     chain.seed = r.seed;
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     for (unsigned b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.triangle);
-        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit));
+        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), layer);
+        // Only the top layer emits, where the ray first meets it
+        if (passed) surface.emissive = make_float3(0, 0, 0);
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
@@ -395,15 +405,16 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // Primary ray footprint (Eq. 5)
             threshold = RESTIR_FOOTPRINT / geometry_density;
         }
-        // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5)
-        const bool footprint = prev.rough && prev.pdf * geometry_density * threshold <= 1.0f;
+        // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
+        const bool footprint = !passed && prev.rough && prev.pdf * geometry_density * threshold <= 1.0f;
         const float n_dot_v = dot(surface.normal, - direction);
         const bool is_entering = n_dot_v < 0.0f;
         // Incident side is air, outgoing side is material (entering)
         const float eta_i = is_entering ? surface.ior : 1.0f;
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
-        const bool nee = neeDecision(material, n_dot_v, eta_i, eta_o);
+        // Light is sampled at the top layer alone
+        const bool nee = layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
         const bool chain_found = extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE;
         // Reconnection at this vertex for paths ending here
         Reservoir here = chain;
@@ -536,8 +547,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             }
             return Shift{throughput * (lobe.throughput * lobe.pdf) * r.radiance / r.jac, density * lobe.pdf / r.jac};
         }
-        // A replayed path meeting the criteria before x_k is not in the image of the shift
-        if ((replay && footprint && inverse_footprint) || (connect && !rough)) {
+        // Refracting into the hit from outside or reflecting between its layers, the ray meets the other layer there
+        const bool passes = scene.materials[hit.triangle].layers > 1u && (lobe_index == LOBE_REFRACT) != passed;
+        // A replayed path meeting the criteria before x_k is not in the image of the shift, nor one connecting there
+        if ((replay && footprint && inverse_footprint) || (connect && (!rough || passes))) {
             return fail;
         }
         if (connect) {
@@ -557,7 +570,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
         direction = dir;
         // Off the side it leaves through
-        origin = origin + surface.normal * (offset * sign(dot(direction, geometry_n)));
+        origin = origin + surface.normal * (passes ? 0.0f : offset * sign(dot(direction, geometry_n)));
         if (!replay) {
             const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
                 / density, 0.0f), 1.0f);
@@ -565,6 +578,13 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 break;
             }
             density *= survival_probability;
+        }
+        // Passing, the next vertex is the same hit in the other layer, reached without distance
+        passed = passes;
+        layer = passes ? layer ^ 1u : 0u;
+        if (passes) {
+            distance = 0.0f;
+            continue;
         }
         // Only occluders in front of the reconnection vertex matter
         const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
