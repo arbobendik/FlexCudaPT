@@ -52,19 +52,22 @@ struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, den
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle: three vertices, normals, generated points and UVs, one material; the world's material last. The light
-// BVH from its root.
+// BVH from its root and per triangle the trail to its leaf, from the first bit: whether it takes the second child.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
 // The frame's number seeds it.
 // Denoised, per pixel: the mean radiance, the motion of what the pixel sees since the frame last denoised, through its
 // camera and vertices, how far the motion is trusted, and the triangle the pixel sees now and saw then.
-// Of the scene the reservoirs a view's first frame reuses were traced in: its BVH, vertices, normals and light BVH.
+// Of the scene the reservoirs a view's first frame reuses were traced in: its BVH, vertices, normals, light BVH and
+// trails.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated; float2* uvs;
-    Material* materials; LightNode* lights; Op* ops; float4* texels; unsigned count; Camera camera;
+    Material* materials; LightNode* lights; unsigned long long* trails; Op* ops; float4* texels; unsigned count;
+    Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
     float4* mean; float2* flow; float* trust; unsigned *seen, *previousSeen; float3* previousVertices;
     Camera denoisedCamera;
     unsigned long long anchorHandle; float3 *anchorVertices, *anchorNormals; LightNode* anchorLights;
+    unsigned long long* anchorTrails;
 };

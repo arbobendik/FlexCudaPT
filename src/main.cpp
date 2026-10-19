@@ -76,7 +76,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     CUdeviceptr anchor = allocate(0), anchorTemp = allocate(0), anchorOutput = allocate(0);
     Camera anchorCamera{};
     scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
-    scene.anchorLights = (LightNode*)allocate(0);
+    scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
     // Of a denoised view's state and scratch, besides its denoised means and the internal guides of the frame last
     // denoised and the next; whether those hold one of its sequence
     OptixDenoiserSizes sizes;
@@ -95,10 +95,12 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                 CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, scene.count, 1, 1));
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
             }
-            LightNode* const lights = loadLights(loaded.vertices, materials);
+            unsigned long long* trails;
+            LightNode* const lights = loadLights(loaded.vertices, materials, trails);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
-            release((CUdeviceptr)scene.lights);
-            scene.lights = lights;
+            std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.trails, (CUdeviceptr)trails);
+            release((CUdeviceptr)scene.lights), release((CUdeviceptr)scene.trails);
+            scene.lights = lights, scene.trails = trails;
             view.camera = {};
             if (scene.count != count) view.width = 0;
             continue;
@@ -173,10 +175,12 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             CHECK(cuMemcpyDtoD(anchor + pixels * sizeof(Reservoir), (CUdeviceptr)scene.duplication,
                 pixels * sizeof(float)));
             for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
-                (CUdeviceptr)scene.anchorLights, anchorTemp, anchorOutput}) release(array);
+                (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTemp, anchorOutput})
+                release(array);
             scene.anchorVertices = (float3*)copy((CUdeviceptr)scene.vertices);
             scene.anchorNormals = (float3*)copy((CUdeviceptr)scene.normals);
             scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
+            scene.anchorTrails = (unsigned long long*)copy((CUdeviceptr)scene.trails);
             scene.anchorHandle = buildBVH(context, (CUdeviceptr)scene.anchorVertices, scene.count,
                 OPTIX_BUILD_OPERATION_BUILD, anchorTemp, anchorOutput);
         }
