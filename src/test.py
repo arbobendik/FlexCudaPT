@@ -65,10 +65,12 @@ alpha = cutout.id_data.nodes.new('ShaderNodeTexImage')
 alpha.image = bpy.data.images.new('clear', 1, 1, alpha=True)
 alpha.image.pixels.foreach_set((0, 0, 0, 0))
 cutout.id_data.links.new(alpha.outputs['Alpha'], cutout.inputs['Alpha'])
-fog = plane('fog', 0, 0, 4).id_data  # Not rendered: volume only
+fog = plane('fog', 0, 0, 4).id_data  # Passes rays straight through: volume only, of no density
 output = fog.nodes['Material Output']
 fog.links.remove(output.inputs['Surface'].links[0])
-fog.links.new(fog.nodes.new('ShaderNodeVolumePrincipled').outputs['Volume'], output.inputs['Volume'])
+volume = fog.nodes.new('ShaderNodeVolumePrincipled')
+volume.inputs['Density'].default_value = 0
+fog.links.new(volume.outputs['Volume'], output.inputs['Volume'])
 for name in ('cutout', 'fog'): bpy.data.objects[name].location.z = 0.5  # Between the camera and the other planes
 emitter = plane('emitter', 0, -0.75, 0.5)
 emitter.inputs['Base Color'].default_value = (0, 0, 0, 1)
