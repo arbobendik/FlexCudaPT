@@ -271,6 +271,15 @@ glass.inputs['Base Color'].default_value = (*COLOR, 1)
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.array(COLOR) ** 2, rtol=0.02), 'glass'
+# A long glass prism needs repeated total internal reflections to reach the white sky instead of turning black.
+bpy.data.objects['slab'].location, bpy.data.objects['slab'].scale = (0, 0, -10), (1, 1, 20)
+glass.inputs['Base Color'].default_value, glass.inputs['IOR'].default_value = (1, 1, 1, 1), 1.45
+matrix = scene.camera.matrix_world.copy()
+scene.camera.location, scene.camera.rotation_euler = (1, 0, 1), (0, math.pi / 4, 0)
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+assert pixels.mean() > 0.9, 'glass internal reflections at default bounces'
+scene.camera.matrix_world = matrix
 
 # Camera controls remain visible with Flex selected; a small emitter on black measures its lens's bokeh.
 context = types.SimpleNamespace(engine='FLEX', camera=scene.camera.data)
