@@ -22,4 +22,5 @@ metallic, roughness, emission, transparency and IOR per hit, and their volumes t
 media absorb by. Max samples, max bounces, paths per sample and resolution are set in the Flex panel of the render
 properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation and the number of spatial neighbors.
 Camera properties include Cycles' depth of field and aperture settings, used in final renders and rendered camera views.
-`make test` renders a small scene headlessly and checks the result.
+The extension's preferences choose OptiX or Vulkan, which traces with ray queries on any GPU that has them and does not
+denoise. `make test` renders a small scene headlessly and checks the result.
