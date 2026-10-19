@@ -33,30 +33,38 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
 
     // Load embedded PTX
-    OptixPipelineCompileOptions compile{};
+    OptixPipelineCompileOptions compile{.numPayloadValues = 1}; // The triangle a ray skips
     OptixModuleCompileOptions moduleOptions{};
     OptixModule module;
     CHECK(optixModuleCreate(context, &moduleOptions, &compile,
         (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
-    // Raygen programs of a frame's passes: rays are only traversed, so none runs on a miss or a hit
+    // Raygen programs of a frame's passes, then the any-hit program skipping a triangle: rays are only traversed, so
+    // none runs on a miss or a closest hit
     const char* passes[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
         "__raygen__duplicates", "__raygen__denoise"};
     constexpr unsigned PASSES = sizeof(passes) / sizeof(*passes);
-    OptixProgramGroup groups[PASSES];
+    OptixProgramGroup groups[PASSES + 1];
     OptixProgramGroupOptions groupOptions{};
     for (unsigned pass = 0; pass < PASSES; ++pass) {
         OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, passes[pass]}};
         CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));
     }
+    OptixProgramGroupDesc skip{.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
+        .hitgroup = {.moduleAH = module, .entryFunctionNameAH = "__anyhit__skip"}};
+    CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &groups[PASSES]));
     // Link pipeline, no recursion
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
     OptixPipeline pipeline;
-    CHECK(optixPipelineCreate(context, &compile, &link, groups, PASSES, nullptr, nullptr, &pipeline));
+    CHECK(optixPipelineCreate(context, &compile, &link, groups, PASSES + 1, nullptr, nullptr, &pipeline));
     // An SBT record per pass carries scene
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
     Record records[PASSES];
     for (unsigned pass = 0; pass < PASSES; ++pass) CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
     const CUdeviceptr table = allocate(sizeof(records));
+    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } hit;
+    CHECK(optixSbtRecordPackHeader(groups[PASSES], &hit));
+    OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit), &hit),
+        .hitgroupRecordStrideInBytes = sizeof(hit), .hitgroupRecordCount = 1};
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
     // number launched, memory used and peak in MiB, the sums left in the shared file if any were. A new view starts
     // over: it persists the last one if it has its size and settings and its camera did not jump, move farther than
@@ -150,7 +158,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             for (Record& record : records) record.data = scene;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
-                OptixShaderBindingTable sbt = {.raygenRecord = table + pass * sizeof(Record)};
+                sbt.raygenRecord = table + pass * sizeof(Record);
                 CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
@@ -179,7 +187,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         if (denoise) {
             for (Record& record : records) record.data = scene;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
-            const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
+            sbt.raygenRecord = table + (PASSES - 1) * sizeof(Record);
             CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, view.width, view.height, 1));
             if (!history) { // The first of a sequence moves nowhere
                 CHECK(cuMemsetD32((CUdeviceptr)scene.flow, 0, 2 * pixels));

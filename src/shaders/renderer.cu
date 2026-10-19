@@ -732,14 +732,23 @@ __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) 
 }
 
 // Nearest hit of a ray within far and its distance, NONE on a miss
-__device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance) {
+// Of a ray leaving the skipped triangle, if any, from where it hit it, as Cycles skips it, starting back by the
+// distance it otherwise starts after to keep triangles there; a ray then passing a triangle hit there skips none
+__device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance,
+    unsigned skip = NONE) {
+    const float back = skip == NONE ? 0 : 1e-4f;
     // Traverse only; hit data is read from the hit object below.
-    optixTraverse(scene.handle, origin, direction, 1e-4f, far, 0.0f, 255, OPTIX_RAY_FLAG_NONE, 0, 1, 0);
+    optixTraverse(scene.handle, origin - direction * back, direction, 1e-4f - back, far + back, 0.0f, 255,
+        skip == NONE ? OPTIX_RAY_FLAG_DISABLE_ANYHIT : OPTIX_RAY_FLAG_NONE, 0, 1, 0, skip);
     if (!optixHitObjectIsHit()) return {NONE};
-    distance = optixHitObjectGetRayTmax();
+    distance = optixHitObjectGetRayTmax() - back;
     // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
     return {optixHitObjectGetPrimitiveIndex(), make_float2(__uint_as_float(optixHitObjectGetAttribute_0()),
         __uint_as_float(optixHitObjectGetAttribute_1()))};
+}
+
+extern "C" __global__ void __anyhit__skip() {
+    if (optixGetPrimitiveIndex() == optixGetPayload_0()) optixIgnoreIntersection();
 }
 
 __device__ float3 hitPosition(const float3* vertices, Hit hit) { // On the triangles of vertices
@@ -807,10 +816,10 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
         origin = origin + offset;
     }
     const float3 start = origin;
-    Hit hit;
+    Hit hit = {NONE};
+    float distance = 0;
     do {
-        float distance = 0;
-        hit = traverse(scene, origin, direction, 1e16f, distance);
+        hit = traverse(scene, origin, direction, 1e16f, distance, distance < 1e-4f ? NONE : hit.triangle);
         origin = origin + direction * distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden);
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, hit), hit};
@@ -889,13 +898,14 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     const float distance = length(toLight);
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight - normal * offset, toward = normalize(shadow);
-    float occluder, left = length(shadow) * (1 - 1e-4f);
+    float occluder = 0, left = length(shadow) * (1 - 1e-4f);
     float3 from = origin + normal * offset, transmitted = make_float3(1, 1, 1);
     direction = toLight * (1 / distance);
     if (!(dot(normal, toLight) > 0))
         return make_float3(0, 0, 0);
     // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency
-    for (Hit hit; (hit = traverse(scene, from, toward, left, occluder)).triangle != NONE; left -= occluder) {
+    for (Hit hit = {NONE}; (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
+        : hit.triangle)).triangle != NONE; left -= occluder) {
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
             const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
                 Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
@@ -1133,9 +1143,12 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             chain_throughput = throughput;
         }
         prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
+        // Off the side it leaves through, or right from where it passes straight through
+        const unsigned through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? hit.triangle
+            : NONE;
         direction = dir;
-        // Off the side it leaves through
-        origin = origin + surface.normal * (passes ? 0.0f : offset * sign(dot(direction, geometry_n)));
+        if (through == NONE)
+            origin = origin + surface.normal * (passes ? 0.0f : offset * sign(dot(direction, geometry_n)));
         if (!replay) {
             const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
                 / density, 0.0f), 1.0f);
@@ -1154,7 +1167,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Only occluders in front of the reconnection vertex matter
         const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
         hit = traverse(scene, origin, direction, reconnecting ? length(reconnection - origin) * 1.001f : 1e16f,
-            distance);
+            distance, through);
         // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
         if (reconnecting && hit.triangle == r.rc.triangle) {
             hit.uv = r.rc.uv;
