@@ -813,7 +813,8 @@ class Flex(bpy.types.RenderEngine):
             ob = instance.object
             bm = bmesh.new()
             if ob.hide_render or ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'LIGHT'} \
-                or moved and ob.name not in moved: continue
+                or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
+                continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
                 if any(face.loop_total > 4 for face in mesh.polygons):
