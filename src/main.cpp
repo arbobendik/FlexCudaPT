@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <sys/mman.h>
 #include <unistd.h>
-#include "../build/shaders.h"
+#include "shaders.h"
 
 // Kinds of what the extension pipes in
 enum { SCENE, REQUEST, UPDATE };
