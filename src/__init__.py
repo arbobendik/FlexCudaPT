@@ -201,6 +201,11 @@ def fold(expression):  # The expression with its operations on constants alone c
     name, *operands = (fold(part) if isinstance(part, tuple) else part for part in expression)
     if name != 'UNASSOCIATE' and OPS[name] and not any(isinstance(operand, tuple) for operand in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
+    if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
+        for i, value in enumerate(operands):
+            if isinstance(value, tuple): continue
+            if numpy.all(numpy.asarray(value) == (1 if name in ('MULTIPLY', 'DIVIDE') else 0)) \
+                and (name in ('ADD', 'MULTIPLY') or i == 1): return operands[1 - i]
     return name, *operands
 
 def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
