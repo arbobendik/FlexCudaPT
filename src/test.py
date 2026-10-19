@@ -245,6 +245,27 @@ add(bpy.data.lights.new('bright', 'POINT'), (0, 0, -1)).data.energy = 1e6
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert pixels.sum(2).min() > 0, 'many lights'
+# Only the center tile emits: its nonlinear shader has zero emission at the texture's mean, like the dark tile.
+mesh = bpy.data.objects['dim'].data
+bm = bmesh.new()
+bm.from_mesh(mesh)
+uv = bm.loops.layers.uv.active
+for face in bm.faces:
+    for loop in face.loops: loop[uv].uv = (0.75, 0.75)  # The white texel
+bmesh.ops.create_grid(bm, size=0.5, matrix=Matrix.Translation((1, 0, 0)))
+bm.to_mesh(mesh)
+bm.free()
+mask = dim.id_data.nodes.new('ShaderNodeMath')
+mask.operation, mask.use_clamp = 'SUBTRACT', True
+mask.inputs[1].default_value = 0.75
+dim.id_data.links.new(dim.id_data.nodes.new('ShaderNodeTexImage').outputs['Color'], mask.inputs[0])
+dim.id_data.nodes['Image Texture'].image = texture.image
+dim.id_data.links.new(mask.outputs[0], dim.inputs['Emission Color'])
+scene.flex_restir = False
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+assert pixels.sum(2).min() > 0, 'textured light sampling'
+scene.flex_restir = True
 # Through a slab of white glass of IOR 1 and depth 0.5 under the white sky, a Volume Absorption of the color and density 1
 # passes its transmittance over unit distance, exp(color - 1), to the power of depth, as FlexLight's Beer's law
 for ob in scene.objects: ob.hide_render = ob != scene.camera
