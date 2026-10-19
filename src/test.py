@@ -390,3 +390,25 @@ exporter.requests = io.BytesIO()
 Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
     object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=reference)]))
 assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.SCENE, 'reference coordinates update'
+collection = bpy.data.collections.new('instance source')
+member = bpy.data.objects.new('instance member', ob.data)
+collection.objects.link(member)
+instance = bpy.data.objects.new('instancer', None)
+scene.collection.objects.link(instance)
+instance.instance_type, instance.instance_collection = 'COLLECTION', collection
+bpy.context.view_layer.update()
+exporter.visible, exporter.requests = (), io.BytesIO()
+Viewport.engine.start(exporter, depsgraph)
+slot = next(i for i, item in enumerate(depsgraph.object_instances)
+    if item.is_instance and item.object.original == member)
+first = exporter.slots[slot][0]
+before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16 + 36 * first).copy()
+instance.location.x = 1
+bpy.context.view_layer.update()
+exporter.requests = io.BytesIO()
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
+assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=4)) == (flex.UPDATE, 1,
+    *exporter.slots[slot][:2]), 'instancer update'
+after = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16)
+assert numpy.allclose(after.reshape(3, 3), before.reshape(3, 3) + (1, 0, 0)), 'instance motion'
