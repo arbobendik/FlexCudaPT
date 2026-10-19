@@ -635,7 +635,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case DIELECTRIC: --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
-        stack[8].x, stack[9].x, stack[10], stack[11].x};
+        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12]};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -724,6 +724,7 @@ constexpr unsigned STREAM_RR = 128u;
 constexpr unsigned STREAM_JITTER = 192u;
 constexpr unsigned STREAM_SELECT = 193u;
 constexpr unsigned STREAM_COVERAGE = 256u;
+constexpr unsigned STREAM_MEDIUM = 320u;
 
 // Camera and primary hit of a pixel
 struct Domain {
@@ -887,12 +888,22 @@ __device__ float solidAngle(float probability, float3 normal, float3 toward) {
     return 2 * probability * powf(length(toward), 3) / fabsf(dot(normal, toward));
 }
 
+__device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y), expf(a.z)); }
+// Scattering and extinction coefficients of a homogeneous medium, none by default
+struct Medium { float3 scatter, extinction; };
+// Of the volume filling the inside of a surface, behind its faces
+__device__ Medium volume(const Surface& surface) {
+    return {surface.scatter * surface.density,
+        (surface.scatter + make_float3(1, 1, 1) - surface.absorption) * surface.density};
+}
+
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
-// the start lifted along shading on its side of the face. Returns emission * the light's cosine / distance^2 / pdf
+// the start lifted along shading on its side of the face, through the medium on that side, of sides behind and in front
+// of face, and those its shadow ray enters. Returns emission * the light's cosine / distance^2 / pdf
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
 __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 shading, float offset,
-    float3 face, unsigned state, float3& direction, float& density, Ray ray) {
+    float3 face, const Medium* sides, unsigned state, float3& direction, float& density, Ray ray) {
     direction = make_float3(0, 0, 0), density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
@@ -927,25 +938,27 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
     float occluder = 0, left = length(shadow) * (1 - 1e-4f);
     direction = toward;
-    // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency
+    Medium medium = sides[dot(face, toLight) > 0];
+    // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency,
+    // entering the volumes of those it meets from the front and leaving them from the back
     for (Hit hit = {NONE}; (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
         : hit.triangle)).triangle != NONE; left -= occluder) {
+        transmitted = transmitted * exponential(medium.extinction * -occluder);
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
             const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
                 Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
             const float3 through = surface.ior == 1 ? surface.albedo * (surface.transparency
                 * G1(surface.roughness * surface.roughness, fabsf(dot(surface.normal, toward)))) : make_float3(0, 0, 0);
             transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
-            if (layer == 0 && dot(faceNormal(scene, hit.triangle), toward) > 0)
-                transmitted = transmitted * beerLambert(occluder, make_float3(
-                    expf(surface.density * (surface.absorption.x - 1)), expf(surface.density * (surface.absorption.y - 1)),
-                    expf(surface.density * (surface.absorption.z - 1))));
+            if (layer == 0 && surface.density > 0)
+                medium = dot(faceNormal(scene, hit.triangle), toward) > 0 ? Medium{} : volume(surface);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return make_float3(0, 0, 0);
         from = from + toward * occluder;
     }
-    return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
+    return transmitted * exponential(medium.extinction * -left)
+        * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}).emissive
         / (density = solidAngle(probability, lightNormal, shadow));
 }
@@ -1017,6 +1030,18 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     Reservoir chain = {};
     chain.seed = r.seed;
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
+    // Medium the ray travels in, none at the camera
+    Medium medium = {};
+    // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
+    const auto survives = [&](unsigned b) {
+        const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
+            / density, 0.0f), 1.0f);
+        if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
+            return false;
+        }
+        density *= survival_probability;
+        return true;
+    };
     for (unsigned b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.triangle);
         const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance};
@@ -1027,7 +1052,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
-                make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density};
+                make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter};
         // Surfaces transmitting nothing face the ray, as in Cycles
         const float facing = surface.transparency > 0 || dot(face, direction) < 0 ? 1.0f : -1.0f;
         const float3 geometry_n = face * facing;
@@ -1037,9 +1062,12 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1)))};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
-        // Rays reaching the back of a face come through its medium
-        if (dot(direction, geometry_n) > 0)
-            throughput = throughput * beerLambert(distance, material.absorption);
+        // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
+        Medium sides[2] = {medium, medium};
+        if (surface.density > 0) {
+            sides[dot(geometry_n, face) < 0] = volume(surface);
+            if (dot(direction, face) > 0) sides[dot(geometry_n, face) > 0] = Medium{};
+        }
         const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
@@ -1092,7 +1120,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float3 light_dir;
                 float light;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : make_float3(0.0f, 0.0f, 0.0f);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : make_float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -1108,7 +1136,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift{throughput * lit(light_dir, light) * radiance, 1.0f} : fail;
             }
@@ -1128,7 +1156,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lit(light_dir, light) * radiance : fail.f;
                 Reservoir candidate = chain;
@@ -1228,13 +1256,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : offset);
         if (weighs) nee_start = leaving;
         origin = passes || through != NONE ? origin : leaving;
-        if (!replay) {
-            const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
-                / density, 0.0f), 1.0f);
-            if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
-                break;
-            }
-            density *= survival_probability;
+        if (!passes) medium = sides[dot(direction, geometry_n) > 0];
+        if (!replay && !survives(b)) {
+            break;
         }
         // Passing, the next vertex is the same hit in the other layer, reached without distance
         passed = passes;
@@ -1255,6 +1279,49 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // The connection to the environment direction has to escape the scene
         if (replay && b == stop && rc == RC_ENV && hit.triangle != NONE) {
             return fail;
+        }
+        // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
+        // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
+        const float sigma = (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
+        if (reconnecting && sigma > 0) {
+            return fail;
+        }
+        prev.rough = prev.rough && !(sigma > 0);
+        for (float along; hit.triangle != NONE
+            && (along = -logf(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
+            b++;
+            origin = origin + direction * along;
+            throughput = throughput * medium.scatter * exponential((make_float3(1, 1, 1) * sigma - medium.extinction)
+                * along) / sigma;
+            const Medium around[2] = {medium, medium};
+            float3 light_dir;
+            float light;
+            const float3 f = !replay || b == stop ? throughput * sampleLight(scene, origin, make_float3(0, 0, 0),
+                direction, 0, direction, around, stream(r.seed, b + STREAM_NEE), light_dir, light,
+                {false, false, prev.lobe, float(b), along})
+                * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
+            if (replay && b == stop) {
+                return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift{f, 1.0f} : fail;
+            }
+            if (!replay) {
+                Reservoir candidate = chain;
+                if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
+                    candidate.radiance = safeDivide(f, chain_throughput);
+                } else {
+                    candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
+                }
+                offer(&sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
+                if (!survives(b)) {
+                    return fail;
+                }
+            }
+            direct_light_emission = false;
+            nee_origin = nee_start = origin, nee_normal = make_float3(0, 0, 0), nee_pdf = INV_PI / 4;
+            unsigned state = stream(r.seed, b);
+            const float z = 1 - 2 * random(state), angle = 2 * PI * random(state);
+            direction = make_float3(sine(z) * cosf(angle), sine(z) * sinf(angle), z);
+            prev = Vertex{false, LOBE_DIFFUSE, INV_PI / 4, 1.0f};
+            hit = traverse(scene, origin, direction, 1e16f, distance);
         }
         if (hit.triangle == NONE) {
             const float3 f = throughput * environment(scene, direction, Ray{false, false, prev.lobe, float(b + 2u), 0});
@@ -1279,7 +1346,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             offer(&sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
             break;
         }
-        // Project ray origin to hit point
+        // Project ray origin to hit point, through the medium
+        throughput = throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
     }
     return fail;
