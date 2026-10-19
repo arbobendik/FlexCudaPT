@@ -841,7 +841,7 @@ class Flex(bpy.types.RenderEngine):
             emit(surface, [], textures, texels, alpha, uses)
             emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
             assert len(slots) <= SLOTS, 'values a program keeps for reuse'
-            return emitted, first
+            return max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0), first
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         slots = []  # Index, triangle count and key of each instance exported
         for i, instance in enumerate(depsgraph.object_instances):
