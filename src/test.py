@@ -328,6 +328,20 @@ for dimensions in ('1D', '2D', '3D', '4D'):
         voronoi.feature = feature
         for socket in voronoi.outputs:
             if socket.enabled: node_matches(socket)
+height = tree.nodes.new('ShaderNodeSeparateXYZ')
+tree.links.new(tree.nodes.new('ShaderNodeNewGeometry').outputs['Position'], height.inputs[0])
+bump = tree.nodes.new('ShaderNodeBump')
+bump.inputs['Distance'].default_value = 0.2
+positive = tree.nodes.new('ShaderNodeVectorMath')
+positive.operation, positive.inputs[1].default_value = 'ADD', (1, 1, 1)
+tree.links.new(bump.outputs['Normal'], positive.inputs[0])
+for axis in ('X', 'Y'):
+    tree.links.new(height.outputs[axis], bump.inputs['Height'])
+    for inverted in (False, True):
+        bump.invert = inverted
+        node_matches(positive.outputs[0])
+bump.inputs['Strength'].default_value = 0
+node_matches(positive.outputs[0])
 zero = tree.nodes.new('ShaderNodeVectorMath')
 zero.operation, zero.inputs['Scale'].default_value = 'SCALE', 0
 tree.links.new(tree.nodes.new('ShaderNodeTexCoord').outputs['Generated'], zero.inputs[0])
