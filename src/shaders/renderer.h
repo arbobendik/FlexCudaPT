@@ -1,5 +1,6 @@
 #pragma once
 #include <vector_types.h>
+// renderer.slang declares these layouts again for Vulkan
 
 // Thin lens: aperture radius, depth of its focus plane, polygon sides (0 for a disk), rotation and anamorphic ratio.
 struct Lens { float aperture, focus, blades, rotation, ratio; };
