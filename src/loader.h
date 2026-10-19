@@ -239,7 +239,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.tangents = load<float4>(3 * header.count);
     scene.infos = load<Info>(header.count);
     scene.materials = load<Material>(header.count + 1, loaded.materials);
-    scene.lights = loadLights(loaded.vertices, loaded.materials);
+    scene.lights = (LightNode*)allocate(0);
     scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
         loaded.temp, loaded.output);
@@ -278,10 +278,6 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         update(scene.tangents, 3 * range.first, 3 * range.count, colors.data());
         update(scene.infos, range.first, range.count, infos.data());
     }
-    LightNode* const lights = loadLights(loaded.vertices, loaded.materials);
-    std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
-    release((CUdeviceptr)scene.lights);
-    scene.lights = lights;
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, scene.count, OPTIX_BUILD_OPERATION_UPDATE,
         loaded.temp, loaded.output);
 }
