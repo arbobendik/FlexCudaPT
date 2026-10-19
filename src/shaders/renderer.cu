@@ -477,12 +477,20 @@ __device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& 
         default: return r * v.x + u * v.y + f * v.z;
     }
 }
-// Surface a program resolves to at a UV, generated point, point in its object and color, facing along the normal with
-// the tangent space tbn, at a position seen from the incoming direction, on the back of its face or not, for the ray,
-// of the info's object
-__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn, float u,
-    float v, float3 generated, float3 object, float4 color, float3 position, float3 incoming, bool backfacing,
-    const Ray& ray, const Info& info) {
+// Of a point shaded: its UV, generated point, point in its object, color and position
+struct Point { float u, v; float3 generated, object; float4 color; float3 position; };
+// Surface a program resolves to at the first point, facing along the normal with the tangent space tbn, seen from the
+// incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped by the
+// two others
+__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn,
+    const Point* points, float3 incoming, bool backfacing, const Ray& ray, const Info& info) {
+    float u, v;
+    float3 generated, object, position;
+    float4 color;
+    const auto at = [&](const Point& p) {
+        u = p.u, v = p.v, generated = p.generated, object = p.object, color = p.color, position = p.position;
+    };
+    at(points[0]);
     float3 stack[STACK], *top = stack;
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
         case PUSH: *top++ = op->value; break;
@@ -508,6 +516,18 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         } break;
         case NORMAL: *top++ = normal; break;
         case POSITION: *top++ = position; break;
+        case SHIFT: at(points[int(top[-1].x)]); break; // Pushes its own point's index before the height there
+        case SHIFTED: --top; top[-1] = *top; at(points[0]); break;
+        case BUMP: { // The normal bent by the height's gradient, as Cycles' bump node
+            top -= 4;
+            const float3 n = top[-1], dx = points[1].position - position, dy = points[2].position - position;
+            const float3 rx = cross(dy, n), ry = cross(n, dx);
+            const float det = dot(dx, rx);
+            const float3 bent = n * fabsf(det) - ((top[1].x - top[0].x) * rx + (top[2].x - top[0].x) * ry)
+                * (top[3].y * sign(det));
+            top[-1] = dot(bent, bent) > 0 ? normalize(normalize(bent) * fmaxf(top[3].x, 0) + n * (1 - fmaxf(top[3].x,
+                0))) : n;
+        } break;
         case INCOMING: *top++ = incoming; break;
         case BACKFACING: *top++ = make_float3(1, 1, 1) * backfacing; break;
         case LIGHT_PATH: top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
@@ -615,21 +635,14 @@ __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, floa
     const float3 tangent = a + (b - a) * s + (make_float3(p[2].x, p[2].y, p[2].z) - a) * t;
     return makeMatrix<float, 3, 3>(tangent, cross(n, tangent) * p[0].w, n);
 }
-// Of a triangle at its barycentrics, reached along the direction by the ray
-__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
-    const Ray& ray) {
+// Of a triangle at its barycentrics
+__device__ Point at(const Scene& scene, unsigned triangle, float s, float t) {
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* generated = scene.generated + 3 * triangle;
     const float3* object = scene.objects + 3 * triangle;
     const float4* color = scene.colors + 3 * triangle;
-    const float3* normals = scene.normals + 3 * triangle;
-    const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
-    const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
-    const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
-    return shade(scene, scene.materials[triangle].program, normal,
-        tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
-        uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
+    return {uv[0].x + (uv[1].x - uv[0].x) * s + (uv[2].x - uv[0].x) * t,
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
         generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
         object[0] + (object[1] - object[0]) * s + (object[2] - object[0]) * t,
@@ -637,7 +650,23 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
             color[0].y + (color[1].y - color[0].y) * s + (color[2].y - color[0].y) * t,
             color[0].z + (color[1].z - color[0].z) * s + (color[2].z - color[0].z) * t,
             color[0].w + (color[1].w - color[0].w) * s + (color[2].w - color[0].w) * t),
-        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, -direction,
+        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t};
+}
+// Of a triangle at its barycentrics, reached along the direction by the ray, bumped by points along its edges as near
+// as the ray's length makes a pixel's
+__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
+    const Ray& ray) {
+    const float3* vertex = scene.vertices + 3 * triangle;
+    const float3* normals = scene.normals + 3 * triangle;
+    const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
+    const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
+    const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
+    const float step = 1e-4f * fmaxf(ray.length, 1e-3f);
+    const Point points[3] = {at(scene, triangle, s, t),
+        at(scene, triangle, s + step / length(vertex[1] - vertex[0]), t),
+        at(scene, triangle, s, t + step / length(vertex[2] - vertex[0]))};
+    return shade(scene, scene.materials[triangle].program, normal,
+        tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t), points, -direction,
         dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, scene.infos[triangle]);
 }
 
@@ -767,11 +796,11 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
 
 // World: equirectangular texture along the direction
 __device__ float3 environment(const Scene& scene, float3 direction, const Ray& ray) {
-    return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{},
-        0.5f - atan2f(direction.y, direction.x) / (2 * PI),
-        0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI,
-        direction, direction, make_float4(0, 0, 0, 0), direction, -direction, false, ray,
-        Info{{}, {}, 0, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
+    const Point point = {0.5f - atan2f(direction.y, direction.x) / (2 * PI),
+        0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
+        direction, make_float4(0, 0, 0, 0), direction}, points[3] = {point, point, point};
+    return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{}, points, -direction,
+        false, ray, Info{{}, {}, 0, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
 }
 
 // Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines

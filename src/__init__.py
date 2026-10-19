@@ -80,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
-    'TRANSFORM', 'BOX'))}
+    'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -533,6 +533,13 @@ def coordinates(node, inputs, index):  # Of a texture coordinate node, as Cycles
     return {0: ('GENERATED',), 1: ('TRANSFORM', facing(('NORMAL',)), 5), 4: ('CAMERA_POINT',), 5: ('WINDOW',),
         6: reflection}.get(index) or resolve(node.outputs[index])
 
+# Of a bump node: the normal bent by the gradient of its height, there and at points along the triangle, whatever
+# filter width, as Cycles'
+def bump(node, inputs, index):
+    strength, distance, _, height, normal = inputs
+    return 'BUMP', normal, height, ('SHIFTED', ('SHIFT', 1), height), ('SHIFTED', ('SHIFT', 2), height), \
+        vector(strength, ('MULTIPLY', distance, -1 if node.invert else 1), 0)
+
 def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
     eta = 'MAXIMUM', inputs[0], 1e-5
     return 'DIELECTRIC', ('DOT_PRODUCT', ('INCOMING',), facing(inputs[1])), mix(eta, ('DIVIDE', 1, eta),
@@ -653,7 +660,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('DOT_PRODUCT', ('CAMERA_POINT',), numpy.eye(3)[2]), length(('CAMERA_POINT',)))[index],
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
-    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight,
+    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'BUMP': bump,
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
