@@ -20,12 +20,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - name: Install the CUDA compiler and headers
+      - name: Install the CUDA compiler and headers and Vulkan's
         run: |
           wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cuda-nvcc-13-4 xxd
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-13-4 xxd libvulkan-dev
       - name: Version
         run: |
           sed -i "s/^\(version = \"[0-9]*\.[0-9]*\)\.[0-9]*\"/\1.$(git rev-list --count HEAD)\"/" src/blender_manifest.toml
