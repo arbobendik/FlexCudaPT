@@ -81,9 +81,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
-# level, coverage, absorption and density
-GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
-BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0]
+# level, coverage, absorption, density and scattering color
+GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0]
+BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0]
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Volume shaders on surfaces
 # reflect nothing, and rays pass through a portal without a position or direction; any other shader is diffuse.
@@ -95,8 +95,9 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
     'BSDF_GLOSSY': ('Color', 1, 'Roughness', 0, 0, 0, 1.5), 'BSDF_GLASS': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'),
     'BSDF_REFRACTION': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'), 'BSDF_TRANSPARENT': ('Color', 0, 0, 0, 0, 1, 1),
     'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1)}
-# Absorption color and density per volume shader node; any other absorbs nothing
-VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density'), 'PRINCIPLED_VOLUME': ('Absorption Color', 'Density')}
+# Absorption color, density and scattering color per volume shader node; any other absorbs and scatters nothing
+VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density', 0), 'VOLUME_SCATTER': (1, 'Density', 'Color'),
+    'PRINCIPLED_VOLUME': ('Absorption Color', 'Density', 'Color')}
 # Luminance of a color and mean of a vector, as Blender converts them to values
 WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
 # Blender's material and camera panels the engine shows
@@ -663,7 +664,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'CURVE_RGB': curves, 'CURVE_VEC': curves, 'CURVE_FLOAT': curves,
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, 13)
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
@@ -714,16 +715,19 @@ def resolve(socket, groups=()):
         if node.type in ('MATH', 'MIX_RGB') and node.use_clamp or node.type == 'MIX' and node.clamp_result:
             value = clamp(value)
     else:  # Alpha covers a share of the shader, emitting by it; the rest passes rays straight through, as in Cycles
-        albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density = (get(source)
+        albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density, scatter = (get(source)
             if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1))
-            + VOLUMES.get(node.type, (1, 0)))
+            + VOLUMES.get(node.type, (1, 0, 0)))
+        if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
+            absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
+                ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
         # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'
         level = mix(('MULTIPLY', get('Specular IOR Level', 0.5), 2), 1, transparency)
         # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
             ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), ('MULTIPLY', transparency, ('SUBTRACT', 1,
             metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
-            get('Specular Tint', 1), level, get('Alpha', 1), absorption, density]
+            get('Specular Tint', 1), level, get('Alpha', 1), absorption, density, scatter]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if isinstance(weight, tuple) or numpy.any(weight):
@@ -733,15 +737,15 @@ def resolve(socket, groups=()):
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
 
-# The material's surface as rows, one per layer from the top or none: the row of its surface, absorbing as its volume,
-# under that of a coat emitting in its place; black without an output; none for volumes without a surface shader
+# The material's surface as rows, one per layer from the top: the row of its surface, filled by its volume, under that
+# of a coat emitting in its place; black without an output; passing rays straight through without a surface shader
 def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
+    surface, volume = resolve(output.inputs['Surface']), resolve(output.inputs['Volume'])[10:13]
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
-        return []
-    surface, volume = resolve(output.inputs['Surface']), resolve(output.inputs['Volume'])[10:12]
-    layers = [surface[:10]] if len(surface) == 12 else [[*surface[12][:4], surface[4], *surface[12][5:]],
+        surface = [*BLACK[:9], 0, *BLACK[10:]]
+    layers = [surface[:10]] if len(surface) == 13 else [[*surface[13][:4], surface[4], *surface[13][5:]],
         [*surface[:4], 0, *surface[5:10]]]
     # FlexLight's BSDF transmits apart from metallic reflection: its transmission is the share transmitted of the share
     # not metallic, its ior that of the share not metallic
@@ -931,15 +935,14 @@ class Flex(bpy.types.RenderEngine):
                 color = numpy.zeros((len(bm.faces), 3, 4), 'f')
                 tangent = numpy.zeros((len(bm.faces), 3, 4), 'f')
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
-            # Triangles of the surfaces rendered, normals turned as the faces turn, a material of its row each
-            rendered = numpy.array([bool(row) for row in shades])[index]
-            vertices.append(positions[rendered])
-            corners.append(normals.reshape(-1, 3, 3)[rendered])
-            uvs.append(uv[rendered])
-            generated.append(orco[rendered])
-            local.append(point[rendered])
-            colors.append(color[rendered])
-            tangents.append(tangent[rendered])
+            # Triangles, normals turned as the faces turn, a material of its row each
+            vertices.append(positions)
+            corners.append(normals.reshape(-1, 3, 3))
+            uvs.append(uv)
+            generated.append(orco)
+            local.append(point)
+            colors.append(color)
+            tangents.append(tangent)
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
             # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
             random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
@@ -947,9 +950,9 @@ class Flex(bpy.types.RenderEngine):
             info = numpy.tile([*instance.matrix_world.translation, *ob.color, ob.pass_index, 0, random,
                 *numpy.array(instance.matrix_world.to_3x3()).T.ravel()], (len(index), 1))
             info[:, 8] = passes[numpy.minimum(index, len(passes) - 1)]
-            infos.append(info[rendered])
-            table = numpy.array([(*(row or [(0, 0)])[0], not ob.visible_camera, len(row)) for row in shades])
-            materials.append(table[index[rendered]])
+            infos.append(info)
+            table = numpy.array([(*row[0], not ob.visible_camera, len(row)) for row in shades])
+            materials.append(table[index])
             slots.append((i, len(vertices[-1]), (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
