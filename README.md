@@ -4,8 +4,9 @@ Blender render engine that path traces the scene on RTX hardware with OptiX, in 
 pixels and samples with NVIDIA's ReSTIR PT Enhanced (Lin et al., 2026) and shades with FlexLight's BSDF, which makes it
 about 4x faster than Cycles and lets it converge around 60x faster in equal time.
 
-Requires an RTX GPU, CUDA, Blender, Python 3, Make, Git and xxd. The first build fetches the
-[OptiX 9.1 headers](https://github.com/NVIDIA/optix-dev/tree/v9.1.0).
+Requires an RTX GPU, CUDA, the Vulkan headers and loader, Blender, Python 3, Make, Git and xxd. The first build fetches
+the [OptiX 9.1 headers](https://github.com/NVIDIA/optix-dev/tree/v9.1.0) and
+[Slang 2026.19](https://github.com/shader-slang/slang/releases/tag/v2026.19).
 
 ```sh
 make install
