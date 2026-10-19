@@ -217,6 +217,20 @@ bpy.data.objects['colored'].scale, scene.camera.data.angle = (100, 100, 1), math
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert abs(pixels.mean() - 0.0735) < 0.004, 'grazing specular'
+# Metallic blends a metal and a dielectric linearly: under a black ceiling, the white sky a white plane of IOR 1 passes
+# halfway between them is the mean of what each passes
+for ob in scene.objects: ob.hide_render = ob != scene.camera
+scene.camera.data.angle, scene.flex_samples = 0.1, 16
+probe = plane('probe', 0, 0, 4)
+plane('ceiling', 0, 0, 100).inputs['Base Color'].default_value = (0, 0, 0, 1)
+bpy.data.objects['ceiling'].location.z = 2
+probe.inputs['Base Color'].default_value, probe.inputs['Roughness'].default_value = (1, 1, 1, 1), 0
+def passed(metallic, transmission):  # Mean light the plane passes, its metallic and transmission weight given
+    probe.inputs['Metallic'].default_value, probe.inputs['Transmission Weight'].default_value = metallic, transmission
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3].mean()
+metal, dielectric = passed(1, 0), passed(0, 0.5)
+assert abs(passed(0.5, 0.5) - (metal + dielectric) / 2) < 0.02, 'metallic share blends linearly'
 # Light sampling finds a dim emitter by the points it lights, a bright light behind them outshining it: at a sample
 # every pixel is lit, where picking emitters by their power alone lights next to none
 for ob in scene.objects: ob.hide_render = ob != scene.camera
