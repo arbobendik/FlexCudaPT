@@ -1,7 +1,7 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time
 from gpu_extras.presets import draw_texture_2d
-from mathutils import Matrix
+from mathutils import Color, Matrix
 from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 
 SUN_DISTANCE = 1e5
@@ -111,7 +111,9 @@ def span(node):  # Of the points of a curves node's curves
     curves = node.mapping.curves
     return min(curve.points[0].location[0] for curve in curves), max(curve.points[-1].location[0] for curve in curves)
 
-def table(node):  # 256 colors of a ramp, or of a curves node's curves over their span, of RGB curves after the combined
+def table(node):  # Colors of a wavelength, ramp or curves node, RGB curves after the combined curve
+    if node.type == 'WAVELENGTH': return [(*numpy.array(Color(xyz).from_xyz_d65_to_scene_linear()) / 2.52, 1)
+        for xyz in CIE]
     if node.type == 'VALTORGB': return [node.color_ramp.evaluate(i / 255) for i in range(256)]
     mapping, curves = node.mapping, [*node.mapping.curves]
     mapping.initialize()
@@ -119,21 +121,20 @@ def table(node):  # 256 colors of a ramp, or of a curves node's curves over thei
     return [[*(mapping.evaluate(curve, mapping.evaluate(curves[3], x) if rgb else x) for curve in (curves * 3)[:3]), 1]
         for x in numpy.linspace(*span(node), 256)]
 
-# First texel, width, height, its top byte the extension, and mean of an image node's image or of a ramp or curves
-# node's 256 colors, added as floats at first use, 8 bit images in sRGB
+# First texel, width, height, its top byte the extension, and mean of an image node's image or of a node's color table,
+# added as floats at first use, 8 bit images in sRGB
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
     key = source if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
     if key not in textures:
         image = source if ramp else source.image
-        pixels = numpy.empty(1024 if ramp else len(image.pixels), 'f')
-        if ramp: pixels[:] = numpy.ravel(table(source))
-        else: image.pixels.foreach_get(pixels)
+        pixels = numpy.array(table(source), 'f').ravel() if ramp else numpy.empty(len(image.pixels), 'f')
+        if not ramp: image.pixels.foreach_get(pixels)
         if not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data:  # As Cycles keeps
             pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
-        width, height = (256, 1) if ramp else image.size
+        width, height = (len(pixels) // 4, 1) if ramp else image.size
         textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
             'REPEAT' if ramp else key[1]) << 24, pixels.reshape(-1, 4).mean(0))
         texels.append(pixels)
@@ -349,6 +350,43 @@ def blackbody(t):  # Cycles' color of a blackbody at the temperature, for scene 
     for (low, *_), before, after in zip(BLACKBODY[1:], colors, colors[1:]):
         color = 'ADD', color, ('MULTIPLY', ('SUBTRACT', 1, ('LESS_THAN', t, low)), ('SUBTRACT', after, before))
     return 'MAXIMUM', color, 0
+
+# CIE 1931 XYZ color matching functions at 5 nm intervals, 380 to 780 nm, as Cycles'
+CIE = ((0.0014, 0.0000, 0.0065), (0.0022, 0.0001, 0.0105), (0.0042, 0.0001, 0.0201),
+    (0.0076, 0.0002, 0.0362), (0.0143, 0.0004, 0.0679), (0.0232, 0.0006, 0.1102),
+    (0.0435, 0.0012, 0.2074), (0.0776, 0.0022, 0.3713), (0.1344, 0.0040, 0.6456),
+    (0.2148, 0.0073, 1.0391), (0.2839, 0.0116, 1.3856), (0.3285, 0.0168, 1.6230),
+    (0.3483, 0.0230, 1.7471), (0.3481, 0.0298, 1.7826), (0.3362, 0.0380, 1.7721),
+    (0.3187, 0.0480, 1.7441), (0.2908, 0.0600, 1.6692), (0.2511, 0.0739, 1.5281),
+    (0.1954, 0.0910, 1.2876), (0.1421, 0.1126, 1.0419), (0.0956, 0.1390, 0.8130),
+    (0.0580, 0.1693, 0.6162), (0.0320, 0.2080, 0.4652), (0.0147, 0.2586, 0.3533),
+    (0.0049, 0.3230, 0.2720), (0.0024, 0.4073, 0.2123), (0.0093, 0.5030, 0.1582),
+    (0.0291, 0.6082, 0.1117), (0.0633, 0.7100, 0.0782), (0.1096, 0.7932, 0.0573),
+    (0.1655, 0.8620, 0.0422), (0.2257, 0.9149, 0.0298), (0.2904, 0.9540, 0.0203),
+    (0.3597, 0.9803, 0.0134), (0.4334, 0.9950, 0.0087), (0.5121, 1.0000, 0.0057),
+    (0.5945, 0.9950, 0.0039), (0.6784, 0.9786, 0.0027), (0.7621, 0.9520, 0.0021),
+    (0.8425, 0.9154, 0.0018), (0.9163, 0.8700, 0.0017), (0.9786, 0.8163, 0.0014),
+    (1.0263, 0.7570, 0.0011), (1.0567, 0.6949, 0.0010), (1.0622, 0.6310, 0.0008),
+    (1.0456, 0.5668, 0.0006), (1.0026, 0.5030, 0.0003), (0.9384, 0.4412, 0.0002),
+    (0.8544, 0.3810, 0.0002), (0.7514, 0.3210, 0.0001), (0.6424, 0.2650, 0.0000),
+    (0.5419, 0.2170, 0.0000), (0.4479, 0.1750, 0.0000), (0.3608, 0.1382, 0.0000),
+    (0.2835, 0.1070, 0.0000), (0.2187, 0.0816, 0.0000), (0.1649, 0.0610, 0.0000),
+    (0.1212, 0.0446, 0.0000), (0.0874, 0.0320, 0.0000), (0.0636, 0.0232, 0.0000),
+    (0.0468, 0.0170, 0.0000), (0.0329, 0.0119, 0.0000), (0.0227, 0.0082, 0.0000),
+    (0.0158, 0.0057, 0.0000), (0.0114, 0.0041, 0.0000), (0.0081, 0.0029, 0.0000),
+    (0.0058, 0.0021, 0.0000), (0.0041, 0.0015, 0.0000), (0.0029, 0.0010, 0.0000),
+    (0.0020, 0.0007, 0.0000), (0.0014, 0.0005, 0.0000), (0.0010, 0.0004, 0.0000),
+    (0.0007, 0.0002, 0.0000), (0.0005, 0.0002, 0.0000), (0.0003, 0.0001, 0.0000),
+    (0.0002, 0.0001, 0.0000), (0.0002, 0.0001, 0.0000), (0.0001, 0.0000, 0.0000),
+    (0.0001, 0.0000, 0.0000), (0.0001, 0.0000, 0.0000), (0.0000, 0.0000, 0.0000))
+
+def wavelength(node, inputs, index):  # Cycles' spectral color, clamped after interpolation in scene linear
+    value = inputs[0]
+    point = 'ADD', ('MULTIPLY', clamp(('DIVIDE', ('SUBTRACT', value, 380), 400)), 80 / 81), 0.5 / 81
+    colors = numpy.array(table(node))[:, :3]
+    color = 'ADD', ('IMAGE_LINEAR', point, node), ('MULTIPLY', ('MINIMUM', ('SUBTRACT', value, 380), 0),
+        (colors[1] - colors[0]) / 5)
+    return 'MULTIPLY', ('MAXIMUM', color, 0), ('MULTIPLY', ('LESS_THAN', 375, value), ('LESS_THAN', value, 780))
 
 # Conversions of colors from RGB into the modes of separate and combine color nodes and back
 MODES = {'RGB': (lambda c: c, lambda c: c), 'HSV': (lambda c: ('RGB_TO_HSV', c), lambda c: ('HSV_TO_RGB', c)),
@@ -610,6 +648,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
     'BLACKBODY': lambda node, inputs, index: blackbody(inputs[0]),
+    'WAVELENGTH': wavelength,
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
     'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),
     'COMBINE_COLOR': lambda node, inputs, index: MODES[node.mode][1](NODES['COMBXYZ'](node, inputs, index)),

@@ -306,6 +306,10 @@ def node_matches(socket):
             24:40, 24:40, :3].mean((0, 1)))
     assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
 
+wavelength = tree.nodes.new('ShaderNodeWavelength')
+for value in (375, 377.5, 380, 447.3, 555, 779.9, 780):
+    wavelength.inputs[0].default_value = value
+    node_matches(wavelength.outputs[0])
 voronoi = tree.nodes.new('ShaderNodeTexVoronoi')
 voronoi.inputs['Vector'].default_value = (0.31, -0.27, 0.63)
 voronoi.distance, voronoi.normalize = 'MINKOWSKI', True
