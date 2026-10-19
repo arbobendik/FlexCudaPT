@@ -359,8 +359,11 @@ __device__ float gradient(unsigned h, const float* f, int dims) {
     return (h & 1 ? -u : u) + (h & 2 ? -v : v) + (h & 4 ? -s : s);
 }
 __device__ float fade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
+// Repeats every 100000, half a cell off past a million, for float precision
+__device__ float wrapped(float x) { return fmodf(x, 100000) + 0.5f * (fabsf(x) >= 1000000); }
 // Signed Perlin noise of p's first components and w: lattice gradients blended by faded distances
 __device__ float noise(float3 p, float w, int dims) {
+    p = make_float3(wrapped(p.x), wrapped(p.y), wrapped(p.z)), w = wrapped(w);
     const float q[4] = {p.x, p.y, p.z, w}, scales[4] = {0.25f, 0.6616f, 0.9820f, 0.8344f};
     float sum = 0;
     for (int corner = 0; corner < 1 << dims; ++corner) {
