@@ -48,6 +48,7 @@ install: build/flex.zip  # A running Blender loads the new build within a second
 test: export BLENDER_USER_RESOURCES = $(CURDIR)/build/blender
 test: install  # Into the exported resources instead of the user's
 	blender -b --python-exit-code 1 -P src/test.py
+	blender -b --python-exit-code 1 -P src/parity.py
 
 clean:
 	rm -rf build
