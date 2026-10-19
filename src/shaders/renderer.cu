@@ -313,6 +313,12 @@ __device__ float importance(const LightNode& node, float3 p, float3 normal) {
         * cosSubClamped(sine(cos_theta_i), cos_theta_i, sin_theta_b, cos_theta_b), 0);
 }
 
+// Density in solid angle of a uniform point toward on a triangle of normal twice its area, the triangle picked with
+// probability
+__device__ float solidAngle(float probability, float3 normal, float3 toward) {
+    return 2 * probability * powf(length(toward), 3) / fabsf(dot(normal, toward));
+}
+
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from in front
 // of the normal, from offset along it. Returns emission * the light's cosine / distance^2 / pdf arriving along
 // direction, pdf = the triangle's probability / area.
@@ -364,7 +370,25 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
         from = from + toward * occluder;
     }
     return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal).emissive
-        * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
+        / solidAngle(probability, lightNormal, toLight);
+}
+
+// Density in solid angle of light sampling from origin picking point on triangle, down the trail to its leaf
+// (pbrt-v4's BVHLightSampler::PMF)
+__device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, unsigned triangle, float3 point) {
+    float probability = 1;
+    unsigned node = 0;
+    for (unsigned long long trail = scene.trails[triangle]; !scene.lights[node].leaf; trail >>= 1) {
+        const unsigned children[2] = {node + 1, scene.lights[node].child};
+        const float shares[2] = {importance(scene.lights[children[0]], origin, normal),
+            importance(scene.lights[children[1]], origin, normal)};
+        probability *= shares[trail & 1] > 0 ? shares[trail & 1] / (shares[0] + shares[1]) : 0;
+        node = children[trail & 1];
+    }
+    const float3* vertices = scene.vertices + 3 * triangle;
+    return scene.lights[node].child == triangle && importance(scene.lights[node], origin, normal) > 0
+        && dot(normal, point - origin) > 0 ? solidAngle(probability,
+        cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - origin) : 0;
 }
 
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
@@ -799,7 +823,7 @@ extern "C" __global__ void __raygen__temporal() {
     Scene before = scene;
     if (scene.frame == 0u) {
         before.handle = scene.anchorHandle, before.vertices = scene.anchorVertices;
-        before.normals = scene.anchorNormals, before.lights = scene.anchorLights;
+        before.normals = scene.anchorNormals, before.lights = scene.anchorLights, before.trails = scene.anchorTrails;
     }
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
