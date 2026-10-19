@@ -414,6 +414,24 @@ def node_matches(socket):
             24:40, 24:40, :3].mean((0, 1)))
     assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
 
+noise = tree.nodes.new('ShaderNodeTexNoise')
+point = tree.nodes.new('ShaderNodeCombineXYZ')
+tree.links.new(point.outputs[0], noise.inputs['Vector'])
+noise.inputs['Scale'].default_value, noise.inputs['Detail'].default_value = 1, 3.25
+for socket, value in zip(point.inputs, (0.31, -0.27, 0.63)): socket.default_value = value
+for dimensions in ('1D', '2D', '4D'):
+    noise.noise_dimensions = dimensions
+    if dimensions in ('1D', '4D'): noise.inputs['W'].default_value = 0.37
+    node_matches(noise.outputs['Fac'])
+noise.noise_dimensions = '3D'
+for position in ((0.31, -0.27, 0.63), (1e-6, -1.000001, 2.999999)):
+    for socket, value in zip(point.inputs, position): socket.default_value = value
+    for kind in ('FBM', 'MULTIFRACTAL', 'HETERO_TERRAIN', 'HYBRID_MULTIFRACTAL', 'RIDGED_MULTIFRACTAL'):
+        noise.noise_type = kind
+        node_matches(noise.outputs['Fac'])
+noise.noise_type, noise.normalize, noise.inputs['Detail'].default_value = 'FBM', False, 14
+node_matches(noise.outputs['Fac'])
+node_matches(noise.outputs['Color'])
 wavelength = tree.nodes.new('ShaderNodeWavelength')
 for value in (375, 377.5, 380, 447.3, 555, 779.9, 780):
     wavelength.inputs[0].default_value = value
