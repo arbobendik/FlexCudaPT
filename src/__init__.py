@@ -414,10 +414,9 @@ def noise(node, inputs, index):
     if not index: return fractal(point, w)
     return vector(fractal(point, w), at(dimensions, point, w), at(dimensions + 1, point, w))
 
-# Of a white noise texture node, its value or color, of four dimensions as of three, as Cycles'
+# Of a white noise texture node, its value or color, as Cycles'
 def white_noise(node, inputs, index):
-    dimensions = int(node.noise_dimensions[0])
-    return 'WHITE_NOISE', inputs[0], numpy.array((min(dimensions, 3), index, 0))
+    return 'WHITE_NOISE', inputs[0], vector(int(node.noise_dimensions[0]), index, inputs[1] if len(inputs) > 1 else 0)
 
 # Of a Voronoi texture node's distance, color or position, as Cycles' fractal of 3D points, which it takes in any
 # dimension, at the generated point without a vector, normalized by the farthest distance its metric makes; or its

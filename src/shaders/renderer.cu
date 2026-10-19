@@ -123,13 +123,15 @@ __device__ float hashed(int n, float x, float y = 0, float z = 0, float w = 0) {
     return float(jenkins(n, __float_as_uint(x), __float_as_uint(y), __float_as_uint(z), __float_as_uint(w)))
         / float(0xFFFFFFFFu);
 }
-// Cycles' white noise of the first dims components of p, its value or color
-__device__ float3 white(float3 p, int dims, bool color) {
-    const float v = dims == 1 ? hashed(1, p.x) : dims == 2 ? hashed(2, p.x, p.y) : hashed(3, p.x, p.y, p.z);
+// Cycles' white noise of the first dims components of p, w the fourth, its value or color
+__device__ float3 white(float3 p, int dims, bool color, float w) {
+    const float v = dims == 1 ? hashed(1, p.x) : dims == 2 ? hashed(2, p.x, p.y) : dims == 3 ? hashed(3, p.x, p.y, p.z)
+        : hashed(4, p.x, p.y, p.z, w);
     if (!color) return make_float3(v, v, v);
     return dims == 1 ? make_float3(v, hashed(2, p.x, 1), hashed(2, p.x, 2)) : dims == 2
-        ? make_float3(v, hashed(3, p.x, p.y, 1), hashed(3, p.x, p.y, 2))
-        : make_float3(v, hashed(4, p.x, p.y, p.z, 1), hashed(4, p.x, p.y, p.z, 2));
+        ? make_float3(v, hashed(3, p.x, p.y, 1), hashed(3, p.x, p.y, 2)) : dims == 3
+        ? make_float3(v, hashed(4, p.x, p.y, p.z, 1), hashed(4, p.x, p.y, p.z, 2))
+        : make_float3(v, hashed(4, p.z, p.x, w, p.y), hashed(4, w, p.z, p.y, p.x));
 }
 // Cycles' point of a Voronoi cell, its color by its randomness 1
 __device__ float3 site(int x, int y, int z) { // By the PCG hash of its integer position, shifting signed
@@ -510,7 +512,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case BRICK: top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
         case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
         case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
-        case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0); break;
+        case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
         case NOISE: top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
             break;
         case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
