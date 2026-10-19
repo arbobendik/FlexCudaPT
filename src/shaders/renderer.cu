@@ -120,7 +120,7 @@ __device__ float hashed(int n, float x, float y = 0, float z = 0, float w = 0) {
         / float(0xFFFFFFFFu);
 }
 // White noise of the first dims components of p, w the fourth, its value or color
-__device__ float3 white(float3 p, int dims, bool color, float w) {
+__device__ __noinline__ float3 white(float3 p, int dims, bool color, float w) {
     const float v = dims == 1 ? hashed(1, p.x) : dims == 2 ? hashed(2, p.x, p.y) : dims == 3 ? hashed(3, p.x, p.y, p.z)
         : hashed(4, p.x, p.y, p.z, w);
     if (!color) return make_float3(v, v, v);
@@ -241,7 +241,7 @@ __device__ float edge(const float* q, int dims, float randomness, bool sphere) {
     return sphere ? sqrtf(best) / 2 : best;
 }
 // Fractal Voronoi: octaves up to the detail of distance, color or position, edge distance, or n-sphere radius
-__device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fractal, float3 shape) {
+__device__ __noinline__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fractal, float3 shape) {
     const float detail = fminf(fmaxf(fractal.x, 0), 15), roughness = fminf(fmaxf(fractal.y, 0), 1);
     const float rmd = detail - floorf(detail), randomness = fminf(fmaxf(extra.x, 0), 1);
     const float farthest = shape.x;
@@ -392,7 +392,7 @@ __device__ float noise(float3 p, float w, int dims) {
     return scales[dims - 1] * sum;
 }
 // Fractal noise: octaves up to the detail as fBm, multifractal, hetero terrain, hybrid or ridged multifractal
-__device__ float fractal(float3 p, float3 params, float3 extra, float w, int dims) {
+__device__ __noinline__ float fractal(float3 p, float3 params, float3 extra, float w, int dims) {
     const float detail = fminf(fmaxf(params.x, 0), 15), roughness = fmaxf(params.y, 0), lacunarity = params.z;
     const float offset = extra.x, gain = extra.y, rmd = detail - floorf(detail);
     const int octaves = int(detail), type = int(extra.z);
