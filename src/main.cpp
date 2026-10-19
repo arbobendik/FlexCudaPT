@@ -34,7 +34,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
 
     // Load embedded PTX
     OptixPipelineCompileOptions compile{.numPayloadValues = 1}; // The triangle a ray skips
-    OptixModuleCompileOptions moduleOptions{};
+    OptixModuleCompileOptions moduleOptions{.maxRegisterCount = 168}; // The default 128 spill the inlined programs
     OptixModule module;
     CHECK(optixModuleCreate(context, &moduleOptions, &compile,
         (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
