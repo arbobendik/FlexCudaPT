@@ -300,6 +300,32 @@ scene.camera.location, scene.camera.rotation_euler = (1, 0, 1), (0, math.pi / 4,
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
 assert pixels.mean() > 0.9, 'glass internal reflections at default bounces'
+# Faceted by noise under smooth normals and short enough for the bounces, it stays clear: directions sampled to the wrong
+# side of a face carry on, losing and gaining no light
+prism, flat = bpy.data.objects['slab'], bpy.data.objects['slab'].data
+prism.data, prism.location, prism.scale = flat.copy(), (0, 0, -2), (1, 1, 4)
+bm = bmesh.new()
+bm.from_mesh(prism.data)
+bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=6, use_grid_fill=True)
+noise = numpy.random.default_rng(1)
+for vertex in bm.verts: vertex.co = (*(numpy.array(vertex.co) + noise.normal(0, 0.02, 3)),)
+bm.to_mesh(prism.data)
+prism.data.shade_smooth()
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+assert (pixels.mean(2) > 0.05).all() and 0.85 < pixels.mean() < 1.01, 'faceted glass internal reflections'
+# So does a white metal normal-mapped by noise under the white sky
+prism.data, prism.hide_render = flat, True
+metal = plane('metal', 0, 0, 2)
+metal.inputs['Metallic'].default_value, metal.inputs['Roughness'].default_value = 1, 0.2
+relief, mapped = metal.id_data.nodes.new('ShaderNodeTexNoise'), metal.id_data.nodes.new('ShaderNodeNormalMap')
+relief.inputs['Scale'].default_value = 8
+metal.id_data.links.new(relief.outputs['Color'], mapped.inputs['Color'])
+metal.id_data.links.new(mapped.outputs[0], metal.inputs['Normal'])
+bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+assert (pixels.mean(2) > 0.05).all() and 0.6 < pixels.mean() < 1.01, 'normal-mapped metal'
+bpy.data.objects['metal'].hide_render, prism.hide_render = True, False
 scene.camera.matrix_world = matrix
 
 # Camera controls remain visible with Flex selected; a small emitter on black measures its lens's bokeh.
