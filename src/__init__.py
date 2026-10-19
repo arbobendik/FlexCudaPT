@@ -719,8 +719,10 @@ def resolve(socket, groups=()):
             + VOLUMES.get(node.type, (1, 0)))
         # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'
         level = mix(('MULTIPLY', get('Specular IOR Level', 0.5), 2), 1, transparency)
+        # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
-            ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), transparency, ior,
+            ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), ('MULTIPLY', transparency, ('SUBTRACT', 1,
+            metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
             get('Specular Tint', 1), level, get('Alpha', 1), absorption, density]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
@@ -741,6 +743,13 @@ def shade(material, program):
     surface, volume = resolve(output.inputs['Surface']), resolve(output.inputs['Volume'])[10:12]
     layers = [surface[:10]] if len(surface) == 12 else [[*surface[12][:4], surface[4], *surface[12][5:]],
         [*surface[:4], 0, *surface[5:10]]]
+    # FlexLight's BSDF transmits apart from metallic reflection: its transmission keeps the share transmitted to the one
+    # scattered diffusely, its ior that of the share not metallic
+    base = layers[-1]
+    metallic, share = base[2], base[5]
+    base[5] = 'DIVIDE', ('MULTIPLY', share, ('SUBTRACT', 1, metallic)), ('SUBTRACT', ('SUBTRACT', 1, metallic),
+        ('MULTIPLY', share, metallic))
+    base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
     return [program([*layer, *volume]) for layer in layers]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
