@@ -764,9 +764,12 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
         matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
 
-def settings(scene, viewport):  # The scene's settings of the renderer, in its order; the viewport denoises every result
+def device(): return bpy.context.preferences.addons[__package__].preferences.device
+
+# The scene's settings of the renderer, in its order, which denoises on OptiX alone; the viewport denoises every result
+def settings(scene, viewport, device):
     return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors, scene.flex_bounces, scene.flex_paths, \
-        scene.flex_denoise * (1 + viewport)
+        scene.flex_denoise * (1 + viewport) * (device == 'OPTIX')
 
 # The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
 # angle its camera moves and turns at most from the last one's to reuse them and continue its denoised sequence; a view
@@ -807,8 +810,9 @@ class Flex(bpy.types.RenderEngine):
     # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process runs:
     # once the engine drops them, the renderer reads the end of its input and exits.
     def spawn(self):
-        process = subprocess.Popen((BINARY, str(self.shared.fileno())), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            pass_fds=(self.shared.fileno(),))
+        self.device = device()  # That of the renderer, which the preference may change since
+        process = subprocess.Popen((BINARY + '-vulkan' * (self.device == 'VULKAN'), str(self.shared.fileno())),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),))
         self.requests = process.stdin
         self.answers = process.stdout
         process.stdin = process.stdout = None
@@ -1026,7 +1030,7 @@ class Flex(bpy.types.RenderEngine):
         count = 0  # Shown none yet: a view that already has its samples is shown once
         while not self.test_break():
             launched, sums = self.trace(width, height, sampling(scene, follows), min(count or 1, RENDER_SAMPLES),
-                settings(scene, False), *camera)
+                settings(scene, False, self.device), *camera)
             if count and not launched: break
             count = int(sums[0, 0, 3])
             pixels = sums[y:y + result.resolution_y, x:x + result.resolution_x] * (1 / count)
@@ -1049,7 +1053,7 @@ class Flex(bpy.types.RenderEngine):
         scene = depsgraph.scene
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
         launched, sums = self.trace(region.width, region.height, sampling(scene, True), VIEWPORT_SAMPLES,
-            settings(scene, True), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
+            settings(scene, True, self.device), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
             camera.evaluated_get(depsgraph) if camera else None)
         if launched:
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
@@ -1061,6 +1065,13 @@ class Flex(bpy.types.RenderEngine):
         draw_texture_2d(self.texture, (0, 0), region.width, region.height)
         self.unbind_display_space_shader()
         gpu.state.blend_set('NONE')
+
+class FlexPreferences(bpy.types.AddonPreferences):  # The API the renderer traces with
+    bl_idname = __package__
+    device: bpy.props.EnumProperty(name='Device', items=(('OPTIX', 'OptiX', 'NVIDIA RTX GPUs'),
+        ('VULKAN', 'Vulkan', 'GPUs with Vulkan ray queries, without denoising')))
+
+    def draw(self, context): self.layout.prop(self, 'device')
 
 class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     bl_label = 'Flex'
@@ -1076,7 +1087,9 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         self.layout.prop(context.scene, 'flex_samples')
         self.layout.prop(context.scene, 'flex_bounces')
         self.layout.prop(context.scene, 'flex_paths')
-        self.layout.prop(context.scene, 'flex_denoise')
+        denoise = self.layout.row()
+        denoise.active = device() == 'OPTIX'
+        denoise.prop(context.scene, 'flex_denoise')
         for name in ('resolution_x', 'resolution_y', 'resolution_percentage', 'use_persistent_data'):
             self.layout.prop(context.scene.render, name)
 
@@ -1116,7 +1129,7 @@ def reload():
     return 1
 
 def register():
-    os.chmod(BINARY, 0o755)  # Extension installs drop the executable bit
+    for binary in (BINARY, BINARY + '-vulkan'): os.chmod(binary, 0o755)  # Extension installs drop the executable bit
     bpy.app.timers.register(reload, persistent=True)
     bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1)
@@ -1143,6 +1156,7 @@ def register():
     bpy.types.Scene.flex_jump_angle = bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
         'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
         max=math.pi, subtype='ANGLE')
+    bpy.utils.register_class(FlexPreferences)
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
     bpy.utils.register_class(RENDER_PT_flex_restir)
@@ -1154,6 +1168,7 @@ def unregister():
     bpy.utils.unregister_class(RENDER_PT_flex_restir)
     bpy.utils.unregister_class(RENDER_PT_flex)
     bpy.utils.unregister_class(Flex)
+    bpy.utils.unregister_class(FlexPreferences)
     del bpy.types.Scene.flex_samples
     del bpy.types.Scene.flex_bounces
     del bpy.types.Scene.flex_paths
