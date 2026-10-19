@@ -836,7 +836,7 @@ __device__ float sinSubClamped(float sin_a, float cos_a, float sin_b, float cos_
 __device__ float sine(float c) { return sqrtf(fmaxf(1 - c * c, 0)); }
 
 // Importance of a light BVH node to a point: power times bounds of the cosines at its emitters, two sided and diffuse,
-// and at the point, for light in front of the normal only as light sampling counts it, over the squared distance
+// and at the point (both hemispheres when normal is zero for transmission), over the squared distance
 // (pbrt-v4's LightBounds::Importance)
 __device__ float importance(const LightNode& node, float3 p, float3 normal) {
     const float3 center = (node.low + node.high) * 0.5f, diagonal = node.high - node.low, wi = normalize(p - center);
@@ -851,15 +851,22 @@ __device__ float importance(const LightNode& node, float3 p, float3 normal) {
     if (cos_theta_p <= 0) return 0;
     const float cos_theta_i = - dot(wi, normal);
     return fmaxf(node.phi * cos_theta_p / fmaxf(d2, length(diagonal) / 2)
-        * cosSubClamped(sine(cos_theta_i), cos_theta_i, sin_theta_b, cos_theta_b), 0);
+        * (dot(normal, normal) == 0 ? 1 : cosSubClamped(sine(cos_theta_i), cos_theta_i, sin_theta_b, cos_theta_b)), 0);
 }
 
-// Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from in front
-// of the normal. Returns emission * the light's cosine / distance^2 / pdf arriving along direction, pdf = the
-// triangle's probability / area. The ray reached origin; shadows are tested for it, emission is shaded for no ray,
-// both a bounce further, as Cycles shades them.
+// Density in solid angle of a uniform point toward on a triangle of normal twice its area, the triangle picked with
+// probability
+__device__ float solidAngle(float probability, float3 normal, float3 toward) {
+    return 2 * probability * powf(length(toward), 3) / fabsf(dot(normal, toward));
+}
+
+// Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
+// origin. Returns emission * the light's cosine / distance^2 / pdf arriving along direction, pdf = the triangle's
+// probability / area. The ray reached origin; shadows are tested for it, emission is shaded for no ray, both a
+// bounce further, as Cycles shades them.
 __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, unsigned state, float3& direction,
     Ray ray) {
+    direction = make_float3(0, 0, 0);
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
     float pick = random(state), probability = 1;
@@ -886,13 +893,12 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     const float side = sqrtf(random(state));
     const float along = random(state);
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
-    const float distance = length(toLight);
     // Visibility along the segment to the sampled point
     const float3 toward = normalize(toLight);
-    float occluder = 0, left = distance * (1 - 1e-4f);
+    float occluder = 0, left = length(toLight) * (1 - 1e-4f);
     float3 from = origin, transmitted = make_float3(1, 1, 1);
-    direction = toLight * (1 / distance);
-    if (!(dot(normal, toLight) > 0))
+    direction = toward;
+    if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0))
         return make_float3(0, 0, 0);
     // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency
     for (Hit hit = {NONE}; (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
@@ -908,8 +914,26 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
         from = from + toward * occluder;
     }
     return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
-        Ray{false, false, LOBE_NONE, ray.depth + 1, distance}).emissive
-        * (fabsf(dot(lightNormal, toLight)) / (2 * probability * distance * distance * distance));
+        Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}).emissive
+        / solidAngle(probability, lightNormal, toLight);
+}
+
+// Density in solid angle of light sampling from origin picking point on triangle, down the trail to its leaf
+// (pbrt-v4's BVHLightSampler::PMF)
+__device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, unsigned triangle, float3 point) {
+    float probability = 1;
+    unsigned node = 0;
+    for (unsigned long long trail = scene.trails[triangle]; !scene.lights[node].leaf; trail >>= 1) {
+        const unsigned children[2] = {node + 1, scene.lights[node].child};
+        const float shares[2] = {importance(scene.lights[children[0]], origin, normal),
+            importance(scene.lights[children[1]], origin, normal)};
+        probability *= shares[trail & 1] > 0 ? shares[trail & 1] / (shares[0] + shares[1]) : 0;
+        node = children[trail & 1];
+    }
+    const float3* vertices = scene.vertices + 3 * triangle;
+    return scene.lights[node].child == triangle && importance(scene.lights[node], origin, normal) > 0
+        && (dot(normal, normal) == 0 || dot(normal, point - origin) > 0) ? solidAngle(probability,
+        cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - origin) : 0;
 }
 
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
@@ -1357,7 +1381,7 @@ extern "C" __global__ void __raygen__temporal() {
     Scene before = scene;
     if (scene.frame == 0u) {
         before.handle = scene.anchorHandle, before.vertices = scene.anchorVertices;
-        before.normals = scene.anchorNormals, before.lights = scene.anchorLights;
+        before.normals = scene.anchorNormals, before.lights = scene.anchorLights, before.trails = scene.anchorTrails;
     }
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
