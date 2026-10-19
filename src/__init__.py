@@ -433,21 +433,25 @@ def noise(node, inputs, index):
 def white_noise(node, inputs, index):
     return 'WHITE_NOISE', inputs[0], vector(int(node.noise_dimensions[0]), index, inputs[1] if len(inputs) > 1 else 0)
 
-# Of a Voronoi texture node's distance, color or position, as Cycles' fractal of 3D points, which it takes in any
-# dimension, at the generated point without a vector, normalized by the farthest distance its metric makes; or its
-# distance to edges or n-sphere radius
+# Of a Voronoi texture node's distance, color, position or W, as Cycles' fractal of 1D to 4D points, at the generated
+# point without a vector, normalized by the farthest distance its metric makes; or its distance to edges or n-sphere
+# radius
 def voronoi(node, inputs, index):
     get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
+    dimensions = int(node.voronoi_dimensions[0])
     point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
-    metric = ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
+    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point, get('W', 0))
+    metric = 0 if dimensions == 1 else ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
     feature = ('F1', 'F2', 'SMOOTH_F1', 'DISTANCE_TO_EDGE', 'N_SPHERE_RADIUS').index(node.feature)
-    farthest = ('POWER', 3, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (3 ** 0.5, 3, 1)[metric]
+    farthest = ('POWER', dimensions, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (dimensions ** 0.5,
+        dimensions, 1)[metric]
     farthest = 'MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))), ('MULTIPLY', 1 if feature > 2
         else farthest, (2 if feature == 1 else 1) * (node.normalize and feature < 4))
+    output = ('Distance', 'Color', 'Position', 'W').index(node.outputs[index].name.replace('Radius', 'Distance'))
     value = ('VORONOI', ('MULTIPLY', point, get('Scale')), vector(feature, metric, get('Exponent', 1)),
-        vector(get('Randomness'), get('Smoothness', 0), index), vector(get('Detail', 0), get('Roughness', 0),
-        get('Lacunarity', 0)), farthest)
-    return ('DIVIDE', value, get('Scale')) if index == 2 else value
+        vector(get('Randomness'), get('Smoothness', 0), output), vector(get('Detail', 0),
+        get('Roughness', 0), get('Lacunarity', 0)), vector(farthest, ('MULTIPLY', w, get('Scale')), dimensions))
+    return ('DIVIDE', value, get('Scale')) if output > 1 else value
 
 def magic(node, inputs, index):  # Of a magic texture node at the generated point without a vector, as Cycles'
     color = 'MAGIC', inputs[0] if node.inputs[0].is_linked else ('GENERATED',), vector(inputs[1], node.turbulence_depth,
