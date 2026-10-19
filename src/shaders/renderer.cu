@@ -881,11 +881,12 @@ __device__ float solidAngle(float probability, float3 normal, float3 toward) {
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
 // the offset start on its side of the face. Returns emission * the light's cosine / distance^2 / pdf arriving along
-// direction, pdf = the triangle's probability / area. The ray reached origin; shadows are tested for it, emission is
+// direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached origin; shadows
+// are tested for it, emission is
 // shaded for no ray, both a bounce further, as Cycles shades them.
 __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 offset, float3 face,
-    unsigned state, float3& direction, Ray ray) {
-    direction = make_float3(0, 0, 0);
+    unsigned state, float3& direction, float& density, Ray ray) {
+    direction = make_float3(0, 0, 0), density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
     float pick = random(state), probability = 1;
@@ -935,7 +936,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     }
     return transmitted * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}).emissive
-        / solidAngle(probability, lightNormal, shadow);
+        / (density = solidAngle(probability, lightNormal, shadow));
 }
 
 // Density in solid angle of light sampling from origin picking point on triangle, down the trail to its leaf
@@ -954,6 +955,20 @@ __device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, floa
     return scene.lights[node].child == triangle && importance(scene.lights[node], origin, normal) > 0
         && (dot(normal, normal) == 0 || dot(normal, point - origin) > 0) ? solidAngle(probability,
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - start) : 0;
+}
+
+// Power heuristic weight of a strategy sampling at density a against one at density b (Veach 1997)
+__device__ float powerHeuristic(float a, float b) { return b > 0 ? 1 / (1 + (b / a) * (b / a)) : 1; }
+
+// Each lobe competes with light sampling separately: the diffuse selection probability depends on its sampled half vector.
+__device__ float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, BSDFMaterial material, float eta_i,
+    float eta_o, unsigned random_state, float light, bool competing) {
+    const auto evaluate = [&](unsigned index) {
+        const SampleBSDF lobe = connectBSDF(in_dir, out_dir, n, material, eta_i, eta_o, index, random_state);
+        return lobe.throughput * (lobe.pdf * powerHeuristic(light, competing ? lobe.pdf : 0.0f));
+    };
+    return dot(g_n, -in_dir) * dot(g_n, out_dir) > 0 ? evaluate(LOBE_DIFFUSE) + evaluate(LOBE_REFLECT)
+        : evaluate(LOBE_REFRACT);
 }
 
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
@@ -978,6 +993,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     // Replaying the densities of the reconnection, generating the product of Russian roulette survival probabilities
     float density = 1.0f;
     bool direct_light_emission = true;
+    // Where light was last sampled, against which normal, and the BSDF's density of the direction the ray left along
+    float3 nee_origin = origin, nee_normal = direction, nee_start = origin;
+    float nee_pdf = 0.0f;
     float threshold = 0.0f;
     float3 reconnection = origin;
     Vertex prev = Vertex{false, 0u, 0.0f, 0.0f};
@@ -1026,7 +1044,21 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
-        const bool nee = layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
+        const bool nee = !passed && layer == 0u && (surface.roughness > 0
+            || (surface.metallic < 1 && surface.transparency < 1));
+        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
+            ? make_float3(0, 0, 0) : surface.normal;
+        // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
+        // which the last bounce skips (power heuristic)
+        const float3 emitted = surface.emissive * (direct_light_emission || !(rgb_to_greyscale(surface.emissive) > 0.0f)
+            ? 1.0f : powerHeuristic(nee_pdf, lightPdf(scene, nee_origin, nee_normal, nee_start, hit.triangle, origin)));
+        if (replay && rc == RC_SURFACE && b > k && b == end && end_type == END_EMIT) {
+            return Shift{throughput * emitted / r.jac, density / r.jac};
+        }
+        const auto lit = [&](float3 light_dir, float light) {
+            return lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
+                stream(r.seed, b), light, b < scene.settings.bounces);
+        };
         const bool chain_found = extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE;
         // Reconnection at this vertex for paths ending here
         Reservoir here = chain;
@@ -1042,21 +1074,18 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             throughput = throughput * geometry_density;
             density *= geometry_density;
             if (k == end && end_type == END_EMIT) {
-                if (!direct_light_emission) {
-                    return fail;
-                }
-                return Shift{throughput * surface.emissive / r.jac, density / r.jac};
+                return Shift{throughput * emitted / r.jac, density / r.jac};
             }
             // Light sampling at the reconnection vertex replays its random numbers, as the light may have moved
             if (k == end && end_type == END_NEE) {
                 float3 light_dir;
-                const float3 radiance = nee ? sampleLight(scene, origin, surface.normal, surface.normal * offset, geometry_n,
-                    stream(r.seed, b + STREAM_NEE), light_dir, ray) : make_float3(0.0f, 0.0f, 0.0f);
+                float light;
+                const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal * offset, geometry_n,
+                    stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : make_float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
-                return Shift{throughput * BSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
-                    stream(r.seed, b)) * radiance / r.jac, density / r.jac};
+                return Shift{throughput * lit(light_dir, light) * radiance / r.jac, density / r.jac};
             }
             if (nee != (extractBits(r.path, PATH_NEE, 1u) == 1u)) {
                 return fail;
@@ -1066,34 +1095,31 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 // Forced reconnection to the light vertex of next event estimation (Sec. 6.2.3), the point its replayed
                 // random numbers pick again (unit Jacobian)
                 float3 light_dir;
-                const float3 radiance = sampleLight(scene, origin, surface.normal, surface.normal * offset, geometry_n,
-                    stream(r.seed, b + STREAM_NEE), light_dir, ray);
-                return rgb_to_greyscale(radiance) > 0.0f ? Shift{throughput * BSDF(direction, light_dir, surface.normal,
-                    geometry_n, material, eta_i, eta_o, stream(r.seed, b)) * radiance, 1.0f} : fail;
+                float light;
+                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal * offset, geometry_n,
+                    stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                return rgb_to_greyscale(radiance) > 0.0f
+                    ? Shift{throughput * lit(light_dir, light) * radiance, 1.0f} : fail;
             }
-            // Emission seen right after a vertex that skipped next event estimation
-            if (rc == RC_NONE && end_type == END_EMIT && direct_light_emission && !footprint) {
-                return Shift{throughput * surface.emissive, 1.0f};
+            // Emission seen right after a vertex, against its next event estimation
+            if (rc == RC_NONE && end_type == END_EMIT && !footprint) {
+                return Shift{throughput * emitted, 1.0f};
             }
             return fail;
         } else if (!replay) {
             // Emission seen directly carries no randomness to resample, shading adds it
-            if (direct_light_emission && b > 0u) {
-                Reservoir candidate = chain;
-                if (chain_found) {
-                    candidate.radiance = safeDivide(throughput * surface.emissive, chain_throughput);
-                } else if (footprint) {
-                    candidate = here;
-                }
-                offer(&sel, withEnd(candidate, END_EMIT, b, throughput * surface.emissive),
-                    throughput * surface.emissive * scale / density);
+            if (b > 0u) {
+                const Reservoir candidate = !chain_found && footprint ? here : chain;
+                offer(&sel, withEnd(candidate, END_EMIT, b, throughput * emitted),
+                    throughput * emitted * scale / density);
             }
             if (nee) {
                 float3 light_dir;
-                const float3 radiance = sampleLight(scene, origin, surface.normal, surface.normal * offset, geometry_n,
-                    stream(r.seed, b + STREAM_NEE), light_dir, ray);
-                const float3 f = rgb_to_greyscale(radiance) > 0.0f ? throughput * BSDF(direction, light_dir,
-                    surface.normal, geometry_n, material, eta_i, eta_o, stream(r.seed, b)) * radiance : fail.f;
+                float light;
+                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal * offset, geometry_n,
+                    stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                const float3 f = rgb_to_greyscale(radiance) > 0.0f
+                    ? throughput * lit(light_dir, light) * radiance : fail.f;
                 Reservoir candidate = chain;
                 if (chain_found) {
                     candidate.radiance = safeDivide(f, chain_throughput);
@@ -1121,16 +1147,18 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 dir = normalize(reconnection - (origin
                     + surface.normal * (offset * sign(dot(reconnection - origin, geometry_n)))));
             }
-            // The path tracer would resample such a direction against the geometry normal
+            // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             if (wrongSide(direction, lobe_index == LOBE_REFRACT, dir, geometry_n)) {
                 return fail;
             }
         } else if (!arrived) {
             SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, material, eta_i, eta_o,
                 stream(r.seed, b), make_float2(0, 0));
-            // Continue sampling with the face normal if the smooth normal sent the ray to the wrong side of the face,
-            // pretending the self reflection faces along it
-            const bool fallback = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, geometry_n);
+            // A direction the smooth normal sends to the wrong side of the face carries on at an unknown density:
+            // through transmitting surfaces sampled again against the face normal, pretending the self reflection
+            // faces along it, elsewhere mirrored across the face, keeping its lobe and weight
+            const bool wrong = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, geometry_n);
+            const bool fallback = wrong && surface.transparency > 0;
             if (fallback) {
                 const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, material,
                     eta_i, eta_o, bsdf_sampled.random_state, make_float2(0, 0));
@@ -1139,15 +1167,23 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             }
             lobe_index = bsdf_sampled.lobe;
             dir = bsdf_sampled.unit_direction;
+            if (wrong && !fallback) dir = dir - 2 * dot(dir, geometry_n) * geometry_n;
             lobe = bsdf_sampled;
-            // Density of the direction is unknown after the fallback
-            lobe.pdf = fallback ? 0.0f : bsdf_sampled.pdf;
+            if (wrong) lobe.pdf = 0;
         }
-        // Rays passing straight through stay where light sampling, which passes them too, last was or was not
-        direct_light_emission = !nee && (direct_light_emission || lobe_index != LOBE_REFRACT || surface.ior != 1);
         // Connections evaluate the given direction
         if (connect || arrived) {
             lobe = connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
+        }
+        // Delta lobes have no competing light sample; straight transmission keeps the preceding vertex's weights.
+        const bool delta = lobe_index != LOBE_DIFFUSE
+            && (surface.roughness == 0.0f || (lobe_index == LOBE_REFRACT && eta_i == eta_o));
+        const bool weighs = nee && !delta;
+        direct_light_emission = !weighs && (direct_light_emission || lobe_index != LOBE_REFRACT || surface.ior != 1);
+        if (weighs) {
+            nee_origin = origin, nee_normal = light_normal;
+            nee_start = origin + surface.normal * (offset * sign(dot(dir, geometry_n)));
+            nee_pdf = lobe.pdf;
         }
         // Inverse ray footprint criterion for the density of the direction leaving this vertex (Eq. 5)
         const bool inverse_footprint = lobe.pdf > 0.0f
@@ -1157,12 +1193,17 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (!inverse_footprint) {
                 return fail;
             }
-            return Shift{throughput * (lobe.throughput * lobe.pdf) * r.radiance / r.jac, density * lobe.pdf / r.jac};
+            if (end_type != END_EMIT) {
+                return Shift{throughput * (lobe.throughput * lobe.pdf) * r.radiance / r.jac, density * lobe.pdf / r.jac};
+            }
+            // Emission's MIS weight depends on the reconnected BSDF; replay its suffix instead of caching that weight.
+            throughput = throughput * lobe.pdf;
+            density *= lobe.pdf;
         }
         // Refracting into the hit from outside or reflecting between its layers, the ray meets the other layer there
         const bool passes = scene.materials[hit.triangle].layers > 1u && (lobe_index == LOBE_REFRACT) != passed;
         // A replayed path meeting the criteria before x_k is not in the image of the shift, nor one connecting there
-        if ((replay && footprint && inverse_footprint) || (connect && (!rough || passes))) {
+        if ((replay && b <= stop && footprint && inverse_footprint) || (connect && (!rough || passes))) {
             return fail;
         }
         if (connect) {
