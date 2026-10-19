@@ -41,7 +41,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     // Raygen programs of a frame's passes, then the any-hit program skipping a triangle: rays are only traversed, so
     // none runs on a miss or a closest hit
     const char* passes[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
-        "__raygen__duplicates", "__raygen__denoise"};
+        "__raygen__duplicates", "__raygen__lights", "__raygen__denoise"};
     constexpr unsigned PASSES = sizeof(passes) / sizeof(*passes);
     OptixProgramGroup groups[PASSES + 1];
     OptixProgramGroupOptions groupOptions{};
@@ -94,6 +94,19 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         if (kind != REQUEST) {
             const unsigned count = scene.count;
             kind == SCENE ? loadScene(context, scene, loaded) : updateScene(context, scene, loaded);
+            std::vector<Material> materials = loaded.materials;
+            if (scene.count) {
+                CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));
+                records[PASSES - 2].data = scene;
+                CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
+                const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};
+                CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, scene.count, 1, 1));
+                CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
+            }
+            LightNode* const lights = loadLights(loaded.vertices, materials);
+            std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
+            release((CUdeviceptr)scene.lights);
+            scene.lights = lights;
             view.camera = {};
             if (scene.count != count) view.width = 0;
             continue;

@@ -822,7 +822,10 @@ class Flex(bpy.types.RenderEngine):
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
-        program = lambda surface: [len(ops), emit(fold(surface), ops, textures, texels, set(alpha_reads(surface)))][::-1]
+        def program(surface):
+            surface, first, alpha = fold(surface), len(ops), set(alpha_reads(surface))
+            return max(emit(surface, ops, textures, texels, alpha),
+                1e-6 if isinstance(surface[4], tuple) else 0), first
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         slots = []  # Index, triangle count and key of each instance exported
         for i, instance in enumerate(depsgraph.object_instances):
