@@ -187,8 +187,9 @@ inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNod
 }
 
 // Light BVH over the emitting triangles, as leaves of their bounds, normal and power pi * emitted * area, else a leaf
-// of no power, uploaded to the GPU
-inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Material>& materials) {
+// of no power, uploaded to the GPU with the trails to the triangles' leaves (pbrt-v4's bit trails)
+inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Material>& materials,
+    unsigned long long*& trails) {
     std::vector<LightNode> lights, nodes;
     for (unsigned t = 0; t + 1 < materials.size(); ++t) {
         const float3 a = vertices[3 * t], b = vertices[3 * t + 1], c = vertices[3 * t + 2], n = cross(b - a, c - a);
@@ -198,6 +199,14 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
     }
     if (lights.empty()) lights.push_back({.leaf = true});
     buildLights(nodes, lights, 0, lights.size());
+    std::vector<unsigned long long> trail(nodes.size()), leaves(materials.size());
+    std::vector<unsigned> depth(nodes.size());
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i].leaf) leaves[nodes[i].child] = trail[i];
+        else trail[i + 1] = trail[i], trail[nodes[i].child] = trail[i] | 1ull << depth[i],
+            depth[i + 1] = depth[nodes[i].child] = depth[i] + 1;
+    }
+    trails = (unsigned long long*)allocate(leaves.size() * sizeof(unsigned long long), leaves.data());
     return (LightNode*)allocate(nodes.size() * sizeof(LightNode), nodes.data());
 }
 
@@ -239,7 +248,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.tangents = load<float4>(3 * header.count);
     scene.infos = load<Info>(header.count);
     scene.materials = load<Material>(header.count + 1, loaded.materials);
-    scene.lights = (LightNode*)allocate(0);
+    scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
         loaded.temp, loaded.output);
@@ -248,7 +257,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.infos,
         (CUdeviceptr)scene.materials,
-        (CUdeviceptr)scene.lights, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
+        (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
 }
 
 // Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
