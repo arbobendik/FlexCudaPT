@@ -20,7 +20,7 @@ struct Surface {
 struct BSDFMaterial {
     float3 albedo, emissive; float roughness, metallic, transmission, ior; float3 absorption;
 };
-// Lights are sampled by emitted, their summed emission under mean textures; hidden surfaces let camera rays through.
+// Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
 // The programs of its layers follow each other from the top.
 struct Material { float emitted; unsigned program, hidden, layers; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of

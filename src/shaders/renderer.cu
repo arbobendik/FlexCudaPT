@@ -712,6 +712,24 @@ __device__ int partner(const Scene& scene, uint3 p, uint3 size, unsigned t) {
     return valid ? qy * int(size.x) + qx : -1;
 }
 
+// Mean emission over the triangle's actual UVs and generated coordinates, keeping support for small emitting regions.
+extern "C" __global__ void __raygen__lights() {
+    const unsigned triangle = optixGetLaunchIndex().x;
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    Material& material = scene.materials[triangle];
+    if (!(material.emitted > 0)) return;
+    constexpr unsigned LIGHT_SAMPLES = 256;
+    unsigned state = hash(triangle);
+    float mean = 0;
+    for (unsigned i = 0; i < LIGHT_SAMPLES; ++i) {
+        const float side = sqrtf((i + random(state)) / LIGHT_SAMPLES), along = random(state);
+        const float3 emission = shade(scene, triangle, side * (1 - along), side * along,
+            faceNormal(scene, triangle)).emissive;
+        mean += fmaxf(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
+    }
+    material.emitted = fmaxf(mean, material.emitted * 0.001f);
+}
+
 // Initial candidates: the path trees of the pixel's primary hits, each at a jitter of its own; it adds the radiance the
 // camera sees right there, of an emitter or the world, as it carries no randomness to resample. Without ReSTIR it adds
 // the path trees' estimate as well.
