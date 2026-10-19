@@ -306,6 +306,16 @@ def node_matches(socket):
             24:40, 24:40, :3].mean((0, 1)))
     assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
 
+voronoi = tree.nodes.new('ShaderNodeTexVoronoi')
+voronoi.inputs['Vector'].default_value = (0.31, -0.27, 0.63)
+voronoi.distance, voronoi.normalize = 'MINKOWSKI', True
+for dimensions in ('1D', '2D', '3D', '4D'):
+    voronoi.voronoi_dimensions = dimensions
+    if dimensions in ('1D', '4D'): voronoi.inputs['W'].default_value = 0.37
+    for feature in ('F1', 'F2', 'SMOOTH_F1', 'DISTANCE_TO_EDGE', 'N_SPHERE_RADIUS'):
+        voronoi.feature = feature
+        for socket in voronoi.outputs:
+            if socket.enabled: node_matches(socket)
 zero = tree.nodes.new('ShaderNodeVectorMath')
 zero.operation, zero.inputs['Scale'].default_value = 'SCALE', 0
 tree.links.new(tree.nodes.new('ShaderNodeTexCoord').outputs['Generated'], zero.inputs[0])

@@ -134,34 +134,48 @@ __device__ float3 white(float3 p, int dims, bool color, float w) {
         ? make_float3(v, hashed(4, p.x, p.y, p.z, 1), hashed(4, p.x, p.y, p.z, 2))
         : make_float3(v, hashed(4, p.z, p.x, w, p.y), hashed(4, w, p.z, p.y, p.x));
 }
-// Cycles' point of a Voronoi cell, its color by its randomness 1
-__device__ float3 site(int x, int y, int z) { // By the PCG hash of its integer position, shifting signed
-    uint3 v = make_uint3(x * 1664525u + 1013904223u, y * 1664525u + 1013904223u, z * 1664525u + 1013904223u);
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    v.x ^= int(v.x) >> 16; v.y ^= int(v.y) >> 16; v.z ^= int(v.z) >> 16;
-    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
-    return make_float3(float(v.x & 0x7FFFFFFF), float(v.y & 0x7FFFFFFF), float(v.z & 0x7FFFFFFF))
-        * (1.0f / float(0x7FFFFFFF));
+// Cycles' PCG hash of 2 to 4 integers, shifting signed
+__device__ void pcg(unsigned* v, int dims) {
+    for (int k = 0; k < dims; ++k) v[k] = v[k] * 1664525u + 1013904223u;
+    for (int round = 0; round < 2; ++round) {
+        if (round) for (int k = 0; k < dims; ++k) v[k] ^= int(v[k]) >> 16;
+        if (dims == 2) v[0] += v[1] * 1664525u, v[1] += v[0] * 1664525u;
+        else if (dims == 3) v[0] += v[1] * v[2], v[1] += v[2] * v[0], v[2] += v[0] * v[1];
+        else v[0] += v[1] * v[3], v[1] += v[2] * v[0], v[2] += v[0] * v[1], v[3] += v[1] * v[2];
+    }
+    for (int k = 0; k < dims; ++k) v[k] &= 0x7FFFFFFF;
 }
-struct Cell { float distance; float3 color, position; };
-// Cycles' Voronoi texture of a 3D point by its feature, F1, F2 or smooth F1, and metric of exponent in kind, the
-// randomness and smoothness in extra
-__device__ Cell voronoi(float3 p, float3 kind, float3 extra) {
+// Cycles' Voronoi cell offset into o, and its color: Jenkins in 1D, signed PCG in 2D to 4D
+__device__ float3 site(const int* c, int dims, float* o) {
+    if (dims == 1) return make_float3(o[0] = hashed(1, c[0]), hashed(2, c[0], 1), hashed(2, c[0], 2));
+    unsigned v[4] = {unsigned(c[0]), unsigned(c[1]), unsigned(c[2]), unsigned(c[3])}, u[3] = {v[0], v[1], 0};
+    pcg(v, dims);
+    for (int k = 0; k < dims; ++k) o[k] = float(v[k]) / float(0x7FFFFFFF);
+    if (dims == 2) pcg(u, 3);
+    return dims == 2 ? make_float3(u[0], u[1], u[2]) / float(0x7FFFFFFF) : make_float3(o[0], o[1], o[2]);
+}
+struct Cell { float distance; float3 color; float position[4]; };
+// Cycles' Voronoi texture of a point of the dimensions by its feature, F1, F2 or smooth F1, and metric of exponent in
+// kind, the randomness and smoothness in extra
+__device__ Cell voronoi(const float* q, int dims, float3 kind, float3 extra) {
     const int feature = int(kind.x), metric = int(kind.y);
     const float randomness = fminf(fmaxf(extra.x, 0), 1), smoothness = fminf(fmaxf(extra.y / 2, 0), 0.5f);
-    const float3 cell = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), local = p - cell;
-    const auto distance = [&](float3 d) {
-        d = make_float3(fabsf(d.x), fabsf(d.y), fabsf(d.z));
-        return metric == 0 ? length(d) : metric == 1 ? d.x + d.y + d.z : metric == 2 ? fmaxf(d.x, fmaxf(d.y, d.z))
-            : powf(powf(d.x, kind.z) + powf(d.y, kind.z) + powf(d.z, kind.z), 1 / kind.z);
-    };
-    float best[2] = {3.402823e38f, 3.402823e38f}, smooth = 0, h = -1;
-    float3 colors[2] = {}, positions[2] = {};
     const int reach = feature == 2 && smoothness != 0 ? 2 : 1;
-    for (int k = -reach; k <= reach; ++k) for (int j = -reach; j <= reach; ++j) for (int i = -reach; i <= reach; ++i) {
-        const float3 color = site(int(cell.x) + i, int(cell.y) + j, int(cell.z) + k);
-        const float3 position = make_float3(i, j, k) + color * randomness;
-        const float d = distance(position - local);
+    int cell[4] = {}, count = 1;
+    for (int k = 0; k < dims; ++k) cell[k] = int(floorf(q[k])), count *= 2 * reach + 1;
+    float best[2] = {3.402823e38f, 3.402823e38f}, smooth = 0, h = -1, positions[2][4] = {};
+    float3 colors[2] = {};
+    for (int n = 0; n < count; ++n) { // Through the cells around, the first axis fastest
+        int c[4] = {};
+        float o[4], position[4] = {}, sum = 0, high = 0;
+        for (int k = 0, m = n; k < dims; ++k, m /= 2 * reach + 1) c[k] = cell[k] + m % (2 * reach + 1) - reach;
+        const float3 color = site(c, dims, o);
+        for (int k = 0; k < dims; ++k) {
+            position[k] = c[k] - cell[k] + o[k] * randomness;
+            const float d = fabsf(position[k] - (q[k] - cell[k]));
+            sum += metric == 0 ? d * d : metric == 3 ? powf(d, kind.z) : d, high = fmaxf(high, d);
+        }
+        const float d = metric == 0 ? sqrtf(sum) : metric == 2 ? high : metric == 3 ? powf(sum, 1 / kind.z) : sum;
         if (reach == 2) { // Smooth F1, blending every cell's in
             if (h == -1) h = 1;
             else {
@@ -171,56 +185,87 @@ __device__ Cell voronoi(float3 p, float3 kind, float3 extra) {
             const float correction = smoothness * h * (1 - h);
             smooth = smooth * (1 - h) + d * h - correction;
             colors[0] = mix(colors[0], color, h) - make_float3(1, 1, 1) * (correction / (1 + 3 * smoothness));
-            positions[0] = mix(positions[0], position, h) - make_float3(1, 1, 1) * (correction / (1 + 3 * smoothness));
+            for (int k = 0; k < dims; ++k)
+                positions[0][k] = positions[0][k] * (1 - h) + position[k] * h - correction / (1 + 3 * smoothness);
         } else if (d < best[0]) {
-            best[1] = best[0], colors[1] = colors[0], positions[1] = positions[0];
-            best[0] = d, colors[0] = color, positions[0] = position;
-        } else if (d < best[1]) best[1] = d, colors[1] = color, positions[1] = position;
+            best[1] = best[0], best[0] = d, colors[1] = colors[0], colors[0] = color;
+            for (int k = 0; k < 4; ++k) positions[1][k] = positions[0][k], positions[0][k] = position[k];
+        } else if (d < best[1]) {
+            best[1] = d, colors[1] = color;
+            for (int k = 0; k < 4; ++k) positions[1][k] = position[k];
+        }
     }
     const int f = feature == 1;
-    return {reach == 2 ? smooth : best[f], colors[f], positions[f] + cell};
+    Cell out = {reach == 2 ? smooth : best[f], colors[f]};
+    for (int k = 0; k < dims; ++k) out.position[dims == 1 ? 3 : k] = positions[f][k] + cell[k];
+    return out;
 }
-// Cycles' distance of a 3D point to the edge of its Voronoi cell, or its cell's n-sphere radius, by the randomness
-__device__ float edge(float3 p, float randomness, bool sphere) {
-    const float3 cell = make_float3(floorf(p.x), floorf(p.y), floorf(p.z)), local = p - cell;
-    const auto point = [&](int i, int j, int k) {
-        return make_float3(i, j, k) + site(int(cell.x) + i, int(cell.y) + j, int(cell.z) + k) * randomness;
+// Cycles' distance of a point of the dimensions to the edge of its Voronoi cell, or its cell's n-sphere radius, by
+// the randomness: in one dimension to the midpoints of its cell's point and its neighbors'
+__device__ float edge(const float* q, int dims, float randomness, bool sphere) {
+    int cell[4] = {}, count = 1;
+    float local[4] = {};
+    for (int k = 0; k < dims; ++k) cell[k] = int(floorf(q[k])), local[k] = q[k] - cell[k], count *= 3;
+    const auto vectorTo = [&](const int* offset, float* v) { // From the point to the cell's point
+        int c[4] = {};
+        float o[4];
+        for (int k = 0; k < dims; ++k) c[k] = cell[k] + offset[k];
+        site(c, dims, o);
+        for (int k = 0; k < dims; ++k) v[k] = offset[k] + o[k] * randomness - local[k];
     };
-    float best = 3.402823e38f;
-    float3 closest = {};
-    int3 offset = {};
-    for (int k = -1; k <= 1; ++k) for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
-        const float3 v = point(i, j, k) - local;
-        if (dot(v, v) < best) best = dot(v, v), closest = v, offset = make_int3(i, j, k);
+    if (dims == 1 && !sphere) {
+        float v[3];
+        for (int i = -1; i <= 1; ++i) vectorTo(&i, v + i + 1);
+        return fminf(fabsf((v[1] + v[0]) / 2), fabsf((v[1] + v[2]) / 2));
+    }
+    float best = 3.402823e38f, closest[4] = {};
+    int offset[4] = {};
+    for (int n = 0; n < count; ++n) {
+        int c[4] = {};
+        float v[4], d = 0;
+        for (int k = 0, m = n; k < dims; ++k, m /= 3) c[k] = m % 3 - 1;
+        vectorTo(c, v);
+        for (int k = 0; k < dims; ++k) d += v[k] * v[k];
+        if (d < best) {
+            best = d;
+            for (int k = 0; k < dims; ++k) closest[k] = v[k], offset[k] = c[k];
+        }
     }
     best = 3.402823e38f;
-    float3 nearest = {};
-    for (int k = -1; k <= 1; ++k) for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
-        if (sphere) { // The nearest other point to the closest
-            if (i == 0 && j == 0 && k == 0) continue;
-            const float3 v = point(offset.x + i, offset.y + j, offset.z + k) - local - closest;
-            if (dot(v, v) < best) best = dot(v, v), nearest = v;
-            continue;
+    for (int n = 0; n < count; ++n) {
+        int c[4] = {};
+        float v[4], perpendicular = 0, along = 0;
+        for (int k = 0, m = n; k < dims; ++k, m /= 3) c[k] = m % 3 - 1 + (sphere ? offset[k] : 0);
+        if (sphere && n == (count - 1) / 2) continue; // The nearest other point to the closest
+        vectorTo(c, v);
+        for (int k = 0; k < dims; ++k) {
+            const float e = v[k] - closest[k];
+            perpendicular += e * e, along += (closest[k] + v[k]) / 2 * e;
         }
-        const float3 v = point(i, j, k) - local, perpendicular = v - closest;
-        if (dot(perpendicular, perpendicular) > 0.0001f)
-            best = fminf(best, dot((closest + v) / 2, normalize(perpendicular)));
+        if (sphere) best = fminf(best, perpendicular);
+        else if (perpendicular > 0.0001f) best = fminf(best, along / sqrtf(perpendicular));
     }
-    return sphere ? length(nearest) / 2 : best;
+    return sphere ? sqrtf(best) / 2 : best;
 }
 // Cycles' fractal of Voronoi octaves up to the detail, as of noise: the distance, color or position, the output in
 // extra, normalized by the farthest distance unless zero; or the distance to edges, of fractal minima, or the n-sphere
 // radius
-__device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fractal, float farthest) {
+__device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fractal, float3 shape) {
     const float detail = fminf(fmaxf(fractal.x, 0), 15), roughness = fminf(fmaxf(fractal.y, 0), 1);
     const float rmd = detail - floorf(detail), randomness = fminf(fmaxf(extra.x, 0), 1);
-    if (kind.x == 4) return make_float3(1, 1, 1) * edge(p, randomness, true);
+    const float farthest = shape.x;
+    const int dims = int(shape.z);
+    float q[4] = {p.x, p.y, p.z, shape.y};
+    if (kind.x == 4) return make_float3(1, 1, 1) * edge(q, dims, randomness, true);
     float amplitude = 1, total = 0, scale = 1;
+    const auto scaled = [&](float s, float* r) { for (int k = 0; k < 4; ++k) r[k] = q[k] * s; };
     if (kind.x == 3) {
         float distance = 8;
         total = farthest;
         for (int i = 0; i <= ceilf(detail); ++i) {
-            const float octave = edge(p * scale, randomness, false);
+            float r[4];
+            scaled(scale, r);
+            const float octave = edge(r, dims, randomness, false);
             if (detail == 0 || roughness == 0) {
                 distance = octave;
                 break;
@@ -235,7 +280,9 @@ __device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fra
     }
     Cell sum = {};
     for (int i = 0; i <= ceilf(detail); ++i) {
-        const Cell octave = voronoi(p * scale, kind, extra);
+        float r[4];
+        scaled(scale, r);
+        const Cell octave = voronoi(r, dims, kind, extra);
         if (detail == 0 || roughness == 0) {
             total = 1;
             sum = octave;
@@ -245,12 +292,14 @@ __device__ float3 fractalVoronoi(float3 p, float3 kind, float3 extra, float3 fra
         total += amplitude * weight;
         sum.distance += octave.distance * amplitude * weight;
         sum.color = sum.color + octave.color * (amplitude * weight);
-        sum.position = mix(sum.position, octave.position / scale, amplitude * weight);
+        for (int k = 0; k < 4; ++k)
+            sum.position[k] = sum.position[k] * (1 - amplitude * weight) + octave.position[k] / scale * amplitude * weight;
         scale *= fractal.z;
         amplitude *= roughness;
     }
     if (farthest > 0) sum.distance /= total * farthest, sum.color = sum.color / total;
-    return extra.z == 0 ? make_float3(1, 1, 1) * sum.distance : extra.z == 1 ? sum.color : sum.position;
+    return extra.z == 0 ? make_float3(1, 1, 1) * sum.distance : extra.z == 1 ? sum.color : extra.z == 2
+        ? make_float3(sum.position[0], sum.position[1], sum.position[2]) : make_float3(1, 1, 1) * sum.position[3];
 }
 // Cycles' magic texture of a point by the scale, depth and distortion in params
 __device__ float3 magic(float3 p, float3 params) {
@@ -514,7 +563,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case BOX: --top; top[-1] = box(top[-1], top->x); break;
         case BRICK: top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
         case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
-        case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3].x); break;
+        case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3]); break;
         case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
         case NOISE: top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
             break;
