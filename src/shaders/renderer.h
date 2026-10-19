@@ -19,7 +19,7 @@ struct Op { unsigned code; union { float3 value; struct { unsigned texel, width,
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
-    float level, coverage; float3 absorption; float density;
+    float level, coverage; float3 absorption; float density; float3 scatter;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface
 struct BSDFMaterial {
