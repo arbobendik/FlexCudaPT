@@ -407,13 +407,15 @@ def offset(seed, dimensions):
     shifts = [100 + 100 * hashed(bits(seed), *[bits(axis)] * (dimensions > 1)) for axis in range(dimensions)]
     return numpy.array((shifts + [0, 0])[:3]), shifts[3] if dimensions == 4 else 0
 
+def point_of(node, value, default=('GENERATED',)):  # A texture node's point: its vector input's value where linked
+    return value if node.inputs[0].is_linked else default
+
 # Of a noise texture node of 1D to 4D points, at the generated point without a vector, as Cycles': its fractal, the
 # type of which the renderer numbers, at the point distorted by signed noise, for its color also at two offsets
 def noise(node, inputs, index):
     get, dimensions = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get, \
         int(node.noise_dimensions[0])
-    point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
-    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point, get('W', 0))
+    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point_of(node, get('Vector')), get('W', 0))
     kind = 'UNNORMALIZED' if node.noise_type == 'FBM' and not node.normalize else node.noise_type
     kind = ('FBM', 'UNNORMALIZED', 'MULTIFRACTAL', 'HETERO_TERRAIN', 'HYBRID_MULTIFRACTAL',
         'RIDGED_MULTIFRACTAL').index(kind)
@@ -433,36 +435,38 @@ def noise(node, inputs, index):
 def white_noise(node, inputs, index):
     return 'WHITE_NOISE', inputs[0], vector(int(node.noise_dimensions[0]), index, inputs[1] if len(inputs) > 1 else 0)
 
-# Of a Voronoi texture node's distance, color or position, as Cycles' fractal of 3D points, which it takes in any
-# dimension, at the generated point without a vector, normalized by the farthest distance its metric makes; or its
-# distance to edges or n-sphere radius
+# Of a Voronoi texture node's distance, color, position or W, as Cycles' fractal of 1D to 4D points, at the generated
+# point without a vector, normalized by the farthest distance its metric makes; or its distance to edges or n-sphere
+# radius
 def voronoi(node, inputs, index):
     get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
-    point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
-    metric = ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
+    dimensions = int(node.voronoi_dimensions[0])
+    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point_of(node, get('Vector')), get('W', 0))
+    metric = 0 if dimensions == 1 else ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
     feature = ('F1', 'F2', 'SMOOTH_F1', 'DISTANCE_TO_EDGE', 'N_SPHERE_RADIUS').index(node.feature)
-    farthest = ('POWER', 3, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (3 ** 0.5, 3, 1)[metric]
+    farthest = ('POWER', dimensions, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (dimensions ** 0.5,
+        dimensions, 1)[metric]
     farthest = 'MULTIPLY', ('ADD', 0.5, ('MULTIPLY', 0.5, clamp(get('Randomness')))), ('MULTIPLY', 1 if feature > 2
         else farthest, (2 if feature == 1 else 1) * (node.normalize and feature < 4))
+    output = ('Distance', 'Color', 'Position', 'W').index(node.outputs[index].name.replace('Radius', 'Distance'))
     value = ('VORONOI', ('MULTIPLY', point, get('Scale')), vector(feature, metric, get('Exponent', 1)),
-        vector(get('Randomness'), get('Smoothness', 0), index), vector(get('Detail', 0), get('Roughness', 0),
-        get('Lacunarity', 0)), farthest)
-    return ('DIVIDE', value, get('Scale')) if index == 2 else value
+        vector(get('Randomness'), get('Smoothness', 0), output), vector(get('Detail', 0),
+        get('Roughness', 0), get('Lacunarity', 0)), vector(farthest, ('MULTIPLY', w, get('Scale')), dimensions))
+    return ('DIVIDE', value, get('Scale')) if output > 1 else value
 
 def magic(node, inputs, index):  # Of a magic texture node at the generated point without a vector, as Cycles'
-    color = 'MAGIC', inputs[0] if node.inputs[0].is_linked else ('GENERATED',), vector(inputs[1], node.turbulence_depth,
-        inputs[2])
+    color = 'MAGIC', point_of(node, inputs[0]), vector(inputs[1], node.turbulence_depth, inputs[2])
     return ('DOT_PRODUCT', color, numpy.full(3, 1 / 3)) if index else color
 
 def brick(node, inputs, index):  # Of a brick texture node at the generated point without a vector, as Cycles'
     p, color1, color2, mortar, scale, size, smooth, bias, width, height = inputs
-    f = 'BRICK', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), vector(size, smooth, bias), \
+    f = 'BRICK', ('MULTIPLY', point_of(node, p), scale), vector(size, smooth, bias), \
         vector(width, height, node.offset), numpy.array((node.offset_frequency, node.squash, node.squash_frequency))
     tint, factor = ('DOT_PRODUCT', f, numpy.eye(3)[0]), ('DOT_PRODUCT', f, numpy.eye(3)[1])
     return factor if index else mix(mix(color1, color2, tint), mortar, factor)
 
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
-    p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+    p = point_of(node, inputs[0])
     x, y = ('DOT_PRODUCT', p, numpy.eye(3)[0]), ('DOT_PRODUCT', p, numpy.eye(3)[1])
     r = 'MAXIMUM', ('SUBTRACT', 0.999999, length(p)), 0
     return clamp({'LINEAR': x, 'QUADRATIC': ('MULTIPLY', ('MAXIMUM', x, 0), ('MAXIMUM', x, 0)),
@@ -473,13 +477,13 @@ def gradient(node, inputs, index):  # Of a gradient texture node at the generate
 
 def checker(node, inputs, index):  # Of a checker texture node at the generated point without a vector, as Cycles'
     p, color1, color2, scale = inputs
-    p = 'MULTIPLY', ('ADD', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), 1e-6), 0.999999
+    p = 'MULTIPLY', ('ADD', ('MULTIPLY', point_of(node, p), scale), 1e-6), 0.999999
     factor = absolute(('MODULO', ('DOT_PRODUCT', ('FLOOR', p), numpy.ones(3)), 2))  # Whether the floors' sum is odd
     return factor if index else mix(color2, color1, factor)
 
 def wave(node, inputs, index):  # Of a wave texture node at the generated point without a vector, as Cycles'
     p, scale, distortion, detail, detail_scale, roughness, phase = inputs
-    p = 'MULTIPLY', ('ADD', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), 1e-6), 0.999999
+    p = 'MULTIPLY', ('ADD', ('MULTIPLY', point_of(node, p), scale), 1e-6), 0.999999
     if node.wave_type == 'BANDS': n = 'DOT_PRODUCT', p, numpy.eye(3)['XYZ'.index(node.bands_direction)] * 20 \
         if node.bands_direction != 'DIAGONAL' else numpy.full(3, 10)
     else: n = 'MULTIPLY', length(('MULTIPLY', p, numpy.ones(3) - numpy.eye(3)['XYZ'.index(node.rings_direction)]
@@ -560,10 +564,10 @@ def normal_map(node, inputs, index):
 # ignores its alpha, which is one then, or holds data.
 def image(node, inputs, index):
     if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
-    source = ImageRead(node, inputs[0] if node.inputs[0].is_linked else ('UV',))
-    point = inputs[0] if node.inputs[0].is_linked else ('UV',)
+    source = ImageRead(node, point_of(node, inputs[0], ('UV',)))
+    point = point_of(node, inputs[0], ('UV',))
     if node.type == 'TEX_ENVIRONMENT':
-        point = node.projection, inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+        point = node.projection, point_of(node, inputs[0])
     elif node.projection in ('SPHERE', 'TUBE'):  # Around the center of the unit cube
         x, y, z = (('DOT_PRODUCT', ('SUBTRACT', ('MULTIPLY', point, 2), 1), axis) for axis in numpy.eye(3))
         around = ('ADD', 0.5, ('DIVIDE', ('ARCTAN2', x, y), -2 * math.pi)), ('ADD', ('MULTIPLY', z, 0.5), 0.5)
