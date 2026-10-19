@@ -704,8 +704,10 @@ def resolve(socket, groups=()):
             + VOLUMES.get(node.type, (1, 0)))
         # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'
         level = mix(('MULTIPLY', get('Specular IOR Level', 0.5), 2), 1, transparency)
+        # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
-            ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), transparency, ior,
+            ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), ('MULTIPLY', transparency, ('SUBTRACT', 1,
+            metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
             get('Specular Tint', 1), level, get('Alpha', 1), absorption, density]
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
@@ -718,7 +720,14 @@ def shade(material, program):
     if not output: return [program(BLACK)]
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         return []
-    return [program([*resolve(output.inputs['Surface'])[:10], *resolve(output.inputs['Volume'])[10:]])]
+    surface = [*resolve(output.inputs['Surface'])[:10], *resolve(output.inputs['Volume'])[10:]]
+    # FlexLight's BSDF transmits apart from metallic reflection: its transmission keeps the share transmitted to the one
+    # scattered diffusely, its ior that of the share not metallic
+    metallic, share = surface[2], surface[5]
+    surface[5] = 'DIVIDE', ('MULTIPLY', share, ('SUBTRACT', 1, metallic)), ('SUBTRACT', ('SUBTRACT', 1, metallic),
+        ('MULTIPLY', share, metallic))
+    surface[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', surface[6], 1), ('SUBTRACT', 1, metallic))
+    return [program(surface)]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
