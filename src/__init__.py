@@ -1114,7 +1114,7 @@ def register():
     bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1)
     bpy.types.Scene.flex_bounces = bpy.props.IntProperty(name='Max Bounces',
-        description='Bounces of a path after the surface the camera sees', default=7, min=0, max=16)
+        description='Bounces of a path after the surface the camera sees', default=16, min=0, max=16)
     bpy.types.Scene.flex_paths = bpy.props.IntProperty(name='Paths per Sample',
         description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32)
     bpy.types.Scene.flex_denoise = bpy.props.BoolProperty(name='Denoise',
