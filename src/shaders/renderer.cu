@@ -927,8 +927,13 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
             const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
                 Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
-            const float3 through = surface.ior == 1 ? surface.albedo * surface.transparency : make_float3(0, 0, 0);
+            const float3 through = surface.ior == 1 ? surface.albedo * (surface.transparency
+                * G1(surface.roughness * surface.roughness, fabsf(dot(surface.normal, toward)))) : make_float3(0, 0, 0);
             transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
+            if (layer == 0 && dot(faceNormal(scene, hit.triangle), toward) > 0)
+                transmitted = transmitted * beerLambert(occluder, make_float3(
+                    expf(surface.density * (surface.absorption.x - 1)), expf(surface.density * (surface.absorption.y - 1)),
+                    expf(surface.density * (surface.absorption.z - 1))));
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return make_float3(0, 0, 0);
@@ -1214,7 +1219,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             : NONE;
         direction = dir;
         if (through == NONE)
-            origin = origin + surface.normal * (passes ? 0.0f : offset * sign(dot(direction, geometry_n)));
+            origin = origin + surface.normal * (passes || (lobe_index == LOBE_REFRACT && eta_i == eta_o)
+                ? 0.0f : offset * sign(dot(direction, geometry_n)));
         if (!replay) {
             const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
                 / density, 0.0f), 1.0f);
