@@ -236,7 +236,7 @@ assert abs(passed(0.5, 0.5) - (metal + dielectric) / 2) < 0.02, 'metallic share 
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
 scene.camera.data.angle, scene.flex_samples = math.pi / 2, 1
-plane('floor', 0, 0, 4)
+floor = plane('floor', 0, 0, 4)
 dim = plane('dim', 0, 0, 1)
 dim.inputs['Base Color'].default_value, dim.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
 dim.inputs['Emission Strength'].default_value = 1
@@ -265,6 +265,64 @@ scene.flex_restir = False
 bpy.ops.render.render(scene=scene.name, write_still=True)
 pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
 assert pixels.sum(2).min() > 0, 'textured light sampling'
+def mis_render(bounces, reuse):
+    scene.flex_bounces, scene.flex_restir = bounces, reuse
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+
+# MIS preserves the rough BSDF's energy and adds the smooth dielectric's delta reflection, with and without reuse.
+bpy.data.objects['bright'].hide_render = True
+dim.id_data.links.remove(dim.inputs['Emission Color'].links[0])
+floor.inputs['IOR'].default_value = 1.5
+scene.flex_samples = 4096
+bounces = scene.flex_bounces
+for roughness in (0, 1):
+    floor.inputs['Roughness'].default_value = roughness
+    direct = mis_render(0, False)
+    for reuse in (False, True):
+        pixels = mis_render(1, reuse)
+        if roughness:
+            assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS energy'
+        else:
+            assert 0.03 < (pixels - direct)[28:36, 28:36].mean() < 0.05, 'MIS delta reflection'
+# MIS and light sampling alone integrate the same BSDF even with strongly tilted shading normals.
+scene.camera.data.angle = 0.3
+floor.inputs['IOR'].default_value = 1
+mesh = bpy.data.objects['floor'].data
+mesh.shade_smooth()
+mesh.normals_split_custom_set([(0.95, 0, 0.3122499)] * len(mesh.loops))
+direct = mis_render(0, False)
+for reuse in (False, True):
+    pixels = mis_render(1, reuse)
+    assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS shading normals'
+mesh.normals_split_custom_set([(0, 0, 1)] * len(mesh.loops))
+scene.camera.data.angle, floor.inputs['IOR'].default_value = math.pi / 2, 1.5
+# Every continuous lobe samples lights, including sharp glossy reflection and rough transmission below the face.
+scene.camera.data.angle = 0.3
+for metallic, transparency, roughness, height in ((1, 0, 0.1, 0.5), (0, 1, 0.6, -0.5)):
+    floor.inputs['Metallic'].default_value, floor.inputs['Transmission Weight'].default_value = metallic, transparency
+    floor.inputs['Roughness'].default_value, bpy.data.objects['dim'].location.z = roughness, height
+    direct = mis_render(0, False)
+    assert direct.mean() > 0, 'continuous light sampling'
+    for reuse in (False, True):
+        pixels = mis_render(1, reuse)
+        assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.02), \
+            f'MIS continuous lobes {metallic, transparency, reuse}: {pixels.mean()} vs {direct.mean()}'
+floor.inputs['Metallic'].default_value = floor.inputs['Transmission Weight'].default_value = 0
+floor.inputs['Roughness'].default_value, bpy.data.objects['dim'].location.z = 1, 0.5
+scene.camera.data.angle = math.pi / 2
+# Rough IOR-1 transmission has the same masking in shadow visibility and BSDF paths, including partial coverage.
+bpy.data.objects['cutout'].hide_render, bpy.data.objects['cutout'].location.z = False, 0.25
+cutout.inputs['Base Color'].default_value = (1, 1, 1, 1)
+cutout.inputs['Transmission Weight'].default_value, cutout.inputs['Roughness'].default_value = 1, 1
+mesh = bpy.data.objects['cutout'].data
+mesh.shade_smooth()
+mesh.normals_split_custom_set([(0.6, 0, 0.8)] * len(mesh.loops))
+direct = mis_render(1, False)
+for reuse in (False, True):
+    pixels = mis_render(3, reuse)
+    assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS straight transmission'
+scene.flex_bounces = bounces
 scene.flex_restir = True
 # Through a slab of white glass of IOR 1 and depth 0.5 under the white sky, a Volume Absorption of the color and density 1
 # passes its transmittance over unit distance, exp(color - 1), to the power of depth, as FlexLight's Beer's law
@@ -327,6 +385,24 @@ pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape
 assert (pixels.mean(2) > 0.05).all() and 0.6 < pixels.mean() < 1.01, 'normal-mapped metal'
 bpy.data.objects['metal'].hide_render, prism.hide_render = True, False
 scene.camera.matrix_world = matrix
+# Both MIS strategies absorb the same light through straight glass, even when hidden from the primary ray.
+for ob in scene.objects: ob.hide_render = ob not in (scene.camera, bpy.data.objects['floor'], bpy.data.objects['dim'])
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.camera.data.angle, scene.flex_samples = 0.3, 4096
+floor.inputs['IOR'].default_value = 1
+clear = mis_render(0, False)
+slab = bpy.data.objects['slab']
+slab.location.z, slab.scale, slab.hide_render, slab.visible_camera = 0.25, (4, 4, 0.1), False, False
+glass.inputs['Base Color'].default_value, glass.inputs['IOR'].default_value = (1, 1, 1, 1), 1
+absorption.inputs['Density'].default_value = 8
+glass.id_data.links.new(absorption.outputs[0], glass.id_data.nodes['Material Output'].inputs['Volume'])
+direct = mis_render(0, False)
+ratio = direct.mean((0, 1)) / clear.mean((0, 1))
+assert 0 < ratio[2] < ratio[1] < ratio[0] < 0.9, f'shadow absorption: {ratio}'
+for reuse in (False, True):
+    pixels = mis_render(3, reuse)
+    assert numpy.allclose(pixels.mean((0, 1)), direct.mean((0, 1)), rtol=0.01), 'MIS shadow absorption'
+scene.flex_bounces = bounces
 
 # Camera controls remain visible with Flex selected; a small emitter on black measures its lens's bokeh.
 context = types.SimpleNamespace(engine='FLEX', camera=scene.camera.data)
