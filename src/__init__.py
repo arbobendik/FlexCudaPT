@@ -82,7 +82,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
-    'TRANSFORM', 'BOX', 'STORE', 'LOAD'))}
+    'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption and density
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0]
@@ -163,30 +163,31 @@ def alpha_reads(expression):  # Image samples whose alpha contributes to the res
         for part in operands[:1] if name == 'UNASSOCIATE' else operands: yield from alpha_reads(part)
 
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
-# textures of their mean. Without slots it counts in uses each expression met, entering none twice; with them those met
-# again are kept in a slot and loaded.
-def emit(expression, ops, textures, texels, alphas, uses, slots=None):
+# textures of their mean. Without slots it counts in uses each expression met at the point it is read at, a height
+# shifted by a bump read at its shift, entering none twice; with them those met again are kept in a slot and loaded.
+def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None):
     if isinstance(expression, list): expression = 'END', *expression
     if not isinstance(expression, tuple):
         ops.append((1, *numpy.resize(expression, 3).astype('f').view('I')))
         return expression
     name, *operands = expression
-    key = expression_key(expression)
-    if key in (uses if slots is None else slots):
+    key = shift, expression_key(expression)
+    if name != 'SHIFT' and key in (uses if slots is None else slots):
         if slots is None: uses[key][0] += 1
         else: ops.append(([*OPS].index('LOAD'), slots[key], 0, 0))
         return uses[key][1]
     if name == 'UNASSOCIATE':
         return emit(('DIVIDE', *operands) if operands[1][-1].key in alphas else operands[0], ops, textures, texels,
-            alphas, uses, slots)
+            alphas, uses, slots, shift)
     payload = texture(operands.pop(), textures, texels) if name in ('IMAGE', 'ALPHA', 'IMAGE_LINEAR',
         'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC') else (0, 0, 0, numpy.ones(4))
-    values = [emit(operand, ops, textures, texels, alphas, uses, slots) for operand in operands]
+    values = [emit(operand, ops, textures, texels, alphas, uses, slots,
+        operands[0] if name == 'SHIFTED' and k else shift) for k, operand in enumerate(operands)]
     ops.append(([*OPS].index(name), *payload[:3]))
     if name == 'LIGHT_PATH': return float(values[0] >= 8)  # Of no ray, length and depth one, as light sampling shades
     value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
     if slots is None: uses[key] = [1, value]
-    elif uses[key][0] > 1:
+    elif name != 'SHIFT' and uses[key][0] > 1:
         slots[key] = len(slots)
         ops.append(([*OPS].index('STORE'), slots[key], 0, 0))
     return value
@@ -547,6 +548,13 @@ def coordinates(node, inputs, index):  # Of a texture coordinate node, as Cycles
     return {0: ('GENERATED',), 1: ('TRANSFORM', facing(('NORMAL',)), 5), 4: ('CAMERA_POINT',), 5: ('WINDOW',),
         6: reflection}.get(index) or resolve(node.outputs[index])
 
+# Of a bump node: the normal bent by the gradient of its height, there and at points along the triangle, whatever
+# filter width, as Cycles'
+def bump(node, inputs, index):
+    strength, distance, _, height, normal = inputs
+    return 'BUMP', normal, height, ('SHIFTED', ('SHIFT', 1), height), ('SHIFTED', ('SHIFT', 2), height), \
+        vector(strength, ('MULTIPLY', distance, -1 if node.invert else 1), 0)
+
 def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
     eta = 'MAXIMUM', inputs[0], 1e-5
     return 'DIELECTRIC', ('DOT_PRODUCT', ('INCOMING',), facing(inputs[1])), mix(eta, ('DIVIDE', 1, eta),
@@ -667,7 +675,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('DOT_PRODUCT', ('CAMERA_POINT',), numpy.eye(3)[2]), length(('CAMERA_POINT',)))[index],
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
-    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight,
+    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'BUMP': bump,
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
