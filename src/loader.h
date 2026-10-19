@@ -209,7 +209,7 @@ struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; s
 // Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
     OptixBuildOperation operation, CUdeviceptr& temp, CUdeviceptr& output) {
-    unsigned flags = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
+    unsigned flags = OPTIX_GEOMETRY_FLAG_NONE; // Any-hit only skips triangles, of rays enabling it
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
         .vertexBuffers = count ? &vertices : nullptr, .numVertices = 3 * count,
         .vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3, .flags = &flags, .numSbtRecords = 1}};
