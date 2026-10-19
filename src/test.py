@@ -65,10 +65,12 @@ alpha = cutout.id_data.nodes.new('ShaderNodeTexImage')
 alpha.image = bpy.data.images.new('clear', 1, 1, alpha=True)
 alpha.image.pixels.foreach_set((0, 0, 0, 0))
 cutout.id_data.links.new(alpha.outputs['Alpha'], cutout.inputs['Alpha'])
-fog = plane('fog', 0, 0, 4).id_data  # Not rendered: volume only
+fog = plane('fog', 0, 0, 4).id_data  # Passes rays straight through: volume only, of no density
 output = fog.nodes['Material Output']
 fog.links.remove(output.inputs['Surface'].links[0])
-fog.links.new(fog.nodes.new('ShaderNodeVolumePrincipled').outputs['Volume'], output.inputs['Volume'])
+volume = fog.nodes.new('ShaderNodeVolumePrincipled')
+volume.inputs['Density'].default_value = 0
+fog.links.new(volume.outputs['Volume'], output.inputs['Volume'])
 for name in ('cutout', 'fog'): bpy.data.objects[name].location.z = 0.5  # Between the camera and the other planes
 emitter = plane('emitter', 0, -0.75, 0.5)
 emitter.inputs['Base Color'].default_value = (0, 0, 0, 1)
@@ -160,6 +162,30 @@ for kind in ('glass', 'cutout'):  # The cutout of alpha 0, which rays pass strai
         seen = numpy.array(bpy.data.images.load(veil.render.filepath, check_existing=False).pixels).reshape(16, 16,
             4)[4:12, 4:12, :3].mean()
         assert abs(seen - (0 if hidden else 1)) < 0.02, ('veil', kind, hidden, seen)
+# And past the faces of a volume, scattering nothing: of density 0, or absorbing 1 per unit length over its depth of 0.6,
+# where the emitter reads exp(-0.6) seen, along the rays near the middle the window takes, and 0 hidden; at 256
+# samples, where Russian roulette spreads the absorber's read by about 0.008
+bpy.data.objects['veil'].hide_render = True
+mesh = bpy.data.meshes.new('veil box')
+bm = bmesh.new()
+bmesh.ops.create_cube(bm, size=1)
+bm.to_mesh(mesh)
+mesh.materials.append(fill := bpy.data.materials.new('veil box'))
+fill.node_tree.nodes.remove(fill.node_tree.nodes['Principled BSDF'])
+absorber = fill.node_tree.nodes.new('ShaderNodeVolumeAbsorption')
+absorber.inputs['Color'].default_value = (0, 0, 0, 1)
+fill.node_tree.links.new(absorber.outputs[0], fill.node_tree.nodes['Material Output'].inputs['Volume'])
+veil.collection.objects.link(box := bpy.data.objects.new('veil box', mesh))
+box.location, box.scale = (0, 0, 0.5), (4, 4, 0.6)
+veil.flex_samples = 256
+for density, passed in ((0, 1), (1, math.exp(-0.6))):
+    absorber.inputs['Density'].default_value = density
+    for hidden in (False, True):
+        bpy.data.objects['veiled'].visible_camera = not hidden
+        bpy.ops.render.render(scene=veil.name, write_still=True)
+        seen = numpy.array(bpy.data.images.load(veil.render.filepath, check_existing=False).pixels).reshape(16, 16,
+            4)[6:10, 6:10, :3].mean()
+        assert abs(seen - (0 if hidden else passed)) < 0.03, ('veil', density, hidden, seen)
 
 class Viewport:  # Stands in for the engine instance Blender creates for a viewport, which background mode has none of
     engine = bpy.types.RenderEngine.bl_rna_get_subclass_py('FLEX')
