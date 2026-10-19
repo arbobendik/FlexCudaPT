@@ -372,6 +372,19 @@ __device__ float wrapped(float x) { return fmodf(x, 100000) + 0.5f * (fabsf(x) >
 // blended by their faded distances
 __device__ float noise(float3 p, float w, int dims) {
     p = make_float3(wrapped(p.x), wrapped(p.y), wrapped(p.z)), w = wrapped(w);
+    if (dims == 3) {
+        const float3 low = make_float3(floorf(p.x), floorf(p.y), floorf(p.z));
+        float sum = 0;
+        for (unsigned corner = 0; corner < 8; ++corner) {
+            const float3 d = make_float3(corner & 1, corner >> 1 & 1, corner >> 2), f = p - low - d;
+            const unsigned h = jenkins(3, int(low.x) + int(d.x), int(low.y) + int(d.y), int(low.z) + int(d.z)) & 15;
+            const float u = h < 8 ? f.x : f.y, v = h < 4 ? f.y : h == 12 || h == 14 ? f.x : f.z;
+            const float weight = (d.x ? fade(f.x + 1) : 1 - fade(f.x))
+                * (d.y ? fade(f.y + 1) : 1 - fade(f.y)) * (d.z ? fade(f.z + 1) : 1 - fade(f.z));
+            sum += weight * ((h & 1 ? -u : u) + (h & 2 ? -v : v));
+        }
+        return 0.9820f * sum;
+    }
     const float q[4] = {p.x, p.y, p.z, w}, scales[4] = {0.25f, 0.6616f, 0.9820f, 0.8344f};
     float sum = 0;
     for (int corner = 0; corner < 1 << dims; ++corner) {
