@@ -90,6 +90,22 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
         ? OPTIX_ERROR_PIPELINE_LINK_ERROR : OPTIX_SUCCESS;
 }
 
+inline OptixResult optixModuleDestroy(OptixModule module) {
+    vkDestroyShaderModule(vulkan.device, module->shader, nullptr);
+    delete module;
+    return OPTIX_SUCCESS;
+}
+inline OptixResult optixProgramGroupDestroy(OptixProgramGroup group) {
+    delete group;
+    return OPTIX_SUCCESS;
+}
+inline OptixResult optixPipelineDestroy(OptixPipeline pipeline) {
+    vkDestroyPipeline(vulkan.device, pipeline->pipeline, nullptr);
+    vkDestroyPipelineLayout(vulkan.device, pipeline->layout, nullptr);
+    delete pipeline;
+    return OPTIX_SUCCESS;
+}
+
 inline OptixResult optixSbtRecordPackHeader(OptixProgramGroup group, void* header) {
     std::memset(header, 0, OPTIX_SBT_RECORD_HEADER_SIZE);
     *(unsigned*)header = group->program;
