@@ -50,10 +50,10 @@ template <typename T> T* zeros(size_t count) {
 // Per pixel arrays of a view
 inline void loadView(Scene& scene, size_t pixels) {
     scene.accumulation = zeros<float4>(pixels);
-    scene.previous = zeros<Reservoir>(pixels);
+    scene.previous = (Reservoir*)zeros<char>(pixels * (sizeof(Reservoir) + sizeof(float)));
     scene.initial = zeros<Reservoir>(pixels);
     scene.temporal = zeros<Reservoir>(pixels);
-    scene.duplication = zeros<float>(pixels);
+    scene.duplication = (float*)(scene.previous + pixels); // After the reservoirs, as the anchor keeps them
     scene.shifts = zeros<Shift>(3 * pixels);
 }
 
