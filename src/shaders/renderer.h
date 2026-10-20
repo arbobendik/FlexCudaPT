@@ -18,6 +18,9 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
+// Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
+constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
+    "__raygen__duplicates", "__raygen__lights", "__raygen__denoise"};
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom

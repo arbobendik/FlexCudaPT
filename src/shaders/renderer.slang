@@ -1584,7 +1584,7 @@ void duplicates(uint3 p, uint3 size, Scene scene) {
 }
 
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
-// by its place in PROGRAMS there
+// by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
