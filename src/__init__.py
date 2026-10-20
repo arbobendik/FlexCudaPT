@@ -751,6 +751,8 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
         matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
 
+BACKENDS = (('OPTIX', ''), ('VULKAN', '-vulkan'))  # The renderer of each, by the suffix of its binary
+runnable = ()  # The backends whose renderer starts on this machine, which register finds
 def device(): return bpy.context.preferences.addons[__package__].preferences.device
 
 # The scene's settings of the renderer, in its order, which denoises on OptiX alone; the viewport denoises every result
@@ -1056,7 +1058,13 @@ class FlexPreferences(bpy.types.AddonPreferences):  # The API the renderer trace
     device: bpy.props.EnumProperty(name='Device', items=(('OPTIX', 'OptiX', 'NVIDIA RTX GPUs'),
         ('VULKAN', 'Vulkan', 'GPUs with Vulkan ray queries, without denoising')))
 
-    def draw(self, context): self.layout.prop(self, 'device')
+    def draw(self, context):  # Those this machine runs selectable alone
+        if not runnable: self.layout.label(text='No backend runs on this machine', icon='ERROR')
+        row = self.layout.row()
+        for key, _ in BACKENDS:
+            button = row.row()
+            button.enabled = key in runnable
+            button.prop_enum(self, 'device', key)
 
 class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     bl_label = 'Flex'
@@ -1115,6 +1123,9 @@ def reload():
 
 def register():
     for binary in (BINARY, BINARY + '-vulkan'): os.chmod(binary, 0o755)  # Extension installs drop the executable bit
+    global runnable  # Started without a file, a renderer exits once its device is up, failing without one
+    runnable = tuple(key for key, suffix in BACKENDS if not subprocess.run((BINARY + suffix,),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
     bpy.app.timers.register(reload, persistent=True)
     bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1)
@@ -1142,6 +1153,8 @@ def register():
         'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
         max=math.pi, subtype='ANGLE')
     bpy.utils.register_class(FlexPreferences)
+    preferences = bpy.context.preferences.addons[__package__].preferences
+    if runnable and preferences.device not in runnable: preferences.device = runnable[0]
     bpy.utils.register_class(Flex)
     bpy.utils.register_class(RENDER_PT_flex)
     bpy.utils.register_class(RENDER_PT_flex_restir)
