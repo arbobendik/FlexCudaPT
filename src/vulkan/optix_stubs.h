@@ -10,8 +10,6 @@
 struct Launch { CUdeviceptr record; unsigned width, height, depth; };
 constexpr unsigned WORKGROUP = 8; // Square, as renderer.slang's main runs, its threads in a row for launches one high
 
-struct OptixDeviceContext_t {};
-struct OptixDenoiser_t {};
 struct OptixModule_t { VkShaderModule shader; };
 struct OptixProgramGroup_t { OptixModule module; unsigned program; };
 struct OptixPipeline_t { VkPipelineLayout layout; VkPipeline pipeline; };
@@ -19,7 +17,7 @@ struct OptixPipeline_t { VkPipelineLayout layout; VkPipeline pipeline; };
 inline OptixResult optixInit() { return OPTIX_SUCCESS; }
 
 inline OptixResult optixDeviceContextCreate(CUcontext, const OptixDeviceContextOptions*, OptixDeviceContext* context) {
-    *context = new OptixDeviceContext_t;
+    *context = nullptr;
     return OPTIX_SUCCESS;
 }
 
@@ -31,7 +29,7 @@ inline OptixResult optixDeviceContextGetProperty(OptixDeviceContext, OptixDevice
 
 inline OptixResult optixDenoiserCreate(OptixDeviceContext, OptixDenoiserModelKind, const OptixDenoiserOptions*,
     OptixDenoiser* denoiser) {
-    *denoiser = new OptixDenoiser_t;
+    *denoiser = nullptr;
     return OPTIX_SUCCESS;
 }
 inline OptixResult optixDenoiserComputeMemoryResources(OptixDenoiser, unsigned, unsigned, OptixDenoiserSizes*) {
