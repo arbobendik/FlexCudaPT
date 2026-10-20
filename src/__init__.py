@@ -830,12 +830,11 @@ class Flex(bpy.types.RenderEngine):
         references = {node.object.name for tree in trees if tree for node in tree.nodes
             if node.type == 'TEX_COORD' and node.object}
         changed = {update.id.name for update in depsgraph.updates}
-        if visible == self.visible and not references & changed and all(isinstance(update.id,
-                (bpy.types.Scene, bpy.types.Camera))
+        same = visible == self.visible and not references & changed
+        if same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
-        moved = visible == self.visible and not references & changed and all(isinstance(update.id,
-            (bpy.types.Scene, bpy.types.Camera, bpy.types.Object, bpy.types.Action)) for update in depsgraph.updates) \
-            and changed
+        moved = same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera, bpy.types.Object,
+            bpy.types.Action)) for update in depsgraph.updates) and changed
         self.visible = visible
         scene = depsgraph.scene_eval
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
