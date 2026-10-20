@@ -3,11 +3,9 @@
 // of one instance; the denoiser is OptiX's alone
 #pragma once
 #include "cuda.h"
+#include "../shaders/renderer.h"
 #include <optix_types.h>
 
-// The raygen programs, numbered as renderer.slang's main runs them
-constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
-    "__raygen__duplicates", "__raygen__lights", "__raygen__denoise"};
 // What a launch pushes: the address of its record and its size
 struct Launch { CUdeviceptr record; unsigned width, height, depth; };
 constexpr unsigned WORKGROUP = 8; // Square, as renderer.slang's main runs, its threads in a row for launches one high
