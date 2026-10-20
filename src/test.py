@@ -324,6 +324,11 @@ direct = mis_render(1, False)
 for reuse in (False, True):
     pixels = mis_render(3, reuse)
     assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS straight transmission'
+# Light sampling passes a half metallic white cutout as a dielectric one of half its color, as the BSDF transmits both
+bpy.data.objects['cutout'].visible_camera, cutout.inputs['Metallic'].default_value = False, 0.5
+metal = mis_render(0, False)
+cutout.inputs['Base Color'].default_value, cutout.inputs['Metallic'].default_value = (0.5, 0.5, 0.5, 1), 0
+assert numpy.isclose(mis_render(0, False).mean(), metal.mean(), rtol=0.01), 'metallic straight transmission'
 scene.flex_bounces = bounces
 scene.flex_restir = True
 # Through a slab of white glass of IOR 1 and depth 0.5 under the white sky, a Volume Absorption of the color and density 1
