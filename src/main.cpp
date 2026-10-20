@@ -48,9 +48,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     OptixModule module;
     // Raygen programs of a frame's passes, then the any-hit program skipping a triangle: rays are only traversed, so
     // none runs on a miss or a closest hit
-    const char* passes[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
-        "__raygen__duplicates", "__raygen__lights", "__raygen__denoise"};
-    constexpr unsigned PASSES = sizeof(passes) / sizeof(*passes);
+    constexpr unsigned PASSES = std::size(PROGRAMS);
     OptixProgramGroup groups[PASSES + 1];
     OptixProgramGroupOptions groupOptions{};
     // Link pipeline, no recursion
@@ -95,7 +93,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         CHECK(optixModuleGetCompilationState(module, &state));
         CHECK(state != OPTIX_MODULE_COMPILE_STATE_COMPLETED);
         for (unsigned pass = 0; pass < PASSES; ++pass) {
-            OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, passes[pass]}};
+            OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, PROGRAMS[pass]}};
             CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));
             CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
         }
