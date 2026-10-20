@@ -227,23 +227,20 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                 CHECK(cuMemsetD32((CUdeviceptr)scene.flow, 0, 2 * pixels));
                 CHECK(cuMemsetD32((CUdeviceptr)scene.trust, 0, pixels));
             }
-            const unsigned width = view.width, height = view.height, stride = sizes.internalGuideLayerPixelSizeInBytes;
-            const OptixImage2D image{(CUdeviceptr)scene.mean, width, height, width * unsigned(sizeof(float4)),
-                sizeof(float4), OPTIX_PIXEL_FORMAT_FLOAT4};
-            OptixDenoiserLayer layer{.input = image, .previousOutput = image, .output = image,
+            const auto image = [&](CUdeviceptr data, unsigned bytes, OptixPixelFormat format) {
+                return OptixImage2D{data, view.width, view.height, view.width * bytes, bytes, format}; };
+            const unsigned stride = sizes.internalGuideLayerPixelSizeInBytes;
+            const OptixImage2D beauty = image((CUdeviceptr)scene.mean, sizeof(float4), OPTIX_PIXEL_FORMAT_FLOAT4);
+            OptixDenoiserLayer layer{.input = beauty, .previousOutput = beauty, .output = beauty,
                 .type = OPTIX_DENOISER_AOV_TYPE_BEAUTY};
             layer.output.data = result = denoised;
             if (history) layer.previousOutput.data = denoised;
             const OptixDenoiserParams params{.temporalModeUsePreviousLayers = history};
             const OptixDenoiserGuideLayer guide{
-                .flow = {(CUdeviceptr)scene.flow, width, height, width * unsigned(sizeof(float2)), sizeof(float2),
-                    OPTIX_PIXEL_FORMAT_FLOAT2},
-                .previousOutputInternalGuideLayer = {guides[0], width, height, width * stride, stride,
-                    OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER},
-                .outputInternalGuideLayer = {guides[1], width, height, width * stride, stride,
-                    OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER},
-                .flowTrustworthiness = {(CUdeviceptr)scene.trust, width, height, width * unsigned(sizeof(float)),
-                    sizeof(float), OPTIX_PIXEL_FORMAT_FLOAT1}};
+                .flow = image((CUdeviceptr)scene.flow, sizeof(float2), OPTIX_PIXEL_FORMAT_FLOAT2),
+                .previousOutputInternalGuideLayer = image(guides[0], stride, OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER),
+                .outputInternalGuideLayer = image(guides[1], stride, OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER),
+                .flowTrustworthiness = image((CUdeviceptr)scene.trust, sizeof(float), OPTIX_PIXEL_FORMAT_FLOAT1)};
             CHECK(optixDenoiserInvoke(denoiser, nullptr, &params, state, sizes.stateSizeInBytes, &guide, &layer, 1,
                 0, 0, scratch, sizes.withoutOverlapScratchSizeInBytes));
             // The frame denoised is the last one now
