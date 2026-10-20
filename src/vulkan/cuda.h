@@ -70,19 +70,20 @@ inline CUresult create(VkDeviceSize bytes, VkMemoryPropertyFlags flags, VkBuffer
     return vkBindBufferMemory(vulkan.device, buffer, memory, 0);
 }
 
+template <class T, class F, class... A> std::vector<T> listed(F list, A... args) { // What a Vulkan call lists
+    uint32_t count = 0;
+    list(args..., &count, nullptr);
+    std::vector<T> items(count);
+    return list(args..., &count, items.data()), items;
+}
+
 // The first discrete GPU with ray queries, else the first GPU with them, its first queue family that computes
 inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
-    uint32_t count = 0;
-    vkEnumeratePhysicalDevices(vulkan.instance, &count, nullptr);
-    std::vector<VkPhysicalDevice> devices(count);
-    vkEnumeratePhysicalDevices(vulkan.instance, &count, devices.data());
+    auto devices = listed<VkPhysicalDevice>(vkEnumeratePhysicalDevices, vulkan.instance);
     const char* extensions[] = {VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, VK_KHR_RAY_QUERY_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
     const auto supported = [&](VkPhysicalDevice device) {
-        uint32_t count = 0;
-        vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
-        std::vector<VkExtensionProperties> properties(count);
-        vkEnumerateDeviceExtensionProperties(device, nullptr, &count, properties.data());
+        const auto properties = listed<VkExtensionProperties>(vkEnumerateDeviceExtensionProperties, device, nullptr);
         return std::all_of(std::begin(extensions), std::end(extensions), [&](const char* name) {
             return std::any_of(properties.begin(), properties.end(),
                 [&](const VkExtensionProperties& p) { return !std::strcmp(p.extensionName, name); });
@@ -97,9 +98,7 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
     if (found == devices.end()) return VK_ERROR_FEATURE_NOT_PRESENT;
     vulkan.physical = *found;
     vkGetPhysicalDeviceProperties(vulkan.physical, &vulkan.properties);
-    vkGetPhysicalDeviceQueueFamilyProperties(vulkan.physical, &count, nullptr);
-    std::vector<VkQueueFamilyProperties> families(count);
-    vkGetPhysicalDeviceQueueFamilyProperties(vulkan.physical, &count, families.data());
+    const auto families = listed<VkQueueFamilyProperties>(vkGetPhysicalDeviceQueueFamilyProperties, vulkan.physical);
     const uint32_t family = std::find_if(families.begin(), families.end(), [](const VkQueueFamilyProperties& f) {
         return f.queueFlags & VK_QUEUE_COMPUTE_BIT; }) - families.begin();
     const float priority = 1;
