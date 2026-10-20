@@ -1079,8 +1079,7 @@ bool survives(Scene scene, uint seed, float3 throughput, inout float density, ui
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
-        const bool nee = !passed && layer == 0u && (surface.roughness > 0
-            || (surface.metallic < 1 && surface.transparency < 1));
+        const bool nee = !passed && layer == 0u && samplesLights(material);
         const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
             ? float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
