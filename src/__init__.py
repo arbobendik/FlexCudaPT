@@ -1130,6 +1130,34 @@ class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex eng
             body.prop(scene, 'flex_jump_distance')
             body.prop(scene, 'flex_jump_angle')
 
+PROPERTIES = {
+    'flex_samples': bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
+        default=1024, min=1),
+    'flex_bounces': bpy.props.IntProperty(name='Max Bounces',
+        description='Bounces of a path after the surface the camera sees', default=16, min=0, max=16),
+    'flex_paths': bpy.props.IntProperty(name='Paths per Sample',
+        description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32),
+    'flex_denoise': bpy.props.BoolProperty(name='Denoise',
+        description='Denoise the result with the OptiX denoiser'),
+    'flex_restir': bpy.props.BoolProperty(name='ReSTIR',
+        description='Reuse paths across pixels and samples with ReSTIR PT Enhanced', default=True),
+    'flex_decorrelation': bpy.props.BoolProperty(name='Decorrelation', description='Reuse samples '
+        'repeated across the neighborhood less over time. Biased: trades correlation artifacts for energy loss'),
+    'flex_neighbors': bpy.props.IntProperty(name='Spatial Neighbors',
+        description='Pixels each pixel reuses paths from per sample, fewer trade quality for speed', default=3, min=1,
+        max=3),
+    'flex_reuse': bpy.props.BoolProperty(name='Reuse Samples', description='Trace fewer samples of a '
+        'view reusing the last one\'s paths, as an animation\'s frames do after its first and after camera jumps'),
+    'flex_reuse_samples': bpy.props.IntProperty(name='Reuse Samples',
+        description='Paths traced per pixel of a view reusing the last one\'s', default=128, min=1),
+    'flex_jump_distance': bpy.props.FloatProperty(name='Distance', description='Farthest the camera '
+        'moves between views to reuse samples, a farther move jumps and traces all of them', default=1, min=0,
+        subtype='DISTANCE'),
+    'flex_jump_angle': bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
+        'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
+        max=math.pi, subtype='ANGLE')}
+CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir)
+
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
 def reload():
     if os.path.exists(__file__) and os.path.getmtime(__file__) != MODIFIED:
@@ -1142,54 +1170,14 @@ def register():
     runnable = tuple(key for key, suffix in BACKENDS if not subprocess.run((BINARY + suffix,),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
     bpy.app.timers.register(reload, persistent=True)
-    bpy.types.Scene.flex_samples = bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
-        default=1024, min=1)
-    bpy.types.Scene.flex_bounces = bpy.props.IntProperty(name='Max Bounces',
-        description='Bounces of a path after the surface the camera sees', default=16, min=0, max=16)
-    bpy.types.Scene.flex_paths = bpy.props.IntProperty(name='Paths per Sample',
-        description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32)
-    bpy.types.Scene.flex_denoise = bpy.props.BoolProperty(name='Denoise',
-        description='Denoise the result with the OptiX denoiser')
-    bpy.types.Scene.flex_restir = bpy.props.BoolProperty(name='ReSTIR',
-        description='Reuse paths across pixels and samples with ReSTIR PT Enhanced', default=True)
-    bpy.types.Scene.flex_decorrelation = bpy.props.BoolProperty(name='Decorrelation', description='Reuse samples '
-        'repeated across the neighborhood less over time. Biased: trades correlation artifacts for energy loss')
-    bpy.types.Scene.flex_neighbors = bpy.props.IntProperty(name='Spatial Neighbors',
-        description='Pixels each pixel reuses paths from per sample, fewer trade quality for speed', default=3, min=1,
-        max=3)
-    bpy.types.Scene.flex_reuse = bpy.props.BoolProperty(name='Reuse Samples', description='Trace fewer samples of a '
-        'view reusing the last one\'s paths, as an animation\'s frames do after its first and after camera jumps')
-    bpy.types.Scene.flex_reuse_samples = bpy.props.IntProperty(name='Reuse Samples',
-        description='Paths traced per pixel of a view reusing the last one\'s', default=128, min=1)
-    bpy.types.Scene.flex_jump_distance = bpy.props.FloatProperty(name='Distance', description='Farthest the camera '
-        'moves between views to reuse samples, a farther move jumps and traces all of them', default=1, min=0,
-        subtype='DISTANCE')
-    bpy.types.Scene.flex_jump_angle = bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
-        'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
-        max=math.pi, subtype='ANGLE')
-    bpy.utils.register_class(FlexPreferences)
+    for name, prop in PROPERTIES.items(): setattr(bpy.types.Scene, name, prop)
+    for cls in CLASSES: bpy.utils.register_class(cls)
     preferences = bpy.context.preferences.addons[__package__].preferences
     if runnable and preferences.device not in runnable: preferences.device = runnable[0]
-    bpy.utils.register_class(Flex)
-    bpy.utils.register_class(RENDER_PT_flex)
-    bpy.utils.register_class(RENDER_PT_flex_restir)
     for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.add(Flex.bl_idname)
 
 def unregister():
     bpy.app.timers.unregister(reload)
     for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.remove(Flex.bl_idname)
-    bpy.utils.unregister_class(RENDER_PT_flex_restir)
-    bpy.utils.unregister_class(RENDER_PT_flex)
-    bpy.utils.unregister_class(Flex)
-    bpy.utils.unregister_class(FlexPreferences)
-    del bpy.types.Scene.flex_samples
-    del bpy.types.Scene.flex_bounces
-    del bpy.types.Scene.flex_paths
-    del bpy.types.Scene.flex_denoise
-    del bpy.types.Scene.flex_restir
-    del bpy.types.Scene.flex_decorrelation
-    del bpy.types.Scene.flex_neighbors
-    del bpy.types.Scene.flex_reuse
-    del bpy.types.Scene.flex_reuse_samples
-    del bpy.types.Scene.flex_jump_distance
-    del bpy.types.Scene.flex_jump_angle
+    for cls in reversed(CLASSES): bpy.utils.unregister_class(cls)
+    for name in PROPERTIES: delattr(bpy.types.Scene, name)
