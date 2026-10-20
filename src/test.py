@@ -98,10 +98,14 @@ bare.nodes.remove(bare.nodes['Material Output'])
 for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
     node.interpolation = 'Closest'  # Whole texels
 
+def render():  # The scene rendered, its pixels' colors
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+
 STATS = []
 def stats(*args): STATS.append(args[0])
 bpy.app.handlers.render_stats.append(stats)
-bpy.ops.render.render(scene=scene.name, write_still=True)
+pixels = render()
 bpy.app.handlers.render_stats.remove(stats)
 progress = [message for message in STATS if ' | Sample ' in message]
 counts = [int(message.split('Sample ')[1].split('/')[0]) for message in progress]
@@ -109,7 +113,6 @@ assert counts[0] == 1 and counts[-1] == scene.flex_samples and all(
     0 < batch <= 64 for batch in numpy.diff([0, *counts])), 'sample progress'
 assert len(counts) <= 10, 'batched progress'
 assert all('Remaining:' in message and 'samples/s' in message for message in progress), 'performance stats'
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
 
 def chroma(x, y, size, color):  # Whether the block of pixels has the color's hue
     mean = pixels[y + 2:y + size - 2, x + 2:x + size - 2].mean((0, 1))
@@ -163,8 +166,7 @@ with offscreen.bind():
 assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
 # Light sampling passes through the cutout and emission it reaches is not added again: the cutout changes no light
 bpy.data.objects['cutout'].hide_render = True
-bpy.ops.render.render(scene=scene.name, write_still=True)
-uncut = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+uncut = render()
 assert numpy.allclose(uncut[18:46, 2:30].mean((0, 1)), pixels[18:46, 2:30].mean((0, 1)), rtol=0.1), 'straight through'
 # A black dielectric reflects white whatever its specular tint and level, as FlexLight's BSDF, which the exporter still
 # folds
@@ -176,31 +178,26 @@ colored.inputs['Specular Tint'].default_value = (0, 1, 0, 1)
 flex = sys.modules[Viewport.engine.__module__]
 surface = flex.fold(flex.resolve(colored.outputs[0].links[0].to_socket))
 assert numpy.allclose(numpy.array(surface[6:9]), ((1.5,) * 3, (0, 1, 0), (2,) * 3)), 'specular level'
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+pixels = render()
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
 assert max(red, green, blue) < 1.02 * min(red, green, blue), 'specular tint'
 # A black cutout covering half lets half the light through to the textured plane and half its light back
 alpha.image.pixels.foreach_set((0, 0, 0, 0.5))
 cutout.inputs['Base Color'].default_value = (0, 0, 0, 1)
 bpy.data.objects['cutout'].hide_render = False
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+pixels = render()
 assert 0.2 < pixels[18:46, 34:62].mean() / uncut[18:46, 34:62].mean() < 0.32, 'coverage'
 for ob in scene.objects: ob.hide_render = ob != scene.camera  # Nothing left to render but the sky
-bpy.ops.render.render(scene=scene.name, write_still=True)
-empty = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+empty = render()[:56]
 assert numpy.allclose(empty, SKY, atol=0.01), 'empty'
 # A white dielectric under a white sky reflects its light and its diffuse beside its specular, as FlexLight's BSDF
 bpy.data.objects['colored'].hide_render = False
 colored.inputs['Base Color'].default_value = colored.inputs['Specular Tint'].default_value = (1, 1, 1, 1)
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+pixels = render()
 assert abs(pixels[18:46, 2:30].mean() - 1.048) < 0.02, 'furnace'
 colored.inputs['Specular Tint'].default_value = (1, 0.08, 0.375, 1)  # Changes nothing, FlexLight's BSDF has no tint
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+pixels = render()
 assert abs(pixels[18:46, 2:30].mean() - 1.048) < 0.02, 'tinted furnace'
 # Huge, black and turned 60 degrees under the white sky, the colored plane reflects FlexLight's specular albedo at that
 # angle
@@ -208,8 +205,7 @@ colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
 colored.inputs['Specular Tint'].default_value, colored.inputs['Roughness'].default_value = (1, 1, 1, 1), 0.434
 bpy.data.objects['colored'].location, bpy.data.objects['colored'].rotation_euler = (0, 0, 0), (math.radians(60), 0, 0)
 bpy.data.objects['colored'].scale, scene.camera.data.angle = (100, 100, 1), math.radians(10)
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+pixels = render()[:56]
 assert abs(pixels.mean() - 0.0735) < 0.004, 'grazing specular'
 # Light sampling finds a dim emitter by the points it lights, a bright light behind them outshining it: at a sample
 # every pixel is lit, where picking emitters by their power alone lights next to none
@@ -222,8 +218,7 @@ dim.inputs['Base Color'].default_value, dim.inputs['Emission Color'].default_val
 dim.inputs['Emission Strength'].default_value = 1
 bpy.data.objects['dim'].location.z, bpy.data.objects['dim'].visible_camera = 0.5, False
 add(bpy.data.lights.new('bright', 'POINT'), (0, 0, -1)).data.energy = 1e6
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+pixels = render()[:56]
 assert pixels.sum(2).min() > 0, 'many lights'
 # Only the center tile emits: its nonlinear shader has zero emission at the texture's mean, like the dark tile.
 mesh = bpy.data.objects['dim'].data
@@ -242,13 +237,11 @@ dim.id_data.links.new(dim.id_data.nodes.new('ShaderNodeTexImage').outputs['Color
 dim.id_data.nodes['Image Texture'].image = texture.image
 dim.id_data.links.new(mask.outputs[0], dim.inputs['Emission Color'])
 scene.flex_restir = False
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+pixels = render()[:56]
 assert pixels.sum(2).min() > 0, 'textured light sampling'
 def mis_render(bounces, reuse):
     scene.flex_bounces, scene.flex_restir = bounces, reuse
-    bpy.ops.render.render(scene=scene.name, write_still=True)
-    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[:56, :, :3]
+    return render()[:56]
 
 # MIS preserves the rough BSDF's energy and adds the smooth dielectric's delta reflection, with and without reuse.
 bpy.data.objects['bright'].hide_render = True
@@ -326,22 +319,19 @@ glass.inputs['Base Color'].default_value, glass.inputs['IOR'].default_value = (1
 absorption = glass.id_data.nodes.new('ShaderNodeVolumeAbsorption')
 absorption.inputs['Color'].default_value = (*COLOR, 1)
 glass.id_data.links.new(absorption.outputs[0], glass.id_data.nodes['Material Output'].inputs['Volume'])
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+pixels = render()[24:40, 24:40]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.exp(numpy.array(COLOR) - 1) ** 0.5, rtol=0.02), 'absorption'
 # Colored instead, the slab tints the light by its base color at each of its two sides, by the color squared
 glass.id_data.links.remove(glass.id_data.nodes['Material Output'].inputs['Volume'].links[0])
 glass.inputs['Base Color'].default_value = (*COLOR, 1)
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+pixels = render()[24:40, 24:40]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.array(COLOR) ** 2, rtol=0.02), 'glass'
 # A long glass prism needs repeated total internal reflections to reach the white sky instead of turning black.
 bpy.data.objects['slab'].location, bpy.data.objects['slab'].scale = (0, 0, -10), (1, 1, 20)
 glass.inputs['Base Color'].default_value, glass.inputs['IOR'].default_value = (1, 1, 1, 1), 1.45
 matrix = scene.camera.matrix_world.copy()
 scene.camera.location, scene.camera.rotation_euler = (1, 0, 1), (0, math.pi / 4, 0)
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+pixels = render()[24:40, 24:40]
 assert pixels.mean() > 0.9, 'glass internal reflections at default bounces'
 scene.camera.matrix_world = matrix
 # Both MIS strategies absorb the same light through straight glass, even when hidden from the primary ray.
@@ -379,8 +369,7 @@ dof.aperture_fstop = fstop = scene.camera.data.lens * 1e-3  # Radius 0.5, measur
 
 def camera_render(**values):  # Image, bokeh variance and skew on each image axis
     for name, value in values.items(): setattr(dof, name, value)
-    bpy.ops.render.render(scene=scene.name, write_still=True)
-    pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+    pixels = render()
     weights = pixels.mean(2) / pixels.mean(2).sum()
     coordinates = numpy.indices(weights.shape)[::-1]
     centered = coordinates - (coordinates * weights).sum((1, 2))[:, None, None]
@@ -414,9 +403,7 @@ def node_matches(socket):
     colors = []
     for engine in ('FLEX', 'CYCLES'):
         scene.render.engine = engine
-        bpy.ops.render.render(scene=scene.name, write_still=True)
-        colors.append(numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[
-            24:40, 24:40, :3].mean((0, 1)))
+        colors.append(render()[24:40, 24:40].mean((0, 1)))
     assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
 
 noise = tree.nodes.new('ShaderNodeTexNoise')
