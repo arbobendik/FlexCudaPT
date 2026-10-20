@@ -1026,4 +1026,32 @@ __device__ float powerHeuristic(float a_5, float b_1)
     return _S281;
 }
 
+__device__ float sphereDensity(float3  center_0, float radius_1, float3  p_3)
+{
+    float3  _S282 = center_0 - p_3;
+    float _S283 = radius_1 * radius_1 / dot_0(_S282, _S282);
+    bool _S284 = _S283 >= 1.0f;
+    if(_S284)
+    {
+        return 0.07957746833562851f;
+    }
+    return (1.0f + (F32_sqrt((1.0f - _S283)))) / (6.28318548202514648f * _S283);
+}
+
+__device__ float3  sampleSphere(float3  center_1, float radius_2, float3  p_4, float u1_0, float u2_0)
+{
+    float3  _S285 = center_1 - p_4;
+    float _S286 = radius_2 * radius_2 / dot_0(_S285, _S285);
+    float _S287 = u1_0 * _S286 / (1.0f + (F32_sqrt(((F32_max((1.0f - _S286), (0.0f)))))));
+    float _S288 = 2.0f * u1_0;
+    bool _S289 = _S286 >= 1.0f;
+    float _S290 = _slang_select(_S289, _S288,_S287);
+    float _S291 = (F32_sqrt(((F32_max((_S290 * (2.0f - _S290)), (0.0f))))));
+    float _S292 = 6.28318548202514648f * u2_0;
+    float3  _S293 = make_float3 (_S291 * (F32_cos((_S292))), 1.0f - _S290, _S291 * (F32_sin((_S292))));
+    float3  _S294 = ((((_S285)) * make_float3(rnorm3df(((_S285)).x, ((_S285)).y, ((_S285)).z))));
+    float3  _S295 = tangentToWorld(_S293, _S294);
+    return _S295;
+}
+
 #undef Matrix
