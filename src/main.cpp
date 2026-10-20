@@ -33,12 +33,15 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     OptixDenoiser denoiser;
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
 
-    // Load embedded PTX
-    OptixPipelineCompileOptions compile{.numPayloadValues = 1}; // The triangle a ray skips
-    OptixModuleCompileOptions moduleOptions{.maxRegisterCount = 168}; // The default 128 spill the inlined programs
+    // Embedded PTX compiled for the steps the scene's programs take, bound in params: first for none
+    OptixPipelineCompileOptions compile{.numPayloadValues = 1, // The triangle a ray skips
+        .pipelineLaunchParamsVariableName = "params"};
+    Params params{};
+    const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};
+    OptixModuleCompileOptions moduleOptions{.maxRegisterCount = 168, // The default 128 spill the inlined programs
+        .boundValues = &bound, .numBoundValues = 1};
+    const CUdeviceptr launch = allocate(sizeof(params));
     OptixModule module;
-    CHECK(optixModuleCreate(context, &moduleOptions, &compile,
-        (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
     // Raygen programs of a frame's passes, then the any-hit program skipping a triangle: rays are only traversed, so
     // none runs on a miss or a closest hit
     const char* passes[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
@@ -46,26 +49,33 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     constexpr unsigned PASSES = sizeof(passes) / sizeof(*passes);
     OptixProgramGroup groups[PASSES + 1];
     OptixProgramGroupOptions groupOptions{};
-    for (unsigned pass = 0; pass < PASSES; ++pass) {
-        OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, passes[pass]}};
-        CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));
-    }
-    OptixProgramGroupDesc skip{.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
-        .hitgroup = {.moduleAH = module, .entryFunctionNameAH = "__anyhit__skip"}};
-    CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &groups[PASSES]));
     // Link pipeline, no recursion
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
     OptixPipeline pipeline;
-    CHECK(optixPipelineCreate(context, &compile, &link, groups, PASSES + 1, nullptr, nullptr, &pipeline));
     // An SBT record per pass carries scene
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
     Record records[PASSES];
-    for (unsigned pass = 0; pass < PASSES; ++pass) CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
     const CUdeviceptr table = allocate(sizeof(records));
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } hit;
-    CHECK(optixSbtRecordPackHeader(groups[PASSES], &hit));
-    OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit), &hit),
+    OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit)),
         .hitgroupRecordStrideInBytes = sizeof(hit), .hitgroupRecordCount = 1};
+    const auto specialize = [&] { // Module, programs and pipeline for params
+        CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
+        CHECK(optixModuleCreate(context, &moduleOptions, &compile,
+            (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
+        for (unsigned pass = 0; pass < PASSES; ++pass) {
+            OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, passes[pass]}};
+            CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));
+            CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
+        }
+        OptixProgramGroupDesc skip{.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
+            .hitgroup = {.moduleAH = module, .entryFunctionNameAH = "__anyhit__skip"}};
+        CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &groups[PASSES]));
+        CHECK(optixPipelineCreate(context, &compile, &link, groups, PASSES + 1, nullptr, nullptr, &pipeline));
+        CHECK(optixSbtRecordPackHeader(groups[PASSES], &hit));
+        CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, &hit, sizeof(hit)));
+    };
+    specialize();
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
     // number launched, memory used and peak in MiB, the sums left in the shared file if any were. A new view starts
     // over: it persists the last one if it has its size and settings and its camera did not jump, move farther than
@@ -95,13 +105,22 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         if (kind != REQUEST) {
             const unsigned count = scene.count;
             kind == SCENE ? loadScene(context, scene, loaded) : updateScene(context, scene, loaded);
+            Params next{};
+            for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
+            if (std::memcmp(&next, &params, sizeof(params))) { // Compiled anew for other steps, in place of the last
+                CHECK(optixPipelineDestroy(pipeline));
+                for (OptixProgramGroup group : groups) CHECK(optixProgramGroupDestroy(group));
+                CHECK(optixModuleDestroy(module));
+                params = next;
+                specialize();
+            }
             std::vector<Material> materials = loaded.materials;
             if (scene.count) {
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));
                 records[PASSES - 2].data = scene;
                 CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
                 const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};
-                CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, scene.count, 1, 1));
+                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count, 1, 1));
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
             }
             unsigned long long* trails;
@@ -175,7 +194,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
                 sbt.raygenRecord = table + pass * sizeof(Record);
-                CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, view.width, view.height, depths[pass]));
+                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
         }
@@ -206,7 +225,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             for (Record& record : records) record.data = scene;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             sbt.raygenRecord = table + (PASSES - 1) * sizeof(Record);
-            CHECK(optixLaunch(pipeline, nullptr, 0, 0, &sbt, view.width, view.height, 1));
+            CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, 1));
             if (!history) { // The first of a sequence moves nowhere
                 CHECK(cuMemsetD32((CUdeviceptr)scene.flow, 0, 2 * pixels));
                 CHECK(cuMemsetD32((CUdeviceptr)scene.trust, 0, pixels));
