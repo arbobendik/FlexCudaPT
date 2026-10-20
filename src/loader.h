@@ -98,7 +98,7 @@ template <typename T> T* load(size_t count) {
     return load(count, data);
 }
 // Count elements piped in by the extension into data, uploaded into array from first on
-template <typename T> void update(T* array, size_t first, size_t count, T* data) {
+template <typename T> void update(T* array, size_t first, size_t count, void* data) {
     std::fread(data, sizeof(T), count, stdin);
     CHECK(cuMemcpyHtoD((CUdeviceptr)(array + first), data, count * sizeof(T)));
 }
@@ -274,18 +274,15 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
     for (unsigned r = 0; r < ranges; ++r) {
         struct { unsigned first, count; } range;
         std::fread(&range, sizeof(range), 1, stdin);
-        std::vector<float3> points(3 * range.count);
-        std::vector<float2> uvs(3 * range.count);
-        std::vector<float4> colors(3 * range.count);
-        std::vector<Info> infos(range.count);
+        std::vector<Info> scratch(range.count); // As large as any of the range's arrays piped in
         update(scene.vertices, 3 * range.first, 3 * range.count, &loaded.vertices[3 * range.first]);
-        update(scene.normals, 3 * range.first, 3 * range.count, points.data());
-        update(scene.generated, 3 * range.first, 3 * range.count, points.data());
-        update(scene.objects, 3 * range.first, 3 * range.count, points.data());
-        update(scene.uvs, 3 * range.first, 3 * range.count, uvs.data());
-        update(scene.colors, 3 * range.first, 3 * range.count, colors.data());
-        update(scene.tangents, 3 * range.first, 3 * range.count, colors.data());
-        update(scene.infos, range.first, range.count, infos.data());
+        update(scene.normals, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.generated, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.objects, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.uvs, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.colors, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.tangents, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.infos, range.first, range.count, scratch.data());
     }
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, scene.count, OPTIX_BUILD_OPERATION_UPDATE,
         loaded.temp, loaded.output);
