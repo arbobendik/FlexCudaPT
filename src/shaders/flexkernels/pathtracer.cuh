@@ -246,7 +246,7 @@ __device__ float trowbridgeReitz(float alpha_0, float n_dot_h_0)
 {
     float _S28 = alpha_0 * alpha_0;
     float _S29 = (1.0f - n_dot_h_0) * (1.0f + n_dot_h_0) + _S28 * n_dot_h_0 * n_dot_h_0;
-    return _S28 / (3.14159274101257324f * _S29 * _S29);
+    return _S28 / (F32_max((3.14159274101257324f * _S29 * _S29), (1.17549435082228751e-38f)));
 }
 
 __device__ float G1(float alpha_1, float n_dot_x_0)
