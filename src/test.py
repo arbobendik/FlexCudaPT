@@ -30,18 +30,23 @@ def add(data, location, rotation=(0, 0, 0)):
     scene.collection.objects.link(ob)
     return ob
 
-def plane(name, x, y=0, size=1):  # Square at height 0 with a Principled BSDF, returned
-    mesh = bpy.data.meshes.new(name)
+def shape(name, create, location, rotation=(0, 0, 0)):  # Of a bmesh operator's shape, with a Principled BSDF, returned
+    data = bpy.data.meshes.new(name)
     bm = bmesh.new()
     bm.loops.layers.uv.new()
-    bmesh.ops.create_grid(bm, size=size / 2, calc_uvs=True)
-    bm.to_mesh(mesh)
-    mesh.shade_smooth()  # The colored plane's normals slightly off the face: light sampling leaves it at an offset
-    mesh.normals_split_custom_set([(0, 0.01 if name == 'colored' else 0, 1)] * len(mesh.loops))
-    mesh.materials.append(bpy.data.materials.new(name))
-    add(mesh, (x, y, 0))
-    mesh.materials[0].node_tree.nodes['Principled BSDF'].inputs['IOR'].default_value = 1  # Pure colors: no specular
-    return mesh.materials[0].node_tree.nodes['Principled BSDF']
+    create(bm)
+    bm.to_mesh(data)
+    data.materials.append(bpy.data.materials.new(name))
+    add(data, location, rotation)
+    return data.materials[0].node_tree.nodes['Principled BSDF']
+
+def plane(name, x, y=0, size=1):  # Square at height 0 with a Principled BSDF, returned
+    bsdf = shape(name, lambda bm: bmesh.ops.create_grid(bm, size=size / 2, calc_uvs=True), (x, y, 0))
+    data = bpy.data.meshes[name]
+    data.shade_smooth()  # The colored plane's normals slightly off the face: light sampling leaves it at an offset
+    data.normals_split_custom_set([(0, 0.01 if name == 'colored' else 0, 1)] * len(data.loops))
+    bsdf.inputs['IOR'].default_value = 1  # Pure colors: no specular
+    return bsdf
 
 # The camera looks down on [-1, 1]^2: sky above and below the planes, colored plane left, textured plane right, light
 # behind the camera, black plane emitting the texture at the bottom center.
@@ -310,13 +315,8 @@ scene.flex_restir = True
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
 scene.camera.data.angle, scene.flex_samples = 0.1, 16
-mesh = bpy.data.meshes.new('slab')
-bm = bmesh.new()
-bmesh.ops.create_cube(bm, size=1)
-bm.to_mesh(mesh)
-mesh.materials.append(bpy.data.materials.new('slab'))
-add(mesh, (0, 0, 0)).scale = (4, 4, 0.5)
-glass = mesh.materials[0].node_tree.nodes['Principled BSDF']
+glass = shape('slab', lambda bm: bmesh.ops.create_cube(bm, size=1), (0, 0, 0))
+bpy.data.objects['slab'].scale = (4, 4, 0.5)
 glass.inputs['Transmission Weight'].default_value, glass.inputs['Roughness'].default_value = 1, 0
 glass.inputs['Base Color'].default_value, glass.inputs['IOR'].default_value = (1, 1, 1, 1), 1
 absorption = glass.id_data.nodes.new('ShaderNodeVolumeAbsorption')
@@ -553,19 +553,9 @@ assert numpy.allclose(after.reshape(3, 3), before.reshape(3, 3) + (1, 0, 0)), 'i
 # on OptiX and on Vulkan, with ReSTIR and without, and compares the images, which trace the same random numbers.
 scene = new('parity')
 
-def mesh(name, create, location, rotation=(0, 0, 0)):  # Of a bmesh operator's shape, with a Principled BSDF, returned
-    data = bpy.data.meshes.new(name)
-    bm = bmesh.new()
-    bm.loops.layers.uv.new()
-    create(bm)
-    bm.to_mesh(data)
-    data.materials.append(bpy.data.materials.new(name))
-    add(data, location, rotation)
-    return data.materials[0].node_tree.nodes['Principled BSDF']
-
 scene.camera = add(bpy.data.cameras.new('camera'), (0, -3, 2), (math.radians(60), 0, 0))
 add(bpy.data.lights.new('light', 'POINT'), (1, -1, 3)).data.energy = 500
-floor = mesh('floor', lambda bm: bmesh.ops.create_grid(bm, size=2, calc_uvs=True), (0, 0, 0))
+floor = shape('floor', lambda bm: bmesh.ops.create_grid(bm, size=2, calc_uvs=True), (0, 0, 0))
 image = floor.id_data.nodes.new('ShaderNodeTexImage')
 image.image = bpy.data.images.new('checker', 4, 4)
 image.image.pixels.foreach_set([c for i in range(16) for c in ((0.9, 0.9, 0.9, 1) if (i + i // 4) % 2 else
@@ -581,19 +571,19 @@ negative.operation, negative.inputs['Scale'].default_value = 'SCALE', -3
 floor.id_data.links.new(floor.id_data.nodes.new('ShaderNodeTexCoord').outputs['UV'], negative.inputs[0])
 floor.id_data.links.new(negative.outputs[0], mirrored.inputs['Vector'])
 floor.id_data.links.new(mirrored.outputs['Color'], floor.inputs['Roughness'])
-metal = mesh('metal', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=0.5,
+metal = shape('metal', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=0.5,
     calc_uvs=True), (-0.8, 0, 0.5))
 metal.inputs['Metallic'].default_value, metal.inputs['Roughness'].default_value = 1, 0.1
 noise = metal.id_data.nodes.new('ShaderNodeTexNoise')
 metal.id_data.links.new(noise.outputs['Color'], metal.inputs['Base Color'])
-glass = mesh('glass', lambda bm: bmesh.ops.create_cube(bm, size=0.8, calc_uvs=True), (0.8, 0, 0.4),
+glass = shape('glass', lambda bm: bmesh.ops.create_cube(bm, size=0.8, calc_uvs=True), (0.8, 0, 0.4),
     (0, 0, math.radians(30)))
 glass.inputs['Transmission Weight'].default_value, glass.inputs['Roughness'].default_value = 1, 0
 glass.inputs['IOR'].default_value = 1.45
 absorption = glass.id_data.nodes.new('ShaderNodeVolumeAbsorption')
 absorption.inputs['Color'].default_value, absorption.inputs['Density'].default_value = (0.8, 0.4, 0.2, 1), 2
 glass.id_data.links.new(absorption.outputs[0], glass.id_data.nodes['Material Output'].inputs['Volume'])
-emitter = mesh('emitter', lambda bm: bmesh.ops.create_grid(bm, size=0.3, calc_uvs=True), (0, 1, 1),
+emitter = shape('emitter', lambda bm: bmesh.ops.create_grid(bm, size=0.3, calc_uvs=True), (0, 1, 1),
     (math.radians(90), 0, 0))
 emitter.inputs['Emission Strength'].default_value = 5
 voronoi = emitter.id_data.nodes.new('ShaderNodeTexVoronoi')
