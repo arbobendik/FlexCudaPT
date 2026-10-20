@@ -999,8 +999,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
-        const bool nee = !passed && layer == 0u && (surface.roughness > 0
-            || (surface.metallic < 1 && surface.transparency < 1));
+        const bool nee = !passed && layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
         const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
             ? make_float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
@@ -1127,7 +1126,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         }
         // Connections evaluate the given direction
         if (connect || arrived) {
-            lobe = connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
+            lobe = lobeBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
         }
         // Delta lobes have no competing light sample; straight transmission keeps the preceding vertex's weights.
         const bool delta = lobe_index != LOBE_DIFFUSE
