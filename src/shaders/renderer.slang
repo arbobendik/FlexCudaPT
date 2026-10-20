@@ -45,7 +45,6 @@ float random(inout uint state) { return ((state = hash(state)) >> 8) * (1.0f / 1
 float sinpi(float x) { return sin(PI * (x - 2 * round(x / 2))); }
 float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 
-static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
 // Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length
 struct Ray { bool camera, shadow; uint lobe; float depth, length; };
@@ -946,9 +945,22 @@ float lightPdf(Scene scene, float3 origin, float3 normal, uint triangle, float3 
 // Each lobe competes with light sampling, but on the last bounce, which samples no BSDF
 float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material material, float eta_i,
     float eta_o, uint random_state, float light, bool competing) {
-    return competing ? neeBSDF(in_dir, out_dir, n, material, eta_i, eta_o,
-        !(dot(g_n, -in_dir) * dot(g_n, out_dir) > 0), light, true, random_state) * light
-        : BSDF(in_dir, out_dir, n, g_n, material, eta_i, eta_o, random_state);
+    // BSDF's lobes toward the light, each weighed against BSDF sampling where it competes (power heuristic)
+    float3 throughputs[3];
+    float pdfs[3];
+    const float3 f = BSDF(in_dir, out_dir, n, material, eta_i, eta_o, !(dot(g_n, -in_dir) * dot(g_n, out_dir) > 0),
+        random_state, throughputs, pdfs);
+    if (!competing) {
+        return f;
+    }
+    float3 weighted = float3(0);
+    for (int i = 0; i < 3; i++) {
+        if (pdfs[i] > 0) {
+            const float ratio = pdfs[i] / light;
+            weighted += throughputs[i] * pdfs[i] / (light * (1 + ratio * ratio));
+        }
+    }
+    return weighted * light;
 }
 
 // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
@@ -1036,8 +1048,7 @@ bool survives(Scene scene, uint seed, float3 throughput, inout float density, ui
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
-        const bool nee = !passed && layer == 0u && (surface.roughness > 0
-            || (surface.metallic < 1 && surface.transparency < 1));
+        const bool nee = !passed && layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
         const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
             ? float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
@@ -1161,7 +1172,7 @@ bool survives(Scene scene, uint seed, float3 throughput, inout float density, ui
         }
         // Connections evaluate the given direction
         if (connect || arrived) {
-            lobe = connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
+            lobe = lobeBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
         }
         // Delta lobes have no competing light sample; straight transmission keeps the preceding vertex's weights.
         const bool delta = lobe_index != LOBE_DIFFUSE
