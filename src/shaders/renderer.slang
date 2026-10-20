@@ -24,7 +24,7 @@ static const int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
     float2* uvs; float4* colors; float4* tangents; Info* infos;
-    SceneMaterial* materials; LightNode* lights; uint64_t* trails; Op* ops; float4* texels; uint count; Camera camera;
+    SceneMaterial* materials; LightNode* lights; uint64_t* trails; Op* ops; uint4* texels; uint count; Camera camera;
     Reservoir* previous; Reservoir* initial; Reservoir* temporal; float* duplication; Shift* shifts; int8_t* pairing[3];
     uint frame; Camera previousCamera; Settings settings;
     float4* mean; float2* flow; float* trust; uint* seen; uint* previousSeen; float3* previousVertices;
@@ -63,6 +63,8 @@ float lightPath(Ray ray, int output) {
 
 // Logarithm of a to the base b, zero where undefined
 float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? log(a) / log(b) : 0; }
+// sRGB to linear
+float decode(float c) { return c < 0.04045f ? max(c, 0) / 12.92f : pow((c + 0.055f) / 1.055f, 2.4f); }
 // a to the power of b, zero where undefined
 float power(float a, float b) {
     return b == 0 ? 1 : a == 0 || a < 0 && b != trunc(b) ? 0 : a > 0 ? pow(a, b)
@@ -463,10 +465,10 @@ float spline(float t, int k) {
     return k == 0 ? (1 - t) * (1 - t) * (1 - t) / 6 : k == 1 ? (t * t * (3 * t - 6) + 4) / 6
         : k == 2 ? (t * (t * (3 - 3 * t) + 3) + 1) / 6 : t * t * t / 6;
 }
-// Of the op's image by its extension: repeated, extended, clipped to none or mirrored
+// Texel of the op's image by its extension; RGBA8 as k / 255, sRGB decoded to linear
 float4 texel(Scene scene, Op op, int x, int y) {
     const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF);
-    const int extension = int(asuint(op.value.z) >> 24);
+    const int extension = int(asuint(op.value.z) >> 24 & 3);
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return float4(0, 0, 0, 0);
     if (extension == 1) { x = min(max(x, 0), width - 1); y = min(max(y, 0), height - 1); }
     // Repeated images wrap once, mirrored ones over an image and its reflection; extended and clipped are in range
@@ -476,7 +478,11 @@ float4 texel(Scene scene, Op op, int x, int y) {
         y = (rem(y, 2 * height) + 2 * height) % (2 * height);
         x = x < width ? x : 2 * width - 1 - x; y = y < height ? y : 2 * height - 1 - y;
     }
-    return scene.texels[asuint(op.value.x) + y * width + x];
+    const uint i = y * width + x;
+    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(scene.texels[asuint(op.value.x) + i]);
+    const uint word = scene.texels[asuint(op.value.x) + i / 4][i % 4];
+    const float4 c = float4(word & 255, word >> 8 & 255, word >> 16 & 255, word >> 24) * (1.0f / 255);
+    return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
 // v from object to world or back, or from world to camera or back, by mode: point, direction or normal
 float3 transform(Scene scene, float3 v, int mode, Info info) {
@@ -554,7 +560,7 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
         case LIGHT_PATH: stack[top - 1] = float3(1, 1, 1) * lightPath(ray, int(stack[top - 1].x)); break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             const uint width = asuint(op.value.y), height = asuint(op.value.z);
-            const bool repeat = height >> 24 == 0;
+            const bool repeat = (height >> 24 & 3) == 0;
             float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * width;
             float y = (repeat ? wrap(stack[top - 1].y) : stack[top - 1].y) * (height & 0xFFFFFF);
             float4 color = texel(scene, *op, int(floor(x)), int(floor(y)));
