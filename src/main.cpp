@@ -139,7 +139,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             if (!reused || std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 reused = false;
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
-                    (void*)scene.temporal, (void*)scene.duplication, (void*)scene.shifts, (void*)anchor})
+                    (void*)scene.temporal, (void*)scene.shifts, (void*)anchor})
                     release((CUdeviceptr)array);
                 loadView(scene, request.view.width * request.view.height);
                 CHECK(munmap(sums, pixels * sizeof(float4)));
@@ -167,9 +167,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                         sizes.withoutOverlapScratchSizeInBytes));
                 }
             } else {
-                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previous, anchor, pixels * sizeof(Reservoir)));
-                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.duplication, anchor + pixels * sizeof(Reservoir),
-                    pixels * sizeof(float)));
+                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previous, anchor, pixels * (sizeof(Reservoir) + sizeof(float))));
                 scene.previousCamera = anchorCamera;
             }
             view = request.view;
@@ -196,9 +194,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             scene.previousCamera = scene.camera;
         }
         if (!reused && launched && done == samples) {
-            CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * sizeof(Reservoir)));
-            CHECK(cuMemcpyDtoD(anchor + pixels * sizeof(Reservoir), (CUdeviceptr)scene.duplication,
-                pixels * sizeof(float)));
+            CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * (sizeof(Reservoir) + sizeof(float))));
             for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
                 (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTemp, anchorOutput})
                 release(array);
