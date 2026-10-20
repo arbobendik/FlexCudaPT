@@ -185,8 +185,7 @@ inline OptixResult optixAccelBuild(OptixDeviceContext, CUstream, const OptixAcce
     Geometry geometry;
     describe(geometry, *inputs, *options);
     const Layout bytes = layout(geometry);
-    VkDeviceSize offset;
-    Allocation& allocation = find(output, offset);
+    auto [allocation, offset] = find(output);
     if (options->operation == OPTIX_BUILD_OPERATION_BUILD) {
         allocation.bvhs.resize(2);
         for (int level = 0; level < 2; ++level) {

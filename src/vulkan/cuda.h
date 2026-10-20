@@ -165,10 +165,9 @@ template <class F> CUresult run(F record) {
 }
 
 // The allocation an address is in and the address's offset into it
-inline Allocation& find(CUdeviceptr ptr, VkDeviceSize& offset) {
+inline std::pair<Allocation&, VkDeviceSize> find(CUdeviceptr ptr) {
     const auto allocation = std::prev(vulkan.allocations.upper_bound(ptr));
-    offset = ptr - allocation->first;
-    return allocation->second;
+    return {allocation->second, ptr - allocation->first};
 }
 
 // Of a size in whole words, which fills take
@@ -194,46 +193,45 @@ inline CUresult cuMemFree(CUdeviceptr ptr) {
 }
 
 inline CUresult cuMemGetAddressRange(CUdeviceptr* base, size_t* bytes, CUdeviceptr ptr) {
-    VkDeviceSize offset;
-    *bytes = find(ptr, offset).bytes;
+    const auto [allocation, offset] = find(ptr);
+    *bytes = allocation.bytes;
     *base = ptr - offset;
     return 0;
 }
 
 inline CUresult cuMemcpyHtoD(CUdeviceptr dst, const void* src, size_t bytes) {
-    VkDeviceSize offset;
-    const VkBuffer buffer = find(dst, offset).buffer;
+    const auto [allocation, offset] = find(dst);
     for (size_t done = 0; done < bytes; done += STAGING) {
         const VkBufferCopy region{.dstOffset = offset + done, .size = std::min(bytes - done, STAGING)};
         std::memcpy(vulkan.mapped, (const char*)src + done, region.size);
         if (CUresult result = run([&](VkCommandBuffer commands) {
-            vkCmdCopyBuffer(commands, vulkan.staging, buffer, 1, &region); })) return result;
+            vkCmdCopyBuffer(commands, vulkan.staging, allocation.buffer, 1, &region); })) return result;
     }
     return 0;
 }
 
 inline CUresult cuMemcpyDtoH(void* dst, CUdeviceptr src, size_t bytes) {
-    VkDeviceSize offset;
-    const VkBuffer buffer = find(src, offset).buffer;
+    const auto [allocation, offset] = find(src);
     for (size_t done = 0; done < bytes; done += STAGING) {
         const VkBufferCopy region{.srcOffset = offset + done, .size = std::min(bytes - done, STAGING)};
         if (CUresult result = run([&](VkCommandBuffer commands) {
-            vkCmdCopyBuffer(commands, buffer, vulkan.staging, 1, &region); })) return result;
+            vkCmdCopyBuffer(commands, allocation.buffer, vulkan.staging, 1, &region); })) return result;
         std::memcpy((char*)dst + done, vulkan.mapped, region.size);
     }
     return 0;
 }
 
 inline CUresult cuMemcpyDtoD(CUdeviceptr dst, CUdeviceptr src, size_t bytes) {
-    VkBufferCopy region{.size = bytes};
-    const VkBuffer to = find(dst, region.dstOffset).buffer, from = find(src, region.srcOffset).buffer;
-    return run([&](VkCommandBuffer commands) { vkCmdCopyBuffer(commands, from, to, 1, &region); });
+    const auto [to, toOffset] = find(dst);
+    const auto [from, fromOffset] = find(src);
+    const VkBufferCopy region{fromOffset, toOffset, bytes};
+    return run([&](VkCommandBuffer commands) { vkCmdCopyBuffer(commands, from.buffer, to.buffer, 1, &region); });
 }
 
 inline CUresult cuMemsetD32(CUdeviceptr ptr, unsigned value, size_t count) {
-    VkDeviceSize offset;
-    const VkBuffer buffer = find(ptr, offset).buffer;
-    return run([&](VkCommandBuffer commands) { vkCmdFillBuffer(commands, buffer, offset, 4 * count, value); });
+    const auto [allocation, offset] = find(ptr);
+    return run([&](VkCommandBuffer commands) {
+        vkCmdFillBuffer(commands, allocation.buffer, offset, 4 * count, value); });
 }
 
 // Of the words the bytes are in, from one
