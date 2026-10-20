@@ -896,40 +896,8 @@ float3 environment(Scene scene, float3 direction, Ray ray) {
         point, -direction, false, ray, info).emissive;
 }
 
-// Of max(0, a - b) for angles a, b in [0, PI] by their sines and cosines
-float cosSubClamped(float sin_a, float cos_a, float sin_b, float cos_b) {
-    return cos_a > cos_b ? 1 : cos_a * cos_b + sin_a * sin_b;
-}
-float sinSubClamped(float sin_a, float cos_a, float sin_b, float cos_b) {
-    return cos_a > cos_b ? 0 : sin_a * cos_b - cos_a * sin_b;
-}
-// Of an angle in [0, PI] by its cosine
-float sine(float c) { return sqrt(max(1 - c * c, 0)); }
-
-// Importance of a light BVH node to a point: power times bounds of the cosines at its emitters, two sided and diffuse,
-// and at the point (both hemispheres when normal is zero for transmission), over the squared distance
-// (pbrt-v4's LightBounds::Importance)
-float importance(LightNode node, float3 p, float3 normal) {
-    const float3 center = (node.low + node.high) * 0.5f, diagonal = node.high - node.low, wi = normalize(p - center);
-    const float d2 = dot(p - center, p - center), r2 = dot(diagonal, diagonal) / 4;
-    const float cos_theta_w = abs(dot(node.w, wi)), sin_theta_o = sine(node.cos_theta_o);
-    // Directions of the bounding sphere of the bounds, all from inside it
-    const float cos_theta_b = d2 < r2 ? -1 : sqrt(max(1 - r2 / d2, 0)), sin_theta_b = sine(cos_theta_b);
-    const float cos_theta_x = cosSubClamped(sine(cos_theta_w), cos_theta_w, sin_theta_o, node.cos_theta_o);
-    const float sin_theta_x = sinSubClamped(sine(cos_theta_w), cos_theta_w, sin_theta_o, node.cos_theta_o);
-    const float cos_theta_p = cosSubClamped(sin_theta_x, cos_theta_x, sin_theta_b, cos_theta_b);
-    // Diffuse emitters spread a quarter turn: cos theta_e = 0
-    if (cos_theta_p <= 0) return 0;
-    const float cos_theta_i = - dot(wi, normal);
-    return max(node.phi * cos_theta_p / max(d2, length(diagonal) / 2)
-        * (dot(normal, normal) == 0 ? 1 : cosSubClamped(sine(cos_theta_i), cos_theta_i, sin_theta_b, cos_theta_b)), 0);
-}
-
-// Density in solid angle of a uniform point toward on a triangle of normal twice its area, the triangle picked with
-// probability
-float solidAngle(float probability, float3 normal, float3 toward) {
-    return 2 * probability * pow(length(toward), 3) / abs(dot(normal, toward));
-}
+// A light BVH node's emitters, as the shared light tree takes them
+LightBounds bounds(LightNode node) { return LightBounds(node.low, node.high, node.w, node.phi, node.cos_theta_o); }
 
 // Scattering and extinction coefficients of a homogeneous medium, none by default
 struct Medium { float3 scatter, extinction; };
@@ -954,18 +922,13 @@ Medium volume(Surface surface) {
     float pick = random(state), probability = 1;
     uint node = 0;
     while (scene.lights[node].leaf == 0) {
-        const uint children[2] = {node + 1, scene.lights[node].child};
-        const float shares[2] = {importance(scene.lights[children[0]], origin, normal),
-            importance(scene.lights[children[1]], origin, normal)};
-        if (shares[0] == 0 && shares[1] == 0)
+        const uint child = pickChild(bounds(scene.lights[node + 1]), bounds(scene.lights[scene.lights[node].child]),
+            origin, normal, pick, probability);
+        if (child > 1)
             return float3(0, 0, 0);
-        const float total = shares[0] + shares[1];
-        const uint child = uint(shares[1] > 0 && pick * total >= shares[0]);
-        pick = min((pick * total - child * shares[0]) / shares[child], 0.99999994f);
-        probability *= shares[child] / total;
-        node = children[child];
+        node = child == 1 ? scene.lights[node].child : node + 1;
     }
-    if (node == 0 && !(importance(scene.lights[0], origin, normal) > 0))
+    if (node == 0 && !(importance(bounds(scene.lights[0]), origin, normal) > 0))
         return float3(0, 0, 0);
     const uint light = scene.lights[node].child;
     const float3 la = scene.vertices[3 * light];
@@ -1014,21 +977,16 @@ float lightPdf(Scene scene, float3 origin, float3 normal, float3 start, uint tri
     float probability = 1;
     uint node = 0;
     for (uint64_t trail = scene.trails[triangle]; scene.lights[node].leaf == 0; trail >>= 1) {
-        const uint children[2] = {node + 1, scene.lights[node].child};
-        const float shares[2] = {importance(scene.lights[children[0]], origin, normal),
-            importance(scene.lights[children[1]], origin, normal)};
         const uint taken = uint(trail & 1);
-        probability *= shares[taken] > 0 ? shares[taken] / (shares[0] + shares[1]) : 0;
-        node = children[taken];
+        probability *= childShare(bounds(scene.lights[node + 1]), bounds(scene.lights[scene.lights[node].child]),
+            origin, normal, taken);
+        node = taken == 1 ? scene.lights[node].child : node + 1;
     }
     float3* vertices = scene.vertices + 3 * triangle;
-    return scene.lights[node].child == triangle && importance(scene.lights[node], origin, normal) > 0
+    return scene.lights[node].child == triangle && importance(bounds(scene.lights[node]), origin, normal) > 0
         && (dot(normal, normal) == 0 || dot(normal, point - origin) > 0) ? solidAngle(probability,
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - start) : 0;
 }
-
-// Power heuristic weight of a strategy sampling at density a against one at density b (Veach 1997)
-float powerHeuristic(float a, float b) { return b > 0 ? 1 / (1 + (b / a) * (b / a)) : 1; }
 
 // renderer.cu's lit: each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF
 float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material material, float eta_i,
