@@ -808,20 +808,28 @@ __device__ float3  neeBSDF(float3  in_dir_4, float3  dir_0, float3  n_8, BSDFMat
     return f_0;
 }
 
+__device__ float3  straightThrough(float3  dir_1, float3  n_9, BSDFMaterial material_7)
+{
+    float _S207 = rgb_to_greyscale(material_7.albedo * make_float3 (material_7.metallic));
+    float _S208 = material_7.roughness;
+    float _S209 = G1(_S208 * _S208, (F32_abs((dot_0(n_9, dir_1)))));
+    return make_float3 (material_7.transmission * _S209 * (1.0f - _S207)) * material_7.albedo;
+}
+
 __device__ uint stream(uint seed_0, uint index_0)
 {
-    uint _S207 = hash(index_0);
-    uint _S208 = hash(seed_0 ^ _S207);
-    return _S208;
+    uint _S210 = hash(index_0);
+    uint _S211 = hash(seed_0 ^ _S210);
+    return _S211;
 }
 
 __device__ float3  safeDivide(float3  a_4, float3  b_0)
 {
-    float3  _S209 = a_4 / b_0;
-    float3  _S210 = make_float3 (0.0f);
-    bool3  _S211 = b_0 == _S210;
-    float3  _S212 = _slang_select(_S211, _S210,_S209);
-    return _S212;
+    float3  _S212 = a_4 / b_0;
+    float3  _S213 = make_float3 (0.0f);
+    bool3  _S214 = b_0 == _S213;
+    float3  _S215 = _slang_select(_S214, _S213,_S212);
+    return _S215;
 }
 
 struct Selection
@@ -834,30 +842,30 @@ struct Selection
 
 __device__ void offer(Selection * sel_0, Reservoir candidate_0, float3  weight_0)
 {
-    float _S213 = rgb_to_greyscale(weight_0);
-    bool _S214 = _S213 > 0.0f;
-    bool _S215;
-    if(_S214)
+    float _S216 = rgb_to_greyscale(weight_0);
+    bool _S217 = _S216 > 0.0f;
+    bool _S218;
+    if(_S217)
     {
-        _S215 = _S213 < 3.00000000549775576e+38f;
+        _S218 = _S216 < 3.00000000549775576e+38f;
     }
     else
     {
-        _S215 = false;
+        _S218 = false;
     }
-    bool _S216 = !_S215;
-    if(_S216)
+    bool _S219 = !_S218;
+    if(_S219)
     {
         return;
     }
-    float _S217 = sel_0->w_sum + _S213;
-    sel_0->w_sum = _S217;
-    float3  _S218 = sel_0->color + weight_0;
-    sel_0->color = _S218;
-    Random _S219 = pcg(sel_0->random_state);
-    sel_0->random_state = _S219.state;
-    bool _S220 = (_S219.value * sel_0->w_sum) <= _S213;
-    if(_S220)
+    float _S220 = sel_0->w_sum + _S216;
+    sel_0->w_sum = _S220;
+    float3  _S221 = sel_0->color + weight_0;
+    sel_0->color = _S221;
+    Random _S222 = pcg(sel_0->random_state);
+    sel_0->random_state = _S222.state;
+    bool _S223 = (_S222.value * sel_0->w_sum) <= _S216;
+    if(_S223)
     {
         sel_0->r = candidate_0;
     }
@@ -867,10 +875,10 @@ __device__ void offer(Selection * sel_0, Reservoir candidate_0, float3  weight_0
 __device__ void offerShifted(Selection * sel_1, Reservoir r_0, Shift shifted_0, float mis_0)
 {
     Reservoir candidate_1 = r_0;
-    float3  _S221 = shifted_0.f / make_float3 (shifted_0.jac);
-    (&candidate_1)->f = _S221;
-    float _S222 = r_0.jac * shifted_0.jac;
-    (&candidate_1)->jac = _S222;
+    float3  _S224 = shifted_0.f / make_float3 (shifted_0.jac);
+    (&candidate_1)->f = _S224;
+    float _S225 = r_0.jac * shifted_0.jac;
+    (&candidate_1)->jac = _S225;
     offer(sel_1, candidate_1, make_float3 (mis_0) * shifted_0.f * make_float3 (r_0.w));
     return;
 }
@@ -878,27 +886,27 @@ __device__ void offerShifted(Selection * sel_1, Reservoir r_0, Shift shifted_0, 
 __device__ Reservoir finalize(Selection sel_2, float c_0)
 {
     Reservoir r_1 = sel_2.r;
-    float _S223 = rgb_to_greyscale((&r_1)->f);
-    float _S224 = sel_2.w_sum / _S223;
-    bool _S225 = _S223 > 0.0f;
-    float _S226 = _slang_select(_S225, _S224,0.0f);
-    (&r_1)->w = _S226;
+    float _S226 = rgb_to_greyscale((&r_1)->f);
+    float _S227 = sel_2.w_sum / _S226;
+    bool _S228 = _S226 > 0.0f;
+    float _S229 = _slang_select(_S228, _S227,0.0f);
+    (&r_1)->w = _S229;
     (&r_1)->c = c_0;
     return r_1;
 }
 
 static __device__ uint insertBits_0(uint e_1, uint newbits_0, uint offset_0, uint count_0)
 {
-    uint _S227 = (1U << count_0) - 1U;
-    return (e_1 & (~(_S227 << offset_0))) | ((newbits_0 & _S227) << offset_0);
+    uint _S230 = (1U << count_0) - 1U;
+    return (e_1 & (~(_S230 << offset_0))) | ((newbits_0 & _S230) << offset_0);
 }
 
 __device__ Reservoir withEnd(Reservoir r_2, uint end_type_0, uint end_0, float3  f_4)
 {
     Reservoir candidate_2 = r_2;
-    uint _S228 = insertBits_0(r_2.path, end_0, 0U, 5U);
-    uint _S229 = insertBits_0(_S228, end_type_0, 12U, 3U);
-    (&candidate_2)->path = _S229;
+    uint _S231 = insertBits_0(r_2.path, end_0, 0U, 5U);
+    uint _S232 = insertBits_0(_S231, end_type_0, 12U, 3U);
+    (&candidate_2)->path = _S232;
     (&candidate_2)->f = f_4;
     return candidate_2;
 }
