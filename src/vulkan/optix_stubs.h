@@ -59,6 +59,22 @@ inline OptixResult optixModuleCreate(OptixDeviceContext, const OptixModuleCompil
         : OPTIX_SUCCESS;
 }
 
+// The module made at once, as its compile is the pipeline's: no tasks
+inline OptixResult optixModuleCreateWithTasks(OptixDeviceContext context, const OptixModuleCompileOptions* options,
+    const OptixPipelineCompileOptions* compile, const char* input, size_t size, char* log, size_t* logSize,
+    OptixModule* module, OptixTask* first) {
+    *first = nullptr;
+    return optixModuleCreate(context, options, compile, input, size, log, logSize, module);
+}
+inline OptixResult optixTaskExecute(OptixTask, OptixTask*, unsigned, unsigned* count) {
+    *count = 0;
+    return OPTIX_SUCCESS;
+}
+inline OptixResult optixModuleGetCompilationState(OptixModule, OptixModuleCompileState* state) {
+    *state = OPTIX_MODULE_COMPILE_STATE_COMPLETED;
+    return OPTIX_SUCCESS;
+}
+
 // Of a raygen program its number, of the any-hit program none: traversal skips the triangle a ray leaves itself
 inline OptixResult optixProgramGroupCreate(OptixDeviceContext, const OptixProgramGroupDesc* desc, unsigned count,
     const OptixProgramGroupOptions*, char*, size_t*, OptixProgramGroup* groups) {
@@ -88,6 +104,22 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
         .module = groups[0]->module->shader, .pName = "main"}, .layout = (*pipeline)->layout};
     return vkCreateComputePipelines(vulkan.device, VK_NULL_HANDLE, 1, &info, nullptr, &(*pipeline)->pipeline)
         ? OPTIX_ERROR_PIPELINE_LINK_ERROR : OPTIX_SUCCESS;
+}
+
+inline OptixResult optixModuleDestroy(OptixModule module) {
+    vkDestroyShaderModule(vulkan.device, module->shader, nullptr);
+    delete module;
+    return OPTIX_SUCCESS;
+}
+inline OptixResult optixProgramGroupDestroy(OptixProgramGroup group) {
+    delete group;
+    return OPTIX_SUCCESS;
+}
+inline OptixResult optixPipelineDestroy(OptixPipeline pipeline) {
+    vkDestroyPipeline(vulkan.device, pipeline->pipeline, nullptr);
+    vkDestroyPipelineLayout(vulkan.device, pipeline->layout, nullptr);
+    delete pipeline;
+    return OPTIX_SUCCESS;
 }
 
 inline OptixResult optixSbtRecordPackHeader(OptixProgramGroup group, void* header) {
