@@ -45,7 +45,6 @@ float random(inout uint state) { return ((state = hash(state)) >> 8) * (1.0f / 1
 float sinpi(float x) { return sin(PI * (x - 2 * round(x / 2))); }
 float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 
-static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
 // Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length
 struct Ray { bool camera, shadow; uint lobe; float depth, length; };
@@ -1033,8 +1032,7 @@ bool survives(Scene scene, uint seed, float3 throughput, inout float density, ui
         // Incident side is material, outgoing side is air (exiting)
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
-        const bool nee = !passed && layer == 0u && (surface.roughness > 0
-            || (surface.metallic < 1 && surface.transparency < 1));
+        const bool nee = !passed && layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
         const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
             ? float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
