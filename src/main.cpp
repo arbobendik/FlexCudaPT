@@ -38,8 +38,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         .pipelineLaunchParamsVariableName = "params"};
     Params params{};
     const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};
-    OptixModuleCompileOptions moduleOptions{.maxRegisterCount = 168, // The default 128 spill the inlined programs
-        .boundValues = &bound, .numBoundValues = 1};
+    OptixModuleCompileOptions moduleOptions{.boundValues = &bound, .numBoundValues = 1};
     const CUdeviceptr launch = allocate(sizeof(params));
     OptixModule module;
     // Raygen programs of a frame's passes, then the any-hit program skipping a triangle: rays are only traversed, so
