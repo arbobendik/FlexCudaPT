@@ -997,17 +997,6 @@ __device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, floa
 // Power heuristic weight of a strategy sampling at density a against one at density b (Veach 1997)
 __device__ float powerHeuristic(float a, float b) { return b > 0 ? 1 / (1 + (b / a) * (b / a)) : 1; }
 
-// Each lobe competes with light sampling separately: the diffuse selection probability depends on its sampled half vector.
-__device__ float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, BSDFMaterial material, float eta_i,
-    float eta_o, unsigned random_state, float light, bool competing) {
-    const auto evaluate = [&](unsigned index) {
-        const SampleBSDF lobe = connectBSDF(in_dir, out_dir, n, material, eta_i, eta_o, index, random_state);
-        return lobe.throughput * (lobe.pdf * powerHeuristic(light, competing ? lobe.pdf : 0.0f));
-    };
-    return dot(g_n, -in_dir) * dot(g_n, out_dir) > 0 ? evaluate(LOBE_DIFFUSE) + evaluate(LOBE_REFLECT)
-        : evaluate(LOBE_REFRACT);
-}
-
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
 // vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
 // dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
@@ -1107,9 +1096,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (replay && rc == RC_SURFACE && b > k && b == end && end_type == END_EMIT) {
             return Shift{throughput * emitted / r.jac, density / r.jac};
         }
+        // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF
         const auto lit = [&](float3 light_dir, float light) {
-            return lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
-                stream(r.seed, b), light, b < scene.settings.bounces);
+            return b < scene.settings.bounces ? neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
+                !(dot(geometry_n, -direction) * dot(geometry_n, light_dir) > 0), light, true, stream(r.seed, b)) * light
+                : BSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o, stream(r.seed, b));
         };
         const bool chain_found = extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE;
         // Reconnection at this vertex for paths ending here
