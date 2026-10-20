@@ -758,20 +758,70 @@ __device__ bool neeDecision(BSDFMaterial material_5, float n_dot_v_0, float eta_
     return _S201;
 }
 
+__device__ float3  neeBSDF(float3  in_dir_4, float3  dir_0, float3  n_8, BSDFMaterial material_6, float eta_i_7, float eta_o_7, bool refracted_2, float pdf_1, bool power_0, uint random_state_5)
+{
+    float3  _S202 = make_float3 (0.0f);
+    uint lobe_4 = 0U;
+    float3  f_0 = _S202;
+    for(;;)
+    {
+        if(lobe_4 < 3U)
+        {
+        }
+        else
+        {
+            break;
+        }
+        bool _S203 = (lobe_4 == 1U) == refracted_2;
+        float3  f_1;
+        if(_S203)
+        {
+            SampleBSDF _S204 = connectBSDF(in_dir_4, dir_0, n_8, material_6, eta_i_7, eta_o_7, lobe_4, random_state_5);
+            bool _S205 = (_S204.pdf) > 0.0f;
+            if(_S205)
+            {
+                if(power_0)
+                {
+                    float _S206 = _S204.pdf / pdf_1;
+                    float3  f_2 = f_0 + _S204.throughput * make_float3 (_S204.pdf) / make_float3 (pdf_1 * (1.0f + _S206 * _S206));
+                    f_1 = f_2;
+                }
+                else
+                {
+                    float3  f_3 = f_0 + _S204.throughput * make_float3 (_S204.pdf) / make_float3 (_S204.pdf + pdf_1);
+                    f_1 = f_3;
+                }
+            }
+            else
+            {
+                f_1 = f_0;
+            }
+        }
+        else
+        {
+            f_1 = f_0;
+        }
+        uint lobe_5 = lobe_4 + 1U;
+        lobe_4 = lobe_5;
+        f_0 = f_1;
+    }
+    return f_0;
+}
+
 __device__ uint stream(uint seed_0, uint index_0)
 {
-    uint _S202 = hash(index_0);
-    uint _S203 = hash(seed_0 ^ _S202);
-    return _S203;
+    uint _S207 = hash(index_0);
+    uint _S208 = hash(seed_0 ^ _S207);
+    return _S208;
 }
 
 __device__ float3  safeDivide(float3  a_4, float3  b_0)
 {
-    float3  _S204 = a_4 / b_0;
-    float3  _S205 = make_float3 (0.0f);
-    bool3  _S206 = b_0 == _S205;
-    float3  _S207 = _slang_select(_S206, _S205,_S204);
-    return _S207;
+    float3  _S209 = a_4 / b_0;
+    float3  _S210 = make_float3 (0.0f);
+    bool3  _S211 = b_0 == _S210;
+    float3  _S212 = _slang_select(_S211, _S210,_S209);
+    return _S212;
 }
 
 struct Selection
@@ -784,30 +834,30 @@ struct Selection
 
 __device__ void offer(Selection * sel_0, Reservoir candidate_0, float3  weight_0)
 {
-    float _S208 = rgb_to_greyscale(weight_0);
-    bool _S209 = _S208 > 0.0f;
-    bool _S210;
-    if(_S209)
+    float _S213 = rgb_to_greyscale(weight_0);
+    bool _S214 = _S213 > 0.0f;
+    bool _S215;
+    if(_S214)
     {
-        _S210 = _S208 < 3.00000000549775576e+38f;
+        _S215 = _S213 < 3.00000000549775576e+38f;
     }
     else
     {
-        _S210 = false;
+        _S215 = false;
     }
-    bool _S211 = !_S210;
-    if(_S211)
+    bool _S216 = !_S215;
+    if(_S216)
     {
         return;
     }
-    float _S212 = sel_0->w_sum + _S208;
-    sel_0->w_sum = _S212;
-    float3  _S213 = sel_0->color + weight_0;
-    sel_0->color = _S213;
-    Random _S214 = pcg(sel_0->random_state);
-    sel_0->random_state = _S214.state;
-    bool _S215 = (_S214.value * sel_0->w_sum) <= _S208;
-    if(_S215)
+    float _S217 = sel_0->w_sum + _S213;
+    sel_0->w_sum = _S217;
+    float3  _S218 = sel_0->color + weight_0;
+    sel_0->color = _S218;
+    Random _S219 = pcg(sel_0->random_state);
+    sel_0->random_state = _S219.state;
+    bool _S220 = (_S219.value * sel_0->w_sum) <= _S213;
+    if(_S220)
     {
         sel_0->r = candidate_0;
     }
@@ -817,10 +867,10 @@ __device__ void offer(Selection * sel_0, Reservoir candidate_0, float3  weight_0
 __device__ void offerShifted(Selection * sel_1, Reservoir r_0, Shift shifted_0, float mis_0)
 {
     Reservoir candidate_1 = r_0;
-    float3  _S216 = shifted_0.f / make_float3 (shifted_0.jac);
-    (&candidate_1)->f = _S216;
-    float _S217 = r_0.jac * shifted_0.jac;
-    (&candidate_1)->jac = _S217;
+    float3  _S221 = shifted_0.f / make_float3 (shifted_0.jac);
+    (&candidate_1)->f = _S221;
+    float _S222 = r_0.jac * shifted_0.jac;
+    (&candidate_1)->jac = _S222;
     offer(sel_1, candidate_1, make_float3 (mis_0) * shifted_0.f * make_float3 (r_0.w));
     return;
 }
@@ -828,28 +878,28 @@ __device__ void offerShifted(Selection * sel_1, Reservoir r_0, Shift shifted_0, 
 __device__ Reservoir finalize(Selection sel_2, float c_0)
 {
     Reservoir r_1 = sel_2.r;
-    float _S218 = rgb_to_greyscale((&r_1)->f);
-    float _S219 = sel_2.w_sum / _S218;
-    bool _S220 = _S218 > 0.0f;
-    float _S221 = _slang_select(_S220, _S219,0.0f);
-    (&r_1)->w = _S221;
+    float _S223 = rgb_to_greyscale((&r_1)->f);
+    float _S224 = sel_2.w_sum / _S223;
+    bool _S225 = _S223 > 0.0f;
+    float _S226 = _slang_select(_S225, _S224,0.0f);
+    (&r_1)->w = _S226;
     (&r_1)->c = c_0;
     return r_1;
 }
 
 static __device__ uint insertBits_0(uint e_1, uint newbits_0, uint offset_0, uint count_0)
 {
-    uint _S222 = (1U << count_0) - 1U;
-    return (e_1 & (~(_S222 << offset_0))) | ((newbits_0 & _S222) << offset_0);
+    uint _S227 = (1U << count_0) - 1U;
+    return (e_1 & (~(_S227 << offset_0))) | ((newbits_0 & _S227) << offset_0);
 }
 
-__device__ Reservoir withEnd(Reservoir r_2, uint end_type_0, uint end_0, float3  f_0)
+__device__ Reservoir withEnd(Reservoir r_2, uint end_type_0, uint end_0, float3  f_4)
 {
     Reservoir candidate_2 = r_2;
-    uint _S223 = insertBits_0(r_2.path, end_0, 0U, 5U);
-    uint _S224 = insertBits_0(_S223, end_type_0, 12U, 3U);
-    (&candidate_2)->path = _S224;
-    (&candidate_2)->f = f_0;
+    uint _S228 = insertBits_0(r_2.path, end_0, 0U, 5U);
+    uint _S229 = insertBits_0(_S228, end_type_0, 12U, 3U);
+    (&candidate_2)->path = _S229;
+    (&candidate_2)->f = f_4;
     return candidate_2;
 }
 
