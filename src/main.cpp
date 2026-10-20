@@ -11,7 +11,6 @@
 enum { SCENE, REQUEST, UPDATE };
 
 int main(int, char** argv) { // Usage: renderer file < scenes and requests > an answer per request, sums in the file
-    const int shared = std::atoi(argv[1]);
     // CUDA + OptiX contexts
     CUcontext cuda;
     OptixDeviceContext context;
@@ -23,6 +22,8 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     unsigned rtcore;
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
+    if (!argv[1]) return 0; // Probe: whether this machine's device runs it
+    const int shared = std::atoi(argv[1]);
     // Scenes keep the reuse textures; the arrays of the last one loaded
     Scene scene{.pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]),
         loadPairing(PAIRING_SIZES[2])}};
