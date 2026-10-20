@@ -213,7 +213,7 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 // Of the scene last loaded: its arrays besides the vertices, the vertices and materials its light BVH is built from and
 // the scratch and output its BVH is refit in
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Material> materials;
-    CUdeviceptr temp, output; };
+    std::vector<Op> ops; CUdeviceptr temp, output; };
 
 // Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
@@ -249,7 +249,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.infos = load<Info>(header.count);
     scene.materials = load<Material>(header.count + 1, loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
-    scene.ops = load<Op>(header.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
+    scene.ops = load<Op>(header.ops, loaded.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
         loaded.temp, loaded.output);
     if (last != scene.previousVertices) release((CUdeviceptr)last);

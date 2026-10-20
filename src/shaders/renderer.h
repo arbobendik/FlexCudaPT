@@ -18,6 +18,8 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
+// Launch parameters, bound at compile time: per step code whether the scene's programs take it
+struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;

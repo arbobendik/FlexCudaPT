@@ -5,6 +5,7 @@
 
 constexpr int STACK = 64;
 constexpr int SLOTS = 32; // Values a program keeps for reuse, as the extension's
+extern "C" __constant__ Params params;
 constexpr float PI = 3.14159265f;
 constexpr float INV_PI = 0.3183098861837907f;
 constexpr float BIAS = 0.0000152587890625f;
@@ -500,6 +501,9 @@ __device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& 
 // Of a point shaded: its UV, generated point, point in its object, color, position and triangle barycentrics
 struct Point { float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle; };
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
+// Whether the scene's programs take the step: bound at compile time, OptiX compiles out the cases of steps they do not
+__device__ bool used(unsigned code) { return params.ops[code >> 6] >> (code & 63) & 1; }
+#define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
 // incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped along its edges
 __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn,
@@ -513,14 +517,15 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     at(point);
     float3 stack[STACK], *top = stack, saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
-        case PUSH: *top++ = op->value; break;
-        case STORE: saved[op->texel] = top[-1]; break;
-        case LOAD: *top++ = saved[op->texel]; break;
-        case UV: *top++ = make_float3(u, v, 0); break;
-        case GENERATED: *top++ = generated; break;
-        case OBJECT: *top++ = object; break;
-        case TRANSFORM: --top; top[-1] = transform(scene, top[-1], int(top->x), info); break;
+        CASE(PUSH) *top++ = op->value; break;
+        CASE(STORE) saved[op->texel] = top[-1]; break;
+        CASE(LOAD) *top++ = saved[op->texel]; break;
+        CASE(UV) *top++ = make_float3(u, v, 0); break;
+        CASE(GENERATED) *top++ = generated; break;
+        CASE(OBJECT) *top++ = object; break;
+        CASE(TRANSFORM) --top; top[-1] = transform(scene, top[-1], int(top->x), info); break;
         case CAMERA_POINT: case WINDOW: { // In the camera's space, right, up and forward, or of its window, of the
+            if (!used(CAMERA_POINT) && !used(WINDOW)) break;
             const Camera& c = scene.camera; // world along its direction from the camera, as Cycles'
             const float3 d = program == scene.materials[scene.count].program ? position : position - c.origin;
             const float3 forward = normalize(cross(c.y, c.x));
@@ -528,20 +533,20 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             *top++ = op->code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
-        case VERTEX_COLOR: *top++ = make_float3(color.x, color.y, color.z); break;
-        case VERTEX_ALPHA: *top++ = make_float3(1, 1, 1) * color.w; break;
-        case OBJECT_INFO: { // Its location, color, alpha, pass index, material's pass index or random number
+        CASE(VERTEX_COLOR) *top++ = make_float3(color.x, color.y, color.z); break;
+        CASE(VERTEX_ALPHA) *top++ = make_float3(1, 1, 1) * color.w; break;
+        CASE(OBJECT_INFO) { // Its location, color, alpha, pass index, material's pass index or random number
             const int output = int(top[-1].x);
             top[-1] = output == 0 ? make_float3(info.location[0], info.location[1], info.location[2]) : output == 1
                 ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? info.material : info.random);
         } break;
-        case NORMAL: *top++ = normal; break;
-        case POSITION: *top++ = position; break;
-        case SHIFT: // Pushes its own point's index before the height there
+        CASE(NORMAL) *top++ = normal; break;
+        CASE(POSITION) *top++ = position; break;
+        CASE(SHIFT) // Pushes its own point's index before the height there
             at(shifted(scene, point, ray, int(top[-1].x))); break;
-        case SHIFTED: --top; top[-1] = *top; at(point); break;
-        case BUMP: { // The normal bent by the height's gradient, as Cycles' bump node
+        CASE(SHIFTED) --top; top[-1] = *top; at(point); break;
+        CASE(BUMP) { // The normal bent by the height's gradient, as Cycles' bump node
             top -= 4;
             const float3 n = top[-1], dx = shifted(scene, point, ray, 1).position - position,
                 dy = shifted(scene, point, ray, 2).position - position;
@@ -552,10 +557,12 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             top[-1] = dot(bent, bent) > 0 ? normalize(normalize(bent) * fmaxf(top[3].x, 0) + n * (1 - fmaxf(top[3].x,
                 0))) : n;
         } break;
-        case INCOMING: *top++ = incoming; break;
-        case BACKFACING: *top++ = make_float3(1, 1, 1) * backfacing; break;
-        case LIGHT_PATH: top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
+        CASE(INCOMING) *top++ = incoming; break;
+        CASE(BACKFACING) *top++ = make_float3(1, 1, 1) * backfacing; break;
+        CASE(LIGHT_PATH) top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
+            if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
+                && !used(ALPHA_CUBIC)) break;
             const bool repeat = op->height >> 24 == 0;
             float x = (repeat ? wrap(top[-1].x) : top[-1].x) * op->width;
             float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
@@ -580,75 +587,75 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
                 ? make_float3(color.x, color.y, color.z)
                 : make_float3(1, 1, 1) * color.w;
         } break;
-        case NORMAL_MAP: {
+        CASE(NORMAL_MAP) {
             const float3 n = transform(scene, tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), 2, info);
             top[-1] = isfinite(dot(n, n)) ? n : normal;
         } break;
-        case ADD: --top; top[-1] = top[-1] + *top; break;
-        case SUBTRACT: --top; top[-1] = top[-1] - *top; break;
-        case MULTIPLY: --top; top[-1] = top[-1] * *top; break;
-        case DOT_PRODUCT: --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
-        case MAXIMUM: --top;
+        CASE(ADD) --top; top[-1] = top[-1] + *top; break;
+        CASE(SUBTRACT) --top; top[-1] = top[-1] - *top; break;
+        CASE(MULTIPLY) --top; top[-1] = top[-1] * *top; break;
+        CASE(DOT_PRODUCT) --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
+        CASE(MAXIMUM) --top;
             top[-1] = make_float3(fmaxf(top[-1].x, top->x), fmaxf(top[-1].y, top->y), fmaxf(top[-1].z, top->z));
             break;
-        case LOGARITHM: --top;
+        CASE(LOGARITHM) --top;
             top[-1] = make_float3(logarithm(top[-1].x, top->x), logarithm(top[-1].y, top->y),
                 logarithm(top[-1].z, top->z));
             break;
-        case MULTIPLY_ADD: top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
-        case DIVIDE: --top; top[-1] = divide(top[-1], *top); break;
-        case SNAP: { --top;
+        CASE(MULTIPLY_ADD) top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
+        CASE(DIVIDE) --top; top[-1] = divide(top[-1], *top); break;
+        CASE(SNAP) { --top;
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
         } break;
-        case BOX: --top; top[-1] = box(top[-1], top->x); break;
-        case BRICK: top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
-        case MAGIC: --top; top[-1] = magic(top[-1], *top); break;
-        case VORONOI: top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3]); break;
-        case WHITE_NOISE: --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
-        case NOISE: top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
+        CASE(BOX) --top; top[-1] = box(top[-1], top->x); break;
+        CASE(BRICK) top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
+        CASE(MAGIC) --top; top[-1] = magic(top[-1], *top); break;
+        CASE(VORONOI) top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3]); break;
+        CASE(WHITE_NOISE) --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
+        CASE(NOISE) top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
             break;
-        case DECODE: top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
-        case POWER: --top; top[-1] = each(top[-1], *top, power); break;
-        case EXPONENT: top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
-        case MINIMUM: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fminf(a, b); }); break;
-        case LESS_THAN: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return float(a < b); }); break;
-        case FLOOR: top[-1] = each(top[-1], [](float a) { return floorf(a); }); break;
-        case MODULO: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; });
+        CASE(DECODE) top[-1] = make_float3(decode(top[-1].x), decode(top[-1].y), decode(top[-1].z)); break;
+        CASE(POWER) --top; top[-1] = each(top[-1], *top, power); break;
+        CASE(EXPONENT) top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
+        CASE(MINIMUM) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fminf(a, b); }); break;
+        CASE(LESS_THAN) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return float(a < b); }); break;
+        CASE(FLOOR) top[-1] = each(top[-1], [](float a) { return floorf(a); }); break;
+        CASE(MODULO) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; });
             break;
         // Reduced exactly, which fast math's sines are not
-        case SINE: top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI); }); break;
-        case COSINE: top[-1] = each(top[-1], [](float a) { return cospif(a * INV_PI); }); break;
-        case TANGENT: top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); break;
-        case ARCSINE: top[-1] = each(top[-1], [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
-        case ARCCOSINE: top[-1] = each(top[-1], [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
-        case ARCTANGENT: top[-1] = each(top[-1], [](float a) { return atanf(a); }); break;
-        case ARCTAN2: --top; top[-1] = each(top[-1], *top, [](float a, float b) { return atan2f(a, b); }); break;
-        case SINH: top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
-        case COSH: top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
-        case TANH: top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
-        case CROSS_PRODUCT: --top; top[-1] = cross(top[-1], *top); break;
-        case RGB_TO_HSV: top[-1] = toHsv(top[-1]); break;
-        case HSV_TO_RGB: top[-1] = fromHsv(top[-1]); break;
-        case RGB_TO_HSL: top[-1] = toHsl(top[-1]); break;
-        case HSL_TO_RGB: top[-1] = fromHsl(top[-1]); break;
-        case ROTATE: { // Around the unit axis by the angle, as Rodrigues'
+        CASE(SINE) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI); }); break;
+        CASE(COSINE) top[-1] = each(top[-1], [](float a) { return cospif(a * INV_PI); }); break;
+        CASE(TANGENT) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); break;
+        CASE(ARCSINE) top[-1] = each(top[-1], [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
+        CASE(ARCCOSINE) top[-1] = each(top[-1], [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
+        CASE(ARCTANGENT) top[-1] = each(top[-1], [](float a) { return atanf(a); }); break;
+        CASE(ARCTAN2) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return atan2f(a, b); }); break;
+        CASE(SINH) top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
+        CASE(COSH) top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
+        CASE(TANH) top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
+        CASE(CROSS_PRODUCT) --top; top[-1] = cross(top[-1], *top); break;
+        CASE(RGB_TO_HSV) top[-1] = toHsv(top[-1]); break;
+        CASE(HSV_TO_RGB) top[-1] = fromHsv(top[-1]); break;
+        CASE(RGB_TO_HSL) top[-1] = toHsl(top[-1]); break;
+        CASE(HSL_TO_RGB) top[-1] = fromHsl(top[-1]); break;
+        CASE(ROTATE) { // Around the unit axis by the angle, as Rodrigues'
             top -= 2;
             const float3 v = top[-1], k = top[0];
             const float c = cospif(top[1].x * INV_PI), s = sinpif(top[1].x * INV_PI);
             top[-1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
         } break;
-        case EQUIRECTANGULAR: { // Image coordinates of a direction, as Cycles'
+        CASE(EQUIRECTANGULAR) { // Image coordinates of a direction, as Cycles'
             const float3 d = top[-1];
             top[-1] = make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI),
                 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI, 0);
         } break;
-        case MIRROR_BALL: { // Image coordinates of a direction on a mirror ball, as Cycles'
+        CASE(MIRROR_BALL) { // Image coordinates of a direction on a mirror ball, as Cycles'
             float3 d = top[-1] / (length(top[-1]) > 0 ? length(top[-1]) : 1) - make_float3(0, 1, 0);
             d = d / (d.y < 0 ? 2 * sqrtf(-0.5f * d.y) : 1);
             top[-1] = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
         } break;
-        case DIELECTRIC: --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
+        CASE(DIELECTRIC) --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12]};
