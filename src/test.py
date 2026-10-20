@@ -596,6 +596,18 @@ assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=4)) == (f
 after = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16)
 assert numpy.allclose(after.reshape(3, 3), before.reshape(3, 3) + (1, 0, 0)), 'instance motion'
 
+# 8 bit sRGB images are filtered in linear light: a black and a white texel magnified read 0.5 halfway between them
+for ob in scene.objects: ob.hide_render = ob != scene.camera
+scene.render.engine = 'FLEX'
+scene.camera.location, scene.camera.rotation_euler, scene.camera.data.angle = (0, 0, 1), (0, 0, 0), 0.1
+edge = plane('edge', 0, 0, 2)
+edge.inputs['Base Color'].default_value, edge.inputs['Emission Strength'].default_value = (0, 0, 0, 1), 1
+steps = edge.id_data.nodes.new('ShaderNodeTexImage')
+steps.image, steps.interpolation = bpy.data.images.new('steps', 2, 1), 'Linear'
+steps.image.pixels.foreach_set((0, 0, 0, 1, 1, 1, 1, 1))
+edge.id_data.links.new(steps.outputs['Color'], edge.inputs['Emission Color'])
+assert abs(render()[24:40, 24:40].mean() - 0.5) < 0.05, 'linear filtering'
+
 # End-to-end parity test, run by make test: renders a scene of textures, among them one mirrored and interpolated at
 # negative coordinates, node programs, an emitter, a point light, glossy metal, glass and a volume under a sky with Flex
 # on OptiX and on Vulkan, with ReSTIR and without, and compares the images, which trace the same random numbers.

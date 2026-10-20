@@ -122,8 +122,10 @@ def table(node):  # Colors of a wavelength, ramp or curves node, RGB curves afte
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
 
-# First texel, width, height, its top byte the extension, and mean of an image node's image or of a node's color table,
-# added as linear floats at first use
+# First texel, width, height, its top byte the extension and above it whether RGBA8 and, in bit 29, sRGB, and linear
+# mean of an image node's image or of a node's color table, added as linear floats at first use; those Blender reads as
+# k / 255 exactly as RGBA8, four texels to a float4, which the shader decodes to the same floats and from sRGB, before
+# it filters them
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
@@ -132,15 +134,26 @@ def texture(source, textures, texels):
         image = source if ramp else source.image
         pixels = numpy.array(table(source), 'f').ravel() if ramp else numpy.empty(len(image.pixels), 'f')
         if not ramp: image.pixels.foreach_get(pixels)
-        if not (ramp or image.is_float or image.colorspace_settings.is_data):
-            pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
-        if not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data:  # As Cycles keeps
-            pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
         width, height = (len(pixels) // 4, 1) if ramp else image.size
+        srgb = not (ramp or image.is_float or image.colorspace_settings.is_data)
+        straight = not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data
+        levels = numpy.rint(pixels * 255).astype('u1')
+        alphas = numpy.bincount(levels[3::4], minlength=256)  # Colors associated by alpha, as Cycles keeps them, in
+        packed = not ramp and numpy.array_equal(levels * (numpy.float32(1) / numpy.float32(255)), pixels) and not (
+            straight and alphas[1:255].any())  # linear light: in RGBA8 exactly by alphas of 0 and 1 alone
+        if packed:  # Its mean in linear light by the count of each level, decoding no texel
+            if straight and alphas[0]: levels.reshape(-1, 4)[levels[3::4] == 0, :3] = 0
+            k = numpy.arange(256) / 255
+            mean = numpy.array([numpy.bincount(c, minlength=256) @ (decode(k) if srgb and i < 3 else k)
+                for i, c in enumerate(levels.reshape(-1, 4).T)]) / (len(levels) // 4)
+        else:
+            if srgb: pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
+            if straight: pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]
+            mean = pixels.reshape(-1, 4).mean(0)
         textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
-            'REPEAT' if ramp else key[1]) << 24, pixels.reshape(-1, 4).mean(0))
-        texels.append(pixels)
+            'REPEAT' if ramp else key[1]) << 24 | packed << 26 | (packed and srgb) << 29, mean)
+        texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
     return textures[key]
 
 def expression_key(expression):
