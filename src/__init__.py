@@ -122,8 +122,9 @@ def table(node):  # Colors of a wavelength, ramp or curves node, RGB curves afte
     return [[*(mapping.evaluate(curve, mapping.evaluate(curves[3], x) if rgb else x) for curve in (curves * 3)[:3]), 1]
         for x in numpy.linspace(*span(node), 256)]
 
-# First texel, width, height, its top byte the extension, and mean of an image node's image or of a node's color table,
-# added as floats at first use, 8 bit images in sRGB
+# First texel, width, height, its top byte the extension and above it whether RGBA8, and mean of an image node's image or
+# of a node's color table, added as floats at first use, 8 bit images in sRGB; those Blender reads as k / 255 exactly
+# as RGBA8, four texels to a float4, which the shader decodes to the same floats
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
@@ -136,9 +137,11 @@ def texture(source, textures, texels):
             pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]  # them, associated
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
         width, height = (len(pixels) // 4, 1) if ramp else image.size
+        levels = numpy.rint(pixels * 255).astype('u1')
+        packed = not ramp and numpy.array_equal(levels * (numpy.float32(1) / numpy.float32(255)), pixels)
         textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
-            'REPEAT' if ramp else key[1]) << 24, pixels.reshape(-1, 4).mean(0))
-        texels.append(pixels)
+            'REPEAT' if ramp else key[1]) << 24 | packed << 26, pixels.reshape(-1, 4).mean(0))
+        texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
     return textures[key]
 
 def expression_key(expression):
