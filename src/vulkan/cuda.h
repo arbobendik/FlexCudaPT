@@ -231,16 +231,13 @@ inline CUresult cuMemcpyDtoD(CUdeviceptr dst, CUdeviceptr src, size_t bytes) {
     return run([&](VkCommandBuffer commands) { vkCmdCopyBuffer(commands, from, to, 1, &region); });
 }
 
-// Of the words the bytes are in, from one
-inline CUresult cuMemsetD8(CUdeviceptr ptr, unsigned char value, size_t count) {
-    VkDeviceSize offset;
-    const VkBuffer buffer = find(ptr, offset).buffer;
-    return run([&](VkCommandBuffer commands) {
-        vkCmdFillBuffer(commands, buffer, offset, (count + 3) & ~size_t(3), value * 0x01010101u); });
-}
-
 inline CUresult cuMemsetD32(CUdeviceptr ptr, unsigned value, size_t count) {
     VkDeviceSize offset;
     const VkBuffer buffer = find(ptr, offset).buffer;
     return run([&](VkCommandBuffer commands) { vkCmdFillBuffer(commands, buffer, offset, 4 * count, value); });
+}
+
+// Of the words the bytes are in, from one
+inline CUresult cuMemsetD8(CUdeviceptr ptr, unsigned char value, size_t count) {
+    return cuMemsetD32(ptr, value * 0x01010101u, (count + 3) / 4);
 }
