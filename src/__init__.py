@@ -1077,9 +1077,7 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
 
     def draw(self, context):
         self.layout.use_property_split = True
-        self.layout.prop(context.scene, 'flex_samples')
-        self.layout.prop(context.scene, 'flex_bounces')
-        self.layout.prop(context.scene, 'flex_paths')
+        for name in ('flex_samples', 'flex_bounces', 'flex_paths'): self.layout.prop(context.scene, name)
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, 'flex_denoise')
