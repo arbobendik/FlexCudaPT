@@ -62,6 +62,8 @@ __device__ float lightPath(const Ray& ray, int output) {
 
 // Logarithm of a to the base b, zero where undefined
 __device__ float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? logf(a) / logf(b) : 0; }
+// sRGB to linear
+__device__ float decode(float c) { return c < 0.04045f ? fmaxf(c, 0) / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
 // a to the power of b, zero where undefined
 __device__ float power(float a, float b) {
     return b == 0 ? 1 : a == 0 || a < 0 && b != truncf(b) ? 0 : a > 0 ? powf(a, b)
@@ -448,9 +450,9 @@ __device__ float spline(float t, int k) {
     return k == 0 ? (1 - t) * (1 - t) * (1 - t) / 6 : k == 1 ? (t * t * (3 * t - 6) + 4) / 6
         : k == 2 ? (t * (t * (3 - 3 * t) + 3) + 1) / 6 : t * t * t / 6;
 }
-// Of the op's image by its extension: repeated, extended, clipped to none or mirrored
+// Texel of the op's image by its extension; RGBA8 as k / 255, sRGB decoded to linear
 __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
-    const int width = op.width, height = op.height & 0xFFFFFF, extension = op.height >> 24;
+    const int width = op.width, height = op.height & 0xFFFFFF, extension = op.height >> 24 & 3;
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return make_float4(0, 0, 0, 0);
     if (extension == 1) x = min(max(x, 0), width - 1), y = min(max(y, 0), height - 1);
     // Repeated images wrap once, mirrored ones over an image and its reflection; extended and clipped are in range
@@ -458,7 +460,12 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     if (extension == 3)
         x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height),
         x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
-    return scene.texels[op.texel + y * width + x];
+    if (!(op.height >> 26 & 1)) return scene.texels[op.texel + y * width + x];
+    const unsigned word = ((const unsigned*)(scene.texels + op.texel))[y * width + x];
+    const float level = 1.0f / 255;
+    const float4 c = make_float4((word & 255) * level, (word >> 8 & 255) * level, (word >> 16 & 255) * level,
+        (word >> 24) * level);
+    return op.height >> 29 & 1 ? make_float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
 // v from object to world or back, or from world to camera or back, by mode: point, direction or normal
 __device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& info) {
@@ -547,7 +554,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
-            const bool repeat = op->height >> 24 == 0;
+            const bool repeat = (op->height >> 24 & 3) == 0;
             float x = (repeat ? wrap(top[-1].x) : top[-1].x) * op->width;
             float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
             float4 color = texel(scene, *op, int(floorf(x)), int(floorf(y)));
