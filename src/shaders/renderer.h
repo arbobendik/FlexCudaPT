@@ -32,8 +32,8 @@ struct BSDFMaterial {
     float3 albedo, emissive; float roughness, metallic, transmission, ior; float3 absorption;
 };
 // Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
-// The programs of its layers follow each other from the top.
-struct Material { float emitted; unsigned program, hidden, layers; };
+// The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point.
+struct Material { float emitted; unsigned program, hidden, layers, opaque; };
 // Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index, its material's
 // pass index and its random number, then its axes, which with its location transform it into the world
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
