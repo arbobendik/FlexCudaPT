@@ -106,7 +106,7 @@ WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3
 # Blender's material and camera panels the engine shows
 PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
     'MATERIAL_PT_animation', *(panel.__name__ for panel in CAMERA_PANELS))
-SCENE, REQUEST, UPDATE = range(3)  # Kinds of what the renderer is piped
+SCENE, REQUEST, UPDATE, STEPS = range(4)  # Kinds of what the renderer is piped
 
 def span(node):  # Of the points of a curves node's curves
     curves = node.mapping.curves
@@ -809,6 +809,7 @@ class Flex(bpy.types.RenderEngine):
         super().__init__(*args, **kwargs)
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
+        self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
         self.texture = None  # The viewport's view as last traced
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
         self.following = None  # The frame after the last one rendered, which reuses its reservoirs in an animation
@@ -840,6 +841,9 @@ class Flex(bpy.types.RenderEngine):
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
         moved = same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera, bpy.types.Object,
             bpy.types.Action)) for update in depsgraph.updates) and changed
+        # Materials' values alone changed, as an animated one's by frame: the steps go anew, while they keep their shape
+        shaded = same and self.shape and len(depsgraph.updates) and not moved and all(not (update.is_updated_geometry
+            or update.is_updated_transform or isinstance(update.id, bpy.types.Image)) for update in depsgraph.updates)
         self.visible = visible
         scene = depsgraph.scene_eval
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
@@ -849,8 +853,8 @@ class Flex(bpy.types.RenderEngine):
         # its material's pass index, as Cycles' object info node tells, then the object's axes
         columns = [[numpy.empty((0, *shape), 'f')] for shape in (*[(3, 3)] * 4, (3, 2), (3, 4), (3, 4), (19,))]
         materials = []
-        ops = []  # Steps of all programs
-        textures = {}  # First texel, width, height and mean per image and ramp
+        ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
+        textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads
         def program(surface, reads=None):
@@ -861,7 +865,8 @@ class Flex(bpy.types.RenderEngine):
             # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
             scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(numpy.resize(surface[k], 3)[0])
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
-            return max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0), first, opaque
+            hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
+            return hints[first], first, opaque
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         slots = []  # Index, triangle count and key of each instance exported
         for i, instance in enumerate(depsgraph.object_instances):
@@ -869,6 +874,10 @@ class Flex(bpy.types.RenderEngine):
             bm = bmesh.new()
             if ob.hide_render or ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'LIGHT'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
+                continue
+            if shaded and ob.type != 'LIGHT':  # Its rows alone
+                for slot in ob.material_slots:
+                    if slot.material not in rows: rows[slot.material] = shade(slot.material, program)
                 continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
@@ -977,11 +986,30 @@ class Flex(bpy.types.RenderEngine):
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
                 *(column[k + 1].astype('f') for column in columns)))))
             return
-        firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
-        self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
+        shape = [op[0] for op in ops], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
+            for row in layers], textures
+        if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
+            if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]):  # textures keep their shape
+                self.visible = None
+                return self.start(depsgraph)
+            read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
+            tables = {key: [] for key, entry in textures.items() if not isinstance(key, tuple) and entry[0] in read}
+            means = {key: texture(key, {}, tables[key])[3] for key in tables}  # read, rebuilt; their means, which the
+            if any((means[key] != textures[key][3]).any() for key in tables):  # hints take, as the renderer has them
+                self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
+                return self.start(depsgraph)
+            # Then per table its first texel, width and texels, until a width of 0; per program its first step and
+            # light power hint, until a first of 2^32 - 1
+            self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for key in
+                tables for part in (struct.pack('<2I', *textures[key][:2]), *tables[key])), struct.pack('<2I', 0, 0),
+                numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4')))
+            return
+        self.shape = shape
+        firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
+        self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
         # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag, layer count, opaque
