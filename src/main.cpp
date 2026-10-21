@@ -49,9 +49,11 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     // Link pipeline, no recursion
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
     OptixPipeline pipeline;
-    // An SBT record per pass carries scene
+    // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
+    // traced in, which a view's first temporal pass reprojects into, then one per pass
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
-    Record records[PASSES];
+    static_assert(sizeof(Record) == RECORD_STRIDE, "The shaders step back to the anchor's record by RECORD_STRIDE");
+    Record records[PASSES + 1]{};
     const CUdeviceptr table = allocate(sizeof(records));
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } hit;
     OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit)),
@@ -63,7 +65,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         for (unsigned pass = 0; pass < PASSES; ++pass) {
             OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, PROGRAMS[pass]}};
             CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));
-            CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass]));
+            CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass + 1]));
         }
         OptixProgramGroupDesc skip{.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
             .hitgroup = {.moduleAH = module, .entryFunctionNameAH = "__anyhit__skip"}};
@@ -114,9 +116,9 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             std::vector<Material> materials = loaded.materials;
             if (scene.count) {
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));
-                records[PASSES - 2].data = scene;
-                CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
-                const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};
+                records[PASSES - 1].data = scene;
+                CHECK(cuMemcpyHtoD(table + (PASSES - 1) * sizeof(Record), &records[PASSES - 1], sizeof(Record)));
+                const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
                 CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count, 1, 1));
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
             }
@@ -186,9 +188,13 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         const unsigned samples = reused ? request.reuse : request.samples;
         for (launched = 0; launched < request.launches && done < samples; ++launched, ++done, ++scene.frame) {
             for (Record& record : records) record.data = scene;
+            Scene& anchored = records[0].data;
+            anchored.handle = scene.anchorHandle, anchored.vertices = scene.anchorVertices;
+            anchored.normals = scene.anchorNormals, anchored.lights = scene.anchorLights;
+            anchored.trails = scene.anchorTrails;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
-                sbt.raygenRecord = table + pass * sizeof(Record);
+                sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
                 CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
@@ -217,7 +223,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         if (denoise) {
             for (Record& record : records) record.data = scene;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
-            sbt.raygenRecord = table + (PASSES - 1) * sizeof(Record);
+            sbt.raygenRecord = table + PASSES * sizeof(Record);
             CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, 1));
             if (!history) { // The first of a sequence moves nowhere
                 CHECK(cuMemsetD32((CUdeviceptr)scene.flow, 0, 2 * pixels));
