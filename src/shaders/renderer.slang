@@ -461,7 +461,7 @@ float spline(float t, int k) {
         : k == 2 ? (t * (t * (3 - 3 * t) + 3) + 1) / 6 : t * t * t / 6;
 }
 // Texel of the op's image by its extension; RGBA8 as k / 255, sRGB decoded to linear
-float4 texel(Scene scene, Op op, int x, int y) {
+float4 texel(Scene* scene, Op op, int x, int y) {
     const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF);
     const int extension = int(asuint(op.value.z) >> 24 & 3);
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return float4(0, 0, 0, 0);
@@ -480,7 +480,7 @@ float4 texel(Scene scene, Op op, int x, int y) {
     return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
 // v from object to world or back, or from world to camera or back, by mode: point, direction or normal
-float3 transform(Scene scene, float3 v, int mode, Info info) {
+float3 transform(Scene* scene, float3 v, int mode, Info info) {
     const float3 x = float3(info.axes[0], info.axes[1], info.axes[2]), y = float3(info.axes[3], info.axes[4], info.axes[5]);
     const float3 z = float3(info.axes[6], info.axes[7], info.axes[8]);
     const float3 t = float3(info.location[0], info.location[1], info.location[2]);
@@ -509,8 +509,8 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
-[noinline] Surface shade(Scene scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming, bool backfacing,
-    Ray ray, Info info) {
+[noinline] Surface shade(Scene* scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming,
+    bool backfacing, Ray ray, Info info) {
     Point at = point;
     float3 stack[STACK], saved[SLOTS];
     int top = 0;
@@ -680,7 +680,7 @@ float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
     return float3x3(tangent, cross(n, tangent) * p[0].w, n);
 }
 // Of a triangle at its barycentrics
-Point at(Scene scene, uint triangle, float s, float t) {
+Point at(Scene* scene, uint triangle, float s, float t) {
     float2* uv = scene.uvs + 3 * triangle;
     float3* vertex = scene.vertices + 3 * triangle;
     float3* generated = scene.generated + 3 * triangle;
@@ -694,7 +694,7 @@ Point at(Scene scene, uint triangle, float s, float t) {
         vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, s, t, triangle);
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
-Point shifted(Scene scene, Point point, Ray ray, int axis) {
+Point shifted(Scene* scene, Point point, Ray ray, int axis) {
     if (point.triangle == NONE) return point;
     float3* vertex = scene.vertices + 3 * point.triangle;
     const float step = 1e-4f * max(ray.length, 1e-3f);
@@ -702,7 +702,7 @@ Point shifted(Scene scene, Point point, Ray ray, int axis) {
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
 // Surface of a triangle at its barycentrics, in a layer of its material
-Surface shade(Scene scene, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray, uint layer = 0) {
+Surface shade(Scene* scene, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray, uint layer = 0) {
     float3* vertex = scene.vertices + 3 * triangle;
     float3* normals = scene.normals + 3 * triangle;
     const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
@@ -779,7 +779,7 @@ Hit hitOf(uint4 rc) { return Hit(rc.x, asfloat(rc.yz)); }
 
 // Nearest hit of a ray within far and its distance, NONE on a miss
 // Leaving the skipped triangle, the ray starts back by its margin, to keep triangles there
-Hit traverse(Scene scene, float3 origin, float3 direction, float far, inout float distance, uint skip = NONE) {
+Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout float distance, uint skip = NONE) {
     const float back = skip == NONE ? 0 : 1e-4f;
     // Every candidate but the skipped triangle committed
     RayQuery<RAY_FLAG_NONE> query;
@@ -797,12 +797,12 @@ float3 hitPosition(float3* vertices, Hit hit) { // On the triangles of vertices
     return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
 }
 
-float3 faceNormal(Scene scene, uint triangle) {
+float3 faceNormal(Scene* scene, uint triangle) {
     float3* vertices = scene.vertices + 3 * triangle;
     return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
 }
 
-float3 smoothNormal(Scene scene, Hit hit) {
+float3 smoothNormal(Scene* scene, Hit hit) {
     float3* normals = scene.normals + 3 * hit.triangle;
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
@@ -829,7 +829,7 @@ float2 aperture(Lens lens, uint state) {
 }
 
 // Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray
-Domain pixelDomain(Scene scene, Camera camera, int pixel, uint3 size, uint seed) {
+Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed) {
     uint state = stream(seed, STREAM_JITTER);
     const float x = pixel % size.x + random(state);
     const float y = pixel / size.x + random(state);
@@ -853,7 +853,7 @@ Domain pixelDomain(Scene scene, Camera camera, int pixel, uint3 size, uint seed)
 }
 
 // World: equirectangular texture along the direction
-float3 environment(Scene scene, float3 direction, Ray ray) {
+float3 environment(Scene* scene, float3 direction, Ray ray) {
     const Point point = Point(0.5f - atan2(direction.y, direction.x) / (2 * PI),
         0.5f + atan2(direction.z, sqrt(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, float4(0, 0, 0, 0), direction, 0, 0, NONE);
@@ -877,7 +877,7 @@ Medium volume(Surface surface) {
 // Light sampling: a light picked by the light tree, P(light) the product of child shares down to it
 // Triangle: uniform point, PDF = solidAngle(P(light))
 // radiance = L * T / PDF
-[noinline] float3 sampleLight(Scene scene, float3 origin, float3 normal, float3 face, Medium sides[2], uint state,
+[noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 face, Medium sides[2], uint state,
     out float3 direction, out float density, Ray ray) {
     direction = float3(0, 0, 0);
     density = 0;
@@ -936,7 +936,7 @@ Medium volume(Surface surface) {
 
 // PDF = solidAngle(probability), probability the product of child shares down the trail
 // (pbrt-v4 BVHLightSampler::PMF)
-float lightPdf(Scene scene, float3 origin, float3 normal, uint triangle, float3 point) {
+float lightPdf(Scene* scene, float3 origin, float3 normal, uint triangle, float3 point) {
     float probability = 1;
     uint node = 0;
     for (uint64_t trail = scene.trails[triangle]; scene.lights[node].leaf == 0; trail >>= 1) {
@@ -973,7 +973,7 @@ float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material m
 }
 
 // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
-bool survives(Scene scene, uint seed, float3 throughput, inout float density, uint b) {
+bool survives(Scene* scene, uint seed, float3 throughput, inout float density, uint b) {
     const float survival_probability = min(max(max(throughput.x, max(throughput.y, throughput.z))
         / density, 0.0f), 1.0f);
     if (survival_probability < pcg(stream(seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
@@ -985,7 +985,7 @@ bool survives(Scene scene, uint seed, float3 throughput, inout float density, ui
 
 // Walk a path from dom: generating, every path of the tree resampled into sel (Sec. 6.1); replaying,
 // the hybrid shift of r into dom (Sec. 2.3), its integrand times the Jacobian of Eq. 2, zero off its image
-[noinline] Shift walk(Scene scene, Domain dom, Reservoir r, bool replay, float scale, inout Selection sel,
+[noinline] Shift walk(Scene* scene, Domain dom, Reservoir r, bool replay, float scale, inout Selection sel,
     out float3 seen) {
     const Shift fail = Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
     const uint end = extractBits(r.path, PATH_END, 5u);
@@ -1341,7 +1341,7 @@ bool survives(Scene scene, uint seed, float3 throughput, inout float density, ui
 }
 
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
-Shift shift(Scene scene, Camera camera, int pixel, uint3 size, Reservoir r) {
+Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
     Selection sel = {};
     float3 seen;
     if (r.w <= 0.0f) {
@@ -1366,7 +1366,7 @@ float2 project(Camera camera, float3 position, uint3 size) {
 }
 
 // Index of the pixel at q if the previous frame left it a sample, -1 otherwise
-int previousValid(Scene scene, float2 q, uint3 size) {
+int previousValid(Scene* scene, float2 q, uint3 size) {
     const int x = int(floor(q.x));
     const int y = int(floor(q.y));
     const bool valid = x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)
@@ -1375,7 +1375,7 @@ int previousValid(Scene scene, float2 q, uint3 size) {
 }
 
 // Backprojection of the camera motion, or the dual motion vector of the surface previously seen there (Sec. 6.4)
-int temporalNeighbor(Scene scene, uint3 p, uint3 size, Domain dom) {
+int temporalNeighbor(Scene* scene, uint3 p, uint3 size, Domain dom) {
     const float2 q = project(scene.previousCamera, dom.x1, size);
     const int index = previousValid(scene, q, size);
     if (index < 0) {
@@ -1392,7 +1392,7 @@ int temporalNeighbor(Scene scene, uint3 p, uint3 size, Domain dom) {
 
 // Index of the partner of p in reuse texture t, randomly flipped, transposed and offset every frame (Sec. 3.2),
 // -1 off the image
-int partner(Scene scene, uint3 p, uint3 size, uint t) {
+int partner(Scene* scene, uint3 p, uint3 size, uint t) {
     const int texture = PAIRING_SIZES[t];
     const uint random = hash(scene.frame * 3u + t);
     const int flip_x = (random & 1u) != 0u ? -1 : 1;
@@ -1408,7 +1408,7 @@ int partner(Scene scene, uint3 p, uint3 size, uint t) {
 }
 
 // Mean emission over the triangle's UVs and generated coordinates
-void lights(uint3 p, Scene scene) {
+void lights(uint3 p, Scene* scene) {
     const uint triangle = p.x;
     const float emitted = scene.materials[triangle].emitted;
     if (!(emitted > 0)) return;
@@ -1425,7 +1425,7 @@ void lights(uint3 p, Scene scene) {
 }
 
 // Initial candidates: path trees of the pixel's primary hits, and the radiance seen right there
-void initial(uint3 p, uint3 size, Scene scene) {
+void initial(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
     const uint pixel_seed = stream(hash(scene.frame), index);
     Selection initial = {};
@@ -1451,7 +1451,7 @@ void initial(uint3 p, uint3 size, Scene scene) {
 }
 
 // Denoiser input and guides of the pixel, and the motion of what it sees since the last denoised frame
-void denoise(uint3 p, uint3 size, Scene scene) {
+void denoise(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
     const float4 sum = scene.accumulation[index];
     scene.mean[index] = float4(sum.xyz / sum.w, 1.0f);
@@ -1469,14 +1469,14 @@ void denoise(uint3 p, uint3 size, Scene scene) {
 }
 
 // Temporal reuse: the initial sample against the previous frame's at the temporal neighbor
-void temporal(uint3 p, uint3 size, Scene scene) {
+void temporal(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
     Reservoir r = scene.initial[index];
     const bool still = scene.frame > 0u && all(scene.camera.origin == scene.previousCamera.origin)
         && all(scene.camera.x == scene.previousCamera.x) && all(scene.camera.y == scene.previousCamera.y)
         && all(scene.camera.z == scene.previousCamera.z);
     // The view's first frame reuses reservoirs of the anchor's scene
-    const Scene before = scene.frame == 0u ? ((Record*)((uint64_t)launch.record - 2 * RECORD_STRIDE)).scene : scene;
+    Scene* before = scene.frame == 0u ? &((Record*)((uint64_t)launch.record - 2 * RECORD_STRIDE)).scene : scene;
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
@@ -1502,7 +1502,7 @@ void temporal(uint3 p, uint3 size, Scene scene) {
 }
 
 // Paired shifts (Sec. 3): the pixel's sample into the domain of its partner in the reuse texture of the launch's layer
-void shifts(uint3 p, uint3 size, Scene scene) {
+void shifts(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
     const int q = partner(scene, p, size, p.z);
     scene.shifts[3 * index + p.z] = q < 0 ? Shift(float3(0.0f, 0.0f, 0.0f), 0.0f)
@@ -1510,7 +1510,7 @@ void shifts(uint3 p, uint3 size, Scene scene) {
 }
 
 // Paired spatial reuse with pairwise MIS (Sec. 3) and shading with vector-valued weights (Sec. 6.3)
-void spatial(uint3 p, uint3 size, Scene scene) {
+void spatial(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
     const Reservoir r = scene.temporal[index];
     float count = 0.0f;
@@ -1549,7 +1549,7 @@ void spatial(uint3 p, uint3 size, Scene scene) {
 }
 
 // Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
-void duplicates(uint3 p, uint3 size, Scene scene) {
+void duplicates(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
     const Reservoir own = scene.previous[index];
     uint count = 0u;
@@ -1576,7 +1576,7 @@ void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint ind
     const uint3 size = uint3(launch.width, launch.height, launch.depth);
     const uint3 p = size.y == 1 && size.z == 1 ? uint3(group.x * 64 + index, 0, 0) : thread;
     if (any(p >= size)) return;
-    const Scene scene = launch.record.scene;
+    Scene* scene = &launch.record.scene;
     switch (launch.record.program) {
         case 0: initial(p, size, scene); break;
         case 1: temporal(p, size, scene); break;
