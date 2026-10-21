@@ -700,15 +700,6 @@ __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026), paths in primary sample space
 
-// Single-vertex roughness threshold (Sec. 4.2)
-constexpr float RESTIR_ROUGHNESS = 0.2f;
-// Dual ray footprint constant c / 100 * 4 PI of Eq. 5 with c = 0.02
-constexpr float RESTIR_FOOTPRINT = 0.0025132741228718345f;
-// Temporal confidence cap and its duplication-driven reduction (Sec. 5)
-constexpr float RESTIR_CAP = 20.0f;
-constexpr float RESTIR_CAP_MIN = 1.0f;
-constexpr float RESTIR_DUPLICATION_ALPHA = 0.1f;
-
 // How a path ends: next event estimation, emissive surface or environment
 constexpr unsigned END_NEE = 0u;
 constexpr unsigned END_EMIT = 1u;
@@ -962,8 +953,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     Medium medium = {};
     // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
     const auto survives = [&](unsigned b) {
-        const float survival_probability = fminf(fmaxf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z))
-            / density, 0.0f), 1.0f);
+        const float survival_probability = survivalProbability(throughput, density);
         if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
             return false;
         }
@@ -983,7 +973,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
                 make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter};
         // Surfaces transmitting nothing face the ray
-        const float facing = surface.transparency > 0 || dot(face, direction) < 0 ? 1.0f : -1.0f;
+        const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
         // The BSDF's material, absorbing the volume's transmittance over unit distance
@@ -996,12 +986,16 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             sides[dot(geometry_n, face) < 0] = volume(surface);
             if (dot(direction, face) > 0) sides[dot(geometry_n, face) > 0] = Medium{};
         }
+        // PDF_area = PDF_solid_angle * |cos_theta| / distance^2
+        // => PDF_area / PDF_solid_angle = |dot(geometry_n, direction)| / distance^2
         const float geometry_density = fabsf(dot(geometry_n, direction)) / (distance * distance);
         if (b == 0u) {
+            // Primary ray footprint (Eq. 5) of the camera's hit
             // Primary ray footprint (Eq. 5)
-            threshold = RESTIR_FOOTPRINT / geometry_density;
+            threshold = 0.0025132741228718345f / geometry_density;
             seen = surface.emissive;
         }
+        // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5)
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
         const bool footprint = !passed && prev.rough && prev.pdf * geometry_density * threshold <= 1.0f;
         const float n_dot_v = dot(surface.normal, - direction);
@@ -1159,10 +1153,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             nee_origin = origin, nee_normal = light_normal;
             nee_pdf = lobe.pdf;
         }
+        // Eq. 5 from this vertex along the sampled lobe
         // Inverse ray footprint criterion for the density of the direction leaving this vertex (Eq. 5)
-        const bool inverse_footprint = lobe.pdf > 0.0f
-            && (lobe_index == LOBE_DIFFUSE || lobe.pdf * prev.cos / (distance * distance) * threshold <= 1.0f);
-        const bool rough = lobe.pdf > 0.0f && (lobe_index == LOBE_DIFFUSE || surface.roughness >= RESTIR_ROUGHNESS);
+        const bool inverse_footprint = lobe.pdf > 0.0f && ((lobe_index == LOBE_DIFFUSE) || lobe.pdf * prev.cos / (distance * distance) * threshold <= 1.0f);
+        // Whether a sampled lobe is rough enough to reconnect through (Sec. 4.2)
+        const bool rough = lobe.pdf > 0.0f && ((lobe_index == LOBE_DIFFUSE) || surface.roughness >= 0.2f);
         if (arrived) {
             if (!inverse_footprint) {
                 return fail;
@@ -1462,16 +1457,20 @@ extern "C" __global__ void __raygen__temporal() {
         const Reservoir temporal = scene.previous[q];
         // Optionally lower the confidence cap where the previous frame duplicated samples (Sec. 5), this biases the estimate
         const float duplicated = scene.settings.decorrelation ? scene.duplication[q] : 0.0f;
-        const float cap = RESTIR_CAP + (RESTIR_CAP_MIN - RESTIR_CAP) * powf(duplicated, RESTIR_DUPLICATION_ALPHA);
-        const float c_t = fminf(temporal.c, cap);
+        // Temporal confidence cap (Sec. 5)
+        const float c_t = fminf(temporal.c, 20.0f + (1.0f - 20.0f) * powf(duplicated, 0.1f));
         const Shift to_current = still ? Shift{temporal.f, 1.0f} : shift(scene, scene.camera, index, size, temporal);
         const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(before, scene.previousCamera, q, size, r);
         const float p_c = rgb_to_greyscale(r.f);
         const float p_t = rgb_to_greyscale(temporal.f);
         Selection sel = {};
         sel.random_state = stream(r.seed, STREAM_SELECT + 1u);
-        offerShifted(&sel, r, Shift{r.f, 1.0f}, r.c * p_c / (r.c * p_c + c_t * rgb_to_greyscale(to_previous.f)));
-        offerShifted(&sel, temporal, to_current, c_t * p_t / (c_t * p_t + r.c * rgb_to_greyscale(to_current.f)));
+        // Temporal MIS weights, p_t->c = g_previous the previous sample shifted here, p_c->t = g_current
+        // m_c = c * p_c / (c * p_c + c_t * p_t->c)
+        // m_t = c_t * p_t / (c_t * p_t + c * p_c->t)
+        const float2 weights = make_float2(r.c * p_c / (r.c * p_c + c_t * rgb_to_greyscale(to_previous.f)), c_t * p_t / (c_t * p_t + r.c * rgb_to_greyscale(to_current.f)));
+        offerShifted(&sel, r, Shift{r.f, 1.0f}, weights.x);
+        offerShifted(&sel, temporal, to_current, weights.y);
         r = finalize(sel, r.c + c_t);
     }
     scene.temporal[index] = r;
@@ -1516,11 +1515,14 @@ extern "C" __global__ void __raygen__spatial() {
             const Reservoir neighbor = scene.temporal[q];
             const Shift to_here = scene.shifts[3 * q + t];
             const Shift to_there = scene.shifts[3 * index + t];
+            // Pair's share of all confidence (Sec. 3.2)
             const float share = (neighbor.c + c_pair) / c_sum;
-            const float p_n = rgb_to_greyscale(neighbor.f);
             if (p_c > 0.0f) {
+                // Pairwise MIS weight of the canonical sample, g_there its target shifted to the neighbor
                 canonical_mis += share * c_pair * p_c / (c_pair * p_c + neighbor.c * rgb_to_greyscale(to_there.f));
             }
+            // Pairwise MIS weight of the neighbor's sample, g_here its target shifted to the current pixel
+            const float p_n = rgb_to_greyscale(neighbor.f);
             offerShifted(&sel, neighbor, to_here,
                 share * neighbor.c * p_n / (neighbor.c * p_n + c_pair * rgb_to_greyscale(to_here.f)));
         }
