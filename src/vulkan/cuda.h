@@ -44,8 +44,9 @@ inline CUresult cuInit(unsigned) {
     return vkCreateInstance(&info, nullptr, &vulkan.instance);
 }
 
-// Index of a memory type of the properties among those of bits, of none -1
-inline int memoryType(uint32_t bits, VkMemoryPropertyFlags flags) {
+// Index of a memory type of the properties among those of bits, also of the preferred ones if any is, of none -1
+inline int memoryType(uint32_t bits, VkMemoryPropertyFlags flags, VkMemoryPropertyFlags preferred = 0) {
+    if (const int type = preferred ? memoryType(bits, flags | preferred) : -1; type >= 0) return type;
     VkPhysicalDeviceMemoryProperties memory;
     vkGetPhysicalDeviceMemoryProperties(vulkan.physical, &memory);
     for (uint32_t i = 0; i < memory.memoryTypeCount; ++i)
@@ -54,7 +55,8 @@ inline int memoryType(uint32_t bits, VkMemoryPropertyFlags flags) {
 }
 
 // Buffer for every use of a device's memory of the properties, at its address with them, to allocations
-inline CUresult create(VkDeviceSize bytes, VkMemoryPropertyFlags flags, VkBuffer& buffer, VkDeviceMemory& memory) {
+inline CUresult create(VkDeviceSize bytes, VkMemoryPropertyFlags flags, VkBuffer& buffer, VkDeviceMemory& memory,
+    VkMemoryPropertyFlags preferred = 0) {
     const VkBufferCreateInfo info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
@@ -65,7 +67,8 @@ inline CUresult create(VkDeviceSize bytes, VkMemoryPropertyFlags flags, VkBuffer
     const VkMemoryAllocateFlagsInfo address{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
         .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
     const VkMemoryAllocateInfo allocate{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &address,
-        .allocationSize = requirements.size, .memoryTypeIndex = uint32_t(memoryType(requirements.memoryTypeBits, flags))};
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = uint32_t(memoryType(requirements.memoryTypeBits, flags, preferred))};
     if (VkResult result = vkAllocateMemory(vulkan.device, &allocate, nullptr, &memory)) return result;
     return vkBindBufferMemory(vulkan.device, buffer, memory, 0);
 }
@@ -135,8 +138,9 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
     LOAD(vkCmdBuildAccelerationStructuresKHR);
     LOAD(vkGetAccelerationStructureDeviceAddressKHR);
 #undef LOAD
+    // Cached if it can be, as the host reads every redraw's sums back through it, which uncached memory slows down
     if (CUresult result = create(STAGING, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        vulkan.staging, vulkan.stagingMemory)) return result;
+        vulkan.staging, vulkan.stagingMemory, VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) return result;
     *context = (CUcontext)vulkan.device;
     return vkMapMemory(vulkan.device, vulkan.stagingMemory, 0, STAGING, 0, &vulkan.mapped);
 }
