@@ -8,7 +8,7 @@
 #include "shaders.h"
 
 // Kinds of what the extension pipes in
-enum { SCENE, REQUEST, UPDATE };
+enum { SCENE, REQUEST, UPDATE, STEPS };
 
 int main(int, char** argv) { // Usage: renderer file < scenes and requests > an answer per request, sums in the file
     // CUDA + OptiX contexts
@@ -103,7 +103,8 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     for (unsigned done = 0, launched, kind; std::fread(&kind, sizeof(kind), 1, stdin); std::fflush(stdout)) {
         if (kind != REQUEST) {
             const unsigned count = scene.count;
-            kind == SCENE ? loadScene(context, scene, loaded) : updateScene(context, scene, loaded);
+            kind == SCENE ? loadScene(context, scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
+                : updateSteps(scene, loaded);
             Params next{};
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
             if (std::memcmp(&next, &params, sizeof(params))) { // Compiled anew for other steps, in place of the last
