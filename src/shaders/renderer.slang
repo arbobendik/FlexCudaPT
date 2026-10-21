@@ -1507,14 +1507,8 @@ void temporal(uint3 p, uint3 size, Scene scene) {
     const bool still = scene.frame > 0u && all(scene.camera.origin == scene.previousCamera.origin)
         && all(scene.camera.x == scene.previousCamera.x) && all(scene.camera.y == scene.previousCamera.y)
         && all(scene.camera.z == scene.previousCamera.z);
-    Scene before = scene;
-    if (scene.frame == 0u) {
-        before.handle = scene.anchorHandle;
-        before.vertices = scene.anchorVertices;
-        before.normals = scene.anchorNormals;
-        before.lights = scene.anchorLights;
-        before.trails = scene.anchorTrails;
-    }
+    // The scene of the view's first frame's reservoirs is the anchor's, in the record two before temporal's own
+    const Scene before = scene.frame == 0u ? ((Record*)((uint64_t)launch.record - 2 * RECORD_STRIDE)).scene : scene;
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
@@ -1605,6 +1599,7 @@ void duplicates(uint3 p, uint3 size, Scene scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
+static const uint RECORD_STRIDE = 544; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 

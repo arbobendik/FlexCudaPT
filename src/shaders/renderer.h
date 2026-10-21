@@ -21,6 +21,9 @@ struct Op { unsigned code; union { float3 value; struct { unsigned texel, width,
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
     "__raygen__duplicates", "__raygen__lights", "__raygen__denoise"};
+// Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
+// the anchor's record first, then the passes', so a pass finds it its program's number and one records back
+constexpr unsigned RECORD_STRIDE = 544;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
