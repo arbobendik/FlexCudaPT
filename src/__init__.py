@@ -762,7 +762,9 @@ def shade(material, program):
     base[5] = 'DIVIDE', ('MULTIPLY', share, ('SUBTRACT', 1, metallic)), ('SUBTRACT', ('SUBTRACT', 1, metallic),
         ('MULTIPLY', share, metallic))
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
-    return [program([*layer, *volume]) for layer in layers]
+    rows = [program([*layer, *volume]) for layer in layers]
+    # Light sampling reads the emission alone: the top layer's, its colors associated as in that layer's program
+    return [(*rows[0], program([*BLACK[:4], layers[0][4], *BLACK[5:]], [*layers[0], *volume])[1]), *rows[1:]]
 
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
@@ -850,8 +852,9 @@ class Flex(bpy.types.RenderEngine):
         ops = []  # Steps of all programs
         textures = {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
-        def program(surface):  # Counted, then emitted keeping what it uses again
-            surface, first, alpha, uses, slots = fold(surface), len(ops), set(alpha_reads(surface)), {}, {}
+        # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads
+        def program(surface, reads=None):
+            surface, first, alpha, uses, slots = fold(surface), len(ops), set(alpha_reads(reads or surface)), {}, {}
             emit(surface, [], textures, texels, alpha, uses)
             emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
             assert len(slots) <= SLOTS, 'values a program keeps for reuse'
@@ -956,8 +959,8 @@ class Flex(bpy.types.RenderEngine):
             # Triangles, normals turned as the faces turn, a material of its row each
             for column, array in zip(columns, (positions, normals.reshape(-1, 3, 3), orco, point, uv, color, tangent,
                 info)): column.append(array)
-            table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row))
-                for row in shades])
+            table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row),
+                row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
             materials.append(table[index])
             slots.append((i, len(positions), (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
@@ -973,11 +976,12 @@ class Flex(bpy.types.RenderEngine):
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
-        materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK)[:2], 0, 1, 0)])
+        world = program(resolve(world.inputs['Surface']) if world else BLACK)
+        materials.append([(*world[:2], 0, 1, 0, world[1])])
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
-        # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag, layer count and
-        # opaque flag (then the world's); then the steps of 4 integers and the texels.
+        # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag, layer count, opaque
+        # flag and emission program (then the world's); then the steps of 4 integers and the texels.
         self.requests.writelines((struct.pack('<4I', SCENE, firsts[-1], len(ops), sum(map(len, texels)) // 4),
             *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
