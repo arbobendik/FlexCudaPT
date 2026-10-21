@@ -2,6 +2,7 @@
 #include "shaders/renderer.h"
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 #include <random>
 #include <cuda.h>
 #include <optix_stubs.h>
@@ -258,6 +259,22 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.infos,
         (CUdeviceptr)scene.materials,
         (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
+}
+
+// The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
+// materials' values changed, an animated one's by frame; then the tables the programs read, rebuilt, each as its first
+// texel and width and its texels, until a width of 0; then per program its first step and light power hint, until a
+// first of 2^32 - 1, which the materials of the programs take
+inline void updateSteps(Scene& scene, Loaded& loaded) {
+    unsigned count;
+    std::fread(&count, sizeof(count), 1, stdin);
+    update(scene.ops, 0, count, loaded.ops.data());
+    for (unsigned table[2]; std::fread(table, sizeof(table), 1, stdin) && table[1];)
+        update(scene.texels, table[0], table[1], std::vector<float4>(table[1]).data());
+    std::unordered_map<unsigned, float> hints;
+    for (std::pair<unsigned, float> hint; std::fread(&hint, sizeof(hint), 1, stdin) && hint.first != ~0u;)
+        hints[hint.first] = hint.second;
+    for (Material& material : loaded.materials) material.emitted = hints.at(material.program);
 }
 
 // Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
