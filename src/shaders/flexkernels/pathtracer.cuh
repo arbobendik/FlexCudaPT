@@ -956,20 +956,126 @@ __device__ Reservoir withEnd(Reservoir r_2, uint end_type_0, uint end_0, float3 
     return candidate_2;
 }
 
+__device__ float facingSign(float transmission_0, float3  face_0, float3  direction_0)
+{
+    bool _S242 = transmission_0 > 0.0f;
+    bool _S243;
+    if(_S242)
+    {
+        _S243 = true;
+    }
+    else
+    {
+        _S243 = (dot_0(face_0, direction_0)) < 0.0f;
+    }
+    float _S244;
+    if(_S243)
+    {
+        _S244 = 1.0f;
+    }
+    else
+    {
+        _S244 = -1.0f;
+    }
+    return _S244;
+}
+
+__device__ float geometryDensity(float3  geometry_n_0, float3  direction_1, float distance_1)
+{
+    return (F32_abs((dot_0(geometry_n_0, direction_1)))) / (distance_1 * distance_1);
+}
+
+__device__ float footprintThreshold(float geometry_density_0)
+{
+    return 0.00251327408477664f / geometry_density_0;
+}
+
+__device__ bool withinFootprint(bool open_0, bool prev_rough_0, float prev_pdf_0, float geometry_density_1, float threshold_0)
+{
+    bool _S245;
+    if(open_0)
+    {
+        _S245 = prev_rough_0;
+    }
+    else
+    {
+        _S245 = false;
+    }
+    if(_S245)
+    {
+        _S245 = (prev_pdf_0 * geometry_density_1 * threshold_0) <= 1.0f;
+    }
+    else
+    {
+        _S245 = false;
+    }
+    return _S245;
+}
+
+__device__ bool withinInverseFootprint(float pdf_1, bool diffuse_0, float prev_cos_0, float distance_2, float threshold_1)
+{
+    bool _S246 = pdf_1 > 0.0f;
+    bool _S247;
+    if(_S246)
+    {
+        if(diffuse_0)
+        {
+            _S247 = true;
+        }
+        else
+        {
+            _S247 = (pdf_1 * prev_cos_0 / (distance_2 * distance_2) * threshold_1) <= 1.0f;
+        }
+    }
+    else
+    {
+        _S247 = false;
+    }
+    return _S247;
+}
+
+__device__ bool roughLobe(float pdf_2, bool diffuse_1, float roughness_0)
+{
+    bool _S248 = pdf_2 > 0.0f;
+    bool _S249;
+    if(_S248)
+    {
+        if(diffuse_1)
+        {
+            _S249 = true;
+        }
+        else
+        {
+            _S249 = roughness_0 >= 0.20000000298023224f;
+        }
+    }
+    else
+    {
+        _S249 = false;
+    }
+    return _S249;
+}
+
+__device__ float survivalProbability(float3  throughput_1, float density_0)
+{
+    float3  _S250 = throughput_1 / make_float3 (density_0);
+    return clamp_0((F32_max((_S250.x), ((F32_max((_S250.y), (_S250.z)))))), 0.0f, 1.0f);
+}
+
 __device__ float cosSubClamped(float sin_a_0, float cos_a_0, float sin_b_0, float cos_b_0)
 {
-    float _S242 = cos_a_0 * cos_b_0 + sin_a_0 * sin_b_0;
-    bool _S243 = cos_a_0 > cos_b_0;
-    float _S244 = _slang_select(_S243, 1.0f,_S242);
-    return _S244;
+    float _S251 = cos_a_0 * cos_b_0 + sin_a_0 * sin_b_0;
+    bool _S252 = cos_a_0 > cos_b_0;
+    float _S253 = _slang_select(_S252, 1.0f,_S251);
+    return _S253;
 }
 
 __device__ float sinSubClamped(float sin_a_1, float cos_a_1, float sin_b_1, float cos_b_1)
 {
-    float _S245 = sin_a_1 * cos_b_1 - cos_a_1 * sin_b_1;
-    bool _S246 = cos_a_1 > cos_b_1;
-    float _S247 = _slang_select(_S246, 0.0f,_S245);
-    return _S247;
+    float _S254 = sin_a_1 * cos_b_1 - cos_a_1 * sin_b_1;
+    bool _S255 = cos_a_1 > cos_b_1;
+    float _S256 = _slang_select(_S255, 0.0f,_S254);
+    return _S256;
 }
 
 __device__ float sine(float c_1)
@@ -979,35 +1085,35 @@ __device__ float sine(float c_1)
 
 __device__ float importance(LightNode node_0, float3  p_0, float3  normal_0)
 {
-    float3  _S248 = (node_0.low + node_0.high) * make_float3 (0.5f);
-    float3  _S249 = node_0.high - node_0.low;
-    float3  _S250 = p_0 - _S248;
-    float3  _S251 = ((((_S250)) * make_float3(rnorm3df(((_S250)).x, ((_S250)).y, ((_S250)).z))));
-    float _S252 = dot_0(_S250, _S250);
-    float _S253 = dot_0(_S249, _S249) / 4.0f;
-    float _S254 = (F32_abs((dot_0(node_0.w, _S251))));
-    float _S255 = sine(node_0.cos_theta_o);
-    float _S256 = (F32_sqrt(((F32_max((1.0f - _S253 / _S252), (0.0f))))));
-    bool _S257 = _S252 < _S253;
-    float _S258 = _slang_select(_S257, -1.0f,_S256);
-    float _S259 = sine(_S258);
-    float _S260 = sine(_S254);
-    float _S261 = cosSubClamped(_S260, _S254, _S255, node_0.cos_theta_o);
-    float _S262 = sine(_S254);
-    float _S263 = sinSubClamped(_S262, _S254, _S255, node_0.cos_theta_o);
-    float _S264 = cosSubClamped(_S263, _S261, _S259, _S258);
-    bool _S265 = _S264 <= 0.0f;
-    if(_S265)
+    float3  _S257 = (node_0.low + node_0.high) * make_float3 (0.5f);
+    float3  _S258 = node_0.high - node_0.low;
+    float3  _S259 = p_0 - _S257;
+    float3  _S260 = ((((_S259)) * make_float3(rnorm3df(((_S259)).x, ((_S259)).y, ((_S259)).z))));
+    float _S261 = dot_0(_S259, _S259);
+    float _S262 = dot_0(_S258, _S258) / 4.0f;
+    float _S263 = (F32_abs((dot_0(node_0.w, _S260))));
+    float _S264 = sine(node_0.cos_theta_o);
+    float _S265 = (F32_sqrt(((F32_max((1.0f - _S262 / _S261), (0.0f))))));
+    bool _S266 = _S261 < _S262;
+    float _S267 = _slang_select(_S266, -1.0f,_S265);
+    float _S268 = sine(_S267);
+    float _S269 = sine(_S263);
+    float _S270 = cosSubClamped(_S269, _S263, _S264, node_0.cos_theta_o);
+    float _S271 = sine(_S263);
+    float _S272 = sinSubClamped(_S271, _S263, _S264, node_0.cos_theta_o);
+    float _S273 = cosSubClamped(_S272, _S270, _S268, _S267);
+    bool _S274 = _S273 <= 0.0f;
+    if(_S274)
     {
         return 0.0f;
     }
-    float _S266 = - dot_0(_S251, normal_0);
-    float _S267 = node_0.phi * _S264 / (F32_max((_S252), (length_0(_S249) / 2.0f)));
-    float _S268 = sine(_S266);
-    float _S269 = cosSubClamped(_S268, _S266, _S259, _S258);
-    bool _S270 = (dot_0(normal_0, normal_0)) == 0.0f;
-    float _S271 = _slang_select(_S270, 1.0f,_S269);
-    return (F32_max((_S267 * _S271), (0.0f)));
+    float _S275 = - dot_0(_S260, normal_0);
+    float _S276 = node_0.phi * _S273 / (F32_max((_S261), (length_0(_S258) / 2.0f)));
+    float _S277 = sine(_S275);
+    float _S278 = cosSubClamped(_S277, _S275, _S268, _S267);
+    bool _S279 = (dot_0(normal_0, normal_0)) == 0.0f;
+    float _S280 = _slang_select(_S279, 1.0f,_S278);
+    return (F32_max((_S276 * _S280), (0.0f)));
 }
 
 __device__ float solidAngle(float probability_0, float3  normal_1, float3  toward_0)
@@ -1017,86 +1123,86 @@ __device__ float solidAngle(float probability_0, float3  normal_1, float3  towar
 
 __device__ uint pickChild(LightNode first_0, LightNode second_0, float3  p_1, float3  normal_2, float * pick_0, float * probability_1)
 {
-    float _S272 = importance(first_0, p_1, normal_2);
-    float _S273 = importance(second_0, p_1, normal_2);
-    float2  _S274 = make_float2 (_S272, _S273);
-    bool _S275 = _S272 == 0.0f;
-    bool _S276;
-    if(_S275)
+    float _S281 = importance(first_0, p_1, normal_2);
+    float _S282 = importance(second_0, p_1, normal_2);
+    float2  _S283 = make_float2 (_S281, _S282);
+    bool _S284 = _S281 == 0.0f;
+    bool _S285;
+    if(_S284)
     {
-        _S276 = _S273 == 0.0f;
+        _S285 = _S282 == 0.0f;
     }
     else
     {
-        _S276 = false;
+        _S285 = false;
     }
-    if(_S276)
+    if(_S285)
     {
         return 2U;
     }
-    float _S277 = _S272 + _S273;
-    bool _S278 = _S273 > 0.0f;
-    if(_S278)
+    float _S286 = _S281 + _S282;
+    bool _S287 = _S282 > 0.0f;
+    if(_S287)
     {
-        _S276 = (*pick_0 * _S277) >= _S272;
+        _S285 = (*pick_0 * _S286) >= _S281;
     }
     else
     {
-        _S276 = false;
+        _S285 = false;
     }
-    uint _S279 = uint(_S276);
-    float _S280 = (F32_min(((*pick_0 * _S277 - float(_S279) * _S272) / _slang_vector_get_element(_S274, _S279)), (0.99999994039535522f)));
-    *pick_0 = _S280;
-    float _S281 = *probability_1 * (_slang_vector_get_element(_S274, _S279) / _S277);
-    *probability_1 = _S281;
-    return _S279;
+    uint _S288 = uint(_S285);
+    float _S289 = (F32_min(((*pick_0 * _S286 - float(_S288) * _S281) / _slang_vector_get_element(_S283, _S288)), (0.99999994039535522f)));
+    *pick_0 = _S289;
+    float _S290 = *probability_1 * (_slang_vector_get_element(_S283, _S288) / _S286);
+    *probability_1 = _S290;
+    return _S288;
 }
 
 __device__ float childShare(LightNode first_1, LightNode second_1, float3  p_2, float3  normal_3, uint child_0)
 {
-    float _S282 = importance(first_1, p_2, normal_3);
-    float _S283 = importance(second_1, p_2, normal_3);
-    float2  _S284 = make_float2 (_S282, _S283);
-    float _S285 = _slang_vector_get_element(_S284, child_0) / (_S282 + _S283);
-    bool _S286 = _slang_vector_get_element(_S284, child_0) > 0.0f;
-    float _S287 = _slang_select(_S286, _S285,0.0f);
-    return _S287;
+    float _S291 = importance(first_1, p_2, normal_3);
+    float _S292 = importance(second_1, p_2, normal_3);
+    float2  _S293 = make_float2 (_S291, _S292);
+    float _S294 = _slang_vector_get_element(_S293, child_0) / (_S291 + _S292);
+    bool _S295 = _slang_vector_get_element(_S293, child_0) > 0.0f;
+    float _S296 = _slang_select(_S295, _S294,0.0f);
+    return _S296;
 }
 
 __device__ float powerHeuristic(float a_5, float b_1)
 {
-    float _S288 = 1.0f / (1.0f + b_1 / a_5 * (b_1 / a_5));
-    bool _S289 = b_1 > 0.0f;
-    float _S290 = _slang_select(_S289, _S288,1.0f);
-    return _S290;
+    float _S297 = 1.0f / (1.0f + b_1 / a_5 * (b_1 / a_5));
+    bool _S298 = b_1 > 0.0f;
+    float _S299 = _slang_select(_S298, _S297,1.0f);
+    return _S299;
 }
 
 __device__ float sphereDensity(float3  center_0, float radius_1, float3  p_3)
 {
-    float3  _S291 = center_0 - p_3;
-    float _S292 = radius_1 * radius_1 / dot_0(_S291, _S291);
-    bool _S293 = _S292 >= 1.0f;
-    if(_S293)
+    float3  _S300 = center_0 - p_3;
+    float _S301 = radius_1 * radius_1 / dot_0(_S300, _S300);
+    bool _S302 = _S301 >= 1.0f;
+    if(_S302)
     {
         return 0.07957746833562851f;
     }
-    return (1.0f + (F32_sqrt((1.0f - _S292)))) / (6.28318548202514648f * _S292);
+    return (1.0f + (F32_sqrt((1.0f - _S301)))) / (6.28318548202514648f * _S301);
 }
 
 __device__ float3  sampleSphere(float3  center_1, float radius_2, float3  p_4, float u1_0, float u2_0)
 {
-    float3  _S294 = center_1 - p_4;
-    float _S295 = radius_2 * radius_2 / dot_0(_S294, _S294);
-    float _S296 = u1_0 * _S295 / (1.0f + (F32_sqrt(((F32_max((1.0f - _S295), (0.0f)))))));
-    float _S297 = 2.0f * u1_0;
-    bool _S298 = _S295 >= 1.0f;
-    float _S299 = _slang_select(_S298, _S297,_S296);
-    float _S300 = (F32_sqrt(((F32_max((_S299 * (2.0f - _S299)), (0.0f))))));
-    float _S301 = 6.28318548202514648f * u2_0;
-    float3  _S302 = make_float3 (_S300 * (F32_cos((_S301))), 1.0f - _S299, _S300 * (F32_sin((_S301))));
-    float3  _S303 = ((((_S294)) * make_float3(rnorm3df(((_S294)).x, ((_S294)).y, ((_S294)).z))));
-    float3  _S304 = tangentToWorld(_S302, _S303);
-    return _S304;
+    float3  _S303 = center_1 - p_4;
+    float _S304 = radius_2 * radius_2 / dot_0(_S303, _S303);
+    float _S305 = u1_0 * _S304 / (1.0f + (F32_sqrt(((F32_max((1.0f - _S304), (0.0f)))))));
+    float _S306 = 2.0f * u1_0;
+    bool _S307 = _S304 >= 1.0f;
+    float _S308 = _slang_select(_S307, _S306,_S305);
+    float _S309 = (F32_sqrt(((F32_max((_S308 * (2.0f - _S308)), (0.0f))))));
+    float _S310 = 6.28318548202514648f * u2_0;
+    float3  _S311 = make_float3 (_S309 * (F32_cos((_S310))), 1.0f - _S308, _S309 * (F32_sin((_S310))));
+    float3  _S312 = ((((_S303)) * make_float3(rnorm3df(((_S303)).x, ((_S303)).y, ((_S303)).z))));
+    float3  _S313 = tangentToWorld(_S311, _S312);
+    return _S313;
 }
 
 #undef Matrix
