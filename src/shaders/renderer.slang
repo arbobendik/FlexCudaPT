@@ -867,22 +867,12 @@ float3 smoothNormal(Scene* scene, Hit hit) {
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
 
-// Distance along the smooth normal rays leave a hit at position from, to prevent unnatural hard shadow / reflection
-// borders due to the difference between the smooth normal and geometry: the corners' distances by the tangents of their
-// normals' angles to the face, limited to PI / 4, interpolated and kept within an eighth of the shortest edge
+// Distance along the smooth normal rays leave a hit at position from, of its triangle, as FlexKernels shares it
 float geometryOffset(Scene* scene, Hit hit, float3 face, float3 position) {
     float3* vertex = scene.vertices + 3 * hit.triangle;
     float3* normal = scene.normals + 3 * hit.triangle;
-    const float weight[3] = {1 - hit.uv.x - hit.uv.y, hit.uv.x, hit.uv.y};
-    float offset = 0, edge = asfloat(0x7F800000u);
-    for (int k = 0; k < 3; ++k) {
-        const float3 side = vertex[(k + 1) % 3] - vertex[k];
-        const float3 diff = position - vertex[k];
-        const float cosine = abs(dot(face, normalize(normal[k])));
-        edge = min(edge, sqrt(dot(side, side)));
-        offset += weight[k] * sqrt(dot(diff, diff)) * min(sqrt(max(1 - cosine * cosine, 0)) / cosine, PI * 0.25f);
-    }
-    return min(max(offset, 0), edge * 0.125f);
+    return geometryOffset(vertex[0], vertex[1], vertex[2], normal[0], normal[1], normal[2], face,
+        float3(1 - hit.uv.x - hit.uv.y, hit.uv.x, hit.uv.y), position);
 }
 // Point offset along the unit normal from origin, or origin where rays from there would skip what lies in between
 float3 lift(Scene* scene, float3 origin, float3 normal, float offset) {
