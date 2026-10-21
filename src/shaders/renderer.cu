@@ -1444,11 +1444,8 @@ extern "C" __global__ void __raygen__temporal() {
     const bool still = scene.frame > 0u && scene.camera.origin == scene.previousCamera.origin
         && scene.camera.x == scene.previousCamera.x && scene.camera.y == scene.previousCamera.y
         && scene.camera.z == scene.previousCamera.z;
-    Scene before = scene;
-    if (scene.frame == 0u) {
-        before.handle = scene.anchorHandle, before.vertices = scene.anchorVertices;
-        before.normals = scene.anchorNormals, before.lights = scene.anchorLights, before.trails = scene.anchorTrails;
-    }
+    // The view's first frame reuses reservoirs of the anchor's scene
+    const Scene& before = scene.frame == 0u ? *(const Scene*)((const char*)&scene - 2 * RECORD_STRIDE) : scene;
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
