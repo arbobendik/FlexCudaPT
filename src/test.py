@@ -408,6 +408,9 @@ scene.flex_bounces = bounces
 context = types.SimpleNamespace(engine='FLEX', camera=scene.camera.data)
 for name in ('DATA_PT_lens', 'DATA_PT_camera', 'DATA_PT_camera_dof', 'DATA_PT_camera_dof_aperture'):
     assert getattr(bpy.types, name).poll(context), name
+panel, subpanel = bpy.types.RENDER_PT_flex, bpy.types.RENDER_PT_flex_restir  # Shown on the render tab
+assert getattr(panel, 'bl_context', None) == 'render' and panel.poll(context), 'Flex panel'
+assert subpanel.bl_parent_id == 'RENDER_PT_flex' and getattr(subpanel, 'bl_context', None) == 'render', 'ReSTIR panel'
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.render.use_border = False
 scene.camera.data.angle, scene.flex_samples = math.pi / 2, 512
