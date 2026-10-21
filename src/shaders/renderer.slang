@@ -22,7 +22,7 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter;
 };
-struct SceneMaterial { float emitted; uint program, hidden, layers, opaque; };
+struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child; uint8_t leaf; };
 static const uint NONE = ~0u;
@@ -727,13 +727,14 @@ Point shifted(Scene* scene, Point point, Ray ray, int axis) {
 }
 // Of a triangle at its barycentrics, reached along the direction by the ray, in a layer of its material, bumped by
 // points along its edges as near as the ray's length makes a pixel's
-Surface shade(Scene* scene, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray, uint layer = 0) {
+Surface shade(Scene* scene, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray, uint layer = 0,
+    bool emission = false) {
     float3* vertex = scene.vertices + 3 * triangle;
     float3* normals = scene.normals + 3 * triangle;
     const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
     const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
     const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
-    uint program = scene.materials[triangle].program;
+    uint program = emission ? scene.materials[triangle].emission : scene.materials[triangle].program;
     // Each layer's program follows the end of the one above it
     while (layer != 0) layer -= uint(scene.ops[program++].code == END);
     return shade(scene, program, normal,
@@ -981,7 +982,7 @@ Medium volume(Surface surface) {
     density = solidAngle(probability, lightNormal, shadow);
     return transmitted * exp(medium.extinction * -left)
         * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
-        Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight))).emissive
+        Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight)), 0, true).emissive
         / density;
 }
 
@@ -1454,8 +1455,8 @@ void lights(uint3 p, Scene* scene) {
     float mean = 0;
     for (uint i = 0; i < LIGHT_SAMPLES; ++i) {
         const float side = sqrt((i + random(state)) / LIGHT_SAMPLES), along = random(state);
-        const float3 emission = shade(scene, triangle, side * (1 - along), side * along,
-            faceNormal(scene, triangle), -faceNormal(scene, triangle), Ray(false, false, LOBE_NONE, 0, 0)).emissive;
+        const float3 emission = shade(scene, triangle, side * (1 - along), side * along, faceNormal(scene, triangle),
+            -faceNormal(scene, triangle), Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
         mean += max(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     scene.materials[triangle].emitted = max(mean, emitted * 0.001f);
