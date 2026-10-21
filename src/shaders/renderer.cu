@@ -699,13 +699,13 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 // Of a triangle at its barycentrics, reached along the direction by the ray, in a layer of its material, bumped by
 // points along its edges as near as the ray's length makes a pixel's
 __device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
-    const Ray& ray, unsigned layer = 0) {
+    const Ray& ray, unsigned layer = 0, bool emission = false) {
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* normals = scene.normals + 3 * triangle;
     const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
     const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
     const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
-    unsigned program = scene.materials[triangle].program;
+    unsigned program = emission ? scene.materials[triangle].emission : scene.materials[triangle].program;
     // Each layer's program follows the end of the one above it
     while (layer) layer -= scene.ops[program++].code == END;
     return shade(scene, program, normal,
@@ -948,7 +948,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     }
     return transmitted * exponential(medium.extinction * -left)
         * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
-        Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}).emissive
+        Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
         / (density = solidAngle(probability, lightNormal, shadow));
 }
 
@@ -1416,8 +1416,8 @@ extern "C" __global__ void __raygen__lights() {
     float mean = 0;
     for (unsigned i = 0; i < LIGHT_SAMPLES; ++i) {
         const float side = sqrtf((i + random(state)) / LIGHT_SAMPLES), along = random(state);
-        const float3 emission = shade(scene, triangle, side * (1 - along), side * along,
-            faceNormal(scene, triangle), -faceNormal(scene, triangle), {false, false, LOBE_NONE, 0, 0}).emissive;
+        const float3 emission = shade(scene, triangle, side * (1 - along), side * along, faceNormal(scene, triangle),
+            -faceNormal(scene, triangle), {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
         mean += fmaxf(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     material.emitted = fmaxf(mean, material.emitted * 0.001f);
