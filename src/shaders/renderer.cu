@@ -931,6 +931,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     // entering the volumes of those it meets from the front and leaving them from the back
     for (Hit hit = {NONE}; (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
         : hit.triangle)).triangle != NONE; left -= occluder) {
+        if (scene.materials[hit.triangle].opaque) return make_float3(0, 0, 0);  // Shading it would pass nothing
         transmitted = transmitted * exponential(medium.extinction * -occluder);
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
             const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
