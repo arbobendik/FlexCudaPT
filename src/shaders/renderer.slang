@@ -21,7 +21,7 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter;
 };
-struct SceneMaterial { float emitted; uint program, hidden, layers; };
+struct SceneMaterial { float emitted; uint program, hidden, layers, opaque; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child; uint8_t leaf; };
 static const uint NONE = ~0u;
@@ -964,6 +964,7 @@ Medium volume(Surface surface) {
     // entering the volumes of those it meets from the front and leaving them from the back
     for (Hit hit = Hit(NONE, float2(0, 0)); (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
         : hit.triangle)).triangle != NONE; left -= occluder) {
+        if (scene.materials[hit.triangle].opaque != 0) return float3(0, 0, 0);  // Shading it would pass nothing
         transmitted = transmitted * exp(medium.extinction * -occluder);
         for (uint layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
             const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,

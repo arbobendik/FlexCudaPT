@@ -855,7 +855,10 @@ class Flex(bpy.types.RenderEngine):
             emit(surface, [], textures, texels, alpha, uses)
             emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
             assert len(slots) <= SLOTS, 'values a program keeps for reuse'
-            return max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0), first
+            # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
+            scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(numpy.resize(surface[k], 3)[0])
+            opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
+            return max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0), first, opaque
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         slots = []  # Index, triangle count and key of each instance exported
         for i, instance in enumerate(depsgraph.object_instances):
@@ -953,7 +956,8 @@ class Flex(bpy.types.RenderEngine):
             # Triangles, normals turned as the faces turn, a material of its row each
             for column, array in zip(columns, (positions, normals.reshape(-1, 3, 3), orco, point, uv, color, tangent,
                 info)): column.append(array)
-            table = numpy.array([(*row[0], not ob.visible_camera, len(row)) for row in shades])
+            table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row))
+                for row in shades])
             materials.append(table[index])
             slots.append((i, len(positions), (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
@@ -969,11 +973,11 @@ class Flex(bpy.types.RenderEngine):
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
-        materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK), 0, 1)])
+        materials.append([(*program(resolve(world.inputs['Surface']) if world else BLACK)[:2], 0, 1, 0)])
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
-        # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag and layer count (then
-        # the world's); then the steps of 4 integers and the texels.
+        # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag, layer count and
+        # opaque flag (then the world's); then the steps of 4 integers and the texels.
         self.requests.writelines((struct.pack('<4I', SCENE, firsts[-1], len(ops), sum(map(len, texels)) // 4),
             *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
