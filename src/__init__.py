@@ -1087,9 +1087,12 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         for name in ('resolution_x', 'resolution_y', 'resolution_percentage', 'use_persistent_data'):
             self.layout.prop(context.scene.render, name)
 
-class RENDER_PT_flex_restir(RENDER_PT_flex):  # ReSTIR settings of the Flex engine
+class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
     bl_label = 'ReSTIR'
     bl_parent_id = 'RENDER_PT_flex'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'render'
 
     def draw(self, context):
         scene = context.scene
