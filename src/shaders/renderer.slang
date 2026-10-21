@@ -520,6 +520,12 @@ float3 transform(Scene scene, float3 v, int mode, Info info) {
 }
 // Of a point shaded: its UV, generated point, point in its object, color, position and triangle barycentrics
 struct Point { float u, v; float3 generated, object; float4 color; float3 position; float s, t; uint triangle; };
+// Whether the scene's programs take the step: the bound values' op mask, specialized as the pipeline is created, its
+// driver compiles out the cases of steps they do not
+[vk::constant_id(0)] const uint64_t OPS0 = 0xFFFFFFFFFFFFFFFFull;
+[vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
+bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
+#define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
 // incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped along its edges
 [noinline] Surface shade(Scene scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming, bool backfacing,
@@ -528,14 +534,15 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
     float3 stack[STACK], saved[SLOTS];
     int top = 0;
     for (Op* op = scene.ops + program; op.code != END; ++op) switch (op.code) {
-        case PUSH: stack[top++] = op.value; break;
-        case STORE: saved[asuint(op.value.x)] = stack[top - 1]; break;
-        case LOAD: stack[top++] = saved[asuint(op.value.x)]; break;
-        case UV: stack[top++] = float3(at.u, at.v, 0); break;
-        case GENERATED: stack[top++] = at.generated; break;
-        case OBJECT: stack[top++] = at.object; break;
-        case TRANSFORM: --top; stack[top - 1] = transform(scene, stack[top - 1], int(stack[top].x), info); break;
+        CASE(PUSH) stack[top++] = op.value; break;
+        CASE(STORE) saved[asuint(op.value.x)] = stack[top - 1]; break;
+        CASE(LOAD) stack[top++] = saved[asuint(op.value.x)]; break;
+        CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
+        CASE(GENERATED) stack[top++] = at.generated; break;
+        CASE(OBJECT) stack[top++] = at.object; break;
+        CASE(TRANSFORM) --top; stack[top - 1] = transform(scene, stack[top - 1], int(stack[top].x), info); break;
         case CAMERA_POINT: case WINDOW: { // In the camera's space, right, up and forward, or of its window, of the
+            if (!used(CAMERA_POINT) && !used(WINDOW)) break;
             const Camera c = scene.camera; // world along its direction from the camera, as Cycles'
             const float3 d = program == scene.materials[scene.count].program ? at.position : at.position - c.origin;
             const float3 forward = normalize(cross(c.y, c.x));
@@ -543,20 +550,20 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
             stack[top++] = op.code == CAMERA_POINT ? float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
-        case VERTEX_COLOR: stack[top++] = at.color.xyz; break;
-        case VERTEX_ALPHA: stack[top++] = float3(1, 1, 1) * at.color.w; break;
-        case OBJECT_INFO: { // Its location, color, alpha, pass index, material's pass index or random number
+        CASE(VERTEX_COLOR) stack[top++] = at.color.xyz; break;
+        CASE(VERTEX_ALPHA) stack[top++] = float3(1, 1, 1) * at.color.w; break;
+        CASE(OBJECT_INFO) { // Its location, color, alpha, pass index, material's pass index or random number
             const int output = int(stack[top - 1].x);
             stack[top - 1] = output == 0 ? float3(info.location[0], info.location[1], info.location[2]) : output == 1
                 ? float3(info.color[0], info.color[1], info.color[2]) : float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? info.material : info.random);
         } break;
-        case NORMAL: stack[top++] = normal; break;
-        case POSITION: stack[top++] = at.position; break;
-        case SHIFT: // Pushes its own point's index before the height there
+        CASE(NORMAL) stack[top++] = normal; break;
+        CASE(POSITION) stack[top++] = at.position; break;
+        CASE(SHIFT) // Pushes its own point's index before the height there
             at = shifted(scene, point, ray, int(stack[top - 1].x)); break;
-        case SHIFTED: --top; stack[top - 1] = stack[top]; at = point; break;
-        case BUMP: { // The normal bent by the height's gradient, as Cycles' bump node
+        CASE(SHIFTED) --top; stack[top - 1] = stack[top]; at = point; break;
+        CASE(BUMP) { // The normal bent by the height's gradient, as Cycles' bump node
             top -= 4;
             const float3 n = stack[top - 1], dx = shifted(scene, point, ray, 1).position - at.position,
                 dy = shifted(scene, point, ray, 2).position - at.position;
@@ -567,10 +574,12 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
             stack[top - 1] = dot(bent, bent) > 0 ? normalize(normalize(bent) * max(stack[top + 3].x, 0)
                 + n * (1 - max(stack[top + 3].x, 0))) : n;
         } break;
-        case INCOMING: stack[top++] = incoming; break;
-        case BACKFACING: stack[top++] = float3(1, 1, 1) * float(backfacing); break;
-        case LIGHT_PATH: stack[top - 1] = float3(1, 1, 1) * lightPath(ray, int(stack[top - 1].x)); break;
+        CASE(INCOMING) stack[top++] = incoming; break;
+        CASE(BACKFACING) stack[top++] = float3(1, 1, 1) * float(backfacing); break;
+        CASE(LIGHT_PATH) stack[top - 1] = float3(1, 1, 1) * lightPath(ray, int(stack[top - 1].x)); break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
+            if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
+                && !used(ALPHA_CUBIC)) break;
             const uint width = asuint(op.value.y), height = asuint(op.value.z);
             const bool repeat = (height >> 24 & 3) == 0;
             float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * width;
@@ -596,91 +605,91 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
                 ? color.xyz
                 : float3(1, 1, 1) * color.w;
         } break;
-        case NORMAL_MAP: {
+        CASE(NORMAL_MAP) {
             const float3 n = transform(scene, tangentToWorldNormalMap(stack[top - 1] * 2 - float3(1, 1, 1), tbn), 2,
                 info);
             stack[top - 1] = isfinite(dot(n, n)) ? n : normal;
         } break;
-        case ADD: --top; stack[top - 1] = stack[top - 1] + stack[top]; break;
-        case SUBTRACT: --top; stack[top - 1] = stack[top - 1] - stack[top]; break;
-        case MULTIPLY: --top; stack[top - 1] = stack[top - 1] * stack[top]; break;
-        case DOT_PRODUCT: --top; stack[top - 1] = float3(1, 1, 1) * dot(stack[top - 1], stack[top]); break;
-        case MAXIMUM: --top; stack[top - 1] = max(stack[top - 1], stack[top]); break;
-        case LOGARITHM: --top;
+        CASE(ADD) --top; stack[top - 1] = stack[top - 1] + stack[top]; break;
+        CASE(SUBTRACT) --top; stack[top - 1] = stack[top - 1] - stack[top]; break;
+        CASE(MULTIPLY) --top; stack[top - 1] = stack[top - 1] * stack[top]; break;
+        CASE(DOT_PRODUCT) --top; stack[top - 1] = float3(1, 1, 1) * dot(stack[top - 1], stack[top]); break;
+        CASE(MAXIMUM) --top; stack[top - 1] = max(stack[top - 1], stack[top]); break;
+        CASE(LOGARITHM) --top;
             stack[top - 1] = float3(logarithm(stack[top - 1].x, stack[top].x), logarithm(stack[top - 1].y, stack[top].y),
                 logarithm(stack[top - 1].z, stack[top].z));
             break;
-        case MULTIPLY_ADD: top -= 2; stack[top - 1] = stack[top - 1] * stack[top] + stack[top + 1]; break;
-        case DIVIDE: --top; stack[top - 1] = divide(stack[top - 1], stack[top]); break;
-        case SNAP: { --top;
+        CASE(MULTIPLY_ADD) top -= 2; stack[top - 1] = stack[top - 1] * stack[top] + stack[top + 1]; break;
+        CASE(DIVIDE) --top; stack[top - 1] = divide(stack[top - 1], stack[top]); break;
+        CASE(SNAP) { --top;
             const float3 q = divide(stack[top - 1], stack[top]);
             stack[top - 1] = floor(q) * stack[top];
         } break;
-        case BOX: --top; stack[top - 1] = box(stack[top - 1], stack[top].x); break;
-        case BRICK: top -= 3; stack[top - 1] = brick(stack[top - 1], stack[top], stack[top + 1], stack[top + 2]); break;
-        case MAGIC: --top; stack[top - 1] = magic(stack[top - 1], stack[top]); break;
-        case VORONOI: top -= 4;
+        CASE(BOX) --top; stack[top - 1] = box(stack[top - 1], stack[top].x); break;
+        CASE(BRICK) top -= 3; stack[top - 1] = brick(stack[top - 1], stack[top], stack[top + 1], stack[top + 2]); break;
+        CASE(MAGIC) --top; stack[top - 1] = magic(stack[top - 1], stack[top]); break;
+        CASE(VORONOI) top -= 4;
             stack[top - 1] = fractalVoronoi(stack[top - 1], stack[top], stack[top + 1], stack[top + 2], stack[top + 3]);
             break;
-        case WHITE_NOISE: --top;
+        CASE(WHITE_NOISE) --top;
             stack[top - 1] = white(stack[top - 1], int(stack[top].x), stack[top].y != 0, stack[top].z);
             break;
-        case NOISE: top -= 3;
+        CASE(NOISE) top -= 3;
             stack[top - 1] = float3(1, 1, 1) * fractal(stack[top - 1], stack[top], stack[top + 1], stack[top + 2].x,
                 int(stack[top + 2].y));
             break;
-        case DECODE: stack[top - 1] = float3(decode(stack[top - 1].x), decode(stack[top - 1].y), decode(stack[top - 1].z));
+        CASE(DECODE) stack[top - 1] = float3(decode(stack[top - 1].x), decode(stack[top - 1].y), decode(stack[top - 1].z));
             break;
-        case POWER: --top;
+        CASE(POWER) --top;
             stack[top - 1] = float3(power(stack[top - 1].x, stack[top].x), power(stack[top - 1].y, stack[top].y),
                 power(stack[top - 1].z, stack[top].z));
             break;
-        case EXPONENT: stack[top - 1] = exp(stack[top - 1]); break;
-        case MINIMUM: --top; stack[top - 1] = min(stack[top - 1], stack[top]); break;
-        case LESS_THAN: --top; stack[top - 1] = float3(stack[top - 1] < stack[top]); break;
-        case FLOOR: stack[top - 1] = floor(stack[top - 1]); break;
-        case MODULO: --top;
+        CASE(EXPONENT) stack[top - 1] = exp(stack[top - 1]); break;
+        CASE(MINIMUM) --top; stack[top - 1] = min(stack[top - 1], stack[top]); break;
+        CASE(LESS_THAN) --top; stack[top - 1] = float3(stack[top - 1] < stack[top]); break;
+        CASE(FLOOR) stack[top - 1] = floor(stack[top - 1]); break;
+        CASE(MODULO) --top;
             stack[top - 1] = float3(stack[top].x != 0 ? fmod(stack[top - 1].x, stack[top].x) : 0,
                 stack[top].y != 0 ? fmod(stack[top - 1].y, stack[top].y) : 0,
                 stack[top].z != 0 ? fmod(stack[top - 1].z, stack[top].z) : 0);
             break;
         // Reduced exactly, which fast math's sines are not
-        case SINE: stack[top - 1] = float3(sinpi(stack[top - 1].x * INV_PI), sinpi(stack[top - 1].y * INV_PI),
+        CASE(SINE) stack[top - 1] = float3(sinpi(stack[top - 1].x * INV_PI), sinpi(stack[top - 1].y * INV_PI),
             sinpi(stack[top - 1].z * INV_PI)); break;
-        case COSINE: stack[top - 1] = float3(cospi(stack[top - 1].x * INV_PI), cospi(stack[top - 1].y * INV_PI),
+        CASE(COSINE) stack[top - 1] = float3(cospi(stack[top - 1].x * INV_PI), cospi(stack[top - 1].y * INV_PI),
             cospi(stack[top - 1].z * INV_PI)); break;
-        case TANGENT: stack[top - 1] = float3(sinpi(stack[top - 1].x * INV_PI) / cospi(stack[top - 1].x * INV_PI),
+        CASE(TANGENT) stack[top - 1] = float3(sinpi(stack[top - 1].x * INV_PI) / cospi(stack[top - 1].x * INV_PI),
             sinpi(stack[top - 1].y * INV_PI) / cospi(stack[top - 1].y * INV_PI),
             sinpi(stack[top - 1].z * INV_PI) / cospi(stack[top - 1].z * INV_PI)); break;
-        case ARCSINE: stack[top - 1] = asin(min(max(stack[top - 1], -1), 1)); break;
-        case ARCCOSINE: stack[top - 1] = acos(min(max(stack[top - 1], -1), 1)); break;
-        case ARCTANGENT: stack[top - 1] = atan(stack[top - 1]); break;
-        case ARCTAN2: --top; stack[top - 1] = atan2(stack[top - 1], stack[top]); break;
-        case SINH: stack[top - 1] = sinh(stack[top - 1]); break;
-        case COSH: stack[top - 1] = cosh(stack[top - 1]); break;
-        case TANH: stack[top - 1] = tanh(stack[top - 1]); break;
-        case CROSS_PRODUCT: --top; stack[top - 1] = cross(stack[top - 1], stack[top]); break;
-        case RGB_TO_HSV: stack[top - 1] = toHsv(stack[top - 1]); break;
-        case HSV_TO_RGB: stack[top - 1] = fromHsv(stack[top - 1]); break;
-        case RGB_TO_HSL: stack[top - 1] = toHsl(stack[top - 1]); break;
-        case HSL_TO_RGB: stack[top - 1] = fromHsl(stack[top - 1]); break;
-        case ROTATE: { // Around the unit axis by the angle, as Rodrigues'
+        CASE(ARCSINE) stack[top - 1] = asin(min(max(stack[top - 1], -1), 1)); break;
+        CASE(ARCCOSINE) stack[top - 1] = acos(min(max(stack[top - 1], -1), 1)); break;
+        CASE(ARCTANGENT) stack[top - 1] = atan(stack[top - 1]); break;
+        CASE(ARCTAN2) --top; stack[top - 1] = atan2(stack[top - 1], stack[top]); break;
+        CASE(SINH) stack[top - 1] = sinh(stack[top - 1]); break;
+        CASE(COSH) stack[top - 1] = cosh(stack[top - 1]); break;
+        CASE(TANH) stack[top - 1] = tanh(stack[top - 1]); break;
+        CASE(CROSS_PRODUCT) --top; stack[top - 1] = cross(stack[top - 1], stack[top]); break;
+        CASE(RGB_TO_HSV) stack[top - 1] = toHsv(stack[top - 1]); break;
+        CASE(HSV_TO_RGB) stack[top - 1] = fromHsv(stack[top - 1]); break;
+        CASE(RGB_TO_HSL) stack[top - 1] = toHsl(stack[top - 1]); break;
+        CASE(HSL_TO_RGB) stack[top - 1] = fromHsl(stack[top - 1]); break;
+        CASE(ROTATE) { // Around the unit axis by the angle, as Rodrigues'
             top -= 2;
             const float3 v = stack[top - 1], k = stack[top];
             const float c = cospi(stack[top + 1].x * INV_PI), s = sinpi(stack[top + 1].x * INV_PI);
             stack[top - 1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
         } break;
-        case EQUIRECTANGULAR: { // Image coordinates of a direction, as Cycles'
+        CASE(EQUIRECTANGULAR) { // Image coordinates of a direction, as Cycles'
             const float3 d = stack[top - 1];
             stack[top - 1] = float3(0.5f - atan2(d.y, d.x) / (2 * PI),
                 0.5f + atan2(d.z, sqrt(d.x * d.x + d.y * d.y)) / PI, 0);
         } break;
-        case MIRROR_BALL: { // Image coordinates of a direction on a mirror ball, as Cycles'
+        CASE(MIRROR_BALL) { // Image coordinates of a direction on a mirror ball, as Cycles'
             float3 d = stack[top - 1] / (length(stack[top - 1]) > 0 ? length(stack[top - 1]) : 1) - float3(0, 1, 0);
             d = d / (d.y < 0 ? 2 * sqrt(-0.5f * d.y) : 1);
             stack[top - 1] = float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
         } break;
-        case DIELECTRIC: --top; stack[top - 1] = float3(1, 1, 1) * fresnel(abs(stack[top - 1].x), 1, stack[top].x); break;
+        CASE(DIELECTRIC) --top; stack[top - 1] = float3(1, 1, 1) * fresnel(abs(stack[top - 1].x), 1, stack[top].x); break;
     }
     return Surface(normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12]);
