@@ -10,7 +10,7 @@
 struct Launch { CUdeviceptr record; unsigned width, height, depth; };
 constexpr unsigned WORKGROUP = 8; // Square, as renderer.slang's main runs, its threads in a row for launches one high
 
-struct OptixModule_t { VkShaderModule shader; };
+struct OptixModule_t { VkShaderModule shader; Params params; };
 struct OptixProgramGroup_t { OptixModule module; unsigned program; };
 struct OptixPipeline_t { VkPipelineLayout layout; VkPipeline pipeline; };
 
@@ -44,13 +44,13 @@ inline OptixResult optixDenoiserInvoke(OptixDenoiser, CUstream, const OptixDenoi
     return OPTIX_ERROR_NOT_SUPPORTED;
 }
 
-inline OptixResult optixModuleCreate(OptixDeviceContext, const OptixModuleCompileOptions*,
+inline OptixResult optixModuleCreate(OptixDeviceContext, const OptixModuleCompileOptions* options,
     const OptixPipelineCompileOptions*, const char* input, size_t size, char*, size_t*, OptixModule* module) {
     std::vector<uint32_t> code(size / 4);
     std::memcpy(code.data(), input, size);
     const VkShaderModuleCreateInfo info{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size,
         .pCode = code.data()};
-    *module = new OptixModule_t;
+    *module = new OptixModule_t{.params = *(const Params*)options->boundValues[0].boundValuePtr}; // Its op mask
     return vkCreateShaderModule(vulkan.device, &info, nullptr, &(*module)->shader) ? OPTIX_ERROR_INVALID_INPUT
         : OPTIX_SUCCESS;
 }
@@ -79,9 +79,13 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
     const VkPipelineLayoutCreateInfo layout{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
     if (vkCreatePipelineLayout(vulkan.device, &layout, nullptr, &(*pipeline)->layout)) return OPTIX_ERROR_INVALID_VALUE;
+    // The module's op mask as renderer.slang's OPS0 and OPS1
+    const VkSpecializationMapEntry entries[] = {{0, 0, 8}, {1, 8, 8}};
+    const VkSpecializationInfo specialization{2, entries, sizeof(Params), &groups[0]->module->params};
     const VkComputePipelineCreateInfo info{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = groups[0]->module->shader, .pName = "main"}, .layout = (*pipeline)->layout};
+        .module = groups[0]->module->shader, .pName = "main", .pSpecializationInfo = &specialization},
+        .layout = (*pipeline)->layout};
     return vkCreateComputePipelines(vulkan.device, VK_NULL_HANDLE, 1, &info, nullptr, &(*pipeline)->pipeline)
         ? OPTIX_ERROR_PIPELINE_LINK_ERROR : OPTIX_SUCCESS;
 }
