@@ -109,12 +109,19 @@ def span(node):  # Of the points of a curves node's curves
     curves = node.mapping.curves
     return min(curve.points[0].location[0] for curve in curves), max(curve.points[-1].location[0] for curve in curves)
 
+# A curves node's mapping as Blender's tables read its points: rebuilt from them, which sorts them by x, while they're
+# in order; once keyed points cross, Blender's tables keep their order, so its table stays as built
+def rebuilt(mapping):
+    ordered = all(a.location[0] <= b.location[0] for curve in mapping.curves for a, b in zip(curve.points,
+        curve.points[1:]))
+    mapping.update() if ordered else mapping.initialize()
+    return mapping
+
 def table(node):  # Colors of a wavelength, ramp or curves node, RGB curves after the combined curve
     if node.type == 'WAVELENGTH': return [(*numpy.array(Color(xyz).from_xyz_d65_to_scene_linear()) / 2.52, 1)
         for xyz in CIE]
     if node.type == 'VALTORGB': return [node.color_ramp.evaluate(i / 255) for i in range(256)]
-    mapping, curves = node.mapping, [*node.mapping.curves]
-    mapping.initialize()
+    mapping, curves = rebuilt(node.mapping), [*node.mapping.curves]
     rgb = node.type == 'CURVE_RGB'
     return [[*(mapping.evaluate(curve, mapping.evaluate(curves[3], x) if rgb else x) for curve in (curves * 3)[:3]), 1]
         for x in numpy.linspace(*span(node), 256)]
@@ -602,7 +609,7 @@ def lookup(node, f, k):  # Component k of a curves node's colors f along them, b
 def curves(node, inputs, index):  # Of an RGB, vector or float curves node, each channel along its curve, as Cycles'
     factor, value = inputs
     if node.type == 'CURVE_FLOAT' and not any(isinstance(fold(v), tuple) for v in inputs):
-        node.mapping.initialize()
+        rebuilt(node.mapping)
         looked = node.mapping.evaluate(node.mapping.curves[0], float(numpy.resize(fold(value), 3)[0]))
         return mix(value, between(looked, node.mapping.clip_min_y, node.mapping.clip_max_y)
             if node.mapping.use_clip else looked, factor)
