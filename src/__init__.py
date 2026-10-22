@@ -897,7 +897,9 @@ class Flex(bpy.types.RenderEngine):
                 orco = (orco.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
                 if any(face.loop_total > 4 for face in mesh.polygons):
                     bm.from_mesh(mesh)
-                    bmesh.ops.triangulate(bm, faces=[face for face in bm.faces if len(face.verts) > 4])
+                    # By the mesh's own fill, which Cycles triangulates n-gons by, without BMesh's beautify
+                    bmesh.ops.triangulate(bm, faces=[face for face in bm.faces if len(face.verts) > 4],
+                        ngon_method='EAR_CLIP')
                     bm.to_mesh(mesh)
                 loops, index = (numpy.empty(n * len(mesh.loop_triangles), 'i') for n in (3, 1))
                 co, vertex = numpy.empty(3 * len(mesh.vertices), 'f'), numpy.empty(len(mesh.loops), 'i')
