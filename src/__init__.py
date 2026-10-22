@@ -3,6 +3,7 @@ import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, s
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix
 from bl_ui.properties_data_camera import classes as CAMERA_PANELS
+from bpy_extras import anim_utils
 
 SUN_DISTANCE = 1e5
 VIEWPORT_SAMPLES = 4  # Per redraw
@@ -79,7 +80,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
-    'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD'))}
+    'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED'))}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density and scattering color
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0]
@@ -135,6 +136,7 @@ def decode(srgb):  # sRGB to linear
 # it filters them
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
+    if isinstance(source, Bake): return textures[source]
     ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
     key = source if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
     if key not in textures:
@@ -175,6 +177,69 @@ class ImageRead:  # Samples Cycles can merge share whether their alpha is read
         self.node = node
         self.key = (node.image, node.interpolation, node.projection, getattr(node, 'projection_blend', 0),
             getattr(node, 'extension', 'REPEAT'), expression_key(fold(point)))
+
+class Bake:  # Texture the bake pass fills with a unit's value
+    pass
+
+READS = ('IMAGE', 'ALPHA', 'IMAGE_LINEAR', 'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC')
+READ_COSTS = {'IMAGE': 2, 'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches of a read by its kind
+# Steps affine in their operands, by which of these vary: a unit of them alone commutes with interpolating its reads
+AFFINE = {'ADD': lambda a, b: True, 'SUBTRACT': lambda a, b: True, 'MULTIPLY': lambda a, b: not (a and b),
+    'DOT_PRODUCT': lambda a, b: not (a and b), 'DIVIDE': lambda a, b: not b,
+    'MULTIPLY_ADD': lambda a, b, c: not (a and b), 'ROTATE': lambda vector, axis, angle: not (axis or angle)}
+POINTS = ('GENERATED', 'OBJECT', 'UV', 'VERTEX_COLOR', 'VERTEX_ALPHA')  # What a unit baked over its object's UVs reads
+BUDGET = 1 << 24  # Texel slots of 16 bytes, two half texels each, baked at most (256 MiB); units over UVs past it stay
+# Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
+# all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
+def jacobian(expression, input):
+    at = lambda e, value: (value if e == (input,) else numpy.full(3, 0.5) if len(e) == 1 and e[0] in POINTS
+        or e[0] == 'NOISE'
+        else (e[0], *(at(operand, value) for operand in e[1:]))) if isinstance(e, tuple) else e
+    values = [fold(at(expression, numpy.full(3, 0.5) + 1e-3 * step)) for step in (*numpy.eye(3), numpy.zeros(3))]
+    if any(isinstance(value, tuple) for value in values): return math.inf
+    return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
+
+# Largest change of a point input per unit of its triangles' UVs, its corners' values as values and theirs as uvs: of
+# its derivative along the UVs, by its Frobenius norm, the 90th percentile over the triangles that have area in UV
+def stretch(values, uvs):
+    edges = lambda a: numpy.stack((a[:, 1] - a[:, 0], a[:, 2] - a[:, 0]), 2)
+    flat = numpy.abs(numpy.linalg.det(edges(uvs))) > 1e-12
+    return flat.any() and numpy.percentile(numpy.linalg.norm(edges(values)[flat] @ numpy.linalg.inv(
+        edges(uvs)[flat]), axis=(1, 2)), 90)
+
+# What an expression is as a unit baked over its object's UVs, its operands' first, into table by its id; for all of a
+# surface before its cut, which meets each expression once, by the scales of its point inputs along them (none: no such
+# unit): its image reads' kinds, points' keys, sizes and extensions; whether it's affine in them (None: not); its cost,
+# an image read's point aside, as baking a read at a moved point only resamples it (None for any other step or input, or
+# reads at a nearest texel or clipped, whose hard edges would blur); its point inputs; and the texels across the UVs it
+# needs: its images', and eight per period of its noises' finest octave of at least a 256th of the first's amplitude, as
+# gradient noise holds more than its frequency and distortion adds to it (two left Fog of tokyo's 0.1% bright), then its
+# images' alone. Not affine in its reads, it bakes only where its noises need more, or its baked texels interpolated
+# would differ from it of interpolated reads.
+def summarize(expression, table, scales):
+    if not isinstance(expression, tuple): return set(), False, 1, set(), 0, 0
+    name, *operands = expression
+    parts = [summarize(operand, table, scales) for operand in operands]
+    read, sub = name in READS and isinstance(operands[-1], ImageRead), parts[:-1] if name in READS else parts
+    node, kind = read and operands[-1].node, name.replace('ALPHA', 'IMAGE')
+    reads = {(kind, expression_key(operands[0]), tuple(node.image.size), getattr(node, 'extension', 'REPEAT'))} \
+        if read else set().union(*(part[0] for part in sub))
+    flags = [part[1] for part in sub]
+    affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
+    points = None if name not in (*POINTS, *READS, 'NOISE') and not OPS.get(name) or read and (name in ('IMAGE',
+        'ALPHA') or getattr(node, 'extension', '') == 'CLIP') or any(part[2] is None for part in parts) else \
+        READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
+    inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
+    along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
+    texels = max([0, *(part[5] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
+    need = max([texels, *(part[4] for part in parts)])
+    if scales and name == 'NOISE':
+        detail, roughness, lacunarity = (0, 1, 1) if isinstance(operands[1], tuple) else numpy.resize(operands[1], 3)
+        octaves = detail if roughness >= 1 else min(detail, math.log(1 / 256) / math.log(max(roughness, 1e-3)))
+        need = math.inf if isinstance(operands[1], tuple) else max(need, 8 * lacunarity ** octaves * along())
+    points = None if affine is None and texels and need <= texels else points
+    table[id(expression)] = reads, affine, points, inputs, need, texels
+    return table[id(expression)]
 
 def alpha_reads(expression):  # Image samples whose alpha contributes to the resolved surface
     if isinstance(expression, list):
@@ -227,6 +292,14 @@ def fold(expression):  # The expression with its operations on constants alone c
             if numpy.all(numpy.asarray(value) == (1 if name in ('MULTIPLY', 'DIVIDE') else 0)) \
                 and (name in ('ADD', 'MULTIPLY') or i == 1): return operands[1 - i]
     return name, *operands
+
+def unanimated(value):  # The expression with its animated values, which its cut keeps from bakes, as constants
+    if isinstance(value, list): return [unanimated(part) for part in value]
+    if not isinstance(value, tuple): return value
+    return unanimated(value[1]) if value[0] == 'ANIMATED' else (value[0], *map(unanimated, value[1:]))
+
+def nonzero(value):  # Whether a value resolved is an expression or a constant not zero, its animated ones as constants
+    return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
 
 def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
     if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(a, b)]
@@ -487,7 +560,7 @@ def noise(node, inputs, index):
     at = lambda seed, p, w, *kind: fractal(('ADD', p, offset(seed, dimensions)[0]), ('ADD', w, offset(seed,
         dimensions)[1]), *kind)  # Offset by the seed
     point, w, distortion = ('MULTIPLY', point, get('Scale')), ('MULTIPLY', w, get('Scale')), get('Distortion')
-    if isinstance(distortion, tuple) or numpy.any(distortion):
+    if nonzero(distortion):
         signed = [at(seed, point, w, numpy.array((0, 0, 1)), numpy.array((0, 0, 1))) for seed in range(dimensions)]
         point = 'ADD', point, ('MULTIPLY', vector(*(signed + [0, 0])[:3]), distortion)
         if dimensions == 4: w = 'ADD', w, ('MULTIPLY', signed[3], distortion)
@@ -554,7 +627,7 @@ def wave(node, inputs, index):  # Of a wave texture node at the generated point 
     else: n = 'MULTIPLY', length(('MULTIPLY', p, numpy.ones(3) - numpy.eye(3)['XYZ'.index(node.rings_direction)]
         if node.rings_direction != 'SPHERICAL' else 1)), 20
     n = 'ADD', n, phase
-    if isinstance(distortion, tuple) or numpy.any(distortion): n = 'ADD', n, ('MULTIPLY', distortion, ('SUBTRACT',
+    if nonzero(distortion): n = 'ADD', n, ('MULTIPLY', distortion, ('SUBTRACT',
         ('MULTIPLY', ('NOISE', ('MULTIPLY', p, detail_scale), vector(detail, roughness, 2), numpy.zeros(3),
         numpy.array((0, 3, 0))), 2), 1))
     if node.wave_profile == 'SIN': return 'ADD', 0.5, ('MULTIPLY', 0.5, ('SINE', ('SUBTRACT', n, math.pi / 2)))
@@ -716,12 +789,18 @@ NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MI
 
 # Expression of what a socket receives, a surface for a shader: a constant, or a step followed by its operands. groups
 # are the group nodes entered on the way; a node that is muted or not resolved exactly passes its input on.
+def animated(socket):  # Whether the socket's value is keyframed or driven, which the interpreter runs per frame
+    data, path = socket.id_data.animation_data, socket.path_from_id('default_value')
+    bag = data and data.action and anim_utils.action_get_channelbag_for_slot(data.action, data.action_slot)
+    return bool(data and (data.drivers.find(path) or bag and bag.fcurves.find(path)))
+
 def resolve(socket, groups=()):
     link = next((link for link in socket.links  # Invalid links close a cycle
         if link.is_valid and not (socket.is_output or link.is_muted)), None)
     if not link and socket.type == 'SHADER': return BLACK
-    if not link:  # A virtual socket has no value
+    if not link:  # A virtual socket has no value; an animated one is left to the interpreter, never baked
         value = numpy.resize(getattr(socket, 'default_value', 0), 3)
+        value = ('ANIMATED', value) if hasattr(socket, 'default_value') and animated(socket) else value
         return {'Normal': ('NORMAL',), 'Coat Normal': ('NORMAL',), 'UV': ('UV',)}.get(socket.name, value)
     node, output = link.from_node, link.from_socket
     index = [*node.outputs].index(output)
@@ -755,9 +834,10 @@ def resolve(socket, groups=()):
             get('Specular Tint', 1), level, get('Alpha', 1), absorption, density, scatter]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
-        if isinstance(weight, tuple) or numpy.any(weight):
+        if nonzero(weight):
             value.append([get('Coat Normal'), get('Coat Tint'), 0, get('Coat Roughness'), 0, 1, get('Coat IOR'), 1, 1,
                 ('MULTIPLY', weight, get('Alpha', 1))])
+    if hasattr(output, 'default_value') and animated(output): value = 'ANIMATED', value  # As of a value node
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
@@ -826,6 +906,9 @@ class Flex(bpy.types.RenderEngine):
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
+        self.rebakes = {}  # Programs of the bakes over each instance's UVs, which run again when it moves or deforms
+        self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
+        # unit's place (first texel of tiles, key, texture, program's hint and steps, value); texels piped before bakes
         self.texture = None  # The viewport's view as last traced
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
         self.following = None  # The frame after the last one rendered, which reuses its reservoirs in an animation
@@ -872,9 +955,60 @@ class Flex(bpy.types.RenderEngine):
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
-        # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads
-        def program(surface, reads=None):
-            surface, first, alpha, uses, slots = fold(surface), len(ops), set(alpha_reads(reads or surface)), {}, {}
+        baked, bakes, units, summaries, placed, again = [0], [], {}, {}, [], []  # Texels baked after those piped, each
+        # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
+        # unit's place, and the bakes to run again. A unit's texture's steps, and the end before its program with its
+        # first texel and size, count from the baked texels, as halves two to a texel, flagged in their height's bit 28.
+        current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the scales
+        # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
+        places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
+        def bake(expression):  # A unit of math, image reads and noise on the point inputs, costing two reads, baked
+            # over its object's UVs at the resolution its frequencies need up to 4K, read at the UV;
+            cost, inputs, size = summaries[id(expression)][2:5] if isinstance(expression, tuple) \
+                else (None, set(), 0)
+            size = current.get('scales') and cost is not None and inputs and cost >= 10 and size
+            if not isinstance(expression, tuple) or not size or size > 4096 or baked[0] + size * size / 2 > BUDGET:
+                if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
+                        summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
+                    return expression  # Else as its operands are, but the alpha read an unassociation divides by
+                return (expression[0], *map(bake, expression[1:])) if expression[0] != 'UNASSOCIATE' \
+                    else (expression[0], bake(expression[1]), expression[2])
+            if (key := (int(current['triangles'][0]), expression_key(expression))) in units:  # As the emission's
+                return 'IMAGE_LINEAR', ('UV',), units[key]  # program of a material reads it again
+            size, t = int(-(-max(64, size) // 16) * 16), current['uv'] * int(-(-max(64, size) // 16) * 16)
+            low, high = (numpy.clip((f(1) + d) // 16, 0, size // 16 - 1).astype(int) for f, d in ((t.min, -1),
+                (t.max, 1)))  # The 16 x 16 tiles of texels each triangle's UVs reach, a texel off its edges included
+            n = (high - low + 1).prod(1)
+            k, j = numpy.arange(n.sum()) - numpy.repeat(n.cumsum() - n, n), numpy.repeat(numpy.arange(len(n)), n)
+            width = high[j, 0] - low[j, 0] + 1
+            tiles = numpy.stack((current['triangles'][j], low[j, 0] + k % width, low[j, 1] + k // width, 0 * j), 1)
+            # In an update of values the last export's unit, its steps and value again unless its expression changed
+            tile, last, units[key], steps, value = places[len(bakes)] if len(bakes) < len(places) else (
+                sum(map(len, texels)) // 4, None, Bake(), None, None)
+            ops.append((0, tile, len(tiles), 0))
+            texels.append(tiles.astype('u4').view('f').ravel())
+            ops.append((0, baked[0], size, size | 1 << 28))
+            if last == key:
+                hints[len(ops)] = steps[0]
+                bakes.append(len(ops))
+                ops.extend(steps[1])
+            else:
+                bakes.append(program([GRAY[0], expression, *GRAY[2:]], cut=False)[1])
+                value = numpy.resize(emit(expression, [], textures, texels, set(), {}), 3)
+                if last: again.append(bakes[-1])
+            placed.append((tile, key, units[key], (hints[bakes[-1]], ops[bakes[-1]:]), value))
+            current['made'].append(bakes[-1])
+            textures[units[key]] = (baked[0], size, size | 1 << 24 | 1 << 27 | 1 << 28, numpy.array((*value, 1)))
+            baked[0] += -(-size * size // 2)
+            return 'IMAGE_LINEAR', ('UV',), units[key]
+        # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
+        def program(surface, reads=None, cut=not moved):  # baked, but in an update of moves: its bakes the last's
+            surface, alpha, uses, slots = fold(surface), set(alpha_reads(reads or surface)), {}, {}
+            if cut:  # Its expressions as units, all, then its units cut
+                summaries.clear()
+                for attribute in surface: summarize(attribute, summaries, current.get('scales'))
+                surface = [bake(attribute) for attribute in surface]
+            surface, first = fold(unanimated(surface)), len(ops)
             emit(surface, [], textures, texels, alpha, uses)
             emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
             assert len(slots) <= SLOTS, 'values a program keeps for reuse'
@@ -884,16 +1018,20 @@ class Flex(bpy.types.RenderEngine):
             hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
-        slots = []  # Index, triangle count and key of each instance exported
+        slots, rebakes, cuts = [], {}, {}  # Index, triangle count and key of each instance exported; its bakes; cuts
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
             if ob.hide_render or ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'LIGHT'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
-            if shaded and ob.type != 'LIGHT':  # Its rows alone
+            if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
                 for slot in ob.material_slots:
-                    if slot.material not in rows: rows[slot.material] = shade(slot.material, program)
+                    if slot.material in rows or (slot.material, ob.name) in rows: continue
+                    current.update(self.cuts.get((slot.material, ob.name), {'scales': None}), made=[])
+                    row = shade(slot.material, program)
+                    rows[(slot.material, ob.name) if current['made'] else slot.material] = row
+                current.clear()
                 continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
@@ -901,6 +1039,7 @@ class Flex(bpy.types.RenderEngine):
                 # loses when triangulated
                 orco = numpy.empty(3 * len(mesh.vertices), 'f')
                 mesh.vertices.foreach_get('undeformed_co', orco)
+                rest = orco.reshape(-1, 3)  # Undeformed, which bakes plan on, so that a rebake is as a fresh export's
                 orco = (orco.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
                 if any(face.loop_total > 4 for face in mesh.polygons):
                     bm.from_mesh(mesh)
@@ -943,10 +1082,25 @@ class Flex(bpy.types.RenderEngine):
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
                 orco = orco[vertex[loops]].reshape(-1, 3, 3)
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
+                rest = rest[vertex[loops]].reshape(-1, 3, 3)
                 color = color[loops].reshape(-1, 3, 4)
-                for slot in ob.material_slots:
-                    if slot.material not in rows: rows[slot.material] = shade(slot.material, program)
-                shades = [rows[slot.material] for slot in ob.material_slots] or [rows[None]]
+                for slot in ob.material_slots:  # Of a material with units baked over this object's UVs, its own row
+                    if slot.material in rows or (slot.material, ob.name) in rows: continue
+                    mask = numpy.isin(index, [k for k, other in enumerate(ob.material_slots)
+                        if other.material == slot.material])
+                    t = uv[mask]
+                    flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
+                        * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
+                    current.update(triangles=sum(map(len, columns[0])) + numpy.nonzero(mask)[0], uv=t, made=[],
+                        scales=not moved and 0 < flat <= 1 and 0 <= t.min() and t.max() <= 1 and {'UV': 1,
+                        'GENERATED': stretch(orco[mask], t), 'OBJECT': stretch(rest[mask], t)})
+                    cuts[(slot.material, ob.name)] = dict(current)
+                    row = shade(slot.material, program)
+                    rows[(slot.material, ob.name) if current['made'] else slot.material] = row
+                    rebakes.setdefault(i, []).extend(current['made'])
+                current.clear()
+                shades = [rows.get((slot.material, ob.name), rows.get(slot.material)) for slot in ob.material_slots] \
+                    or [rows[None]]
             # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
             if ob.type == 'LIGHT':
                 light = ob.data
@@ -995,47 +1149,58 @@ class Flex(bpy.types.RenderEngine):
             materials.append(table[index])
             slots.append((i, len(positions), (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
-        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
+        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene;
+        # then the count and programs of the bakes over their UVs
         if moved:
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
+            again = [bake for i, _, _ in slots for bake in self.rebakes.get(i, [])]  # Then its bakes to run again
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
-                *(column[k + 1].astype('f') for column in columns)))))
+                *(column[k + 1].astype('f') for column in columns))), struct.pack('<I', len(again)),
+                numpy.array(again, 'I')))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
         shape = [op[0] for op in ops], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
             for row in layers], textures
+        piped = self.piped if shaded else sum(map(len, texels)) // 4
+        ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
+            and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
-            if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]):  # textures keep their shape
+            if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures keep their shape
+                    textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)):
                 self.visible = None
                 return self.start(depsgraph)
             read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
-            tables = {key: [] for key, entry in textures.items() if not isinstance(key, tuple) and entry[0] in read}
+            tables = {key: [] for key, entry in textures.items()
+                if not isinstance(key, (tuple, Bake)) and entry[0] in read}
             means = {key: texture(key, {}, tables[key])[3] for key in tables}  # read, rebuilt; their means, which the
             if any((means[key] != textures[key][3]).any() for key in tables):  # hints take, as the renderer has them
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
                 return self.start(depsgraph)
             # Then per table its first texel, width and texels, until a width of 0; per program its first step and
-            # light power hint, until a first of 2^32 - 1
+            # light power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again
             self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for key in
                 tables for part in (struct.pack('<2I', *textures[key][:2]), *tables[key])), struct.pack('<2I', 0, 0),
-                numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4')))
+                numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
+                numpy.array(again, 'I')))
             return
         self.shape = shape
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
+        self.rebakes, self.cuts, self.placed, self.piped = rebakes, cuts, placed, piped
         materials = numpy.concatenate(materials)
-        # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
-        # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag, layer count, opaque
-        # flag and emission program (then the world's); then the steps of 4 integers and the texels.
-        self.requests.writelines((struct.pack('<4I', SCENE, firsts[-1], len(ops), sum(map(len, texels)) // 4),
+        # Scene on stdin: triangle, step, texel, baked texel and bake counts; per triangle 9 vertex, 9 normal, 9
+        # generated, 9 object, 6 UV, 12 color, 12 tangent and 19 info floats, a material of its emission, program,
+        # hidden flag, layer count, opaque flag and emission program (then the world's); then the steps of 4 integers,
+        # the texels and the programs of the bakes.
+        self.requests.writelines((struct.pack('<6I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes)),
             *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
-            numpy.array(ops, 'I'), *texels))
+            numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I')))
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view

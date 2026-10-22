@@ -588,7 +588,7 @@ Viewport.engine.start(exporter, depsgraph)
 slot = next(i for i, item in enumerate(depsgraph.object_instances)
     if item.is_instance and item.object.original == member)
 first = exporter.slots[slot][0]
-before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16 + 36 * first).copy()
+before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=24 + 36 * first).copy()
 instance.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()

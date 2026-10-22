@@ -214,7 +214,7 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 // Of the scene last loaded: its arrays besides the vertices, the vertices and materials its light BVH is built from and
 // the scratch and output its BVH is refit in
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Material> materials;
-    std::vector<Op> ops; CUdeviceptr temp, output; };
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output; };
 
 // Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
@@ -235,13 +235,14 @@ inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr verti
 }
 
 // World-space scene piped in by the extension into scene, in place of the one of arrays, then its arrays: triangle,
-// step and texel counts, then the scene's arrays in order. The vertices last denoised stay the previous ones while the
+// step, texel, baked texel and bake counts, then the scene's arrays in order and the programs of its bakes, which the
+// bake pass fills the baked texels after those piped with. The vertices last denoised stay the previous ones while the
 // triangle count does, others are freed.
 inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
-    struct { unsigned count, ops, texels; } header;
+    struct { unsigned count, ops, texels, baked, bakes; } header;
     std::fread(&header, sizeof(header), 1, stdin);
     scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
     scene.generated = load<float3>(3 * header.count), scene.objects = load<float3>(3 * header.count);
@@ -250,7 +251,12 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.infos = load<Info>(header.count);
     scene.materials = load<Material>(header.count + 1, loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
-    scene.ops = load<Op>(header.ops, loaded.ops), scene.texels = load<float4>(header.texels), scene.count = header.count;
+    scene.ops = load<Op>(header.ops, loaded.ops), scene.count = header.count;
+    std::vector<float4> texels(header.texels + header.baked);
+    std::fread(texels.data(), sizeof(float4), header.texels, stdin);
+    scene.texels = (float4*)allocate(texels.size() * sizeof(float4), texels.data());
+    loaded.bakes.resize(header.bakes);
+    std::fread(loaded.bakes.data(), sizeof(unsigned), header.bakes, stdin);
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
         loaded.temp, loaded.output);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
@@ -264,7 +270,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
 // materials' values changed, an animated one's by frame; then the tables the programs read, rebuilt, each as its first
 // texel and width and its texels, until a width of 0; then per program its first step and light power hint, until a
-// first of 2^32 - 1, which the materials of the programs take
+// first of 2^32 - 1, which the materials of the programs take; then the bakes to run again, as an update's
 inline void updateSteps(Scene& scene, Loaded& loaded) {
     unsigned count;
     std::fread(&count, sizeof(count), 1, stdin);
@@ -275,11 +281,15 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
     for (std::pair<unsigned, float> hint; std::fread(&hint, sizeof(hint), 1, stdin) && hint.first != ~0u;)
         hints[hint.first] = hint.second;
     for (Material& material : loaded.materials) material.emitted = hints.at(material.program);
+    std::fread(&count, sizeof(count), 1, stdin);
+    loaded.rebakes.resize(count);
+    std::fread(loaded.rebakes.data(), sizeof(unsigned), count, stdin);
 }
 
 // Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
 // the slots of its instances: a count of ranges, then per range its first triangle and triangle count and theirs in
-// the scene's order. The light BVH is built anew and the BVH refit. The vertices last denoised stay the previous ones.
+// the scene's order, then the count and programs of the bakes over their UVs to run again. The light BVH is built anew
+// and the BVH refit. The vertices last denoised stay the previous ones.
 inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     const size_t bytes = loaded.vertices.size() * sizeof(float3);
     if (scene.previousVertices == scene.vertices) {
@@ -301,6 +311,10 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         update(scene.tangents, 3 * range.first, 3 * range.count, scratch.data());
         update(scene.infos, range.first, range.count, scratch.data());
     }
+    unsigned rebakes;
+    std::fread(&rebakes, sizeof(rebakes), 1, stdin);
+    loaded.rebakes.resize(rebakes);
+    std::fread(loaded.rebakes.data(), sizeof(unsigned), rebakes, stdin);
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, scene.count, OPTIX_BUILD_OPERATION_UPDATE,
         loaded.temp, loaded.output);
 }
