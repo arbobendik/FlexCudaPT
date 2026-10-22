@@ -336,6 +336,18 @@ matrix = scene.camera.matrix_world.copy()
 scene.camera.location, scene.camera.rotation_euler = (1, 0, 1), (0, math.pi / 4, 0)
 pixels = render()[24:40, 24:40]
 assert pixels.mean() > 0.9, 'glass internal reflections at default bounces'
+# Faceted by noise under smooth normals, it keeps Cycles' 0.649 (1024 samples) as mirror reflections turn above the faces
+prism = bpy.data.objects['slab']
+flat, prism.data = prism.data, prism.data.copy()
+bm = bmesh.new()
+bm.from_mesh(prism.data)
+bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=6, use_grid_fill=True)
+noise = numpy.random.default_rng(1)
+for vertex in bm.verts: vertex.co = (*(numpy.array(vertex.co) + noise.normal(0, 0.02, 3)),)
+bm.to_mesh(prism.data)
+prism.data.shade_smooth()
+assert numpy.isclose(render()[24:40, 24:40].mean(), 0.649, atol=0.05), 'faceted glass internal reflections'
+prism.data = flat
 scene.camera.matrix_world = matrix
 # Both MIS strategies absorb the same light through straight glass, even when hidden from the primary ray.
 for ob in scene.objects: ob.hide_render = ob not in (scene.camera, bpy.data.objects['floor'], bpy.data.objects['dim'])

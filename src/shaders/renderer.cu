@@ -826,6 +826,19 @@ __device__ bool wrongSide(float3 in_dir, bool refracted, float3 out_dir, float3 
     return (dot(in_dir, face) < 0 != refracted) != (dot(out_dir, face) > 0);
 }
 
+// The normal turned toward the face just enough that the mirror reflection of toward, the viewer, leaves above it,
+// face and normal on its side, as Cycles' ensure_valid_specular_reflection; unchanged where the reflection does
+__device__ float3 validReflection(float3 face, float3 toward, float3 normal) {
+    const float in_z = dot(toward, face), threshold = min(0.9f * in_z, 0.01f);
+    if (dot(face, 2 * dot(normal, toward) * normal - toward) >= threshold) return normal;
+    const float3 tangent = normal - dot(normal, face) * face;
+    const float3 x = dot(tangent, tangent) > 0 ? normalize(tangent) : normal;
+    const float in_x = dot(toward, x), a = in_x * in_x + in_z * in_z, b = 2 * (a + in_z * threshold);
+    const float root = sqrt(max(b * b - 4 * a * (threshold + in_z) * (threshold + in_z), 0.0f));
+    const float z2 = 0.25f * (in_x < 0 ? b + root : b - root) / a;
+    return sqrt(max(1 - z2, 0.0f)) * x + sqrt(max(z2, 0.0f)) * face;
+}
+
 // Uniform point of the circular or polygonal aperture, squeezed horizontally as in Cycles.
 __device__ float2 aperture(const Lens& lens, unsigned state) {
     float angle = 2 * PI * random(state), radius = lens.aperture * sqrtf(random(state)), x = radius, y = 0;
@@ -1019,6 +1032,12 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
+        // Transmitting, turned on the ray's side so mirror reflections leave above the face, as Cycles' bump map
+        // correction turns its glass's; its diffuse closures keep theirs, as the shared BSDF's one normal does elsewhere
+        if (surface.transparency > 0) {
+            const float side = dot(direction, geometry_n) > 0 ? -1.0f : 1.0f;
+            surface.normal = side * validReflection(side * geometry_n, -direction, side * surface.normal);
+        }
         // As FlexLight's Material, which the shared BSDF takes, absorbing the volume's transmittance over unit distance
         const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
