@@ -3,6 +3,7 @@
 #include "loader.h"
 #include <cstring>
 #include <cstddef>
+#include <utility>
 #include <sys/mman.h>
 #include <unistd.h>
 #include "shaders.h"
@@ -114,11 +115,11 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                 params = next;
                 specialize();
             }
-            for (unsigned bake : kind == SCENE ? loaded.bakes : loaded.rebakes) { // A scene's, or those an update or
-                const Op& texture = loaded.ops[bake - 1]; // new steps run again: numbered by its frame, before
+            for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
+                const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
                 CHECK(cuMemsetD32((CUdeviceptr)(scene.texels + texture.texel), 0, 2 * texture.width * texture.height));
-                for (unsigned pass = 0, tiles = loaded.ops[bake - 2].width; pass < 2; ++pass) { // the lights pass: 16 x
-                    records[PASSES - 2].data = scene; // 16 texels per tile, inside their triangles,
+                for (unsigned pass = 0, tiles = loaded.ops[bake - 2].width; pass < 2; ++pass) { // before the lights
+                    records[PASSES - 2].data = scene; // pass: 16 x 16 texels per tile, inside their triangles,
                     records[PASSES - 2].data.frame = bake | pass << 31; // then off their edges, as halves
                     CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
                     const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};

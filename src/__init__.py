@@ -187,7 +187,7 @@ READ_COSTS = {'IMAGE': 2, 'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches
 AFFINE = {'ADD': lambda a, b: True, 'SUBTRACT': lambda a, b: True, 'MULTIPLY': lambda a, b: not (a and b),
     'DOT_PRODUCT': lambda a, b: not (a and b), 'DIVIDE': lambda a, b: not b,
     'MULTIPLY_ADD': lambda a, b, c: not (a and b), 'ROTATE': lambda vector, axis, angle: not (axis or angle)}
-POINTS = ('GENERATED', 'OBJECT', 'UV', 'VERTEX_COLOR', 'VERTEX_ALPHA')  # What a unit baked over its object's UVs reads
+POINTS = ('GENERATED',)  # What a unit baked over its object's UVs reads: undeformed, no motion bakes it again
 BUDGET = 1 << 24  # Texel slots of 16 bytes, two half texels each, baked at most (256 MiB); units over UVs past it stay
 # Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
 # all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
@@ -906,7 +906,6 @@ class Flex(bpy.types.RenderEngine):
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
-        self.rebakes = {}  # Programs of the bakes over each instance's UVs, which run again when it moves or deforms
         self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
         # unit's place (first texel of tiles, key, texture, program's hint and steps, value); texels piped before bakes
         self.texture = None  # The viewport's view as last traced
@@ -1018,7 +1017,7 @@ class Flex(bpy.types.RenderEngine):
             hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
-        slots, rebakes, cuts = [], {}, {}  # Index, triangle count and key of each instance exported; its bakes; cuts
+        slots, cuts = [], {}  # Index, triangle count and key of each instance exported; cuts
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -1039,7 +1038,6 @@ class Flex(bpy.types.RenderEngine):
                 # loses when triangulated
                 orco = numpy.empty(3 * len(mesh.vertices), 'f')
                 mesh.vertices.foreach_get('undeformed_co', orco)
-                rest = orco.reshape(-1, 3)  # Undeformed, which bakes plan on, so that a rebake is as a fresh export's
                 orco = (orco.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
                 if any(face.loop_total > 4 for face in mesh.polygons):
                     bm.from_mesh(mesh)
@@ -1082,7 +1080,6 @@ class Flex(bpy.types.RenderEngine):
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
                 orco = orco[vertex[loops]].reshape(-1, 3, 3)
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
-                rest = rest[vertex[loops]].reshape(-1, 3, 3)
                 color = color[loops].reshape(-1, 3, 4)
                 for slot in ob.material_slots:  # Of a material with units baked over this object's UVs, its own row
                     if slot.material in rows or (slot.material, ob.name) in rows: continue
@@ -1092,12 +1089,11 @@ class Flex(bpy.types.RenderEngine):
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
                         * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
                     current.update(triangles=sum(map(len, columns[0])) + numpy.nonzero(mask)[0], uv=t, made=[],
-                        scales=not moved and 0 < flat <= 1 and 0 <= t.min() and t.max() <= 1 and {'UV': 1,
-                        'GENERATED': stretch(orco[mask], t), 'OBJECT': stretch(rest[mask], t)})
+                        scales=not moved and 0 < flat <= 1 and 0 <= t.min() and t.max() <= 1
+                        and {'GENERATED': stretch(orco[mask], t)})
                     cuts[(slot.material, ob.name)] = dict(current)
                     row = shade(slot.material, program)
                     rows[(slot.material, ob.name) if current['made'] else slot.material] = row
-                    rebakes.setdefault(i, []).extend(current['made'])
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(slot.material)) for slot in ob.material_slots] \
                     or [rows[None]]
@@ -1149,17 +1145,14 @@ class Flex(bpy.types.RenderEngine):
             materials.append(table[index])
             slots.append((i, len(positions), (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
-        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene;
-        # then the count and programs of the bakes over their UVs
+        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
         if moved:
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
-            again = [bake for i, _, _ in slots for bake in self.rebakes.get(i, [])]  # Then its bakes to run again
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
-                *(column[k + 1].astype('f') for column in columns))), struct.pack('<I', len(again)),
-                numpy.array(again, 'I')))
+                *(column[k + 1].astype('f') for column in columns)))))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
@@ -1191,7 +1184,7 @@ class Flex(bpy.types.RenderEngine):
         self.shape = shape
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
-        self.rebakes, self.cuts, self.placed, self.piped = rebakes, cuts, placed, piped
+        self.cuts, self.placed, self.piped = cuts, placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts; per triangle 9 vertex, 9 normal, 9
         # generated, 9 object, 6 UV, 12 color, 12 tangent and 19 info floats, a material of its emission, program,
