@@ -889,6 +889,11 @@ class Flex(bpy.types.RenderEngine):
                 continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
+                # Generated coordinates of the undeformed mesh, through the orco layer Cycles reads, which the mesh
+                # loses when triangulated
+                orco = numpy.empty(3 * len(mesh.vertices), 'f')
+                mesh.vertices.foreach_get('undeformed_co', orco)
+                orco = (orco.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
                 totals = numpy.empty(len(mesh.polygons), 'i')  # Corners per face, read at once
                 mesh.polygons.foreach_get('loop_total', totals)
                 if (totals > 4).any():
@@ -922,7 +927,6 @@ class Flex(bpy.types.RenderEngine):
                     values = numpy.empty((len(attribute.data), 4), 'f')
                     attribute.data.foreach_get('color', values.ravel())
                     color = values[vertex] if attribute.domain == 'POINT' else values
-                orco = (co.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
                 ob.to_mesh_clear()
                 matrix = numpy.array(instance.matrix_world)
                 positions = (co.reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3])[vertex[loops]].reshape(-1, 3, 3)
