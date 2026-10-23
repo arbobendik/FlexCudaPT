@@ -909,10 +909,14 @@ class Flex(bpy.types.RenderEngine):
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
                 # Generated coordinates of the undeformed mesh, through the orco layer Cycles reads, which the mesh
-                # loses when triangulated
+                # loses when triangulated; of a mesh its modifiers only deform, the same vertices in the same order,
+                # its original's, which a depsgraph evaluated for no render, as the viewport's first, holds no such layer
+                # of; of others, which make vertices of their own, that layer, if any
+                rest = ob.original.data if ob.type == 'MESH' and len(ob.original.data.vertices) == len(mesh.vertices) \
+                    else mesh
                 orco = numpy.empty(3 * len(mesh.vertices), 'f')
-                mesh.vertices.foreach_get('undeformed_co', orco)
-                orco = (orco.reshape(-1, 3) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
+                rest.vertices.foreach_get('co' if rest is not mesh else 'undeformed_co', orco)
+                orco = (orco.reshape(-1, 3) - rest.texspace_location) / (2 * numpy.array(rest.texspace_size)) + 0.5
                 if any(face.loop_total > 4 for face in mesh.polygons):
                     bm.from_mesh(mesh)
                     # By the mesh's own fill, which Cycles triangulates n-gons by, without BMesh's beautify
