@@ -1,7 +1,8 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time
 from gpu_extras.presets import draw_texture_2d
-from mathutils import Color, Matrix
+from mathutils import Color, Matrix, Vector
+from mathutils.bvhtree import BVHTree
 from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 
 SUN_DISTANCE = 1e5
@@ -790,6 +791,14 @@ BACKENDS = (('OPTIX', ''), ('VULKAN', '-vulkan'))  # The renderer of each, by th
 runnable = ()  # The backends whose renderer starts on this machine, which register finds
 def device(): return bpy.context.preferences.addons[__package__].preferences.device
 
+# Whether the point lies in the closed mesh of the BVH: a ray up from it crosses it an odd number of times, stepping a
+# float's precision past each crossing
+def inside(tree, point):
+    crossings = 0
+    while (hit := tree.ray_cast(point, (0, 0, 1)))[0] is not None:
+        crossings, point = crossings + 1, hit[0] + Vector((0, 0, 1e-5 + 1e-6 * abs(hit[0].z)))
+    return crossings % 2 == 1
+
 # The scene's settings of the renderer, in its order, which denoises on OptiX alone; the viewport denoises every result
 def settings(scene, viewport, device):
     return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors, scene.flex_bounces, scene.flex_paths, \
@@ -825,6 +834,8 @@ class Flex(bpy.types.RenderEngine):
         super().__init__(*args, **kwargs)
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
+        self.volumes = {}  # Of each instance exported filling a volume, by its index: its triangles' BVH in the world and
+        # its first triangle of a material filling it
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
         self.texture = None  # The viewport's view as last traced
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
@@ -884,7 +895,7 @@ class Flex(bpy.types.RenderEngine):
             hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
-        slots = []  # Index, triangle count and key of each instance exported
+        slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -938,6 +949,11 @@ class Flex(bpy.types.RenderEngine):
                 ob.to_mesh_clear()
                 matrix = numpy.array(instance.matrix_world)
                 positions = (co.reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3])[vertex[loops]].reshape(-1, 3, 3)
+                if (filled := numpy.flatnonzero(numpy.isin(index, [k for k, slot in enumerate(ob.material_slots)
+                        if slot.material and (output := slot.material.node_tree.get_output_node('CYCLES'))
+                        and output.inputs['Volume'].is_linked]))).size:
+                    volumes[i] = BVHTree.FromPolygons(positions.reshape(-1, 3).tolist(),
+                        numpy.arange(3 * len(positions)).reshape(-1, 3).tolist()), int(filled[0])
                 normals = normal.reshape(-1, 3)[loops] @ numpy.array(instance.matrix_world.to_3x3().adjugated())
                 normals /= numpy.linalg.norm(normals, axis=1, keepdims=True)
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
@@ -1000,6 +1016,7 @@ class Flex(bpy.types.RenderEngine):
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
+            self.volumes.update(volumes)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
                 *(column[k + 1].astype('f') for column in columns)))))
@@ -1028,6 +1045,7 @@ class Flex(bpy.types.RenderEngine):
         self.shape = shape
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
+        self.volumes = volumes
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step and texel counts; per triangle 9 vertex, 9 normal, 9 generated, 9 object, 6 UV,
         # 12 color, 12 tangent and 19 info floats, a material of its emission, program, hidden flag, layer count, opaque
@@ -1048,10 +1066,14 @@ class Flex(bpy.types.RenderEngine):
         x = right / projection[0][0]
         y = up / projection[1][1]
         center = x * projection[0][2] + y * projection[1][2] - back
-        # Request on stdin: sampling, launches, size, settings, the camera's origin and its ray direction
-        # per NDC x, per NDC y and at the center, then the thin lens.
-        self.requests.write(struct.pack(f'<3I2f{3 + len(settings)}I17f', REQUEST, *sampling, launches, width, height,
-            *settings, *matrix.translation, *x, *y, *center, *lens(camera)))
+        # The volume the camera is in: of an instance filling one that a ray up from the camera leaves an odd number of
+        # times, its first triangle of a material filling it, or none
+        medium = next((self.slots[i][0] + first for i, (tree, first) in self.volumes.items()
+            if inside(tree, matrix.translation)), 2 ** 32 - 1)
+        # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the camera's origin and its
+        # ray direction per NDC x, per NDC y and at the center, then the thin lens.
+        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I17f', REQUEST, *sampling, launches, width, height,
+            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera)))
         self.requests.flush()
         launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
         sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)

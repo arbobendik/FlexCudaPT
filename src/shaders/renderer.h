@@ -22,7 +22,7 @@ constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "
     "__raygen__duplicates", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 544;
+constexpr unsigned RECORD_STRIDE = 560;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -65,8 +65,9 @@ struct Reservoir {
 // Integrand of a sample shifted into another pixel times the Jacobian determinant of the shift, and the latter
 struct Shift { float3 f; float jac; };
 // Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, the
-// spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample
-struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise; };
+// spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample, and
+// a triangle of the volume the camera is in, or none
+struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle: three vertices, normals, generated points, points in their object, UVs, colors and tangents, an info and one

@@ -27,7 +27,7 @@ struct Info { float location[3], color[4], index, material, random, axes[9]; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child; uint8_t leaf; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle; float2 uv; };
-struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise; };
+struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 static const int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
@@ -1046,8 +1046,11 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
     Reservoir chain = {};
     chain.seed = r.seed;
     float3 chain_throughput = float3(0.0f, 0.0f, 0.0f);
-    // Medium the ray travels in, none at the camera
-    Medium medium = NO_MEDIUM;
+    // Medium the ray travels in: from the camera that of the volume it is in, by the first triangle of the volume's
+    // instance, which absorbs on the way to the first hit; what it scatters out there it is taken to scatter back in
+    Medium medium = scene.settings.medium == NONE ? NO_MEDIUM : volume(shade(scene, scene.settings.medium, 0, 0,
+        scene.normals[3 * scene.settings.medium], direction, Ray(true, false, LOBE_NONE, 0.0f, distance)));
+    throughput = exp((medium.scatter - medium.extinction) * distance);
     for (uint b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.triangle);
         const Ray ray = Ray(b == 0u, false, b != 0 ? prev.lobe : LOBE_NONE, float(b), distance);
@@ -1077,7 +1080,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
             threshold = footprintThreshold(geometry_density);
-            seen = surface.emissive;
+            seen = throughput * surface.emissive;
         }
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
         const bool footprint = withinFootprint(!passed, prev.rough, prev.pdf, geometry_density, threshold);
@@ -1601,7 +1604,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 544; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 560; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
