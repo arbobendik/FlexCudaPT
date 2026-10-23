@@ -65,7 +65,7 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
     return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
 
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
-# emission
+# emission, and a mark of its specular tint passes it on
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
@@ -82,7 +82,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
         + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
-    'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED'))}
+    'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')), 'SPECULAR': lambda tint: tint}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density and scattering color
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0]
@@ -216,10 +216,11 @@ def stretch(values, uvs):
 # What an expression is as a unit baked over its object's UVs, its operands' first, into table by its id; for all of a
 # surface before its cut, which meets each expression once, by the scales of its point inputs along them (none: no such
 # unit): its image reads' kinds, points' keys, sizes and extensions; whether it's affine in them (None: not); its cost
-# (None for any other step or input, or an image read: baked over UVs and read back, the image's texels would be
-# interpolated twice, rounding off their kinks); its point inputs; and the texels across the UVs it needs, eight per
-# period of its noises' finest octave of at least a 256th of the first's amplitude, as gradient noise holds more than its
-# frequency and distortion adds to it (two left Fog of tokyo's 0.1% bright).
+# (None for any other step or input, a specular mark, kept live around what of its tint bakes, or an image read:
+# baked over UVs and read back, the image's texels would be interpolated twice, rounding off their kinks); its point
+# inputs; and the texels across the UVs it needs, eight per period of its noises' finest octave of at least a 256th of
+# the first's amplitude, as gradient noise holds more than its frequency and distortion adds to it (two left Fog of
+# tokyo's 0.1% bright).
 def summarize(expression, table, scales):
     if not isinstance(expression, tuple): return set(), False, 1, set(), 0
     if id(expression) in table: return table[id(expression)]  # A part shared, summarized already
@@ -231,7 +232,7 @@ def summarize(expression, table, scales):
         if read else set().union(*(part[0] for part in sub))
     flags = [part[1] for part in sub]
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
-    points = None if name not in (*POINTS, *READS, 'NOISE') and not OPS.get(name) or read \
+    points = None if name not in (*POINTS, *READS, 'NOISE') and not OPS.get(name) or read or name == 'SPECULAR' \
         or any(part[2] is None for part in parts) else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
@@ -293,7 +294,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name != 'UNASSOCIATE' and OPS[name] and not any(isinstance(operand, tuple) for operand in operands):
+    if name not in ('UNASSOCIATE', 'SPECULAR') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
         for i, value in enumerate(operands):
@@ -852,13 +853,17 @@ def resolve(socket, groups=()):
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
-        # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'
-        level = mix(('MULTIPLY', get('Specular IOR Level', 0.5), 2), 1, transparency)
+        # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'; a
+        # tint or level off Blender's defaults marks the tint, the shader compiling both out for scenes marking none
+        tint, factor = get('Specular Tint', 1), get('Specular IOR Level', 0.5)
+        level = mix(('MULTIPLY', factor, 2), 1, transparency)
+        if any(isinstance(x, tuple) or numpy.any(x != y) for x, y in ((tint, 1), (factor, 0.5))):
+            tint = 'SPECULAR', tint
         # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
             ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), ('MULTIPLY', transparency, ('SUBTRACT', 1,
             metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
-            get('Specular Tint', 1), level, get('Alpha', 1), absorption, density, scatter]
+            tint, level, get('Alpha', 1), absorption, density, scatter]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if nonzero(weight):
