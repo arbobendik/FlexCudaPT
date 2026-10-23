@@ -952,8 +952,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     Reservoir chain = {};
     chain.seed = r.seed;
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
-    // Medium the ray travels in, none at the camera
-    Medium medium = {};
+    // Medium the ray travels in, from the camera that of the volume it is in
+    Medium medium = scene.settings.medium == NONE ? Medium{} : volume(shade(scene, scene.settings.medium, 0, 0,
+        scene.normals[3 * scene.settings.medium], direction, Ray{true, false, LOBE_NONE, 0.0f, distance}));
+    throughput = exponential((medium.scatter - medium.extinction) * distance);
     // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
     const auto survives = [&](unsigned b) {
         const float survival_probability = survivalProbability(throughput, density);
@@ -996,7 +998,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // Primary ray footprint (Eq. 5) of the camera's hit
             // Primary ray footprint (Eq. 5)
             threshold = 0.0025132741228718345f / geometry_density;
-            seen = surface.emissive;
+            seen = throughput * surface.emissive;
         }
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5)
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
