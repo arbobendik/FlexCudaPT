@@ -216,15 +216,17 @@ assert 0.2 < pixels[18:46, 34:62].mean() / uncut[18:46, 34:62].mean() < 0.32, 'c
 for ob in scene.objects: ob.hide_render = ob != scene.camera  # Nothing left to render but the sky
 empty = render()[:56]
 assert numpy.allclose(empty, SKY, atol=0.01), 'empty'
-# A white dielectric under a white sky reflects its light and its diffuse beside its specular, as FlexLight's BSDF
+# A white dielectric under a white sky diffuses what its Fresnel leaves beside its specular, never more than it
+# receives: each pixel holds its single-scatter directional albedo at its view cosine, a mean of 0.9903 derived
+# numerically
 bpy.data.objects['colored'].hide_render = False
 colored.inputs['Base Color'].default_value = colored.inputs['Specular Tint'].default_value = (1, 1, 1, 1)
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
 pixels = render()
-assert abs(pixels[18:46, 2:30].mean() - 1.048) < 0.02, 'furnace'
+assert abs(pixels[18:46, 2:30].mean() - 0.9903) < 0.005, 'furnace'
 colored.inputs['Specular Tint'].default_value = (1, 0.08, 0.375, 1)  # Changes nothing, FlexLight's BSDF has no tint
 pixels = render()
-assert abs(pixels[18:46, 2:30].mean() - 1.048) < 0.02, 'tinted furnace'
+assert abs(pixels[18:46, 2:30].mean() - 0.9903) < 0.005, 'tinted furnace'
 # Huge, black and turned 60 degrees under the white sky, the colored plane reflects FlexLight's specular albedo at that
 # angle
 colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
