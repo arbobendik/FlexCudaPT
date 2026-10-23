@@ -526,6 +526,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(PUSH) *top++ = op->value; break;
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
+        CASE(SPECULAR) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -1074,10 +1075,13 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
-        // As FlexLight's Material, which the shared BSDF takes, absorbing the volume's transmittance over unit distance
+        // As FlexLight's Material, which the shared BSDF takes, absorbing the volume's transmittance over unit distance,
+        // its dielectric's reflectance at normal incidence tinted and scaled by its specular level, which scenes not
+        // marking it keep at their defaults, compiled out
         const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
-            expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1)))};
+            expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
+            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
