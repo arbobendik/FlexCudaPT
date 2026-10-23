@@ -1027,10 +1027,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
-        // The BSDF's material, absorbing the volume's transmittance over unit distance
+        // The BSDF's material, absorbing the volume's transmittance over unit distance, its specular level applied
         const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
-            expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1)))};
+            expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
+            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1};
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
         if (surface.density > 0) {
