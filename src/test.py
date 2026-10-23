@@ -704,6 +704,57 @@ steps.image, steps.interpolation = bpy.data.images.new('steps', 2, 1), 'Linear'
 steps.image.pixels.foreach_set((0, 0, 0, 1, 1, 1, 1, 1))
 edge.id_data.links.new(steps.outputs['Color'], edge.inputs['Emission Color'])
 assert abs(render()[24:40, 24:40].mean() - 0.5) < 0.05, 'linear filtering'
+# A noise of the generated point with detail at its bake's texel scale (scale 50, 2272 texels across) bakes over the
+# plane's UVs and renders as it does live, its UVs moved off [0, 1], where nothing bakes: at 256 samples and two
+# pixels a texel all but 1% of pixels within 0.0018, three times the live render's seed floor there, the bake at half
+# that, a bake a texel off or at half its resolution past twice it; moving the plane bakes nothing again
+noise = edge.id_data.nodes.new('ShaderNodeTexNoise')
+noise.inputs['Scale'].default_value = 50
+edge.id_data.links.new(noise.outputs['Color'], edge.inputs['Emission Color'])
+depsgraph, exporter = bpy.context.evaluated_depsgraph_get(), types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, depsgraph)
+bakes = numpy.frombuffer(exporter.requests.getvalue(), 'I', count=6)[5]
+assert bakes == len(getattr(exporter, 'placed', ())) > 0, 'bakes'
+bpy.data.objects['edge'].location.x, exporter.requests = 0.1, io.BytesIO()
+bpy.context.view_layer.update()
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=bpy.data.objects['edge'])]))
+assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.UPDATE, 'motion bakes nothing'
+bpy.data.objects['edge'].location.x, scene.flex_samples, scene.camera.data.angle = 0, 256, 0.03
+baked, uvs = render(), bpy.data.meshes['edge'].uv_layers.active.data
+uv = numpy.zeros(2 * len(uvs), 'f')
+uvs.foreach_get('uv', uv), uvs.foreach_set('uv', uv + 1)
+assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked noise'
+# An image read at the generated point stays live beside the noise, affine in it, its alpha unread: baked over UVs and
+# read back, its texels would be interpolated twice
+links, product = edge.id_data.links, edge.id_data.nodes.new('ShaderNodeMix')
+product.data_type, product.blend_type, product.inputs['Factor'].default_value = 'RGBA', 'MULTIPLY', 1
+links.new(edge.id_data.nodes.new('ShaderNodeTexCoord').outputs['Generated'], steps.inputs['Vector'])
+links.new(noise.outputs['Color'], product.inputs[6]), links.new(steps.outputs['Color'], product.inputs[7])
+links.new(product.outputs[2], edge.inputs['Emission Color'])
+steps.image.alpha_mode = 'CHANNEL_PACKED'
+uvs.foreach_set('uv', uv)
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())  # Exporting anew, not updating values
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert exporter.placed and not any('steps' in str(key) for _, key, *_ in exporter.placed), 'image reads stay live'
+# Coated, the plane's base layer bakes its noise and renders under the coat as live, within the seed floor there,
+# 0.0082 of its mean: its bake comes before both layers' rows, which follow each other
+edge.inputs['Emission Strength'].default_value, edge.inputs['Coat Weight'].default_value = 0, 0.5
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (*SKY, 1)  # Its light alone
+links.new(noise.outputs['Color'], edge.inputs['Base Color'])
+baked = render()
+uvs.foreach_set('uv', uv + 1)
+live = render()
+assert numpy.abs(live - baked).mean() < 0.0082 * live.mean(), 'coated base bakes'
+# An image read at the UV straight into a base color bakes nothing: a bake would add a fetch and remove none
+plain = bpy.data.materials.new('plain')
+plain.node_tree.nodes.new('ShaderNodeTexImage').image = steps.image
+plain.node_tree.links.new(plain.node_tree.nodes['Image Texture'].outputs['Color'],
+    plain.node_tree.nodes['Principled BSDF'].inputs['Base Color'])
+bpy.data.meshes['edge'].materials[0], exporter = plain, types.SimpleNamespace(visible=(), requests=io.BytesIO())
+uvs.foreach_set('uv', uv)
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert not exporter.placed, 'plain images bake nothing'
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
