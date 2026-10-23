@@ -637,7 +637,7 @@ Viewport.engine.start(exporter, depsgraph)
 slot = next(i for i, item in enumerate(depsgraph.object_instances)
     if item.is_instance and item.object.original == member)
 first = exporter.slots[slot][0]
-before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16 + 36 * first).copy()
+before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=24 + 36 * first).copy()
 instance.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
@@ -662,7 +662,7 @@ Viewport.engine.start(exporter, depsgraph)
 first, count = exporter.slots[next(i for i, item in enumerate(depsgraph.object_instances)
     if item.object.original == twisted)][:2]
 piped = exporter.requests.getvalue()
-generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=16 + 36 * (2 * numpy.frombuffer(piped, 'I', count=2)[1]
+generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=24 + 36 * (2 * numpy.frombuffer(piped, 'I', count=2)[1]
     + first)).reshape(-1, 3)
 mesh = twisted.data
 rest = (numpy.array([v.co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
@@ -683,7 +683,7 @@ piped, kinds = exporter.requests.getvalue(), set()
 for i, item in enumerate(depsgraph.object_instances):
     if item.object.original in made and item.object.type == 'MESH':
         first, count = exporter.slots[i][:2]
-        generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=16 + 36 * (2 * numpy.frombuffer(piped, 'I',
+        generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=24 + 36 * (2 * numpy.frombuffer(piped, 'I',
             count=2)[1] + first)).reshape(-1, 3)
         mesh, kinds = item.object.to_mesh(), kinds | {item.object.original.type}
         orco = (numpy.array([v.undeformed_co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(

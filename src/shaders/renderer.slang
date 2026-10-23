@@ -16,7 +16,7 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ARCTANGENT, ARCTAN2, SINH, COSH, TANH, CROSS_PRODUCT, RGB_TO_HSV, HSV_TO_RGB, RGB_TO_HSL, HSL_TO_RGB,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
-    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD };
+    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED };
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -582,6 +582,19 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(INCOMING) stack[top++] = incoming; break;
         CASE(BACKFACING) stack[top++] = float3(1, 1, 1) * float(backfacing); break;
         CASE(LIGHT_PATH) stack[top - 1] = float3(1, 1, 1) * lightPath(ray, int(stack[top - 1].x)); break;
+        CASE(BAKED) { // A bake's texels, halves two to a texel, read linearly at the UV and extended at its edges
+            const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF);
+            const float x = stack[top - 1].x * width - 0.5f, y = stack[top - 1].y * height - 0.5f;
+            const int i = int(floor(x)), j = int(floor(y));
+            float3 c[4];
+            for (int k = 0; k < 4; ++k) {
+                const uint t = min(max(j + k / 2, 0), height - 1) * width + min(max(i + k % 2, 0), width - 1);
+                const uint4 pair = scene.texels[asuint(op.value.x) + t / 2];
+                const uint2 h = t % 2 == 0 ? pair.xy : pair.zw;
+                c[k] = float3(f16tof32(h.x), f16tof32(h.x >> 16), f16tof32(h.y));
+            }
+            stack[top - 1] = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
+        } break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
@@ -1472,6 +1485,46 @@ int partner(Scene* scene, uint3 p, uint3 size, uint t) {
     return valid ? qy * int(size.x) + qx : -1;
 }
 
+// A texel of the bake whose program the frame numbers, as the OptiX renderer's bake pass bakes it
+void bake(uint3 p, Scene* scene) {
+    const uint program = scene.frame & ~(1u << 31);
+    const uint first = asuint(scene.ops[program - 1].value.x), width = asuint(scene.ops[program - 1].value.y);
+    const uint height = asuint(scene.ops[program - 1].value.z);
+    uint2* texels = (uint2*)(scene.texels + first);
+    const uint4 tile = scene.texels[asuint(scene.ops[program - 2].value.x) + p.x / 16];
+    const uint x = tile.y * 16 + p.x % 16, y = tile.z * 16 + p.y;
+    if (x >= width || y >= height) return;
+    if ((scene.frame >> 31) != 0) {
+        const int u[] = {int(x) - 1, int(x) + 1, int(x), int(x)}, v[] = {int(y), int(y), int(y) - 1, int(y) + 1};
+        for (int k = 0; k < 4 && texels[y * width + x].y >> 16 == 0; ++k) {
+            if (u[k] < 0 || v[k] < 0 || u[k] >= int(width) || v[k] >= int(height)) continue;
+            const uint2 texel = texels[v[k] * width + u[k]];
+            if (texel.y >> 16 == 0x3C00) texels[y * width + x] = uint2(texel.x, texel.y & 0xFFFF | 0x38000000);
+        }
+        return;
+    }
+    float2* uv = scene.uvs + 3 * tile.x;
+    int64_t px[3], py[3];
+    for (int k = 0; k < 3; ++k) {
+        px[k] = int64_t(floor(uv[k].x * width * 512)); py[k] = int64_t(floor(uv[k].y * height * 512));
+    }
+    const int64_t area = (px[1] - px[0]) * (py[2] - py[0]) - (py[1] - py[0]) * (px[2] - px[0]);
+    for (int k = 0; k < 3; ++k) {
+        const int a = area > 0 ? k : (3 - k) % 3, b = area > 0 ? (k + 1) % 3 : (5 - k) % 3;
+        const int64_t dx = px[b] - px[a], dy = py[b] - py[a];
+        const int64_t w = dx * (int64_t(2 * y + 1) * 256 - py[a]) - dy * (int64_t(2 * x + 1) * 256 - px[a]);
+        if (area == 0 || w < 0 || w == 0 && !(dy > 0 || dy == 0 && dx > 0)) return;
+    }
+    const float2 e = uv[1] - uv[0], f = uv[2] - uv[0], c = float2((x + 0.5f) / width, (y + 0.5f) / height) - uv[0];
+    const float det = e.x * f.y - e.y * f.x;
+    const Point point = at(scene, tile.x, (c.x * f.y - c.y * f.x) / det, (e.x * c.y - e.y * c.x) / det);
+    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    const float3 albedo = shade(scene, program, float3(0, 0, 1), float3x3(float3(0), float3(0), float3(0)), point,
+        float3(0, 0, 1), false, Ray(false, false, LOBE_NONE, 0, 0), info).albedo;
+    texels[y * width + x] =
+        uint2(f32tof16(albedo.x) | f32tof16(albedo.y) << 16, f32tof16(albedo.z) | f32tof16(1.0f) << 16);
+}
+
 // Mean emission over the triangle's actual UVs and generated coordinates, keeping support for small emitting regions.
 void lights(uint3 p, Scene* scene) {
     const uint triangle = p.x;
@@ -1656,7 +1709,8 @@ void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint ind
         case 2: shifts(p, size, scene); break;
         case 3: spatial(p, size, scene); break;
         case 4: duplicates(p, size, scene); break;
-        case 5: lights(p, scene); break;
+        case 5: if (used(BAKED)) bake(p, scene); break; // Compiled out for scenes that bake nothing, as OptiX's raygen
+        case 6: lights(p, scene); break;
         default: denoise(p, size, scene); break;
     }
 }
