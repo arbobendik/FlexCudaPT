@@ -910,7 +910,7 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     const float side = sqrtf(random(state));
     const float along = random(state);
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
-    if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0))
+    if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
         return make_float3(0, 0, 0);
     float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = make_float3(1, 1, 1);
     // Visibility along the segment from the offset start to the sampled point
@@ -1181,10 +1181,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (connect || arrived) {
             lobe = connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
         }
-        // Delta lobes have no competing light sample; straight transmission keeps the preceding vertex's weights.
+        // Delta lobes and wrong-sided directions, of unknown density, have no competing light sample; straight
+        // transmission keeps the preceding vertex's weights.
         const bool delta = lobe_index != LOBE_DIFFUSE
             && (surface.roughness == 0.0f || (lobe_index == LOBE_REFRACT && eta_i == eta_o));
-        const bool weighs = nee && !delta;
+        const bool weighs = nee && !delta && lobe.pdf > 0;
         direct_light_emission = !weighs && (direct_light_emission || lobe_index != LOBE_REFRACT || surface.ior != 1);
         if (weighs) {
             nee_origin = origin, nee_normal = light_normal;
