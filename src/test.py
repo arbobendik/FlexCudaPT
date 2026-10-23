@@ -649,6 +649,24 @@ steps.image.pixels.foreach_set((0, 0, 0, 1, 1, 1, 1, 1))
 edge.id_data.links.new(steps.outputs['Color'], edge.inputs['Emission Color'])
 assert abs(render()[24:40, 24:40].mean() - 0.5) < 0.05, 'linear filtering'
 
+# White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
+# holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
+# silhouette, integrated numerically
+for ob in scene.objects: ob.hide_render = ob != scene.camera
+scene.render.engine, scene.flex_restir, scene.flex_samples = 'FLEX', False, 64
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+scene.camera.location, scene.camera.rotation_euler, scene.camera.data.angle = (0, 0, 3), (0, 0, 0), 0.8
+furnace = shape('furnace', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=1), (0, 0, 0))
+bpy.data.meshes['furnace'].shade_smooth()
+furnace.inputs['Base Color'].default_value, furnace.inputs['Metallic'].default_value = (1, 1, 1, 1), 1
+furnace.inputs['Roughness'].default_value = 0.5
+disk = render().mean(2)
+corner = numpy.linspace(-1, 1, SIZE + 1) * math.tan(0.4)  # Pixel corners' rays, as the camera's angle spreads them
+x, y = numpy.meshgrid(corner, corner)
+inside = 9 * (x * x + y * y) < 0.9801 * (1 + x * x + y * y)  # Within 0.99 of the center, inside the mesh's silhouette
+covered = inside[:-1, :-1] & inside[1:, :-1] & inside[:-1, 1:] & inside[1:, 1:]
+assert abs(disk[covered].mean() - 0.8801) < 0.003, 'rough metal furnace'
+
 # End-to-end parity test, run by make test: renders a scene of textures, among them one mirrored and interpolated at
 # negative coordinates, node programs, an emitter, a point light, glossy metal, glass and a volume under a sky with Flex
 # on OptiX and on Vulkan, with ReSTIR and without, and compares the images, which trace the same random numbers.
