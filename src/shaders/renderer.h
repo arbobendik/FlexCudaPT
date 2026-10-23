@@ -30,9 +30,11 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter;
 };
-// FlexLight's Material, which the shared BSDF takes of a surface
+// FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
+// will read, which change nothing by default
 struct BSDFMaterial {
-    float3 albedo, emissive; float roughness, metallic, transmission, ior; float3 absorption;
+    float3 albedo, emissive; float roughness, metallic, transmission, ior; float3 absorption, specular_tint{1, 1, 1};
+    float specular_level = 1;
 };
 // Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
 // The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point. Light
