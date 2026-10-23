@@ -770,9 +770,10 @@ __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) 
 __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance,
     unsigned skip = NONE) {
     const float back = skip == NONE ? 0 : 1e-4f;
+    unsigned layer = __float_as_uint(-INFINITY);
     // Traverse only; hit data is read from the hit object below.
     optixTraverse(scene.handle, origin - direction * back, direction, 1e-4f - back, far + back, 0.0f, 255,
-        skip == NONE ? OPTIX_RAY_FLAG_DISABLE_ANYHIT : OPTIX_RAY_FLAG_NONE, 0, 1, 0, skip);
+        skip == NONE ? OPTIX_RAY_FLAG_DISABLE_ANYHIT : OPTIX_RAY_FLAG_NONE, 0, 1, 0, skip, layer);
     if (!optixHitObjectIsHit()) return {NONE};
     distance = optixHitObjectGetRayTmax() - back;
     // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
@@ -780,8 +781,39 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
         __uint_as_float(optixHitObjectGetAttribute_1()))};
 }
 
+// Next layer along the ray from origin within far past the triangle after at distance at, by distance, then index, so
+// that a loop over layers meets each once and ends; at becomes its distance. Traversal's bounds keep a few ulps of
+// slack, the order is the any-hit program's alone: the nearest hit past the layer, traversal culling beyond it, then of
+// the hits at exactly its distance the lowest index past the layer, every candidate skipped
+__device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, float far, float& at, unsigned after) {
+    unsigned layer = __float_as_uint(at), gather = __float_as_uint(INFINITY), index = NONE, u, v;
+    optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), far, 0.0f, 255, OPTIX_RAY_FLAG_NONE,
+        0, 1, 0, after, layer, gather, index, u, v);
+    if (!optixHitObjectIsHit()) return {NONE};
+    at = optixHitObjectGetRayTmax(), gather = __float_as_uint(at);
+    optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), at * (1 + 4.76837158203125e-7f), 0.0f,
+        255, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v);
+    return {index, make_float2(__uint_as_float(u), __uint_as_float(v))};
+}
+
+// Rays skip the triangle of payload 0. Rays past a layer, of it at the distance of payload 1, skip the triangles before it
+// by distance, then index; gathering at the distance of payload 2, they skip every candidate, keeping the lowest index
+// there and its barycentrics in payloads 3 to 5
 extern "C" __global__ void __anyhit__skip() {
-    if (optixGetPrimitiveIndex() == optixGetPayload_0()) optixIgnoreIntersection();
+    const unsigned triangle = optixGetPrimitiveIndex(), skip = optixGetPayload_0();
+    const float at = __uint_as_float(optixGetPayload_1());
+    if (at == -INFINITY) {
+        if (triangle == skip) optixIgnoreIntersection();
+        return;
+    }
+    const float t = optixGetRayTmax(), gather = __uint_as_float(optixGetPayload_2());
+    if (!(t > at || (t == at && triangle > skip)))
+        optixIgnoreIntersection();
+    else if (gather != INFINITY) {
+        if (t == gather && triangle < optixGetPayload_3())
+            optixSetPayload_3(triangle), optixSetPayload_4(optixGetAttribute_0()), optixSetPayload_5(optixGetAttribute_1());
+        optixIgnoreIntersection();
+    }
 }
 
 __device__ float3 hitPosition(const float3* vertices, Hit hit) { // On the triangles of vertices
@@ -915,13 +947,20 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = make_float3(1, 1, 1);
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
-    float occluder = 0, left = length(shadow) * (1 - 1e-4f);
+    const float left = length(shadow) * (1 - 1e-4f);
+    float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[dot(face, toLight) > 0];
-    // Through each layer of occluders passing rays straight through, where uncovered or tinted by their transparency,
-    // entering the volumes of those it meets from the front and leaving them from the back
-    for (Hit hit = {NONE}; (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
-        : hit.triangle)).triangle != NONE; left -= occluder) {
+    // Through each layer of occluders, by distance then index, passing rays straight through, where uncovered or tinted
+    // by their transparency, entering the volumes of those it meets from the front and leaving them from the back
+    // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
+    // short of it, from the lowest index there
+    Hit first = traverse(scene, from, toward, left, at);
+    if (first.triangle != NONE && !scene.materials[first.triangle].opaque)
+        at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
+    for (Hit hit = first; hit.triangle != NONE;
+        before = at, hit = nextLayer(scene, from, toward, left, at, hit.triangle)) {
+        occluder = at - before;
         if (scene.materials[hit.triangle].opaque) return make_float3(0, 0, 0);  // Shading it would pass nothing
         transmitted = transmitted * exponential(medium.extinction * -occluder);
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
@@ -935,9 +974,8 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return make_float3(0, 0, 0);
-        from = from + toward * occluder;
     }
-    return transmitted * exponential(medium.extinction * -left)
+    return transmitted * exponential(medium.extinction * (before - left))
         * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
         / (density = solidAngle(probability, lightNormal, shadow));

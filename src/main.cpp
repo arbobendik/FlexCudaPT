@@ -34,7 +34,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
 
     // Embedded PTX compiled for the steps the scene's programs take, bound in params: first for none
-    OptixPipelineCompileOptions compile{.numPayloadValues = 1, // The triangle a ray skips
+    OptixPipelineCompileOptions compile{.numPayloadValues = 6, // The triangle a ray skips, a layer and its gathering
         .pipelineLaunchParamsVariableName = "params"};
     Params params{};
     const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};

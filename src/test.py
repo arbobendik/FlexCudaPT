@@ -782,3 +782,28 @@ for restir in (False, True):
     rtol, atol = (0.1, 0.02) if restir else (0.05, 0.01)
     assert numpy.allclose(blocks(vulkan), blocks(optix), rtol=rtol, atol=atol), \
         f'blocks {restir}: {numpy.abs(blocks(vulkan) - blocks(optix)).max()}'
+
+# Stacked planes of half coverage, coincident or closer than shadow rays used to step over, each let half of the light
+# of an emitter so small that light sampling alone carries it through to the floor below them, on both backends
+scene = new('layers')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.flex_samples, scene.flex_restir = 1024, False
+scene.camera = add(bpy.data.cameras.new('layers'), (0, 0, 0.5))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 1
+grid = lambda size: lambda bm: bmesh.ops.create_grid(bm, size=size / 2)
+shape('floor', grid(4), (0, 0, 0)).inputs['Roughness'].default_value = 1
+light = shape('light', grid(0.01), (0, 0, 2))
+for name, value in (('Base Color', (0, 0, 0, 1)), ('Specular IOR Level', 0), ('Emission Color', (1, 1, 1, 1)),
+        ('Emission Strength', 20 * 150 ** 2)): light.inputs[name].default_value = value
+for i in range(4):
+    layer = shape(f'layer {i}', grid(6), (0, 0, 1))
+    for name, value in (('Base Color', (0, 0, 0, 1)), ('Specular IOR Level', 0), ('Alpha', 0.5)):
+        layer.inputs[name].default_value = value
+layers = [bpy.data.objects[f'layer {i}'] for i in range(4)]
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    for ob in layers: ob.hide_render = True
+    open_ = render().mean()
+    for n, spacing in ((2, 0), (4, 0), (2, 5e-5), (4, 5e-5)):
+        for i, ob in enumerate(layers): ob.hide_render, ob.location.z = i >= n, 1 + i * spacing
+        assert numpy.isclose(render().mean() / open_, 0.5 ** n, rtol=0.02), f'layers {device} {n} {spacing}'
