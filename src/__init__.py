@@ -912,8 +912,8 @@ class Flex(bpy.types.RenderEngine):
                 # loses when triangulated; of a mesh its modifiers only deform, the same vertices in the same order,
                 # its original's, which a depsgraph evaluated for no render, as the viewport's first, holds no such layer
                 # of; of others, which make vertices of their own, that layer, if any
-                rest = ob.original.data if ob.type == 'MESH' and len(ob.original.data.vertices) == len(mesh.vertices) \
-                    else mesh
+                rest = ob.original.data if ob.original.type == 'MESH' and len(ob.original.data.vertices) \
+                    == len(mesh.vertices) else mesh
                 orco = numpy.empty(3 * len(mesh.vertices), 'f')
                 rest.vertices.foreach_get('co' if rest is not mesh else 'undeformed_co', orco)
                 orco = (orco.reshape(-1, 3) - rest.texspace_location) / (2 * numpy.array(rest.texspace_size)) + 0.5
