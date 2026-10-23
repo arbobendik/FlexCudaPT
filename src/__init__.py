@@ -1081,15 +1081,17 @@ class Flex(bpy.types.RenderEngine):
 
     # Shows the result after ever larger batches of samples, until it has them all or the render is cancelled
     def render(self, depsgraph):
-        scene = depsgraph.scene_eval
+        # The scene as set: with persistent data the evaluated one keeps its first render's values of its properties
+        # changed alone, such as Flex's settings, while its camera follows
+        scene = depsgraph.scene
         width = self.resolution_x
         height = self.resolution_y
         self.update_progress(0)
         self.update_stats('', f'{scene.name} | Syncing scene')
         self.start(depsgraph)
-        camera = (scene.camera.matrix_world.normalized(),
-            scene.camera.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y),
-            scene.camera)
+        evaluated = scene.camera.evaluated_get(depsgraph)
+        camera = (evaluated.matrix_world.normalized(),
+            evaluated.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y), evaluated)
         result = self.begin_result(0, 0, width, height)  # Blender clips the result to the render border
         border = depsgraph.scene.render
         x = int(border.use_border * border.border_min_x * width)

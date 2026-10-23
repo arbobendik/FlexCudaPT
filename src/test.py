@@ -121,6 +121,16 @@ assert counts[0] == 1 and counts[-1] == scene.flex_samples and all(
     0 < batch <= 64 for batch in numpy.diff([0, *counts])), 'sample progress'
 assert len(counts) <= 10, 'batched progress'
 assert all('Remaining:' in message and 'samples/s' in message for message in progress), 'performance stats'
+# With persistent data the engine keeps its scene between renders, which still take Flex's settings as since changed
+# alone: raising the samples renders what a render without persistent data does
+shot = lambda: bpy.ops.render.render(scene=scene.name, write_still=True) and bpy.data.images.load(scene.render.filepath)
+scene.render.use_persistent_data, samples, scene.flex_samples = True, scene.flex_samples, 1
+render()
+scene.flex_samples = 2
+persisted = numpy.array(shot().pixels)
+scene.render.use_persistent_data = False
+assert numpy.array_equal(persisted, numpy.array(shot().pixels)), 'persistent settings'
+scene.flex_samples = samples
 
 def chroma(x, y, size, color):  # Whether the block of pixels has the color's hue
     mean = pixels[y + 2:y + size - 2, x + 2:x + size - 2].mean((0, 1))
