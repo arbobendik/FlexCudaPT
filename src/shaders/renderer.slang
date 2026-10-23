@@ -8,7 +8,7 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ARCTANGENT, ARCTAN2, SINH, COSH, TANH, CROSS_PRODUCT, RGB_TO_HSV, HSV_TO_RGB, RGB_TO_HSL, HSL_TO_RGB,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
-    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED };
+    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR };
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -521,6 +521,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(PUSH) stack[top++] = op.value; break;
         CASE(STORE) saved[asuint(op.value.x)] = stack[top - 1]; break;
         CASE(LOAD) stack[top++] = saved[asuint(op.value.x)]; break;
+        CASE(SPECULAR) break;
         CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
         CASE(GENERATED) stack[top++] = at.generated; break;
         CASE(OBJECT) stack[top++] = at.object; break;
@@ -1071,9 +1072,10 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
-        // The BSDF's material, absorbing the volume's transmittance over unit distance
+        // The BSDF's material, absorbing the volume's transmittance over unit distance, its specular level applied
         const Material material = Material(surface.albedo, surface.emissive, surface.roughness, surface.metallic,
-            surface.transparency, surface.ior, exp(surface.density * (surface.absorption - 1)));
+            surface.transparency, surface.ior, exp(surface.density * (surface.absorption - 1)),
+            used(SPECULAR) ? surface.tint : float3(1, 1, 1), used(SPECULAR) ? surface.level : 1);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
         if (surface.density > 0) {
