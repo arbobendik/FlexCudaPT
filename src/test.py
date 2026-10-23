@@ -300,16 +300,25 @@ for roughness in (0, 1):
             assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS energy'
         else:
             assert 0.03 < (pixels - direct)[28:36, 28:36].mean() < 0.05, 'MIS delta reflection'
-# MIS and light sampling alone integrate the same BSDF even with strongly tilted shading normals.
+# Even with strongly tilted shading normals MIS keeps the BSDF's energy: in a box emitting white the white floor reads
+# white, with the light that directions sent to a face's wrong side carry on to, which light sampling cannot reach: it
+# finds the lobe's share on the face's side alone, (1 + cos) / 2 of the tilt
 scene.camera.data.angle = 0.3
 floor.inputs['IOR'].default_value = 1
 mesh = bpy.data.objects['floor'].data
 mesh.shade_smooth()
 mesh.normals_split_custom_set([(0.95, 0, 0.3122499)] * len(mesh.loops))
-direct = mis_render(0, False)
+color = floor.inputs['Base Color'].default_value[:]
+floor.inputs['Base Color'].default_value, bpy.data.objects['dim'].hide_render = (1, 1, 1, 1), True
+box = shape('box', lambda bm: [bmesh.ops.create_cube(bm, size=4), bmesh.ops.reverse_faces(bm, faces=bm.faces[:])],
+    (0, 0, 0))  # Facing in
+box.inputs['Base Color'].default_value, box.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+box.inputs['Emission Strength'].default_value, box.inputs['IOR'].default_value = 1, 1  # No specular: it reads 1 alone
 for reuse in (False, True):
-    pixels = mis_render(1, reuse)
-    assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS shading normals'
+    assert numpy.isclose(mis_render(1, reuse).mean(), 1, rtol=0.01), 'MIS shading normals'
+assert numpy.isclose(mis_render(0, False).mean(), (1 + 0.3122499) / 2, rtol=0.01), 'light sampling shading normals'
+floor.inputs['Base Color'].default_value, bpy.data.objects['dim'].hide_render = color, False
+bpy.data.objects['box'].hide_render = True
 mesh.normals_split_custom_set([(0, 0, 1)] * len(mesh.loops))
 scene.camera.data.angle, floor.inputs['IOR'].default_value = math.pi / 2, 1.5
 # Every continuous lobe samples lights, including sharp glossy reflection and rough transmission below the face.
