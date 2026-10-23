@@ -659,6 +659,30 @@ mesh = twisted.data
 rest = (numpy.array([v.co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
 assert all(numpy.isclose(rest, point, atol=1e-5).all(1).any() for point in generated), 'undeformed generated coordinates'
 twisted.hide_render = True
+# Curves, text, surfaces and metaballs evaluate to meshes their originals hold no vertices of: their generated
+# coordinates are those meshes' orco layers
+made = []
+for primitive in (bpy.ops.curve.primitive_bezier_curve_add, bpy.ops.object.text_add,
+        bpy.ops.surface.primitive_nurbs_surface_surface_add, bpy.ops.object.metaball_add):
+    primitive(location=(5, 0, 0))
+    made.append(bpy.context.object)
+made[0].data.extrude = 0.1
+bpy.context.view_layer.update()
+exporter.visible, exporter.requests = (), io.BytesIO()
+Viewport.engine.start(exporter, depsgraph)
+piped, kinds = exporter.requests.getvalue(), set()
+for i, item in enumerate(depsgraph.object_instances):
+    if item.object.original in made and item.object.type == 'MESH':
+        first, count = exporter.slots[i][:2]
+        generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=16 + 36 * (2 * numpy.frombuffer(piped, 'I',
+            count=2)[1] + first)).reshape(-1, 3)
+        mesh, kinds = item.object.to_mesh(), kinds | {item.object.original.type}
+        orco = (numpy.array([v.undeformed_co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(
+            mesh.texspace_size)) + 0.5
+        assert all(numpy.isclose(orco, point, atol=1e-5).all(1).any() for point in generated), 'curve generated'
+        item.object.to_mesh_clear()
+assert kinds == {'CURVE', 'FONT', 'SURFACE', 'META'}, 'curves made meshes'
+for ob in made: ob.hide_render = True
 
 # 8 bit sRGB images are filtered in linear light: a black and a white texel magnified read 0.5 halfway between them
 for ob in scene.objects: ob.hide_render = ob != scene.camera
