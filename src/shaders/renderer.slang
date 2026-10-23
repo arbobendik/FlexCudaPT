@@ -788,6 +788,30 @@ Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout flo
     return Hit(query.CommittedPrimitiveIndex(), query.CommittedTriangleBarycentrics());
 }
 
+// Next layer past the triangle after at distance at, by distance then index; at becomes its distance
+Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout float at, uint after) {
+    RayQuery<RAY_FLAG_NONE> query;
+    query.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
+        RayDesc(origin, at * (1 - 4.76837158203125e-7f), direction, far));
+    while (query.Proceed()) if (pastLayer(query.CandidateTriangleRayT(), query.CandidatePrimitiveIndex(), at, after))
+        query.CommitNonOpaqueTriangleHit();
+    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return Hit(NONE, float2(0, 0));
+    const float t = query.CommittedRayT();
+    Hit hit = Hit(NONE, float2(0, 0));
+    RayQuery<RAY_FLAG_NONE> gather;
+    gather.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
+        RayDesc(origin, t * (1 - 4.76837158203125e-7f), direction, t * (1 + 4.76837158203125e-7f)));
+    while (gather.Proceed()) if (gather.CandidateTriangleRayT() == t && gather.CandidatePrimitiveIndex() < hit.triangle
+        && pastLayer(t, gather.CandidatePrimitiveIndex(), at, after))
+        hit = Hit(gather.CandidatePrimitiveIndex(), gather.CandidateTriangleBarycentrics());
+    at = t;
+    return hit;
+}
+
+// Whether a hit at distance t of triangle lies past the layer of triangle after at distance at, by distance then index
+bool pastLayer(float t, uint triangle, float at, uint after) { return t > at || (t == at && triangle > after); }
+
+
 float3 hitPosition(float3* vertices, Hit hit) { // On the triangles of vertices
     vertices = vertices + 3 * hit.triangle;
     return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
@@ -902,12 +926,18 @@ Medium volume(Surface surface) {
     float3 from = origin, transmitted = float3(1, 1, 1);
     // Visibility along the segment to the sampled point
     const float3 toward = normalize(toLight);
-    float occluder = 0, left = length(toLight) * (1 - 1e-4f);
+    const float left = length(toLight) * (1 - 1e-4f);
+    float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[int(dot(face, toLight) > 0)];
-    // Through each layer of occluders, tinted by their transparency, entering and leaving their volumes
-    for (Hit hit = Hit(NONE, float2(0, 0)); (hit = traverse(scene, from, toward, left, occluder, occluder < 1e-4f ? NONE
-        : hit.triangle)).triangle != NONE; left -= occluder) {
+    // Through each layer of occluders by distance then index, tinted by their transparency, entering their volumes
+    // where the first hit lets light through, the layers start an ulp short of it
+    Hit first = traverse(scene, from, toward, left, at);
+    if (first.triangle != NONE && scene.materials[first.triangle].opaque == 0)
+        at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
+    for (Hit hit = first; hit.triangle != NONE;
+        before = at, hit = nextLayer(scene, from, toward, left, at, hit.triangle)) {
+        occluder = at - before;
         if (scene.materials[hit.triangle].opaque != 0) return float3(0, 0, 0);  // Shading it would pass nothing
         transmitted = transmitted * exp(medium.extinction * -occluder);
         for (uint layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
@@ -921,10 +951,9 @@ Medium volume(Surface surface) {
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return float3(0, 0, 0);
-        from = from + toward * occluder;
     }
     density = solidAngle(probability, lightNormal, toLight);
-    return transmitted * exp(medium.extinction * -left)
+    return transmitted * exp(medium.extinction * (before - left))
         * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
         Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight)), 0, true).emissive
         / density;
