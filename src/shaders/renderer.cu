@@ -566,6 +566,19 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(INCOMING) *top++ = incoming; break;
         CASE(BACKFACING) *top++ = make_float3(1, 1, 1) * backfacing; break;
         CASE(LIGHT_PATH) top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
+        CASE(BAKED) { // A bake's texels, halves, read linearly at the UV and extended at its edges
+            const int width = op->width, height = op->height & 0xFFFFFF;
+            const float x = top[-1].x * width - 0.5f, y = top[-1].y * height - 0.5f;
+            const int i = int(floorf(x)), j = int(floorf(y));
+            float3 c[4];
+            for (int k = 0; k < 4; ++k) {
+                const ushort4 h = ((const ushort4*)(scene.texels + op->texel))[
+                    min(max(j + k / 2, 0), height - 1) * width + min(max(i + k % 2, 0), width - 1)];
+                c[k] = make_float3(__half2float(__ushort_as_half(h.x)), __half2float(__ushort_as_half(h.y)),
+                    __half2float(__ushort_as_half(h.z)));
+            }
+            top[-1] = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
+        } break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
@@ -1435,6 +1448,52 @@ __device__ int partner(const Scene& scene, uint3 p, uint3 size, unsigned t) {
     const int qy = int(p.y) + (transpose ? delta.x * flip_x : delta.y * flip_y);
     const bool valid = qx >= 0 && qy >= 0 && qx < int(size.x) && qy < int(size.y);
     return valid ? qy * int(size.x) + qx : -1;
+}
+
+// A texel of the bake whose program the frame numbers, its top bit the pass: what the program's surface takes as albedo
+// there, as halves into the texels its end before the program gives the first and size of. The end before that gives
+// its tiles, each 16 x 16 texels over a triangle's UVs, each texel's point at its center: owned by one triangle in the
+// first pass, in the second one beside a baked texel where none was.
+extern "C" __global__ void __raygen__bake() {
+    const uint3 p = optixGetLaunchIndex();
+    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    const unsigned program = scene.frame & ~(1u << 31);
+    const Op &tiles = scene.ops[program - 2], &bake = scene.ops[program - 1];
+    ushort4* const texels = (ushort4*)(scene.texels + bake.texel);
+    const uint4 tile = ((const uint4*)scene.texels)[tiles.texel + p.x / 16];
+    const unsigned x = tile.y * 16 + p.x % 16, y = tile.z * 16 + p.y;
+    if (x >= bake.width || y >= bake.height) return;
+    if (scene.frame >> 31) { // Off the edges: the first of left, right, below and above the first pass baked
+        const int u[] = {int(x) - 1, int(x) + 1, int(x), int(x)}, v[] = {int(y), int(y), int(y) - 1, int(y) + 1};
+        for (int k = 0; k < 4 && !texels[y * bake.width + x].w; ++k) {
+            if (u[k] < 0 || v[k] < 0 || u[k] >= int(bake.width) || v[k] >= int(bake.height)) continue;
+            const ushort4 texel = texels[v[k] * bake.width + u[k]];
+            if (texel.w == 0x3C00) texels[y * bake.width + x] = make_ushort4(texel.x, texel.y, texel.z, 0x3800);
+        } // Its alpha 1, the padding's a half, so padding takes only what the first pass baked
+        return;
+    }
+    // Inside, or on an edge the triangle takes by the top-left rule, exactly on a grid of 512ths of a texel that
+    // the triangles of a shared edge agree on: one of them bakes each texel
+    const float2* uv = scene.uvs + 3 * tile.x;
+    long long px[3], py[3];
+    for (int k = 0; k < 3; ++k)
+        px[k] = floorf(uv[k].x * bake.width * 512), py[k] = floorf(uv[k].y * bake.height * 512);
+    const long long area = (px[1] - px[0]) * (py[2] - py[0]) - (py[1] - py[0]) * (px[2] - px[0]);
+    for (int k = 0; k < 3; ++k) { // Along its edges counterclockwise
+        const int a = area > 0 ? k : (3 - k) % 3, b = area > 0 ? (k + 1) % 3 : (5 - k) % 3;
+        const long long dx = px[b] - px[a], dy = py[b] - py[a];
+        const long long w = dx * ((2 * y + 1) * 256ll - py[a]) - dy * ((2 * x + 1) * 256ll - px[a]);
+        if (!area || w < 0 || !w && !(dy > 0 || !dy && dx > 0)) return;
+    }
+    const float2 e = uv[1] - uv[0], f = uv[2] - uv[0];
+    const float2 c = make_float2((x + 0.5f) / bake.width - uv[0].x, (y + 0.5f) / bake.height - uv[0].y);
+    const float det = e.x * f.y - e.y * f.x;
+    const Point point = at(scene, tile.x, (c.x * f.y - c.y * f.x) / det, (e.x * c.y - e.y * c.x) / det);
+    const float3 z = make_float3(0, 0, 1), albedo = shade(scene, program, z, SlangMatrix<float, 3, 3>{}, point, z,
+        false, {false, false, LOBE_NONE, 0, 0}, Info{}).albedo;
+    texels[y * bake.width + x] = make_ushort4(
+        __half_as_ushort(__float2half_rn(albedo.x)), __half_as_ushort(__float2half_rn(albedo.y)),
+        __half_as_ushort(__float2half_rn(albedo.z)), __half_as_ushort(__float2half_rn(1)));
 }
 
 // Mean emission over the triangle's actual UVs and generated coordinates, keeping support for small emitting regions.
