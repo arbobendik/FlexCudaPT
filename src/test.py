@@ -638,6 +638,27 @@ assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=4)) == (f
     *exporter.slots[slot][:2]), 'instancer update'
 after = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16)
 assert numpy.allclose(after.reshape(3, 3), before.reshape(3, 3) + (1, 0, 0)), 'instance motion'
+# Twisted, a mesh keeps the generated coordinates of its vertices undeformed, those of a final render, though this
+# depsgraph, evaluated for no render as the viewport's first, holds no orco layer
+twisted = bpy.data.objects.new('twisted', bpy.data.meshes.new('twisted'))
+scene.collection.objects.link(twisted)
+bm = bmesh.new()
+bmesh.ops.create_grid(bm, x_segments=4, y_segments=4, size=1)
+bm.to_mesh(twisted.data)
+twist = twisted.modifiers.new('twist', 'SIMPLE_DEFORM')
+twist.deform_axis, twist.angle = 'X', 0.6
+bpy.context.view_layer.update()
+exporter.visible, exporter.requests = (), io.BytesIO()
+Viewport.engine.start(exporter, depsgraph)
+first, count = exporter.slots[next(i for i, item in enumerate(depsgraph.object_instances)
+    if item.object.original == twisted)][:2]
+piped = exporter.requests.getvalue()
+generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=16 + 36 * (2 * numpy.frombuffer(piped, 'I', count=2)[1]
+    + first)).reshape(-1, 3)
+mesh = twisted.data
+rest = (numpy.array([v.co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
+assert all(numpy.isclose(rest, point, atol=1e-5).all(1).any() for point in generated), 'undeformed generated coordinates'
+twisted.hide_render = True
 
 # 8 bit sRGB images are filtered in linear light: a black and a white texel magnified read 0.5 halfway between them
 for ob in scene.objects: ob.hide_render = ob != scene.camera
