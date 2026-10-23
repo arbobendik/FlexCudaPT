@@ -262,6 +262,29 @@ for level, derived in ((0.5, (0.9903, 0.9936, 0.9926)), (1, (0.9863, 0.9929, 0.9
     colored.inputs['Specular IOR Level'].default_value = level
     assert numpy.allclose(render()[18:46, 2:30].mean((0, 1)), derived, atol=0.002), f'tinted furnace at level {level}'
 colored.inputs['Specular IOR Level'].default_value, scene.flex_restir = 0.5, True
+# ReSTIR keeps the furnace's light: white and tinted, the plane's block with ReSTIR minus without, over independent
+# realizations (the same part of the plane at widths whose pixels draw other seeds), is zero within five standard
+# errors per channel. A guard against lost or broken reuse weights (dropping the canonical sample's MIS weight takes
+# 90%), not a precision test of unbiasedness: it detects shifts above about 0.24% white and 0.48% tinted red, and a
+# change that only reshuffles the noise fails it with odds of about 1.6%
+REALIZATIONS = tuple(SIZE * k for k in range(1, 7))
+def block(width):  # Mean color of the furnace block at width pixels, the same part of the plane at each
+    scene.render.resolution_x = scene.render.resolution_y = width
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    k = width // SIZE
+    image = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(width, width, 4)
+    return image[18 * k:46 * k, 2 * k:30 * k, :3].mean((0, 1))
+for tint in ((1, 1, 1, 1), (1, 0.08, 0.375, 1)):
+    colored.inputs['Specular Tint'].default_value = tint
+    shifts = []
+    for width in REALIZATIONS:
+        scene.flex_restir = False
+        without = block(width)
+        scene.flex_restir = True
+        shifts.append(block(width) - without)
+    shifts = numpy.array(shifts)
+    assert (abs(shifts.mean(0)) < 5 * shifts.std(0, ddof=1) / len(shifts) ** 0.5).all(), f'restir furnace {tint}'
+scene.render.resolution_x = scene.render.resolution_y = SIZE
 # Huge, black and turned 60 degrees under the white sky, the colored plane reflects FlexLight's specular albedo at that
 # angle
 colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
