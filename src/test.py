@@ -194,8 +194,9 @@ assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'vi
 bpy.data.objects['cutout'].hide_render = True
 uncut = render()
 assert numpy.allclose(uncut[18:46, 2:30].mean((0, 1)), pixels[18:46, 2:30].mean((0, 1)), rtol=0.1), 'straight through'
-# A black dielectric reflects white whatever its specular tint and level, as FlexLight's BSDF, which the exporter still
-# folds
+# A black dielectric reflects its reflectance at normal incidence tinted by its Specular Tint and scaled by its Specular
+# IOR Level, as Blender's Principled defines them, the exporter folding level 1 into a factor of 2 and marking the tint
+# off their defaults, unmarked at them for the shader to compile both out
 colored.id_data.links.remove(colored.inputs['Base Color'].links[0])
 colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
 colored.inputs['IOR'].default_value = 1.5
@@ -203,10 +204,19 @@ colored.inputs['Specular IOR Level'].default_value = 1
 colored.inputs['Specular Tint'].default_value = (0, 1, 0, 1)
 flex = sys.modules[Viewport.engine.__module__]
 surface = flex.fold(flex.resolve(colored.outputs[0].links[0].to_socket))
-assert numpy.allclose(numpy.array(surface[6:9]), ((1.5,) * 3, (0, 1, 0), (2,) * 3)), 'specular level'
+assert surface[7][0] == 'SPECULAR' and numpy.allclose(numpy.array((surface[6], surface[7][1], surface[8])),
+    ((1.5,) * 3, (0, 1, 0), (2,) * 3)), 'specular level'
 pixels = render()
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
-assert max(red, green, blue) < 1.02 * min(red, green, blue), 'specular tint'
+assert green > 50 * max(red, blue), 'specular tint'
+colored.inputs['Specular Tint'].default_value = (1, 1, 1, 1)
+reflected = []  # At level 1, 0.5 and 0: doubled, plain and none
+for level in (1, 0.5, 0):
+    colored.inputs['Specular IOR Level'].default_value = level
+    reflected.append(render()[18:46, 2:30].mean())
+assert 1.95 < reflected[0] / reflected[1] < 2.05 and reflected[2] < 1e-3 * reflected[1], 'specular level reflectance'
+colored.inputs['Specular IOR Level'].default_value = 0.5
+assert not isinstance(flex.fold(flex.resolve(colored.outputs[0].links[0].to_socket))[7], tuple), 'specular defaults'
 # A black cutout covering half lets half the light through to the textured plane and half its light back
 alpha.image.pixels.foreach_set((0, 0, 0, 0.5))
 cutout.inputs['Base Color'].default_value = (0, 0, 0, 1)
@@ -218,15 +228,21 @@ empty = render()[:56]
 assert numpy.allclose(empty, SKY, atol=0.01), 'empty'
 # A white dielectric under a white sky diffuses what its Fresnel leaves beside its specular, never more than it
 # receives: each pixel holds its single-scatter directional albedo at its view cosine, a mean of 0.9903 derived
-# numerically
+# numerically; without ReSTIR, whose reuse it would measure besides the BSDF
 bpy.data.objects['colored'].hide_render = False
 colored.inputs['Base Color'].default_value = colored.inputs['Specular Tint'].default_value = (1, 1, 1, 1)
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+scene.flex_restir = False
 pixels = render()
-assert abs(pixels[18:46, 2:30].mean() - 0.9903) < 0.005, 'furnace'
-colored.inputs['Specular Tint'].default_value = (1, 0.08, 0.375, 1)  # Changes nothing, FlexLight's BSDF has no tint
-pixels = render()
-assert abs(pixels[18:46, 2:30].mean() - 0.9903) < 0.005, 'tinted furnace'
+assert abs(pixels[18:46, 2:30].mean() - 0.9903) < 0.002, 'furnace'
+# Tinted, at its level and doubled, it returns in each channel what its tinted reflection and the diffuse of what that
+# leaves do, never more than it receives: each channel its single-scatter directional albedo, derived numerically as
+# 'furnace' is
+colored.inputs['Specular Tint'].default_value = (1, 0.08, 0.375, 1)
+for level, derived in ((0.5, (0.9903, 0.9936, 0.9926)), (1, (0.9863, 0.9929, 0.9908))):
+    colored.inputs['Specular IOR Level'].default_value = level
+    assert numpy.allclose(render()[18:46, 2:30].mean((0, 1)), derived, atol=0.002), f'tinted furnace at level {level}'
+colored.inputs['Specular IOR Level'].default_value, scene.flex_restir = 0.5, True
 # Huge, black and turned 60 degrees under the white sky, the colored plane reflects FlexLight's specular albedo at that
 # angle
 colored.inputs['Base Color'].default_value = (0, 0, 0, 1)
@@ -737,6 +753,12 @@ uvs.foreach_set('uv', uv)
 exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())  # Exporting anew, not updating values
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert exporter.placed and not any('steps' in str(key) for _, key, *_ in exporter.placed), 'image reads stay live'
+# A procedural specular tint bakes inside its mark, which stays live for the shader to keep the tint
+links.new(noise.outputs['Color'], edge.inputs['Specular Tint'])
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert exporter.placed and not any('SPECULAR' in str(key) for _, key, *_ in exporter.placed), 'specular mark live'
+links.remove(edge.inputs['Specular Tint'].links[0])
 # Coated, the plane's base layer bakes its noise and renders under the coat as live, within the seed floor there,
 # 0.0082 of its mean: its bake comes before both layers' rows, which follow each other
 edge.inputs['Emission Strength'].default_value, edge.inputs['Coat Weight'].default_value = 0, 0.5
