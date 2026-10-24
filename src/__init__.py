@@ -167,8 +167,13 @@ def texture(source, textures, texels):
         texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
     return textures[key]
 
-def expression_key(expression):
-    if isinstance(expression, tuple): return tuple(map(expression_key, expression))
+# Recursions over resolve()'s expressions, whose parts are shared, take each part once per outermost call: memo by its
+# id, which the parts keep as they outlive the call, made by that call and passed down
+def expression_key(expression, memo=None):
+    memo = {} if memo is None else memo
+    if isinstance(expression, tuple):
+        if id(expression) not in memo: memo[id(expression)] = tuple(expression_key(part, memo) for part in expression)
+        return memo[id(expression)]
     if isinstance(expression, ImageRead): return expression.key
     if isinstance(expression, (int, float, numpy.number, numpy.ndarray)):
         return tuple(numpy.resize(expression, 3).astype('f'))
@@ -217,6 +222,7 @@ def stretch(values, uvs):
 # frequency and distortion adds to it (two left Fog of tokyo's 0.1% bright).
 def summarize(expression, table, scales):
     if not isinstance(expression, tuple): return set(), False, 1, set(), 0
+    if id(expression) in table: return table[id(expression)]  # A part shared, summarized already
     name, *operands = expression
     parts = [summarize(operand, table, scales) for operand in operands]
     read, sub = name in READS and isinstance(operands[-1], ImageRead), parts[:-1] if name in READS else parts
@@ -237,14 +243,17 @@ def summarize(expression, table, scales):
     table[id(expression)] = reads, affine, points, inputs, need
     return table[id(expression)]
 
-def alpha_reads(expression):  # Image samples whose alpha contributes to the resolved surface
+def alpha_reads(expression, seen=None):  # Image samples whose alpha contributes to the resolved surface, each part
+    seen = set() if seen is None else seen  # shared entered once
+    if id(expression) in seen: return
+    seen.add(id(expression))
     if isinstance(expression, list):
-        for part in expression: yield from alpha_reads(part)
+        for part in expression: yield from alpha_reads(part, seen)
     elif isinstance(expression, tuple):
         name, *operands = expression
         if name in ('ALPHA', 'ALPHA_LINEAR', 'ALPHA_CUBIC') and isinstance(operands[-1], ImageRead):
             yield operands[-1].key
-        for part in operands[:1] if name == 'UNASSOCIATE' else operands: yield from alpha_reads(part)
+        for part in operands[:1] if name == 'UNASSOCIATE' else operands: yield from alpha_reads(part, seen)
 
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
 # textures of their mean. Without slots it counts in uses each expression met at the point it is read at, a height
@@ -275,10 +284,15 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
         ops.append(([*OPS].index('STORE'), slots[key], 0, 0))
     return value
 
-def fold(expression):  # The expression with its operations on constants alone computed, as the shader would
-    if isinstance(expression, list): return [fold(attribute) for attribute in expression]
+def fold(expression, memo=None):  # The expression with its operations on constants alone computed, as the shader would
+    memo = {} if memo is None else memo
+    if isinstance(expression, list): return [fold(attribute, memo) for attribute in expression]
     if not isinstance(expression, tuple): return expression
-    name, *operands = (fold(part) if isinstance(part, tuple) else part for part in expression)
+    if id(expression) not in memo: memo[id(expression)] = folded(expression, memo)
+    return memo[id(expression)]
+
+def folded(expression, memo):
+    name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
     if name != 'UNASSOCIATE' and OPS[name] and not any(isinstance(operand, tuple) for operand in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
@@ -288,10 +302,14 @@ def fold(expression):  # The expression with its operations on constants alone c
                 and (name in ('ADD', 'MULTIPLY') or i == 1): return operands[1 - i]
     return name, *operands
 
-def unanimated(value):  # The expression with its animated values, which its cut keeps from bakes, as constants
-    if isinstance(value, list): return [unanimated(part) for part in value]
+def unanimated(value, memo=None):  # The expression with its animated values, which its cut keeps from bakes, as
+    # constants
+    memo = {} if memo is None else memo
+    if isinstance(value, list): return [unanimated(part, memo) for part in value]
     if not isinstance(value, tuple): return value
-    return unanimated(value[1]) if value[0] == 'ANIMATED' else (value[0], *map(unanimated, value[1:]))
+    if id(value) not in memo: memo[id(value)] = unanimated(value[1], memo) if value[0] == 'ANIMATED' else (
+        value[0], *(unanimated(part, memo) for part in value[1:]))
+    return memo[id(value)]
 
 def nonzero(value):  # Whether a value resolved is an expression or a constant not zero, its animated ones as constants
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
@@ -968,7 +986,11 @@ class Flex(bpy.types.RenderEngine):
         current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the scales
         # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
-        def bake(expression):  # A unit of math, ramps and noise on the point inputs, costing two reads, baked
+        def bake(expression, memo=None):  # Each part once per outermost call, as the recursions above
+            memo = {} if memo is None else memo
+            if id(expression) not in memo: memo[id(expression)] = baking(expression, memo)
+            return memo[id(expression)]
+        def baking(expression, memo):  # A unit of math, ramps and noise on the point inputs, costing two reads, baked
             # over its object's UVs at the resolution its frequencies need up to 4K, read at the UV;
             cost, inputs, size = summaries[id(expression)][2:5] if isinstance(expression, tuple) \
                 else (None, set(), 0)
@@ -977,8 +999,8 @@ class Flex(bpy.types.RenderEngine):
                 if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
                         summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by
-                return (expression[0], *map(bake, expression[1:])) if expression[0] != 'UNASSOCIATE' \
-                    else (expression[0], bake(expression[1]), expression[2])
+                return (expression[0], *(bake(part, memo) for part in expression[1:])) \
+                    if expression[0] != 'UNASSOCIATE' else (expression[0], bake(expression[1], memo), expression[2])
             if (key := (int(current['triangles'][0]), expression_key(expression))) in units:  # As the emission's
                 return 'BAKED', ('UV',), units[key]  # program of a material reads it again
             size, t = int(-(-max(64, size) // 16) * 16), current['uv'] * int(-(-max(64, size) // 16) * 16)

@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gpu, io, math, numpy, os, sys, types
+import bpy, bmesh, gpu, io, math, numpy, os, sys, time, types
 from mathutils import Matrix
 
 SIZE = 64
@@ -873,3 +873,20 @@ sun.energy, sun.angle = math.pi, 0
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.isclose(render().mean(), 1, rtol=0.01), f'parallel sun {device}'
+
+# A chain of mixes, each multiplying the last into itself, shares the first one's expression 2^10 times: folding, keying
+# and summarizing each shared part once, its export takes linear time, not exponential
+scene = new('chain')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('chain'), (0, 0, 2))
+chain = plane('chain', 0, 0)
+last = chain.id_data.nodes.new('ShaderNodeTexNoise').outputs['Color']
+for _ in range(10):
+    mix = chain.id_data.nodes.new('ShaderNodeMix')  # Its color sockets: A 6, B 7, the result 2
+    mix.data_type, mix.blend_type, mix.inputs[7].default_value = 'RGBA', 'MULTIPLY', (0.9, 0.8, 0.7, 1)
+    chain.id_data.links.new(last, mix.inputs[6])
+    last = mix.outputs[2]
+chain.id_data.links.new(last, chain.inputs['Base Color'])
+start = time.perf_counter()
+Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), bpy.context.evaluated_depsgraph_get())
+assert time.perf_counter() - start < 1, 'shared expressions once'
