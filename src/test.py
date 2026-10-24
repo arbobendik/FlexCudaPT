@@ -204,6 +204,25 @@ colored.inputs['Specular Tint'].default_value = (0, 1, 0, 1)
 flex = sys.modules[Viewport.engine.__module__]
 surface = flex.fold(flex.resolve(colored.outputs[0].links[0].to_socket))
 assert numpy.allclose(numpy.array(surface[6:9]), ((1.5,) * 3, (0, 1, 0), (2,) * 3)), 'specular level'
+# A mapping at its defaults turns no point: an image read through it folds to its read at the UV, as a noise times zero
+# folds to zero, and transmitting nothing under a textured metallic, opaque; a degenerate map range of the noise times
+# zero stays guarded to zero, as Blender sees its input vary
+identities = bpy.data.materials.new('identities').node_tree
+bsdf, (mapping, image, product, ranged) = identities.nodes['Principled BSDF'], (identities.nodes.new(kind) for kind in
+    ('ShaderNodeMapping', 'ShaderNodeTexImage', 'ShaderNodeMath', 'ShaderNodeMapRange'))
+image.image, product.operation, product.inputs[1].default_value = texture.image, 'MULTIPLY', 0
+ranged.inputs['From Min'].default_value = ranged.inputs['From Max'].default_value = 0.5
+ranged.inputs['To Min'].default_value, ranged.clamp = 0.3, False
+identities.links.new(identities.nodes.new('ShaderNodeTexCoord').outputs['UV'], mapping.inputs['Vector'])
+identities.links.new(mapping.outputs['Vector'], image.inputs['Vector'])
+for output, target in ((image.outputs['Color'], bsdf.inputs['Base Color']), (image.outputs['Color'],
+        bsdf.inputs['Metallic']), (identities.nodes.new('ShaderNodeTexNoise').outputs['Fac'], product.inputs[0]),
+        (product.outputs[0], bsdf.inputs['Roughness']), (product.outputs[0], ranged.inputs['Value']),
+        (ranged.outputs['Result'], bsdf.inputs['Emission Strength'])):
+    identities.links.new(output, target)
+surface = flex.fold(flex.resolve(identities.nodes['Material Output'].inputs['Surface']))
+assert 'ROTATE' not in str(surface[1]) and not any(isinstance(surface[k], tuple) for k in (3, 5)), 'identities fold'
+assert not isinstance(surface[4], tuple) and not numpy.any(surface[4]), 'degenerate range guarded'
 pixels = render()
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
 assert max(red, green, blue) < 1.02 * min(red, green, blue), 'specular tint'
