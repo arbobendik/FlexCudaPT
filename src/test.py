@@ -858,3 +858,18 @@ for device in ('OPTIX', 'VULKAN'):
     for n, spacing in ((2, 0), (4, 0), (2, 5e-5), (4, 5e-5)):
         for i, ob in enumerate(layers): ob.hide_render, ob.location.z = i >= n, 1 + i * spacing
         assert numpy.isclose(render().mean() / open_, 0.5 ** n, rtol=0.02), f'layers {device} {n} {spacing}'
+
+# A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
+# its irradiance over pi, one, on both backends
+scene = new('sun')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.flex_samples = 64
+scene.camera = add(bpy.data.cameras.new('sun'), (0, 0, 1))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 1
+floor = plane('sun floor', 0, size=4)
+floor.inputs['Base Color'].default_value, floor.inputs['Roughness'].default_value = (1, 1, 1, 1), 1
+sun = add(bpy.data.lights.new('sun', 'SUN'), (0, 0, 2)).data
+sun.energy, sun.angle = math.pi, 0
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.isclose(render().mean(), 1, rtol=0.01), f'parallel sun {device}'

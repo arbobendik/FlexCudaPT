@@ -7,6 +7,7 @@ from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 from bpy_extras import anim_utils
 
 SUN_DISTANCE = 1e5
+SUN_MIN_ANGLE = 1e-4  # Blender's parallel sun of angle 0 as the smallest disk, which delivers the same irradiance
 VIEWPORT_SAMPLES = 4  # Per redraw
 RENDER_SAMPLES = 64  # At most, per update of a final render
 SLOTS = 32  # Values a program keeps for reuse, as the shader's
@@ -1133,7 +1134,7 @@ class Flex(bpy.types.RenderEngine):
                 for face in bm.faces: face.material_index = 1
                 if light.type == 'AREA': disk(bm, sides, *size, 0)
                 elif light.type == 'SUN':
-                    disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(light.angle / 2)], SUN_DISTANCE)
+                    disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2)], SUN_DISTANCE)
                 else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
             bm.transform(instance.matrix_world)
