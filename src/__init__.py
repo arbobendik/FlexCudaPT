@@ -300,6 +300,12 @@ def folded(expression, memo):
             if isinstance(value, tuple): continue
             if numpy.all(numpy.asarray(value) == (1 if name in ('MULTIPLY', 'DIVIDE') else 0)) \
                 and (name in ('ADD', 'MULTIPLY') or i == 1): return operands[1 - i]
+    # A rotation by no angle, as a mapping's at its defaults; a product with zero, and zero divided, zero where
+    # undefined as Blender's
+    if name == 'ROTATE' and not isinstance(operands[2], tuple) and not numpy.any(operands[2]): return operands[0]
+    if name == 'MULTIPLY' and any(not isinstance(value, tuple) and not numpy.any(value) for value in operands) \
+            or name == 'DIVIDE' and not isinstance(operands[0], tuple) and not numpy.any(operands[0]):
+        return numpy.zeros(3)
     return name, *operands
 
 def unanimated(value, memo=None):  # The expression with its animated values, which its cut keeps from bakes, as
@@ -313,6 +319,14 @@ def unanimated(value, memo=None):  # The expression with its animated values, wh
 
 def nonzero(value):  # Whether a value resolved is an expression or a constant not zero, its animated ones as constants
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
+
+def constant(expression, seen=None):  # Whether it is constant before products of zero fold it, as Blender's nodes see
+    if not isinstance(expression, tuple): return True  # it; each part shared once
+    seen = {} if seen is None else seen
+    if id(expression) not in seen:
+        seen[id(expression)] = expression[0] != 'UNASSOCIATE' and bool(OPS[expression[0]]) \
+            and all(constant(part, seen) for part in expression[1:])
+    return seen[id(expression)]
 
 def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
     if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(a, b)]
@@ -424,7 +438,7 @@ def map_range(node, inputs, index):
     if kind == 'SMOOTHERSTEP': t = 'MULTIPLY', ('MULTIPLY', ('MULTIPLY', t, t), t), ('ADD', ('MULTIPLY', t,
         ('SUBTRACT', ('MULTIPLY', t, 6), 15)), 10)
     value = 'ADD', to_low, ('MULTIPLY', t, ('SUBTRACT', to_high, to_low))
-    if node.data_type == 'FLOAT' and any(isinstance(fold(v), tuple) for v in inputs):
+    if node.data_type == 'FLOAT' and not all(map(constant, inputs)):
         value = 'MULTIPLY', value, ('LESS_THAN', 0, absolute(('SUBTRACT', high, low)))
     return between(value, to_low, to_high) if node.clamp else value
 
