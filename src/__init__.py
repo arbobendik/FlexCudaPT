@@ -1055,7 +1055,16 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             emit(surface, [], textures, texels, alpha, uses)
             emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
-            assert len(slots) <= SLOTS, 'values a program keeps for reuse'
+            # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
+            # straight through, so a program needs only as many slots as it keeps values at once
+            store, load = [*OPS].index('STORE'), [*OPS].index('LOAD')
+            last, taken, renamed = {op[1]: k for k, op in enumerate(ops[first:], first) if op[0] == load}, set(), {}
+            for k in range(first, len(ops)):
+                code, slot = ops[k][:2]
+                if code == store: renamed[slot] = min(set(range(len(taken) + 1)) - taken); taken.add(renamed[slot])
+                if code in (store, load): ops[k] = (code, renamed[slot], 0, 0)
+                if code == load and last[slot] == k: taken.discard(renamed[slot])
+            assert max(renamed.values(), default=-1) < SLOTS, 'values a program keeps for reuse'
             # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
             scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(numpy.resize(surface[k], 3)[0])
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
