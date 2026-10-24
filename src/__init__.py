@@ -308,6 +308,12 @@ def folded(expression, memo):
             if isinstance(value, tuple): continue
             if numpy.all(numpy.asarray(value) == (1 if name in ('MULTIPLY', 'DIVIDE') else 0)) \
                 and (name in ('ADD', 'MULTIPLY') or i == 1): return operands[1 - i]
+    # A rotation by no angle, as a mapping's at its defaults; a product with zero, and zero divided, zero where
+    # undefined as Blender's
+    if name == 'ROTATE' and not isinstance(operands[2], tuple) and not numpy.any(operands[2]): return operands[0]
+    if name == 'MULTIPLY' and any(not isinstance(value, tuple) and not numpy.any(value) for value in operands) \
+            or name == 'DIVIDE' and not isinstance(operands[0], tuple) and not numpy.any(operands[0]):
+        return numpy.zeros(3)
     return name, *operands
 
 def unanimated(value, memo=None):  # The expression with its animated values, which its cut keeps from bakes, as
