@@ -909,3 +909,51 @@ chain.id_data.links.new(last, chain.inputs['Base Color'])
 start = time.perf_counter()
 Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), bpy.context.evaluated_depsgraph_get())
 assert time.perf_counter() - start < 1, 'shared expressions once'
+
+# Classroom's schoolDesk_wood rebuilt: one image three times under mappings and curves, mixed by the object's random
+# number, overlaid with a color attribute and bumping its diffuse shader by the mix. It keeps 37 values for reuse but
+# never more than 6 at once, so its slots are taken again as their last loads pass, and it exports and renders
+scene = new('slots')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('slots'), (0, 0, 2))
+desk = plane('desk', 0, 0)
+tree, mesh = desk.id_data, bpy.data.objects['desk'].data
+tree.nodes.remove(desk)
+mesh.color_attributes.new('Col', 'BYTE_COLOR', 'CORNER').data.foreach_set('color',
+    numpy.random.default_rng(1).uniform(0, 1, 4 * len(mesh.loops)).astype('f'))
+wood = bpy.data.images.new('wood', 8, 8)
+wood.pixels.foreach_set(numpy.random.default_rng(2).uniform(0, 1, 4 * 64).astype('f'))
+node = tree.nodes.new
+link = lambda a, b: tree.links.new(a, b)
+uv, info = node('ShaderNodeTexCoord').outputs['UV'], node('ShaderNodeObjectInfo').outputs['Random']
+curves = []
+for location, rotation, scale, points in (((0, 0, 0), (0, 0, 0), 0.9, ((0.518, 0.556), None, (0.527, 0.456), None)),
+        ((0, 1.6, 0), (0, 0, 0), 0.8, ((0.518, 0.55), None, (0.523, 0.512), None)),
+        ((0.7, 0, 0), (0.0349, 0, 0), 0.85, ((0.518, 0.556), None, (0.523, 0.512), (0.455, 0.425)))):
+    mapping, image, curve = node('ShaderNodeMapping'), node('ShaderNodeTexImage'), node('ShaderNodeRGBCurve')
+    mapping.vector_type, image.image, curve.inputs['Fac'].default_value = 'TEXTURE', wood, 0.9
+    mapping.inputs['Location'].default_value, mapping.inputs['Rotation'].default_value = location, rotation
+    mapping.inputs['Scale'].default_value = (scale, scale, 1)
+    for k, point in enumerate(points):
+        if point: curve.mapping.curves[k].points.new(*point)
+    curve.mapping.update()
+    link(uv, mapping.inputs['Vector']), link(mapping.outputs['Vector'], image.inputs['Vector'])
+    link(image.outputs['Color'], curve.inputs['Color']), curves.append(curve.outputs['Color'])
+mixes = []  # Of the mixes' color sockets: A 6, B 7, the result 2
+for operation, threshold, a, b in (('LESS_THAN', 0.33, curves[0], curves[1]), ('GREATER_THAN', 0.66, None, curves[2])):
+    math_, mix = node('ShaderNodeMath'), node('ShaderNodeMix')
+    math_.operation, math_.inputs[1].default_value, mix.data_type = operation, threshold, 'RGBA'
+    link(info, math_.inputs[0]), link(math_.outputs[0], mix.inputs['Factor'])
+    link(a or mixes[-1], mix.inputs[6]), link(b, mix.inputs[7])
+    mixes.append(mix.outputs[2])
+overlay, attribute, bump, diffuse = (node(kind) for kind in ('ShaderNodeMix', 'ShaderNodeAttribute', 'ShaderNodeBump',
+    'ShaderNodeBsdfDiffuse'))
+overlay.data_type, overlay.blend_type, overlay.inputs['Factor'].default_value = 'RGBA', 'OVERLAY', 0.5
+attribute.attribute_name, bump.inputs['Distance'].default_value = 'Col', 0.1
+link(mixes[1], overlay.inputs[6]), link(attribute.outputs['Color'], overlay.inputs[7])
+link(mixes[1], bump.inputs['Strength']), link(overlay.outputs[2], diffuse.inputs['Color'])
+link(bump.outputs['Normal'], diffuse.inputs['Normal'])
+link(diffuse.outputs['BSDF'], tree.get_output_node('CYCLES').inputs['Surface'])
+Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), bpy.context.evaluated_depsgraph_get())
+pixels = render()
+assert numpy.isfinite(pixels).all() and pixels.mean() > 0, 'values a program keeps for reuse'
