@@ -1221,16 +1221,18 @@ header = numpy.frombuffer(piped, 'I', count=10)  # Mesh triangles, after the ins
 assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=40 + 172 * header[9] + 36 * 4 * header[8])
     == 0.25), 'render uv map'
 
-# A chain of mixes, each multiplying the last into itself, shares the first one's expression 2^10 times: folding, keying
-# and summarizing each shared part once, its export takes linear time, not exponential
+# A chain of mixes, each multiplying the last into itself at a factor of a half, which keeps it in both of the mix's
+# terms, shares the first one's expression 2^20 times: folding, keying and summarizing each shared part once, and
+# emitting its steps by keys hashed once, its export takes linear time, not exponential
 scene = new('chain')
 bpy.context.window.scene = scene
 scene.camera = add(bpy.data.cameras.new('chain'), (0, 0, 2))
 chain = plane('chain', 0, 0)
 last = chain.id_data.nodes.new('ShaderNodeTexNoise').outputs['Color']
-for _ in range(10):
+for _ in range(20):
     mix = chain.id_data.nodes.new('ShaderNodeMix')  # Its color sockets: A 6, B 7, the result 2
     mix.data_type, mix.blend_type, mix.inputs[7].default_value = 'RGBA', 'MULTIPLY', (0.9, 0.8, 0.7, 1)
+    mix.inputs['Factor'].default_value = 0.5  # 1 by default, whose fold leaves the last in one term alone
     chain.id_data.links.new(last, mix.inputs[6])
     last = mix.outputs[2]
 chain.id_data.links.new(last, chain.inputs['Base Color'])
