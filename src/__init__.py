@@ -17,8 +17,12 @@ def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
     with numpy.errstate(all='ignore'):
         return numpy.where((a > 0) & (b > 0) & (b != 1), numpy.log(a) / numpy.log(b), 0)
 
-def divide(a, b):
-    return numpy.divide(a, b, out=numpy.zeros(3), where=b != 0)
+def divide(a, b):  # Zero where undefined, of 3-vectors or rows of them
+    return numpy.divide(a, b, out=numpy.zeros(numpy.broadcast_shapes(numpy.shape(a), numpy.shape(b), (3,))),
+        where=b != 0)
+
+def dot(a, b):  # Of 3-vectors as numpy's, of rows of them each, kept as a column
+    return numpy.dot(a, b) if numpy.ndim(a) < 2 and numpy.ndim(b) < 2 else (a * b).sum(-1, keepdims=True)
 
 def power(a, b):  # Of a to the power of b, zero where undefined as Blender's on the GPU
     with numpy.errstate(all='ignore'):
@@ -68,18 +72,19 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
 # emission, and a mark of its specular tint passes it on
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
-    'DOT_PRODUCT': numpy.dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
+    'DOT_PRODUCT': dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
     'DIVIDE': divide, 'SNAP': lambda a, b: numpy.floor(divide(a, b)) * b, **dict.fromkeys(('GENERATED', 'NOISE',
     'IMAGE_CUBIC', 'ALPHA_CUBIC')), 'POWER': power, 'EXPONENT': numpy.exp,
     'MINIMUM': numpy.minimum, 'LESS_THAN': lambda a, b: (a < b) * 1.0, 'FLOOR': numpy.floor,
-    'MODULO': lambda a, b: numpy.fmod(a, b, out=numpy.zeros(3), where=b != 0), 'SINE': numpy.sin, 'COSINE': numpy.cos,
+    'MODULO': lambda a, b: numpy.fmod(a, b, out=numpy.zeros(numpy.broadcast_shapes(numpy.shape(a), numpy.shape(b),
+        (3,))), where=b != 0), 'SINE': numpy.sin, 'COSINE': numpy.cos,
     'TANGENT': numpy.tan, 'ARCSINE': lambda a: numpy.arcsin(numpy.clip(a, -1, 1)),
     'ARCCOSINE': lambda a: numpy.arccos(numpy.clip(a, -1, 1)), 'ARCTANGENT': numpy.arctan, 'ARCTAN2': numpy.arctan2,
     'SINH': numpy.sinh, 'COSH': numpy.cosh, 'TANH': numpy.tanh, 'CROSS_PRODUCT': numpy.cross, 'RGB_TO_HSV': to_hsv,
     'HSV_TO_RGB': from_hsv, 'RGB_TO_HSL': to_hsl, 'HSL_TO_RGB': from_hsl,
     'ROTATE': lambda v, k, a: v * numpy.cos(a) + numpy.cross(k, v) * numpy.sin(a)
-        + k * numpy.dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
+        + k * dot(k, v) * (1 - numpy.cos(a)), 'EQUIRECTANGULAR': equirectangular, 'MIRROR_BALL': mirror_ball,
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
