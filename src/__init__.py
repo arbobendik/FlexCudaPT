@@ -225,6 +225,18 @@ def stretch(values, uvs):
     order = numpy.argsort(norms)
     return flat.any() and norms[order][numpy.searchsorted(numpy.cumsum(area[flat][order]), 0.9 * area[flat].sum())]
 
+# Whether a material's tree is trivial, as Bendik's rule has it, and so bakes nothing: its links only from flat Image
+# Textures, Normal Maps, UV Maps, Texture Coordinates' UV, Mappings that change nothing, reroutes and a shader, not a
+# group, neither mixing, adding nor coated
+def trivial(material):
+    return bool(material and material.node_tree) and all(link.is_muted or not link.is_valid or (node := link.from_node)
+        .type in ('NORMAL_MAP', 'UVMAP', 'REROUTE') or node.type == 'TEX_IMAGE' and node.projection == 'FLAT'
+        or node.type == 'TEX_COORD' and link.from_socket.name == 'UV' or node.type == 'MAPPING' and node.vector_type
+        != 'NORMAL' and all(not s.is_linked and tuple(s.default_value) == (float(s.name == 'Scale'),) * 3
+        for s in node.inputs[1:] if s.enabled) or link.from_socket.type == 'SHADER' and node.type not in (
+        'MIX_SHADER', 'ADD_SHADER', 'GROUP') and not ((coat := node.inputs.get('Coat Weight')) and (coat.is_linked
+        or coat.default_value)) for link in material.node_tree.links)
+
 # What an expression is as a unit baked over its object's UVs, its operands' first, into table by its id; for all of a
 # surface before its cut, which meets each expression once, by the scales of its point inputs along them (none: no such
 # unit): its image reads' kinds, points' keys, sizes and extensions; whether it's affine in them (None: not); its cost
@@ -1180,7 +1192,7 @@ class Flex(bpy.types.RenderEngine):
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
                         * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
                     current.update(triangles=sum(map(len, columns[0])) + numpy.nonzero(mask)[0], uv=t, made=[],
-                        scales=not moved and 0 < flat <= 1 and 0 <= t.min() and t.max() <= 1
+                        scales=not (moved or trivial(slot.material)) and 0 < flat <= 1 and 0 <= t.min() and t.max() <= 1
                         and {'GENERATED': stretch(orco[mask], t)})
                     cuts[(slot.material, ob.name)] = dict(current)
                     row = shade(slot.material, program)
