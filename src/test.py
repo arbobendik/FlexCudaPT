@@ -887,7 +887,7 @@ Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert not exporter.placed, 'plain images bake nothing'
 # A power of an image read through a mapping that scales the UV twice bakes over UV space only where it can within the
 # bake tolerance: white noise, whose kinks a bake rounds off, stays live; a smooth image bakes once, repeating with
-# the UV, its samples on the image's texels, and renders as it does live, without bake memory: at 256 samples and two
+# the UV, its samples on the image's texels, and renders as live, at a tolerance below 0: at 256 samples and two
 # pixels an image texel all but 1% of pixels within 0.0018, the live render's seed floor there, the bake at three
 # quarters of it, a bake a texel off, on a grid half a texel off or of zeros past five times it; at half its
 # resolution it would stray too far, so it isn't baked
@@ -913,12 +913,12 @@ for smooth in (False, True):
     exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
     Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
     assert [key[0] for _, key, *_ in exporter.placed] == ([None] if smooth else []), 'uv bakes within tolerance'
-baked, scene.flex_bake_memory = render(), 0
+baked, tolerance, module['BAKE_TOLERANCE'] = render(), module['BAKE_TOLERANCE'], -1  # Every bake strays
 assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked uv'
 # The image alone, scaled by an emission strength, only restates it: no unit bakes it again
 power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Emission Color'])
 power.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = 1.8
-scene.flex_bake_memory, exporter = 2048, types.SimpleNamespace(visible=(), requests=io.BytesIO())
+module['BAKE_TOLERANCE'], exporter = tolerance, types.SimpleNamespace(visible=(), requests=io.BytesIO())
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert not exporter.placed, 'an image scaled bakes nothing'
 # A trivial tree, its image read at the UV into Transmission, which the export makes math of the image, bakes nothing
@@ -953,11 +953,12 @@ assert numpy.allclose(render(), by_node, atol=1e-4), 'light falloff'
 displaced = bpy.data.materials.new('displaced')
 nodes, links = displaced.node_tree.nodes, displaced.node_tree.links
 height, displacement = nodes.new('ShaderNodeTexNoise'), nodes.new('ShaderNodeDisplacement')
-height.inputs['Scale'].default_value = 4
+height.inputs['Scale'].default_value = 4  # Of the position, which no bake reads: both shade it live, the same steps
+links.new(nodes.new('ShaderNodeNewGeometry').outputs['Position'], height.inputs['Vector'])
 displacement.inputs['Midlevel'].default_value, displacement.inputs['Scale'].default_value = 0.5, 2  # Exact in float
 links.new(height.outputs['Fac'], displacement.inputs['Height'])
 links.new(displacement.outputs[0], nodes['Material Output'].inputs['Displacement'])
-displaced.displacement_method, scene.flex_bake_memory = 'BUMP', 0  # Live, the same steps of both
+displaced.displacement_method = 'BUMP'
 bpy.data.meshes['edge'].materials[0] = displaced
 by_displacement, bump = render(), nodes.new('ShaderNodeBump')
 bump.inputs['Distance'].default_value = 2
@@ -965,7 +966,6 @@ links.new(height.outputs['Fac'], bump.inputs['Height'])
 links.new(bump.outputs['Normal'], nodes['Principled BSDF'].inputs['Normal'])
 links.remove(nodes['Material Output'].inputs['Displacement'].links[0])
 assert numpy.allclose(render(), by_displacement, atol=1e-4), 'displacement by bump'
-scene.flex_bake_memory = 2048
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
