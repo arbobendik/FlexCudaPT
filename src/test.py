@@ -878,6 +878,48 @@ bpy.data.meshes['edge'].materials[0], exporter = plain, types.SimpleNamespace(vi
 uvs.foreach_set('uv', uv)
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert not exporter.placed, 'plain images bake nothing'
+# A power of an image read through a mapping that scales the UV twice bakes over UV space only where it can within the
+# bake tolerance: white noise, whose kinks a bake rounds off, stays live; a smooth image bakes once, repeating with
+# the UV, its samples on the image's texels, and renders as it does live, without bake memory: at 256 samples and two
+# pixels an image texel all but 1% of pixels within 0.0018, the live render's seed floor there, the bake at three
+# quarters of it, a bake a texel off, on a grid half a texel off or of zeros past five times it; at half its
+# resolution it would stray too far, so it isn't baked
+detail, material = bpy.data.images.new('detail', 1024, 1024), bpy.data.materials.new('power')
+power, texels = material.node_tree, numpy.random.default_rng(1).random((1024, 1024, 4), 'f')
+texels[..., 3] = 1
+mapping, image, exponent = (power.nodes.new(kind) for kind in ('ShaderNodeMapping', 'ShaderNodeTexImage',
+    'ShaderNodeMath'))
+mapping.inputs['Scale'].default_value[:2], image.image, image.interpolation = (2, 2), detail, 'Linear'
+exponent.operation, exponent.inputs[1].default_value = 'POWER', 2.2
+for output, target in ((power.nodes.new('ShaderNodeTexCoord').outputs['UV'], mapping.inputs['Vector']),
+        (mapping.outputs['Vector'], image.inputs['Vector']), (image.outputs['Color'], exponent.inputs[0]),
+        (exponent.outputs[0], power.nodes['Principled BSDF'].inputs['Emission Color'])):
+    power.links.new(output, target)
+power.nodes['Principled BSDF'].inputs['Base Color'].default_value = (0, 0, 0, 1)
+power.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = 1
+bpy.data.meshes['edge'].materials[0] = material
+for smooth in (False, True):
+    if smooth:  # Detail over 16 texels, spread over the whole range
+        for axis in (0, 1): texels[..., :3] = sum(numpy.roll(texels[..., :3], k, axis) for k in range(16)) / 16
+        texels[..., :3] = (texels[..., :3] - texels[..., :3].min()) / numpy.ptp(texels[..., :3])
+    detail.pixels.foreach_set(texels.ravel())
+    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+    Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+    assert [key[0] for _, key, *_ in exporter.placed] == ([None] if smooth else []), 'uv bakes within tolerance'
+baked, scene.flex_bake_memory = render(), 0
+assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked uv'
+# The image alone, scaled by an emission strength, only restates it: no unit bakes it again
+power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Emission Color'])
+power.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = 1.8
+scene.flex_bake_memory, exporter = 2048, types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert not exporter.placed, 'an image scaled bakes nothing'
+# A trivial tree, its image read at the UV into Transmission, which the export makes math of the image, bakes nothing
+power.links.new(power.nodes['Texture Coordinate'].outputs['UV'], image.inputs['Vector'])
+power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Transmission Weight'])
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert not exporter.placed, 'trivial trees bake nothing'
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
