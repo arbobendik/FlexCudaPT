@@ -105,7 +105,7 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
     'BSDF_GLOSSY': ('Color', 1, 'Roughness', 0, 0, 0, 1.5), 'BSDF_GLASS': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'),
     'BSDF_REFRACTION': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'), 'BSDF_TRANSPARENT': ('Color', 0, 0, 0, 0, 1, 1),
     'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1),
-    'BSDF_TRANSLUCENT': (0, 0, 1, 0, 0, 0, 1)}
+    'BSDF_TRANSLUCENT': (0, 0, 1, 0, 0, 0, 1), 'SUBSURFACE_SCATTERING': ('Color', 0, 'Roughness', 0, 0, 0, 'IOR')}
 # Absorption color, density and scattering color per volume shader node; any other absorbs and scatters nothing
 VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density', 0), 'VOLUME_SCATTER': (1, 'Density', 'Color'),
     'PRINCIPLED_VOLUME': ('Absorption Color', 'Density', 'Color')}
@@ -973,6 +973,20 @@ def resolve(socket, groups=()):
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
+        # Subsurface scattering as the medium its share transmitted enters: of mean free path the radius by the scale
+        # per channel, the color's albedo by Chiang et al.'s inversion, whose slab reflects that color; on closed meshes
+        # alone, as an open one, a leaf, would fill the space behind it, and keeps its diffuse
+        subsurface = 1 if node.type == 'SUBSURFACE_SCATTERING' else get('Subsurface Weight')
+        if nonzero(subsurface) and sealed():
+            sss = node.type == 'SUBSURFACE_SCATTERING'
+            path = 'MAXIMUM', 1e-4, ('MULTIPLY', get('Radius' if sss else 'Subsurface Radius'),
+                get('Scale' if sss else 'Subsurface Scale'))
+            root = 'POWER', ('ADD', 9.59217, ('MULTIPLY', albedo, ('ADD', 41.6808, ('MULTIPLY', 17.7126, albedo)))), 0.5
+            single = 'SUBTRACT', 1, ('POWER', ('SUBTRACT', ('ADD', 4.09712, ('MULTIPLY', 4.20863, albedo)), root), 2)
+            # FlexKernels tints what refracts by the albedo, which the medium's color carries here alone
+            transparency, albedo = mix(transparency, 1, subsurface), mix(albedo, 1, subsurface)
+            absorption = 'SUBTRACT', 1, ('DIVIDE', ('SUBTRACT', 1, single), path)
+            density, scatter = 1, ('DIVIDE', single, path)
         # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'; a
         # tint or level off Blender's defaults marks the tint, the shader compiling both out for scenes marking none
         tint, factor = get('Specular Tint', 1), get('Specular IOR Level', 0.5)
@@ -995,12 +1009,24 @@ def resolve(socket, groups=()):
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
     return value
 
+def closed(ob, mesh):  # Whether the object is a closed mesh, each edge shared by two faces
+    if ob.type != 'MESH': return False
+    edges = numpy.empty(len(mesh.loops), 'i')
+    mesh.loops.foreach_get('edge_index', edges)
+    return bool(numpy.all(numpy.bincount(edges, minlength=len(mesh.edges)) == 2))
+# Of the object whose material shade() resolves: whether it is closed, and whether its subsurface scattering asked
+SEALING = {'closed': True, 'asked': False}
+def sealed():
+    SEALING['asked'] = True
+    return SEALING['closed']
+
 # The material's surface as rows, one per layer from the top: the row of its surface, filled by its volume, under that
 # of a coat emitting in its place; black without an output; passing rays straight through without a surface shader
 def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
-    surface, volume = resolve(output.inputs['Surface']), resolve(output.inputs['Volume'])[10:13]
+    surface = resolve(output.inputs['Surface'])  # Its volume, or the medium its subsurface scattering fills
+    volume = resolve(output.inputs['Volume'])[10:13] if output.inputs['Volume'].is_linked else surface[10:13]
     if output.inputs['Displacement'].is_linked and material.displacement_method in ('BUMP', 'BOTH'):  # Onto the
         height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # normal alone: a Bump of the
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
@@ -1225,6 +1251,13 @@ class Flex(bpy.types.RenderEngine):
             hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
+        subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
+        variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
+        def shaded_row(material):  # Its row, apart for the open objects of a material with subsurface scattering
+            SEALING['asked'] = False
+            row = shade(material, program)
+            if SEALING['asked']: subsurface.add(material)
+            return row
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
         cuts = {}  # What each material of each object was cut over
         for i, instance in enumerate(depsgraph.object_instances):
@@ -1234,15 +1267,17 @@ class Flex(bpy.types.RenderEngine):
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
+                SEALING['closed'] = closed(ob, ob.data)
                 for slot in ob.material_slots:
-                    if slot.material in rows or (slot.material, ob.name) in rows: continue
+                    if variant(slot.material) in rows or (slot.material, ob.name) in rows: continue
                     current.update(self.cuts.get((slot.material, ob.name), {'scales': None}), made=[])
-                    row = shade(slot.material, program)
-                    rows[(slot.material, ob.name) if current['made'] else slot.material] = row
+                    row = shaded_row(slot.material)
+                    rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
                 current.clear()
                 continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
+                sealing = closed(ob, mesh)  # Read while the evaluated mesh lives
                 # Generated coordinates of the undeformed mesh, through the orco layer Cycles reads, which the mesh
                 # loses when triangulated; of a mesh its modifiers only deform, the same vertices in the same order,
                 # its original's, which a depsgraph evaluated for no render, as the viewport's first, holds no such layer
@@ -1299,8 +1334,9 @@ class Flex(bpy.types.RenderEngine):
                 orco = orco[vertex[loops]].reshape(-1, 3, 3)
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
                 color = color[loops].reshape(-1, 3, 4)
+                SEALING['closed'] = sealing
                 for slot in ob.material_slots:  # Of a material with units baked over this object's UVs, its own row
-                    if slot.material in rows or (slot.material, ob.name) in rows: continue
+                    if variant(slot.material) in rows or (slot.material, ob.name) in rows: continue
                     mask = numpy.isin(index, [k for k, other in enumerate(ob.material_slots)
                         if other.material == slot.material])
                     t = uv[mask]
@@ -1310,11 +1346,11 @@ class Flex(bpy.types.RenderEngine):
                         scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
-                    row = shade(slot.material, program)
-                    rows[(slot.material, ob.name) if current['made'] else slot.material] = row
+                    row = shaded_row(slot.material)
+                    rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
                 current.clear()
-                shades = [rows.get((slot.material, ob.name), rows.get(slot.material)) for slot in ob.material_slots] \
-                    or [rows[None]]
+                shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
+                    for slot in ob.material_slots] or [rows[None]]
             # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
             if ob.type == 'LIGHT':
                 light = ob.data

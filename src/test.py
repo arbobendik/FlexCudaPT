@@ -425,6 +425,33 @@ sheet.inputs['IOR'].default_value, sheet.inputs['Roughness'].default_value = 1.5
 links.new(sheet.outputs[0], nodes['Material Output'].inputs['Surface'])
 bpy.data.meshes['sheet'].normals_split_custom_set([(0.6, 0, 0.8)] * 4)
 assert mis_render(1, False).mean() <= 1, 'glass furnace'
+# White subsurface scattering of mean free path 0.1 fills a closed slab 0.05 thick, lit from behind by the lamp, which
+# glows through it, while the open sheet of the same material keeps its diffuse; a closed sphere of it in the emitting
+# box returns at most what it receives, short by the walks the bounces cut
+sss = shape('sss', lambda bm: bmesh.ops.create_cube(bm, size=1), (0, 0, 0))
+bpy.data.objects['sss'].scale = (4, 4, 0.05)
+sss.inputs['Subsurface Weight'].default_value, sss.inputs['Subsurface Scale'].default_value = 1, 0.1
+sss.inputs['Base Color'].default_value, sss.inputs['Subsurface Radius'].default_value = (1, 1, 1, 1), (1, 1, 1)
+links.new(sss.outputs[0], nodes['Material Output'].inputs['Surface'])  # The sheet's too
+bpy.data.meshes['sheet'].materials[0] = bpy.data.objects['sss'].active_material
+for name, hidden in (('shell', True), ('lamp', False), ('sheet', True)): bpy.data.objects[name].hide_render = hidden
+through = mis_render(bounces, False).mean()
+print('SUBSURFACE through', through, flush=True)
+assert through > 0.05, 'subsurface through a closed slab'
+bpy.data.objects['sss'].hide_render, bpy.data.objects['sheet'].hide_render = True, False
+print('SUBSURFACE open sheet', mis_render(bounces, False).mean(), flush=True)
+assert mis_render(bounces, False).mean() < 0.01, 'open subsurface diffuse'
+bpy.data.objects['sheet'].modifiers.new('solid', 'SOLIDIFY').thickness = 0.05  # Closed by a modifier, it fills
+solid = mis_render(bounces, False).mean()
+print('SUBSURFACE solidified sheet', solid, flush=True)
+assert solid > 0.05, 'subsurface through a sheet a modifier closes'
+bpy.data.objects['sheet'].modifiers.clear()
+bpy.data.objects['sheet'].hide_render, bpy.data.objects['lamp'].hide_render = True, True
+bpy.data.objects['shell'].hide_render, bpy.data.objects['sss'].hide_render = False, False
+bpy.data.objects['sss'].scale, bpy.data.objects['sss'].location.z = (1, 1, 1), -0.6  # A cube, its top 0.1 below
+furnace = mis_render(bounces, False).mean()
+print('SUBSURFACE furnace', furnace, flush=True)
+assert furnace <= 1.005, 'subsurface furnace'
 for ob in scene.objects: ob.hide_render = ob not in shown
 scene.camera.data.angle, floor.inputs['IOR'].default_value = math.pi / 2, 1.5
 # Every continuous lobe samples lights, including sharp glossy reflection and rough transmission below the face.
@@ -1190,6 +1217,10 @@ bpy.context.preferences.edit.keyframe_new_interpolation_type = 'CONSTANT'
 tinted = [plane(name, x, y, 0.8) for name, x, y in (('moving', -0.5, 0.5), ('tinted', 0.5, 0.5),
     ('bending', -0.5, -0.5), ('leaving', 0.5, -0.5), ('arriving', 0.5, -0.5))][1]
 lamp = add(bpy.data.lights.new('lamp', 'POINT'), (0, 0, 1))
+sealed = plane('sealed', 0, 0, 0.4)  # Subsurface on a sheet a modifier closes, filled as a fresh export fills it
+bpy.data.objects['sealed'].location.z = 0.2
+bpy.data.objects['sealed'].modifiers.new('solid', 'SOLIDIFY').thickness = 0.1
+sealed.inputs['Subsurface Weight'].default_value, sealed.inputs['Subsurface Scale'].default_value = 1, 0.1
 bent = bpy.data.objects['bending']
 bent.shape_key_add(name='basis'), bent.shape_key_add(name='bent')
 for point in bent.data.shape_keys.key_blocks['bent'].data: point.co.z = 0.3 * point.co.x
@@ -1210,7 +1241,8 @@ def saving(scene, *_): during.append(scene.render.use_persistent_data), bpy.data
     bpy.app.tempdir + 'during.blend', {scene})
 for animate, expected in ((lambda: keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
         flex.UPDATE), (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
-        (0.1, 0.6, 0.2, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'], 'value', 0, 1),
+        (0.1, 0.6, 0.2, 1)), flex.STEPS), (lambda: keys(sealed.inputs['Base Color'], 'default_value',
+        (0.8, 0.8, 0.8, 1), (0.3, 0.6, 0.9, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'], 'value', 0, 1),
         keys(lamp.data, 'energy', 20, 40), keys(lamp.data, 'color', (1, 1, 1), (1, 0.5, 0.2)),
         keys(bpy.data.objects['leaving'], 'hide_render', False, True),
         keys(bpy.data.objects['arriving'], 'hide_render', True, False)), flex.SCENE)):
