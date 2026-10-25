@@ -206,12 +206,16 @@ def jacobian(expression, input):
     return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
 
 # Largest change of a point input per unit of its triangles' UVs, its corners' values as values and theirs as uvs: of
-# its derivative along the UVs, by its Frobenius norm, the 90th percentile over the triangles that have area in UV
+# its derivative along the UVs, by its Frobenius norm, the 90th percentile over the triangles that have area in UV,
+# weighted by that area as their texels are: a sliver's derivative is only as exact as its UVs' last bits, which
+# Blender's threads leave to chance, so slivers must not decide it
 def stretch(values, uvs):
     edges = lambda a: numpy.stack((a[:, 1] - a[:, 0], a[:, 2] - a[:, 0]), 2)
-    flat = numpy.abs(numpy.linalg.det(edges(uvs))) > 1e-12
-    return flat.any() and numpy.percentile(numpy.linalg.norm(edges(values)[flat] @ numpy.linalg.inv(
-        edges(uvs)[flat]), axis=(1, 2)), 90)
+    area = numpy.abs(numpy.linalg.det(edges(uvs)))
+    flat = area > 1e-12
+    norms = numpy.linalg.norm(edges(values)[flat] @ numpy.linalg.inv(edges(uvs)[flat]), axis=(1, 2))
+    order = numpy.argsort(norms)
+    return flat.any() and norms[order][numpy.searchsorted(numpy.cumsum(area[flat][order]), 0.9 * area[flat].sum())]
 
 # What an expression is as a unit baked over its object's UVs, its operands' first, into table by its id; for all of a
 # surface before its cut, which meets each expression once, by the scales of its point inputs along them (none: no such
