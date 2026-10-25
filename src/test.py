@@ -927,6 +927,45 @@ power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['T
 exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert not exporter.placed, 'trivial trees bake nothing'
+# Light Falloff's linear output, smoothed, emits as its strength by the ray's length, by the length squared over itself
+# plus the smoothing, built of Light Path's ray length and math; a material's displacement by bump alone bends its
+# normal as a Bump node of the height at the displacement's scale does, its midlevel no slope
+falloff = bpy.data.materials.new('falloff')
+nodes, links = falloff.node_tree.nodes, falloff.node_tree.links
+bsdf, light = nodes['Principled BSDF'], nodes.new('ShaderNodeLightFalloff')
+bsdf.inputs['Base Color'].default_value, bsdf.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+light.inputs['Strength'].default_value, light.inputs['Smooth'].default_value = 3, 0.5
+links.new(light.outputs['Linear'], bsdf.inputs['Emission Strength'])
+bpy.data.meshes['edge'].materials[0] = falloff
+by_node = render()
+def operated(operation, a, b):  # A math node's output of two operands, each a socket or a value
+    step = nodes.new('ShaderNodeMath')
+    step.operation = operation
+    for socket, operand in zip(step.inputs, (a, b)):
+        if isinstance(operand, bpy.types.NodeSocket): links.new(operand, socket)
+        else: socket.default_value = operand
+    return step.outputs[0]
+length = nodes.new('ShaderNodeLightPath').outputs['Ray Length']
+squared = operated('MULTIPLY', length, length)
+ratio = operated('DIVIDE', squared, operated('ADD', squared, 0.5))
+links.new(operated('MULTIPLY', operated('MULTIPLY', length, 3), ratio), bsdf.inputs['Emission Strength'])
+assert numpy.allclose(render(), by_node, atol=1e-4), 'light falloff'
+displaced = bpy.data.materials.new('displaced')
+nodes, links = displaced.node_tree.nodes, displaced.node_tree.links
+height, displacement = nodes.new('ShaderNodeTexNoise'), nodes.new('ShaderNodeDisplacement')
+height.inputs['Scale'].default_value = 4
+displacement.inputs['Midlevel'].default_value, displacement.inputs['Scale'].default_value = 0.5, 2  # Exact in float
+links.new(height.outputs['Fac'], displacement.inputs['Height'])
+links.new(displacement.outputs[0], nodes['Material Output'].inputs['Displacement'])
+displaced.displacement_method, scene.flex_bake_memory = 'BUMP', 0  # Live, the same steps of both
+bpy.data.meshes['edge'].materials[0] = displaced
+by_displacement, bump = render(), nodes.new('ShaderNodeBump')
+bump.inputs['Distance'].default_value = 2
+links.new(height.outputs['Fac'], bump.inputs['Height'])
+links.new(bump.outputs['Normal'], nodes['Principled BSDF'].inputs['Normal'])
+links.remove(nodes['Material Output'].inputs['Displacement'].links[0])
+assert numpy.allclose(render(), by_displacement, atol=1e-4), 'displacement by bump'
+scene.flex_bake_memory = 2048
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
