@@ -952,12 +952,12 @@ Medium volume(Surface surface) {
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
 // the start lifted along shading on its side of the face, through the medium on that side, of sides behind and in front
-// of face, and those its shadow ray enters; sided, only where the lifted start sees it on that side too, as no
-// direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
+// of face, and those its shadow ray enters; without a normal, only where the lifted start sees it on that side too,
+// as no direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
 [noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 shading, float offset,
-    float3 face, Medium sides[2], uint state, out float3 direction, out float density, Ray ray, bool sided = false) {
+    float3 face, Medium sides[2], uint state, out float3 direction, out float density, Ray ray) {
     direction = float3(0, 0, 0);
     density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
@@ -986,7 +986,7 @@ Medium volume(Surface surface) {
     float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = float3(1, 1, 1);
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
-    if (sided && !(dot(face, shadow) * dot(face, toLight) > 0))
+    if (dot(normal, normal) == 0 && !(dot(face, shadow) * dot(face, toLight) > 0))
         return float3(0, 0, 0);
     const float left = length(shadow) * (1 - 1e-4f);
     float before = 0, at = 0, occluder;
@@ -1176,7 +1176,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 float3 light_dir = float3(0.0f, 0.0f, 0.0f);
                 float light = 0.0f;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, sided) : float3(0.0f, 0.0f, 0.0f);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -1193,7 +1193,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, sided);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift(throughput * lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i,
                     eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance, 1.0f) : fail;
@@ -1214,7 +1214,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, sided);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
                     stream(r.seed, b), light, b < scene.settings.bounces) * radiance : fail.f;

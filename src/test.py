@@ -418,6 +418,13 @@ for shader in (translucent, both):
         assert numpy.isclose(mis_render(1, False).mean(), 1, rtol=0.01), 'translucent furnace'
         assert numpy.isclose(mis_render(1, True).mean(), 1, rtol=0.01), 'translucent furnace, reused'
 scene.camera.location.z, scene.camera.rotation_euler.x = 1, 0
+# One-layer white rough glass there returns at most what it receives: light sampling, without a light normal on a
+# transmitting surface, counts a light point only on the side the lifted start sees it, as BSDF sampling reaches it
+sheet.inputs['Base Color'].default_value, sheet.inputs['Transmission Weight'].default_value = (1, 1, 1, 1), 1
+sheet.inputs['IOR'].default_value, sheet.inputs['Roughness'].default_value = 1.5, 0.3
+links.new(sheet.outputs[0], nodes['Material Output'].inputs['Surface'])
+bpy.data.meshes['sheet'].normals_split_custom_set([(0.6, 0, 0.8)] * 4)
+assert mis_render(1, False).mean() <= 1, 'glass furnace'
 for ob in scene.objects: ob.hide_render = ob not in shown
 scene.camera.data.angle, floor.inputs['IOR'].default_value = math.pi / 2, 1.5
 # Every continuous lobe samples lights, including sharp glossy reflection and rough transmission below the face.
