@@ -118,12 +118,13 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
                 const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
                 CHECK(cuMemsetD32((CUdeviceptr)(scene.texels + texture.texel), 0, 2 * texture.width * texture.height));
-                for (unsigned pass = 0, tiles = loaded.ops[bake - 2].width; pass < 2; ++pass) { // before the lights
-                    records[PASSES - 2].data = scene; // pass: 16 x 16 texels per tile, inside their triangles,
-                    records[PASSES - 2].data.frame = bake | pass << 31; // then off their edges, as halves
+                for (unsigned pass = 0, tiles = loaded.ops[bake - 2].width; pass < (tiles ? 2 : 1); ++pass) {
+                    records[PASSES - 2].data = scene; // before the lights pass: 16 x 16 texels per tile, inside their
+                    records[PASSES - 2].data.frame = bake | pass << 31; // triangles, then off their edges, as halves;
                     CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
                     const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};
-                    CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, 16 * tiles, 16, 1));
+                    CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, tiles ? 16 * tiles // or,
+                        : texture.width, tiles ? 16 : texture.height, 1)); // without tiles, every texel at once
                 }
             }
             std::vector<Material> materials = loaded.materials;

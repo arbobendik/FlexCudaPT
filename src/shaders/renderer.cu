@@ -568,14 +568,16 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(INCOMING) *top++ = incoming; break;
         CASE(BACKFACING) *top++ = make_float3(1, 1, 1) * backfacing; break;
         CASE(LIGHT_PATH) top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
-        CASE(BAKED) { // A bake's texels, halves, read linearly at the UV and extended at its edges
+        CASE(BAKED) { // A bake's texels, halves, read linearly at the UV, extended at its edges or repeating
             const int width = op->width, height = op->height & 0xFFFFFF;
             const float x = top[-1].x * width - 0.5f, y = top[-1].y * height - 0.5f;
             const int i = int(floorf(x)), j = int(floorf(y));
+            const auto edged = [&](int k, int n) { return op->height >> 29 & 1 ? (k % n + n) % n
+                : min(max(k, 0), n - 1); };
             float3 c[4];
             for (int k = 0; k < 4; ++k) {
-                const ushort4 h = ((const ushort4*)(scene.texels + op->texel))[
-                    min(max(j + k / 2, 0), height - 1) * width + min(max(i + k % 2, 0), width - 1)];
+                const ushort4 h = ((const ushort4*)(scene.texels + op->texel))[edged(j + k / 2, height) * width
+                    + edged(i + k % 2, width)];
                 c[k] = make_float3(__half2float(__ushort_as_half(h.x)), __half2float(__ushort_as_half(h.y)),
                     __half2float(__ushort_as_half(h.z)));
             }
@@ -1473,6 +1475,16 @@ extern "C" __global__ void __raygen__bake() {
     const unsigned program = scene.frame & ~(1u << 31);
     const Op &tiles = scene.ops[program - 2], &bake = scene.ops[program - 1];
     ushort4* const texels = (ushort4*)(scene.texels + bake.texel);
+    if (!tiles.width) { // Over UV space, without tiles: each texel at the UV it stands for
+        if (p.x >= bake.width || p.y >= (bake.height & 0xFFFFFF)) return;
+        Point point = {};
+        point.u = (p.x + 0.5f) / bake.width, point.v = (p.y + 0.5f) / (bake.height & 0xFFFFFF);
+        const float3 z = make_float3(0, 0, 1), c = shade(scene, program, z, SlangMatrix<float, 3, 3>{}, point, z,
+            false, {false, false, LOBE_NONE, 0, 0}, Info{}).albedo;
+        texels[p.y * bake.width + p.x] = make_ushort4(__half_as_ushort(__float2half_rn(c.x)),
+            __half_as_ushort(__float2half_rn(c.y)), __half_as_ushort(__float2half_rn(c.z)), 0x3C00);
+        return;
+    }
     const uint4 tile = ((const uint4*)scene.texels)[tiles.texel + p.x / 16];
     const unsigned x = tile.y * 16 + p.x % 16, y = tile.z * 16 + p.y;
     if (x >= bake.width || y >= bake.height) return;

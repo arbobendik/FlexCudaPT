@@ -585,13 +585,16 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(INCOMING) stack[top++] = incoming; break;
         CASE(BACKFACING) stack[top++] = float3(1, 1, 1) * float(backfacing); break;
         CASE(LIGHT_PATH) stack[top - 1] = float3(1, 1, 1) * lightPath(ray, int(stack[top - 1].x)); break;
-        CASE(BAKED) { // A bake's texels, halves two to a texel, read linearly at the UV and extended at its edges
-            const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF);
+        CASE(BAKED) { // A bake's texels, halves two to a texel, read linearly at the UV, extended at its edges or
+            const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF); // repeating
             const float x = stack[top - 1].x * width - 0.5f, y = stack[top - 1].y * height - 0.5f;
             const int i = int(floor(x)), j = int(floor(y));
+            const bool repeating = (asuint(op.value.z) >> 29 & 1) != 0;
             float3 c[4];
             for (int k = 0; k < 4; ++k) {
-                const uint t = min(max(j + k / 2, 0), height - 1) * width + min(max(i + k % 2, 0), width - 1);
+                const int a = j + k / 2, b = i + k % 2;
+                const uint t = (repeating ? (a % height + height) % height : min(max(a, 0), height - 1)) * width
+                    + (repeating ? (b % width + width) % width : min(max(b, 0), width - 1));
                 const uint4 pair = scene.texels[asuint(op.value.x) + t / 2];
                 const uint2 h = t % 2 == 0 ? pair.xy : pair.zw;
                 c[k] = float3(f16tof32(h.x), f16tof32(h.x >> 16), f16tof32(h.y));
@@ -1498,6 +1501,16 @@ void bake(uint3 p, Scene* scene) {
     const uint first = asuint(scene.ops[program - 1].value.x), width = asuint(scene.ops[program - 1].value.y);
     const uint height = asuint(scene.ops[program - 1].value.z);
     uint2* texels = (uint2*)(scene.texels + first);
+    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    if (asuint(scene.ops[program - 2].value.y) == 0) { // Over UV space, without tiles: each texel at its UV
+        if (p.x >= width || p.y >= (height & 0xFFFFFF)) return;
+        Point point = {};
+        point.u = (p.x + 0.5f) / width; point.v = (p.y + 0.5f) / (height & 0xFFFFFF);
+        const float3 c = shade(scene, program, float3(0, 0, 1), float3x3(float3(0), float3(0), float3(0)), point,
+            float3(0, 0, 1), false, Ray(false, false, LOBE_NONE, 0, 0), info).albedo;
+        texels[p.y * width + p.x] = uint2(f32tof16(c.x) | f32tof16(c.y) << 16, f32tof16(c.z) | f32tof16(1.0f) << 16);
+        return;
+    }
     const uint4 tile = scene.texels[asuint(scene.ops[program - 2].value.x) + p.x / 16];
     const uint x = tile.y * 16 + p.x % 16, y = tile.z * 16 + p.y;
     if (x >= width || y >= height) return;
@@ -1525,7 +1538,6 @@ void bake(uint3 p, Scene* scene) {
     const float2 e = uv[1] - uv[0], f = uv[2] - uv[0], c = float2((x + 0.5f) / width, (y + 0.5f) / height) - uv[0];
     const float det = e.x * f.y - e.y * f.x;
     const Point point = at(scene, tile.x, (c.x * f.y - c.y * f.x) / det, (e.x * c.y - e.y * c.x) / det);
-    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0}};
     const float3 albedo = shade(scene, program, float3(0, 0, 1), float3x3(float3(0), float3(0), float3(0)), point,
         float3(0, 0, 1), false, Ray(false, false, LOBE_NONE, 0, 0), info).albedo;
     texels[y * width + x] =

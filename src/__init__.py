@@ -199,10 +199,10 @@ class Bake:  # Texture the bake pass fills with a unit's value
 READS = ('IMAGE', 'ALPHA', 'IMAGE_LINEAR', 'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC', 'BAKED')
 # Steps affine in their operands, by which of these vary: a unit of them alone commutes with interpolating its reads
 AFFINE = {'ADD': lambda a, b: True, 'SUBTRACT': lambda a, b: True, 'MULTIPLY': lambda a, b: not (a and b),
-    'DOT_PRODUCT': lambda a, b: not (a and b), 'DIVIDE': lambda a, b: not b,
+    'DOT_PRODUCT': lambda a, b: not (a and b), 'DIVIDE': lambda a, b: not b, 'UNASSOCIATE': lambda color, alpha: True,
     'MULTIPLY_ADD': lambda a, b, c: not (a and b), 'ROTATE': lambda vector, axis, angle: not (axis or angle)}
-POINTS = ('GENERATED',)  # What a unit baked over its object's UVs reads: undeformed, no motion bakes it again
-BUDGET = 1 << 24  # Texel slots of 16 bytes, two half texels each, baked at most (256 MiB); units over UVs past it stay
+POINTS = ('GENERATED', 'UV')  # What units read: undeformed, so no motion bakes them again; the UV alone, over UV space
+READ_COSTS = {'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches of the reads a unit over UV space may take
 # Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
 # all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
 def jacobian(expression, input):
@@ -240,8 +240,8 @@ def trivial(material):
 # What an expression is as a unit baked over its object's UVs, its operands' first, into table by its id; for all of a
 # surface before its cut, which meets each expression once, by the scales of its point inputs along them (none: no such
 # unit): its image reads' kinds, points' keys, sizes and extensions; whether it's affine in them (None: not); its cost
-# (None for any other step or input, a specular mark, kept live around what of its tint bakes, or an image read:
-# baked over UVs and read back, the image's texels would be interpolated twice, rounding off their kinks); its point
+# (None for any other step or input, a specular mark, kept live around what of its tint bakes, or a nearest or
+# clipped read, which a unit over UV space can't measure); its point
 # inputs; and the texels across the UVs it needs, eight per period of its noises' finest octave of at least a 256th of
 # the first's amplitude, as gradient noise holds more than its frequency and distortion adds to it (two left Fog of
 # tokyo's 0.1% bright).
@@ -256,18 +256,99 @@ def summarize(expression, table, scales):
         if read else set().union(*(part[0] for part in sub))
     flags = [part[1] for part in sub]
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
-    points = None if name not in (*POINTS, *READS, 'NOISE') and not OPS.get(name) or read \
-        or name in ('SPECULAR', 'TRANSLUCENT') or any(part[2] is None for part in parts) \
-        else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
+    points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
+        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT') or any(
+        part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
+        part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
-    need = max([0, *(part[4] for part in parts)])
+    need = max([0, *(part[4] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
     if scales and name == 'NOISE':
         detail, roughness, lacunarity = (0, 1, 1) if isinstance(operands[1], tuple) else numpy.resize(operands[1], 3)
         octaves = detail if roughness >= 1 else min(detail, math.log(1 / 256) / math.log(max(roughness, 1e-3)))
         need = math.inf if isinstance(operands[1], tuple) else max(need, 8 * lacunarity ** octaves * along())
     table[id(expression)] = reads, affine, points, inputs, need
     return table[id(expression)]
+
+BAKE_TOLERANCE = 2 ** -9  # Most a bake over UV space strays from shading live: a fifth of its test's seed floor (0.011)
+
+def texels_of(source, cache):  # An image's or table's texels as the export holds them (read alone in an update,
+    # cache[None] None), and what filters texels taken of them as the renderer: linear, associated; once an image
+    if (key := source.image if source.type in ('TEX_IMAGE', 'TEX_ENVIRONMENT') else source) not in cache:
+        first, width, height, _ = texture(source, *(stores := cache[None] or ({}, [])))
+        held = stores[1][numpy.searchsorted(numpy.cumsum([*map(len, stores[1])]) // 4, first, 'right')]
+        scale, linear = numpy.float32(1 / 255) if height >> 26 & 1 else 1, decode if height >> 29 & 1 else numpy.asarray
+        filtered = lambda c: numpy.concatenate((linear(c[..., :3] * scale), c[..., 3:] * scale), -1)  # RGBA8 as k / 255
+        cache[key] = (held.view('u1') if height >> 26 & 1 else held)[:width * (height & 0xFFFFFF) * 4].reshape(
+            height & 0xFFFFFF, width, 4), filtered
+    return cache[key]
+
+ROWS = ('RGB_TO_HSV', 'HSV_TO_RGB', 'RGB_TO_HSL', 'HSL_TO_RGB', 'EQUIRECTANGULAR', 'MIRROR_BALL')  # Steps of one vector
+def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linear reads of the UV at rows of UVs
+    if not isinstance(expression, tuple): return numpy.broadcast_to(numpy.resize(expression, 3), (len(uv), 3))
+    if id(expression) not in memo:
+        name, *operands = expression
+        if name == 'UV': value = numpy.column_stack((uv, numpy.zeros(len(uv))))
+        elif name == 'UNASSOCIATE': value = shaded(operands[0], uv, cache, memo)  # As emit() reads it unweighed
+        elif name in READS:
+            source = operands[-1].node if isinstance(operands[-1], ImageRead) else operands[-1]
+            texels, filtered = texels_of(source, cache)
+            x, y = (shaded(operands[0], uv, cache, memo)[:, :2] * texels.shape[1::-1] - 0.5).T
+            i, j = numpy.floor(x).astype(int), numpy.floor(y).astype(int)
+            at = lambda k, n: k % n if getattr(source, 'extension', 'REPEAT') == 'REPEAT' else numpy.clip(k, 0, n - 1)
+            c = [filtered(texels[at(j + k // 2, texels.shape[0]), at(i + k % 2, texels.shape[1])]) for k in range(4)]
+            x, y = (x - i)[:, None], (y - j)[:, None]
+            value = (c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y
+            value = value[:, 3:] if name.startswith('ALPHA') else value[:, :3]
+        else:
+            parts = [shaded(part, uv, cache, memo) for part in operands]
+            value = OPS[name](*parts) if name not in ROWS else [OPS[name](*row) for row in zip(*parts)]
+        memo[id(expression)] = numpy.broadcast_to(numpy.asarray(value, 'f8'), (len(uv), 3))
+    return memo[id(expression)]
+
+def strays(expression, low, span, size, cache):  # Whether a bake of size texels over the domain, read back linearly,
+    q = numpy.random.default_rng(0).random((64, 2)) * size - 0.5  # strays past BAKE_TOLERANCE from shading live, at
+    points = [numpy.floor(q) + (k % 2, k // 2) + 0.5 for k in range(4)] + [q + 0.5]  # 64 points: around each the
+    c = shaded(expression, low + numpy.concatenate(points) / size * span, cache, {}).reshape(5, 64, 3)  # texels baked
+    x, y = (q - numpy.floor(q)).T[..., None]
+    return (abs((c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y - c[4]) > BAKE_TOLERANCE).any()
+
+def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone: the low corner, span and texels of
+    # the domain its bake covers, and whether it repeats there; aligned, with an odd count of samples a texel, to the
+    # texels of the image lattice its reads share, so their filtering's kinks are samples, and as fine as keeps it
+    # within BAKE_TOLERANCE of shading live, measured at points of it (noise alone: eight samples per period); None
+    # where 4K can't, or noise and reads mix, which can't be measured here
+    reads, noise, memo = [], [], {}
+    def walk(e):
+        if isinstance(e, tuple) and id(e) not in memo:
+            memo[id(e)] = (reads if e[0] in READS and isinstance(e[-1], ImageRead) else noise if e[0] == 'NOISE'
+                else []).append(e) or [*map(walk, e[1:])]
+    if walk(expression) or reads and noise: return None
+    low, span, base, repeat = uvs.min(0), numpy.ptp(uvs, 0).clip(1e-6), numpy.full(2, max(64, need)), False
+    p = (point := reads and reads[0][1]) and shaded(point, numpy.array(((0, 0), (1, 0), (0, 1))), cache, {})  # At 3 UVs
+    o, s = point and p[0, :2], point and numpy.array((p[1, 0], p[2, 1])) - p[0, :2]
+    if point and s.all() and len({(tuple(r[-1].node.image.size), expression_key(r[1])) for r in reads}) == 1:
+        base = abs(s) * reads[0][-1].node.image.size  # Texels a UV; repeating with the UV where shading shows it
+        q = numpy.random.default_rng(1).random((8, 2))
+        repeat = (base == numpy.round(base)).all() and all(numpy.allclose(shaded(expression, q, cache, {}), shaded(
+            expression, q + d, cache, {})) for d in numpy.eye(2))
+        low = -o / s + numpy.floor((low + o / s) * base) / base  # The corner of a texel at or below its UVs
+        span = numpy.ones(2) if repeat else numpy.ceil((uvs.max(0) - low) * base).clip(1) / base
+    key = 'odd', expression_key(expression, keys)  # Its samples a texel, as measured for another object of it
+    for k in [cache[key]] if key in cache else range(1, 9, 2):
+        size = numpy.ceil(span * base * (k or 0) - 1e-6).astype(int)
+        if not k or (size > 4096).any(): return None
+        if noise or key in cache or not strays(expression, low, span, size, cache):
+            return cache.setdefault(key, k) and (numpy.r_[cache.setdefault((key, 'low'), low) if repeat else low, 0],
+                numpy.r_[span, 1], size, repeat)  # Repeating, at the first object's corner, as it was baked there
+    cache[key] = None
+
+def moved_to(expression, point, memo):  # The expression with its UV at the point, each shared part once
+    if not isinstance(expression, tuple): return expression
+    if expression[0] == 'UV': return point
+    if id(expression) not in memo: memo[id(expression)] = expression[0], *(moved_to(part, point, memo)
+        for part in expression[1:])
+    return memo[id(expression)]
 
 def alpha_reads(expression, seen=None):  # Image samples whose alpha contributes to the resolved surface, each part
     seen = set() if seen is None else seen  # shared entered once
@@ -1034,6 +1115,7 @@ class Flex(bpy.types.RenderEngine):
         # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
         # unit's place, and the bakes to run again. A unit's texture's steps, and the end before its program with its
         # first texel and size, count from the baked texels, as halves two to a texel, flagged in their height's bit 28.
+        images, keys = {None: None if shaded else (textures, texels)}, {}  # Images units over UVs read; cut parts' keys
         current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the scales
         # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
@@ -1041,32 +1123,44 @@ class Flex(bpy.types.RenderEngine):
             memo = {} if memo is None else memo
             if id(expression) not in memo: memo[id(expression)] = baking(expression, memo)
             return memo[id(expression)]
-        def baking(expression, memo):  # A unit of math, ramps and noise on the point inputs, costing two reads, baked
-            # over its object's UVs at the resolution its frequencies need up to 4K, read at the UV;
-            cost, inputs, size = summaries[id(expression)][2:5] if isinstance(expression, tuple) \
-                else (None, set(), 0)
-            size = current.get('scales') and cost is not None and inputs and cost >= 10 and size
-            if not isinstance(expression, tuple) or not size or size > 4096 or baked[0] + size * size / 2 > BUDGET:
+        def baking(expression, memo):  # A unit of math, ramps, noise and linear reads on the point inputs, costing two
+            # reads, baked up to 4K and read at the UV: of generated points without reads over its object's UVs, as
+            # fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for every object
+            # where it repeats with the UV. Never affine in one image's read: it would only bake that texture again
+            reads, affine, cost, inputs, need = summaries[id(expression)] if isinstance(expression, tuple) \
+                else (set(), False, None, set(), 0)
+            uvs = current.get('uv', numpy.empty((0, 3, 2))).reshape(-1, 2)
+            unit = isinstance(expression, tuple) and expression[0] not in (*READS, 'UNASSOCIATE') \
+                and not (affine and len(reads) == 1) and (cost or 0) >= 10 and current.get('scales')
+            domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, keys)
+            size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
+                if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
+            if size is None or (size > 4096).any() or baked[0] + size.prod() / 2 > scene.flex_bake_memory << 16:
                 if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
                         summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by
                 return (expression[0], *(bake(part, memo) for part in expression[1:])) \
                     if expression[0] != 'UNASSOCIATE' else (expression[0], bake(expression[1], memo), expression[2])
-            if (key := (int(current['triangles'][0]), expression_key(expression))) in units:  # As the emission's
-                return 'BAKED', ('UV',), units[key]  # program of a material reads it again
-            size, t = int(-(-max(64, size) // 16) * 16), current['uv'] * int(-(-max(64, size) // 16) * 16)
-            low, high = (numpy.clip((f(1) + d) // 16, 0, size // 16 - 1).astype(int) for f, d in ((t.min, -1),
+            point = ('DIVIDE', ('SUBTRACT', ('UV',), domain[0]), domain[1]) if domain else ('UV',)
+            if (key := (None if domain and domain[3] else tuple(numpy.r_[domain[0], domain[1]]) if domain else int(
+                    current['triangles'][0]), expression_key(expression, keys))) in units:  # Baked over the same UVs,
+                current['made'] += [units[key]] * (key[0] is not None)  # its row the object's own unless repeating
+                return 'BAKED', point, units[key]
+            t = current['uv'][:0 if domain else None] * size[0]  # Over UV space none: the bake pass takes every texel
+            low, high = (numpy.clip((f(1) + d) // 16, 0, size[0] // 16 - 1).astype(int) for f, d in ((t.min, -1),
                 (t.max, 1)))  # The 16 x 16 tiles of texels each triangle's UVs reach, a texel off its edges included
             n = (high - low + 1).prod(1)
             k, j = numpy.arange(n.sum()) - numpy.repeat(n.cumsum() - n, n), numpy.repeat(numpy.arange(len(n)), n)
             width = high[j, 0] - low[j, 0] + 1
             tiles = numpy.stack((current['triangles'][j], low[j, 0] + k % width, low[j, 1] + k // width, 0 * j), 1)
+            if domain:  # Over UV space the texels' own UVs, the bake pass baking texel by texel
+                expression = moved_to(expression, ('ADD', ('MULTIPLY', ('UV',), domain[1]), domain[0]), {})
             # In an update of values the last export's unit, its steps and value again unless its expression changed
             tile, last, units[key], steps, value = places[len(bakes)] if len(bakes) < len(places) else (
                 sum(map(len, texels)) // 4, None, Bake(), None, None)
             ops.append((0, tile, len(tiles), 0))
             texels.append(tiles.astype('u4').view('f').ravel())
-            ops.append((0, baked[0], size, size | 1 << 28))
+            ops.append((0, baked[0], size[0], size[1] | 1 << 28))
             if last == key:
                 hints[len(ops)] = steps[0]
                 bakes.append(len(ops))
@@ -1077,15 +1171,16 @@ class Flex(bpy.types.RenderEngine):
                 if last: again.append(bakes[-1])
             placed.append((tile, key, units[key], (hints[bakes[-1]], ops[bakes[-1]:]), value))
             current['made'].append(bakes[-1])
-            textures[units[key]] = (baked[0], size, size | 1 << 28, numpy.array((*value, 1)))
-            baked[0] += -(-size * size // 2)
-            return 'BAKED', ('UV',), units[key]
+            textures[units[key]] = (baked[0], size[0], size[1] | 1 << 28 | bool(domain and domain[3]) << 29,
+                numpy.array((*value, 1)))
+            baked[0] += -(-size.prod() // 2)
+            return 'BAKED', point, units[key]
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
             surface, alpha, uses, slots = fold(surface), set(alpha_reads(reads or surface)), {}, {}
             if cut:  # Its expressions as units, all, then its units cut
-                summaries.clear()
+                for table in (summaries, keys): table.clear()
                 for attribute in surface: summarize(attribute, summaries, current.get('scales'))
                 surface = [bake(attribute) for attribute in surface]
             if not emitted: return surface
@@ -1192,8 +1287,8 @@ class Flex(bpy.types.RenderEngine):
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
                         * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
                     current.update(triangles=sum(map(len, columns[0])) + numpy.nonzero(mask)[0], uv=t, made=[],
-                        scales=not (moved or trivial(slot.material)) and 0 < flat <= 1 and 0 <= t.min() and t.max() <= 1
-                        and {'GENERATED': stretch(orco[mask], t)})
+                        scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
+                        and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
                     row = shade(slot.material, program)
                     rows[(slot.material, ob.name) if current['made'] else slot.material] = row
@@ -1408,6 +1503,7 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     def draw(self, context):
         self.layout.use_property_split = True
         for name in ('flex_samples', 'flex_bounces', 'flex_paths'): self.layout.prop(context.scene, name)
+        self.layout.prop(context.scene, 'flex_bake_memory')
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, 'flex_denoise')
@@ -1450,6 +1546,9 @@ PROPERTIES = {
         description='Bounces of a path after the surface the camera sees', default=16, min=0, max=16),
     'flex_paths': bpy.props.IntProperty(name='Paths per Sample',
         description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32),
+    'flex_bake_memory': bpy.props.IntProperty(name='Bake Memory', description='Memory in MiB textures baked from '
+        'materials\' node expressions may take; past it, the expressions stay computed while shading', default=2048,
+        min=0, max=1 << 15),
     'flex_denoise': bpy.props.BoolProperty(name='Denoise',
         description='Denoise the result with the OptiX denoiser'),
     'flex_restir': bpy.props.BoolProperty(name='ReSTIR',
