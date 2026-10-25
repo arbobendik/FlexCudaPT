@@ -1394,7 +1394,7 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, 'flex_denoise')
-        for name in ('resolution_x', 'resolution_y', 'resolution_percentage', 'use_persistent_data'):
+        for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
             self.layout.prop(context.scene.render, name)
 
 class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
@@ -1452,6 +1452,25 @@ PROPERTIES = {
     'flex_jump_angle': bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
         'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
         max=math.pi, subtype='ANGLE')}
+# Flex keeps its scene from one frame of an animation to the next: Blender keeps an engine and its depsgraph for a job's
+# frames only with persistent data, which a Flex render sets as the job starts, for Blender's copy of the settings, and
+# gives the user's value back before the first frame, so no file ever saves it; the job done, setting the user's off
+# again frees the engine and its renderer, as Blender does when it is switched off
+users = {}  # The user's persistent data of each scene whose Flex render set it, until its first frame
+@bpy.app.handlers.persistent
+def persist(scene, *_):
+    if scene.render.engine == Flex.bl_idname:
+        users[scene.name], scene.render.use_persistent_data = scene.render.use_persistent_data, True
+@bpy.app.handlers.persistent
+def restore(scene, *_):
+    if scene.name in users: scene.render.use_persistent_data = users.pop(scene.name)
+@bpy.app.handlers.persistent
+def release(scene, *_):  # Only once the job is done: setting it off frees the depsgraph a job's frames keep
+    restore(scene)
+    if scene.render.engine == Flex.bl_idname and not scene.render.use_persistent_data:
+        scene.render.use_persistent_data = False
+HANDLERS = ((bpy.app.handlers.render_init, persist), (bpy.app.handlers.render_pre, restore),
+    (bpy.app.handlers.render_complete, release), (bpy.app.handlers.render_cancel, release))
 CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir)
 
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
@@ -1471,9 +1490,11 @@ def register():
     preferences = bpy.context.preferences.addons[__package__].preferences
     if runnable and preferences.device not in runnable: preferences.device = runnable[0]
     for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.add(Flex.bl_idname)
+    for handlers, handler in HANDLERS: handlers.append(handler)
 
 def unregister():
     bpy.app.timers.unregister(reload)
+    for handlers, handler in HANDLERS: handlers.remove(handler)
     for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.remove(Flex.bl_idname)
     for cls in reversed(CLASSES): bpy.utils.unregister_class(cls)
     for name in PROPERTIES: delattr(bpy.types.Scene, name)
