@@ -1057,7 +1057,99 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         density *= survival_probability;
         return true;
     };
+    unsigned through = NONE;  // The triangle the last surface passes straight through
+    bool scattered = false;  // Whether the vertex before was a medium's scattering event
     for (unsigned b = 0u; ; b++) {
+        // One traverse per vertex, from the vertex before along its direction: a surface's sampled one or a medium
+        // event's phase; the next vertex the medium's scattering event before the hit, or else the hit
+        if (b > 0u && !passed) {
+            const unsigned last = b - 1u;  // The vertex the ray leaves
+            // Only occluders in front of the reconnection vertex matter
+            const bool reconnecting = !scattered && replay && last == stop && rc == RC_SURFACE;
+            hit = traverse(scene, origin, direction, reconnecting ? length(reconnection - origin) * 1.001f : 1e16f,
+                distance, scattered ? NONE : through);
+            // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
+            if (reconnecting && hit.triangle == r.rc.triangle) {
+                hit.uv = r.rc.uv;
+                distance = length(reconnection - origin);
+            }
+            // The connection to the environment direction has to escape the scene
+            if (!scattered && replay && last == stop && rc == RC_ENV && hit.triangle != NONE) {
+                return fail;
+            }
+            // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at
+            // vertices lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at
+            // nor across
+            const float sigma = (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
+            if (reconnecting && sigma > 0) {
+                return fail;
+            }
+            if (!scattered) prev.rough = prev.rough && !(sigma > 0);
+            float along;
+            scattered = hit.triangle != NONE
+                && (along = -logf(1 - pcg(stream(r.seed, last + STREAM_MEDIUM)).value) / sigma) < distance;
+            if (scattered) {
+                origin = origin + direction * along;
+                throughput = throughput * medium.scatter
+                    * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * along) / sigma;
+                const Medium around[2] = {medium, medium};
+                float3 light_dir;
+                float light;
+                const float3 f = !replay || b == stop ? throughput * sampleLight(scene, origin, make_float3(0, 0, 0),
+                    direction, 0, direction, around, stream(r.seed, b + STREAM_NEE), light_dir, light,
+                    {false, false, prev.lobe, float(b), along})
+                    * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
+                if (replay && b == stop) {
+                    return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift{f, 1.0f} : fail;
+                }
+                if (!replay) {
+                    Reservoir candidate = chain;
+                    if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
+                        candidate.radiance = safeDivide(f, chain_throughput);
+                    } else {
+                        candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
+                    }
+                    offer(&sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
+                    if (!survives(b)) {
+                        return fail;
+                    }
+                }
+                direct_light_emission = false;
+                nee_origin = nee_start = origin, nee_normal = make_float3(0, 0, 0), nee_pdf = INV_PI / 4;
+                unsigned state = stream(r.seed, b);
+                const float z = 1 - 2 * random(state), angle = 2 * PI * random(state);
+                direction = make_float3(sine(z) * cosf(angle), sine(z) * sinf(angle), z);
+                prev = Vertex{false, LOBE_DIFFUSE, INV_PI / 4, 1.0f};
+                continue;
+            }
+            if (hit.triangle == NONE) {
+                const float3 f = throughput * environment(scene, direction,
+                    Ray{false, false, prev.lobe, float(last + 2u), 0});
+                if (replay) {
+                    if (last == stop && rc == RC_ENV) {
+                        return Shift{f / r.jac, density / r.jac};
+                    }
+                    if (rc == RC_NONE && end_type == END_ENV && last == end && !prev.rough) {
+                        return Shift{f, 1.0f};
+                    }
+                    return fail;
+                }
+                Reservoir candidate = chain;
+                if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
+                    candidate.radiance = safeDivide(f, chain_throughput);
+                } else if (prev.rough) {
+                    // Reconnection to the environment direction, guarded by the roughness threshold only (Sec. 4.2)
+                    candidate.path = (last + 1u) << PATH_K | RC_ENV << PATH_RC | prev.lobe << PATH_LOBE_PREV;
+                    candidate.jac = prev.pdf;
+                    candidate.dir = direction;
+                }
+                offer(&sel, withEnd(candidate, END_ENV, last, f), f * scale / density);
+                break;
+            }
+            // Project ray origin to hit point, through the medium
+            throughput = throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
+            origin = origin + direction * distance;
+        }
         const float3 face = faceNormal(scene, hit.triangle);
         const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance};
         Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), direction, ray,
@@ -1294,7 +1386,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         }
         prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
         // Off the side it leaves through, or right from where it passes straight through
-        const unsigned through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? hit.triangle
+        through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? hit.triangle
             : NONE;
         direction = dir;
         // Off the side it leaves through, where light sampling toward it starts as well
@@ -1313,88 +1405,6 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             distance = 0.0f;
             continue;
         }
-        // Only occluders in front of the reconnection vertex matter
-        const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
-        hit = traverse(scene, origin, direction, reconnecting ? length(reconnection - origin) * 1.001f : 1e16f,
-            distance, through);
-        // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
-        if (reconnecting && hit.triangle == r.rc.triangle) {
-            hit.uv = r.rc.uv;
-            distance = length(reconnection - origin);
-        }
-        // The connection to the environment direction has to escape the scene
-        if (replay && b == stop && rc == RC_ENV && hit.triangle != NONE) {
-            return fail;
-        }
-        // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
-        // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
-        const float sigma = (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
-        if (reconnecting && sigma > 0) {
-            return fail;
-        }
-        prev.rough = prev.rough && !(sigma > 0);
-        for (float along; hit.triangle != NONE
-            && (along = -logf(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
-            b++;
-            origin = origin + direction * along;
-            throughput = throughput * medium.scatter * exponential((make_float3(1, 1, 1) * sigma - medium.extinction)
-                * along) / sigma;
-            const Medium around[2] = {medium, medium};
-            float3 light_dir;
-            float light;
-            const float3 f = !replay || b == stop ? throughput * sampleLight(scene, origin, make_float3(0, 0, 0),
-                direction, 0, direction, around, stream(r.seed, b + STREAM_NEE), light_dir, light,
-                {false, false, prev.lobe, float(b), along})
-                * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
-            if (replay && b == stop) {
-                return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift{f, 1.0f} : fail;
-            }
-            if (!replay) {
-                Reservoir candidate = chain;
-                if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
-                    candidate.radiance = safeDivide(f, chain_throughput);
-                } else {
-                    candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
-                }
-                offer(&sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
-                if (!survives(b)) {
-                    return fail;
-                }
-            }
-            direct_light_emission = false;
-            nee_origin = nee_start = origin, nee_normal = make_float3(0, 0, 0), nee_pdf = INV_PI / 4;
-            unsigned state = stream(r.seed, b);
-            const float z = 1 - 2 * random(state), angle = 2 * PI * random(state);
-            direction = make_float3(sine(z) * cosf(angle), sine(z) * sinf(angle), z);
-            prev = Vertex{false, LOBE_DIFFUSE, INV_PI / 4, 1.0f};
-            hit = traverse(scene, origin, direction, 1e16f, distance);
-        }
-        if (hit.triangle == NONE) {
-            const float3 f = throughput * environment(scene, direction, Ray{false, false, prev.lobe, float(b + 2u), 0});
-            if (replay) {
-                if (b == stop && rc == RC_ENV) {
-                    return Shift{f / r.jac, density / r.jac};
-                }
-                if (rc == RC_NONE && end_type == END_ENV && b == end && !prev.rough) {
-                    return Shift{f, 1.0f};
-                }
-                return fail;
-            }
-            Reservoir candidate = chain;
-            if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
-                candidate.radiance = safeDivide(f, chain_throughput);
-            } else if (prev.rough) {
-                // Reconnection to the environment direction, guarded by the roughness threshold only (Sec. 4.2)
-                candidate.path = (b + 1u) << PATH_K | RC_ENV << PATH_RC | prev.lobe << PATH_LOBE_PREV;
-                candidate.jac = prev.pdf;
-                candidate.dir = direction;
-            }
-            offer(&sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
-            break;
-        }
-        // Project ray origin to hit point, through the medium
-        throughput = throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
-        origin = origin + direction * distance;
     }
     return fail;
 }
