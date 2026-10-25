@@ -191,13 +191,28 @@ def texture(source, textures, texels):
         texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
     return textures[key]
 
+class Key(tuple):  # An expression's key, of its parts' keys: equal keys made one by a table and each hashed once, as a
+    # tuple's hash and compare would walk its parts, which are shared, once per use
+    def __new__(cls, parts, table):
+        key = tuple.__new__(cls, parts)
+        key.hash = tuple.__hash__(key)
+        return table.setdefault(key, key)
+    def __hash__(self): return self.hash
+
+def interned(key, table):  # A key of another table into this one, its parts first
+    if isinstance(key, Key) and key not in table:
+        for part in key: interned(part, table)
+        table[key] = key
+
 # Recursions over resolve()'s expressions, whose parts are shared, take each part once per outermost call: memo by its
-# id, which the parts keep as they outlive the call, made by that call and passed down
-def expression_key(expression, memo=None):
+# id, which the parts keep as they outlive the call, made by that call and passed down; keys made one in table, by
+# default the memo, which holds each expression with its key, as emit's outlives the expressions it makes
+def expression_key(expression, memo=None, table=None):
     memo = {} if memo is None else memo
     if isinstance(expression, tuple):
-        if id(expression) not in memo: memo[id(expression)] = tuple(expression_key(part, memo) for part in expression)
-        return memo[id(expression)]
+        if id(expression) not in memo: memo[id(expression)] = expression, Key((expression_key(part, memo, table)
+            for part in expression), memo if table is None else table)
+        return memo[id(expression)][1]
     if isinstance(expression, ImageRead): return expression.key
     if isinstance(expression, (int, float, numpy.number, numpy.ndarray)):
         return tuple(numpy.resize(expression, 3).astype('f'))
@@ -398,23 +413,25 @@ def alpha_reads(expression, seen=None):  # Image samples whose alpha contributes
 def marks(expression, name):  # Whether the expression holds an operation of the name
     return isinstance(expression, tuple) and (expression[0] == name or any(marks(x, name) for x in expression[1:]))
 
-def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None):
+# Keys are made once in keys, a memo of expression_key passed down, which both passes of a program share.
+def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None, keys=None):
+    keys = {} if keys is None else keys
     if isinstance(expression, list): expression = 'END', *expression
     if not isinstance(expression, tuple):
         ops.append((1, *numpy.resize(expression, 3).astype('f').view('I')))
         return expression
     name, *operands = expression
-    key = shift, expression_key(expression)
+    key = shift, expression_key(expression, keys)
     if name != 'SHIFT' and key in (uses if slots is None else slots):
         if slots is None: uses[key][0] += 1
         else: ops.append(([*OPS].index('LOAD'), slots[key], 0, 0))
         return uses[key][1]
     if name == 'UNASSOCIATE':
         return emit(('DIVIDE', *operands) if operands[1][-1].key in alphas else operands[0], ops, textures, texels,
-            alphas, uses, slots, shift)
+            alphas, uses, slots, shift, keys)
     payload = texture(operands.pop(), textures, texels) if name in READS else (0, 0, 0, numpy.ones(4))
     values = [emit(operand, ops, textures, texels, alphas, uses, slots,
-        operands[0] if name == 'SHIFTED' and k else shift) for k, operand in enumerate(operands)]
+        operands[0] if name == 'SHIFTED' and k else shift, keys) for k, operand in enumerate(operands)]
     ops.append(([*OPS].index(name), *payload[:3]))
     if name == 'LIGHT_PATH': return float(values[0] >= 8)  # Of no ray, length and depth one, as light sampling shades
     value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
@@ -1198,10 +1215,12 @@ class Flex(bpy.types.RenderEngine):
         # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
         # unit's place, and the bakes to run again. A unit's texture's steps, and the end before its program with its
         # first texel and size, count from the baked texels, as halves two to a texel, flagged in their height's bit 28.
-        images, keys = {None: None if shaded else (textures, texels)}, {}  # Images units over UVs read; cut parts' keys
+        images, keys = {None: None if shaded else (textures, texels)}, {}  # Images units over UVs read; parts' keys, a
+        # memo of expression_key's for the export, holding its parts as it does, its keys made one with the last's
         current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the scales
         # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
+        for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
         def bake(expression, memo=None):  # Each part once per outermost call, as the recursions above
             memo = {} if memo is None else memo
             if id(expression) not in memo: memo[id(expression)] = baking(expression, memo)
@@ -1289,16 +1308,16 @@ class Flex(bpy.types.RenderEngine):
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
-            surface, alpha, uses, slots = fold(surface), set(alpha_reads(reads or surface)), {}, {}
+            surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
             if cut:  # Its expressions as units, all, then its units cut
-                for table in (summaries, keys): table.clear()
+                summaries.clear()
                 for attribute in surface: summarize(attribute, summaries, current.get('scales'))
                 surface = [bake(attribute) for attribute in surface]
             if not emitted: return surface
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color only marked: scenes without one run main's programs, the shader compiling it out
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
-            emit(surface, [], textures, texels, alpha, uses)
+            emit(surface, [], textures, texels, alpha, uses, keys=keyed)
             store, load = [*OPS].index('STORE'), [*OPS].index('LOAD')
             # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
             # straight through, so a program needs only as many slots as it keeps values at once; while that is more
@@ -1306,7 +1325,7 @@ class Flex(bpy.types.RenderEngine):
             while True:
                 del ops[first:]
                 slots.clear()
-                emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
+                emitted = emit(surface, ops, textures, texels, alpha, uses, slots, keys=keyed)
                 last, taken, renamed = {op[1]: k for k, op in enumerate(ops[first:], first) if op[0] == load}, set(), {}
                 stored, crowded = {}, set()
                 for k in range(first, len(ops)):
