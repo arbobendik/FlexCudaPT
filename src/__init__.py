@@ -343,10 +343,11 @@ def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone:
                 numpy.r_[span, 1], size, repeat)  # Repeating, at the first object's corner, as it was baked there
     cache[key] = None
 
-def moved_to(expression, point, memo):  # The expression with its UV at the point, each shared part once
-    if not isinstance(expression, tuple): return expression
-    if expression[0] == 'UV': return point
-    if id(expression) not in memo: memo[id(expression)] = expression[0], *(moved_to(part, point, memo)
+def moved_to(expression, point, memo, leaf='UV'):  # The expression, or a surface, with its UV (or another leaf) at the
+    if isinstance(expression, list): return [moved_to(part, point, memo, leaf) for part in expression]  # point, each
+    if not isinstance(expression, tuple): return expression  # shared part once
+    if expression[0] == leaf: return point
+    if id(expression) not in memo: memo[id(expression)] = expression[0], *(moved_to(part, point, memo, leaf)
         for part in expression[1:])
     return memo[id(expression)]
 
@@ -794,6 +795,13 @@ def bump(node, inputs, index):
     return 'BUMP', normal, height, ('SHIFTED', ('SHIFT', 1), height), ('SHIFTED', ('SHIFT', 2), height), \
         vector(strength, ('MULTIPLY', distance, -1 if node.invert else 1), 0)
 
+# Of a light falloff node: its strength by the ray's length to the power of the output's index, smoothed toward the
+# ray's start
+def light_falloff(node, inputs, index):
+    (strength, smooth), squared = inputs, ('MULTIPLY', ('LIGHT_PATH', 8), ('LIGHT_PATH', 8))
+    strength = ('MULTIPLY', strength, ('POWER', ('LIGHT_PATH', 8), index)) if index else strength
+    return ('MULTIPLY', strength, ('DIVIDE', squared, ('ADD', smooth, squared))) if nonzero(smooth) else strength
+
 def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
     eta = 'MAXIMUM', inputs[0], 1e-5
     return 'DIELECTRIC', ('DOT_PRODUCT', ('INCOMING',), facing(inputs[1])), mix(eta, ('DIVIDE', 1, eta),
@@ -912,7 +920,9 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('DOT_PRODUCT', ('CAMERA_POINT',), numpy.eye(3)[2]), length(('CAMERA_POINT',)))[index],
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
         6: ('BACKFACING',)}.get(index) or resolve(node.outputs[index]),
-    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'BUMP': bump,
+    'FRESNEL': fresnel, 'LAYER_WEIGHT': layer_weight, 'BUMP': bump, 'LIGHT_FALLOFF': light_falloff,
+    'DISPLACEMENT': lambda node, inputs, index: ('MULTIPLY', inputs[3], ('MULTIPLY', ('SUBTRACT', *inputs[:2]),
+        inputs[2])),
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
@@ -991,6 +1001,10 @@ def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
     surface, volume = resolve(output.inputs['Surface']), resolve(output.inputs['Volume'])[10:13]
+    if output.inputs['Displacement'].is_linked and material.displacement_method in ('BUMP', 'BOTH'):  # Onto the
+        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # normal alone: a Bump of the
+        surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
+            vector(1, 1, 0)), {}, 'NORMAL')  # height along it, where the surface reads the normal
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         surface = [*BLACK[:9], 0, *BLACK[10:]]
     layers = [surface[:10]] if len(surface) == 14 else [[*surface[14][:4], surface[4], *surface[14][5:]],
