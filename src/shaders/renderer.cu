@@ -515,6 +515,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
         CASE(SPECULAR) break;
+        CASE(TRANSLUCENT) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -665,7 +666,8 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(DIELECTRIC) --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
-        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12]};
+        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
+        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0)};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -1032,7 +1034,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
-            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1};
+            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
+            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0)};
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
         if (surface.density > 0) {
@@ -1059,7 +1062,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
         const bool nee = !passed && layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
-        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
+        // Translucent, light sampled anywhere around
+        const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
+        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1 || sided
             ? make_float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
@@ -1172,7 +1177,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 dir = normalize(reconnection - origin);
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
-            if (wrongSide(direction, lobe_index == LOBE_REFRACT, dir, geometry_n)) {
+            // A translucent diffuse lobe past the shading normal refracts
+            const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
+            if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
+                geometry_n)) {
                 return fail;
             }
         } else if (!arrived) {
