@@ -8,11 +8,12 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ARCTANGENT, ARCTAN2, SINH, COSH, TANH, CROSS_PRODUCT, RGB_TO_HSV, HSV_TO_RGB, RGB_TO_HSL, HSL_TO_RGB,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
-    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR };
+    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
+    TRANSLUCENT };
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
-    float level, coverage; float3 absorption; float density; float3 scatter;
+    float level, coverage; float3 absorption; float density; float3 scatter, translucent;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
@@ -691,7 +692,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             stack[top - 1] = float3(1, 1, 1) * fresnel(abs(stack[top - 1].x), 1, stack[top].x); break;
     }
     return Surface(normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
-        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12]);
+        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
+        used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0));
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1070,7 +1072,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface(surface.normal, float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
-                float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter);
+                float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter, float3(0, 0, 0));
         // Surfaces transmitting nothing face the ray
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
@@ -1078,7 +1080,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         // The BSDF's material, absorbing the volume's transmittance over unit distance, its specular level applied
         const Material material = Material(surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, exp(surface.density * (surface.absorption - 1)),
-            used(SPECULAR) ? surface.tint : float3(1, 1, 1), used(SPECULAR) ? surface.level : 1);
+            used(SPECULAR) ? surface.tint : float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
+            used(TRANSLUCENT) ? surface.translucent : float3(0, 0, 0));
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
         if (surface.density > 0) {
@@ -1101,7 +1104,9 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
         const bool nee = !passed && layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
-        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
+        // Translucent, light sampled anywhere around
+        const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
+        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1 || sided
             ? float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
@@ -1201,7 +1206,10 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 dir = normalize(reconnection - origin);
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
-            if (wrongSide(direction, lobe_index == LOBE_REFRACT, dir, geometry_n)) {
+            // A translucent diffuse lobe past the shading normal refracts
+            const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
+            if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
+                geometry_n)) {
                 return fail;
             }
         } else if (!arrived) {
