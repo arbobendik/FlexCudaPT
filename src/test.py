@@ -739,6 +739,16 @@ steps.image, steps.interpolation = bpy.data.images.new('steps', 2, 1), 'Linear'
 steps.image.pixels.foreach_set((0, 0, 0, 1, 1, 1, 1, 1))
 edge.id_data.links.new(steps.outputs['Color'], edge.inputs['Emission Color'])
 assert abs(render()[24:40, 24:40].mean() - 0.5) < 0.05, 'linear filtering'
+# A unit's bake scale holds still under the noise Blender's threads leave in the last bits of UVs: eight triangles of a
+# tenth of the UV square, their generated points stretched 1 to 8 times along them, and two slivers a millionth wide
+# stretched 9 and 10 times, whose derivatives are only as exact as their UVs; two ulps of noise move it under 1e-4
+uv = numpy.array([[(0.1 * k, 0.5), (0.1 * k + 0.1, 0.5), (0.1 * k, 0.6)] for k in range(8)]
+    + [[(x, 0.8), (x + 0.1, 0.8), (x + 0.05, 0.8 + 1e-6)] for x in (0.2, 0.5)], 'f')
+points = numpy.concatenate((uv, numpy.zeros((10, 3, 1), 'f')), 2) * numpy.arange(1, 11, dtype='f')[:, None, None]
+noise = numpy.random.default_rng(0)
+scales = [flex.stretch(points, (uv + noise.integers(-2, 3, uv.shape) * numpy.spacing(uv)).astype('f'))
+    for _ in range(20)]
+assert max(scales) - min(scales) < 1e-4 * flex.stretch(points, uv), 'scale of slivers'
 # A noise of the generated point with detail at its bake's texel scale (scale 50, 2272 texels across) bakes over the
 # plane's UVs and renders as it does live, its UVs moved off [0, 1], where nothing bakes: at 256 samples and two
 # pixels a texel all but 1% of pixels within 0.0018, three times the live render's seed floor there, the bake at half
