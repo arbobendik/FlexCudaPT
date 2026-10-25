@@ -16,7 +16,8 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     SINH, COSH, TANH, CROSS_PRODUCT, RGB_TO_HSV, HSV_TO_RGB, RGB_TO_HSL, HSL_TO_RGB,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
-    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR };
+    OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
+    TRANSLUCENT };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
@@ -29,7 +30,7 @@ struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
-    float level, coverage; float3 absorption; float density; float3 scatter;
+    float level, coverage; float3 absorption; float density; float3 scatter, translucent;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
 // will read, and the color of Blender's Translucent BSDF, which change nothing by default

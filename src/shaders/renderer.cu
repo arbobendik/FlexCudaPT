@@ -527,6 +527,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
         CASE(SPECULAR) break;
+        CASE(TRANSLUCENT) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -677,7 +678,8 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(DIELECTRIC) --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
-        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12]};
+        stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
+        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0)};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -919,11 +921,12 @@ __device__ Medium volume(const Surface& surface) {
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
 // the start lifted along shading on its side of the face, through the medium on that side, of sides behind and in front
-// of face, and those its shadow ray enters. Returns emission * the light's cosine / distance^2 / pdf
+// of face, and those its shadow ray enters; sided, only where the lifted start sees it on that side too, as no
+// direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
 __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 shading, float offset,
-    float3 face, const Medium* sides, unsigned state, float3& direction, float& density, Ray ray) {
+    float3 face, const Medium* sides, unsigned state, float3& direction, float& density, Ray ray, bool sided = false) {
     direction = make_float3(0, 0, 0), density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
@@ -951,6 +954,8 @@ __device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, 
     float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = make_float3(1, 1, 1);
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
+    if (sided && !(dot(face, shadow) * dot(face, toLight) > 0))
+        return make_float3(0, 0, 0);
     const float left = length(shadow) * (1 - 1e-4f);
     float before = 0, at = 0, occluder;
     direction = toward;
@@ -1071,7 +1076,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
-            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1};
+            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
+            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0)};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
@@ -1095,7 +1101,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const float eta_o = is_entering ? 1.0f : surface.ior;
         // Light is sampled at the top layer alone
         const bool nee = !passed && layer == 0u && samplesLights(material);
-        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1
+        // Translucent, light sampled anywhere around, on the side the lifted start sees it; compiled out without it
+        const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
+        const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1 || sided
             ? make_float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
@@ -1106,9 +1114,16 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         }
         // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF
         const auto lit = [&](float3 light_dir, float light) {
-            return b < scene.settings.bounces ? neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
-                !(dot(geometry_n, -direction) * dot(geometry_n, light_dir) > 0), light, true, stream(r.seed, b)) * light
-                : BSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o, stream(r.seed, b));
+            if (b < scene.settings.bounces)
+                return neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
+                    !(dot(geometry_n, -direction) * dot(geometry_n, light_dir) > 0), light, true, stream(r.seed, b))
+                    * light;
+            const float3 f = BSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
+                stream(r.seed, b));
+            // Translucent's share selected, not branched on, so scenes without it compile to BSDF alone
+            const float3 correction = translucentCorrection(direction, light_dir, surface.normal, geometry_n, material,
+                eta_i, eta_o, stream(r.seed, b));
+            return sided ? f + correction : f;
         };
         const bool chain_found = extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE;
         // Reconnection at this vertex for paths ending here
@@ -1132,7 +1147,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float3 light_dir;
                 float light;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : make_float3(0.0f, 0.0f, 0.0f);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, sided)
+                    : make_float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -1148,7 +1164,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, sided);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift{throughput * lit(light_dir, light) * radiance, 1.0f} : fail;
             }
@@ -1168,7 +1184,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, sided);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lit(light_dir, light) * radiance : fail.f;
                 Reservoir candidate = chain;
@@ -1199,7 +1215,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                     surface.normal * sign(dot(reconnection - origin, geometry_n)), offset));
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
-            if (wrongSide(direction, lobe_index == LOBE_REFRACT, dir, geometry_n)) {
+            // A translucent diffuse lobe past the shading normal refracts, as in FlexKernels' BSDF
+            const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
+            if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
+                geometry_n)) {
                 return fail;
             }
         } else if (!arrived) {

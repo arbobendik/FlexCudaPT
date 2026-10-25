@@ -378,6 +378,47 @@ assert numpy.isclose(mis_render(0, False).mean(), (1 + 0.3122499) / 2, rtol=0.01
 floor.inputs['Base Color'].default_value, bpy.data.objects['dim'].hide_render = color, False
 bpy.data.objects['box'].hide_render = True
 mesh.normals_split_custom_set([(0, 0, 1)] * len(mesh.loops))
+# Blender's Translucent BSDF transmits diffusely: a white sheet lit only by an emitter of radiance 1 below it reads, by
+# light sampling alone and beside BSDF hits, that emitter's view factor through its back, where reflecting it read none,
+# and mixed half with a white diffuse half of it; inside a box emitting white it reads white from either side, its
+# shading normals strongly tilted
+shown = [ob for ob in scene.objects if not ob.hide_render]
+for ob in shown: ob.hide_render = ob != scene.camera
+sheet = shape('sheet', lambda bm: bmesh.ops.create_grid(bm, size=2, calc_uvs=True), (0, 0, 0))
+nodes, links = sheet.id_data.nodes, sheet.id_data.links
+translucent, diffuse, both = (nodes.new(kind) for kind in ('ShaderNodeBsdfTranslucent', 'ShaderNodeBsdfDiffuse',
+    'ShaderNodeMixShader'))
+translucent.inputs['Color'].default_value = diffuse.inputs['Color'].default_value = (1, 1, 1, 1)
+links.new(diffuse.outputs[0], both.inputs[1]), links.new(translucent.outputs[0], both.inputs[2])
+lamp = shape('lamp', lambda bm: bmesh.ops.create_grid(bm, size=2, calc_uvs=True), (0, 0, -0.25))
+lamp.inputs['Base Color'].default_value, lamp.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+lamp.inputs['Emission Strength'].default_value, lamp.inputs['IOR'].default_value = 1, 1
+s = 2 / math.hypot(2, 0.25)
+view = 4 / math.pi * s * math.atan(s)  # Of the lamp's square from the sheet's center
+# Only a translucent color marks its program, through a mix too, so the shader compiles it out of other scenes
+assert not isinstance(flex.fold(flex.resolve(nodes['Material Output'].inputs['Surface']))[13], tuple), 'opaque unmarked'
+for shader, share in ((translucent, 1), (both, 0.5)):
+    links.new(shader.outputs[0], nodes['Material Output'].inputs['Surface'])
+    assert flex.marks(flex.fold(flex.resolve(nodes['Material Output'].inputs['Surface']))[13], 'TRANSLUCENT'), 'marked'
+    for depth in (0, 1):
+        assert numpy.isclose(mis_render(depth, False).mean(), share * view, rtol=0.02), 'translucent from behind'
+    # Reused too: ReSTIR's connections through the sheet are the diffuse lobe's, refracting
+    assert numpy.isclose(mis_render(1, True).mean(), share * view, rtol=0.02), 'translucent from behind, reused'
+bpy.data.objects['lamp'].hide_render = True
+shell = shape('shell', lambda bm: [bmesh.ops.create_cube(bm, size=6), bmesh.ops.reverse_faces(bm, faces=bm.faces[:])],
+    (0, 0, 0))  # Facing in
+shell.inputs['Base Color'].default_value, shell.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+shell.inputs['Emission Strength'].default_value, shell.inputs['IOR'].default_value = 1, 1
+bpy.data.meshes['sheet'].shade_smooth()
+bpy.data.meshes['sheet'].normals_split_custom_set([(0.95, 0, 0.3122499)] * 4)
+for shader in (translucent, both):
+    links.new(shader.outputs[0], nodes['Material Output'].inputs['Surface'])
+    for side in (1, -1):
+        scene.camera.location.z, scene.camera.rotation_euler.x = side, math.pi * (side < 0)
+        assert numpy.isclose(mis_render(1, False).mean(), 1, rtol=0.01), 'translucent furnace'
+        assert numpy.isclose(mis_render(1, True).mean(), 1, rtol=0.01), 'translucent furnace, reused'
+scene.camera.location.z, scene.camera.rotation_euler.x = 1, 0
+for ob in scene.objects: ob.hide_render = ob not in shown
 scene.camera.data.angle, floor.inputs['IOR'].default_value = math.pi / 2, 1.5
 # Every continuous lobe samples lights, including sharp glossy reflection and rough transmission below the face.
 scene.camera.data.angle = 0.3
@@ -810,6 +851,14 @@ links.new(noise.outputs['Color'], edge.inputs['Specular Tint'])
 exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert exporter.placed and not any('SPECULAR' in str(key) for _, key, *_ in exporter.placed), 'specular mark live'
+# So does a procedural translucent color, which stays live for the shader to transmit it
+through = edge.id_data.nodes.new('ShaderNodeBsdfTranslucent')
+output = edge.id_data.nodes['Material Output'].inputs['Surface']
+links.new(noise.outputs['Color'], through.inputs['Color']), links.new(through.outputs[0], output)
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert exporter.placed and not any('TRANSLUCENT' in str(key) for _, key, *_ in exporter.placed), 'translucent mark live'
+links.new(edge.outputs[0], output)
 links.remove(edge.inputs['Specular Tint'].links[0])
 # Coated, the plane's base layer bakes its noise and renders under the coat as live, within the seed floor there,
 # 0.0082 of its mean: its bake comes before both layers' rows, which follow each other
