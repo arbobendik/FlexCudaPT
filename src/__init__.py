@@ -1149,7 +1149,7 @@ class Flex(bpy.types.RenderEngine):
             domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, keys)
             size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
                 if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
-            if size is None or (size > 4096).any() or baked[0] + size.prod() / 2 > scene.flex_bake_memory << 16:
+            if size is None or (size > 4096).any():
                 if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
                         summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by
@@ -1517,7 +1517,6 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     def draw(self, context):
         self.layout.use_property_split = True
         for name in ('flex_samples', 'flex_bounces', 'flex_paths'): self.layout.prop(context.scene, name)
-        self.layout.prop(context.scene, 'flex_bake_memory')
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, 'flex_denoise')
@@ -1560,9 +1559,6 @@ PROPERTIES = {
         description='Bounces of a path after the surface the camera sees', default=16, min=0, max=16),
     'flex_paths': bpy.props.IntProperty(name='Paths per Sample',
         description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32),
-    'flex_bake_memory': bpy.props.IntProperty(name='Bake Memory', description='Memory in MiB textures baked from '
-        'materials\' node expressions may take; past it, the expressions stay computed while shading', default=2048,
-        min=0, max=1 << 15),
     'flex_denoise': bpy.props.BoolProperty(name='Denoise',
         description='Denoise the result with the OptiX denoiser'),
     'flex_restir': bpy.props.BoolProperty(name='ReSTIR',
