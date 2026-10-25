@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gpu, io, math, numpy, os, sys, time, types
+import bpy, bmesh, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref
 from mathutils import Matrix
 
 SIZE = 64
@@ -1061,3 +1061,74 @@ link(diffuse.outputs['BSDF'], tree.get_output_node('CYCLES').inputs['Surface'])
 Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), bpy.context.evaluated_depsgraph_get())
 pixels = render()
 assert numpy.isfinite(pixels).all() and pixels.mean() > 0, 'values a program keeps for reuse'
+
+# Flex keeps its scene between an animation's frames, each reaching the renderer as an update of what changed and
+# rendering exactly as a fresh export of it does: in three jobs of two frames, as Blender updates whatever is animated
+# every frame, a move, a material's value, then a deformation, a light's change and objects removed and added. The
+# user's persistent data reads as it was, during the job too, so saved files never hold Flex's; the engine is let go
+# once a job is done or cancelled; and a user's own persistent data stays on
+scene = new('frames')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('frames'), (0, 0, 2))
+scene.flex_samples, scene.flex_restir, scene.flex_denoise = 16, False, False  # No reservoirs carried between frames
+scene.frame_start, scene.frame_end = 1, 2
+bpy.context.preferences.edit.keyframe_new_interpolation_type = 'CONSTANT'
+tinted = [plane(name, x, y, 0.8) for name, x, y in (('moving', -0.5, 0.5), ('tinted', 0.5, 0.5),
+    ('bending', -0.5, -0.5), ('leaving', 0.5, -0.5), ('arriving', 0.5, -0.5))][1]
+lamp = add(bpy.data.lights.new('lamp', 'POINT'), (0, 0, 1))
+bent = bpy.data.objects['bending']
+bent.shape_key_add(name='basis'), bent.shape_key_add(name='bent')
+for point in bent.data.shape_keys.key_blocks['bent'].data: point.co.z = 0.3 * point.co.x
+bpy.data.objects['arriving'].hide_render = True
+def keys(owner, name, *values):  # Its value at the job's two frames
+    for frame, value in enumerate(values, 1):
+        setattr(owner, name, value)
+        owner.keyframe_insert(name, frame=frame)
+kinds, engines, start = [], [], flex.Flex.start  # The kind of each message an export pipes, and the engines exporting
+def tapped(self, depsgraph):
+    pipe, engines[len(engines):] = self.requests, [weakref.ref(self)]
+    self.requests = types.SimpleNamespace(writelines=lambda parts: (kinds.append(struct.unpack('<I', (parts := [
+        *parts])[0][:4])[0]), pipe.writelines(parts)))
+    start(self, depsgraph)
+    self.requests = pipe
+during = []  # The flag as each frame renders, and a file saved then
+def saving(scene, *_): during.append(scene.render.use_persistent_data), bpy.data.libraries.write(
+    bpy.app.tempdir + 'during.blend', {scene})
+for animate, expected in ((lambda: keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
+        flex.UPDATE), (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
+        (0.1, 0.6, 0.2, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'], 'value', 0, 1),
+        keys(lamp.data, 'energy', 20, 40), keys(lamp.data, 'color', (1, 1, 1), (1, 0.5, 0.2)),
+        keys(bpy.data.objects['leaving'], 'hide_render', False, True),
+        keys(bpy.data.objects['arriving'], 'hide_render', True, False)), flex.SCENE)):
+    for animated in (*bpy.data.objects, *bpy.data.materials, *bpy.data.lights, *bpy.data.shape_keys):
+        animated.animation_data_clear()  # The last job's values held, unanimated
+    animate()
+    fresh = []  # Each frame exported anew, its own job, which nothing persists without the handler that sets it
+    bpy.app.handlers.render_init.remove(flex.persist)
+    for frame in (1, 2):
+        scene.frame_set(frame)
+        fresh.append(render())
+    bpy.app.handlers.render_init.append(flex.persist)
+    kinds[:], engines[:], during[:], flex.Flex.start = [], [], [], tapped
+    bpy.app.handlers.render_post.append(saving)
+    bpy.ops.render.render(animation=True, scene=scene.name)
+    bpy.app.handlers.render_post.remove(saving)
+    flex.Flex.start = start
+    frames = [numpy.array(bpy.data.images.load(scene.render.frame_path(frame=frame)).pixels).reshape(SIZE, SIZE,
+        4)[..., :3] for frame in (1, 2)]
+    assert kinds == [flex.SCENE, expected] and len({engine() for engine in engines}) == 1, f'frames kept {expected}'
+    assert all(map(numpy.array_equal, frames, fresh)), f'frames as exported anew {expected}'
+    with bpy.data.libraries.load(bpy.app.tempdir + 'during.blend') as (_, saved): saved.scenes = [scene.name]
+    assert during == [False] * 2 and not any(s.render.use_persistent_data for s in (scene, saved.scenes[0])), \
+        f'user persistent data {expected}'
+    gc.collect()
+    assert not engines[0](), f'engine released {expected}'
+flex.persist(scene)
+for handler in bpy.app.handlers.render_cancel: handler(scene)
+assert not scene.render.use_persistent_data and flex.release in bpy.app.handlers.render_cancel, 'cancel restores'
+scene.render.use_persistent_data, engines[:], flex.Flex.start = True, [], tapped
+render()
+flex.Flex.start = start
+gc.collect()
+assert scene.render.use_persistent_data and engines[0](), 'user persistent data kept'
+scene.render.use_persistent_data = False
