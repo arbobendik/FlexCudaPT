@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time
+import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time, types
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -1123,6 +1123,7 @@ class Flex(bpy.types.RenderEngine):
         columns = [[numpy.empty((0, *shape), 'f')] for shape in (*[(3, 3)] * 4, (3, 2), (3, 4), (3, 4), (19,))]
         materials = []
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
+        aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         baked, bakes, units, summaries, placed, again = [0], [], {}, {}, [], []  # Texels baked after those piped, each
@@ -1141,6 +1142,7 @@ class Flex(bpy.types.RenderEngine):
             # reads, baked up to 4K and read at the UV: of generated points without reads over its object's UVs, as
             # fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for every object
             # where it repeats with the UV. Never affine in one image's read: it would only bake that texture again
+            nonlocal ops, hints
             reads, affine, cost, inputs, need = summaries[id(expression)] if isinstance(expression, tuple) \
                 else (set(), False, None, set(), 0)
             uvs = current.get('uv', numpy.empty((0, 3, 2))).reshape(-1, 2)
@@ -1169,11 +1171,14 @@ class Flex(bpy.types.RenderEngine):
             tiles = numpy.stack((current['triangles'][j], low[j, 0] + k % width, low[j, 1] + k // width, 0 * j), 1)
             if domain:  # Over UV space the texels' own UVs, the bake pass baking texel by texel
                 expression = moved_to(expression, ('ADD', ('MULTIPLY', ('UV',), domain[1]), domain[0]), {})
-            # In an update of values the last export's unit, its steps and value again unless its expression changed
+            # In an update of values the last export's unit, its steps and value again unless its expression changed;
+            # its steps and hint among the bakes'
+            (ops, hints), outer = aside, (ops, hints)
             tile, last, units[key], steps, value = places[len(bakes)] if len(bakes) < len(places) else (
                 sum(map(len, texels)) // 4, None, Bake(), None, None)
             ops.append((0, tile, len(tiles), 0))
-            texels.append(tiles.astype('u4').view('f').ravel())
+            tilings[tile] = tiles.astype('u4').view('f').ravel()  # Its own, though another's empty list starts there
+            texels.append(tilings[tile])
             ops.append((0, baked[0], size[0], size[1] | 1 << 28))
             if last == key:
                 hints[len(ops)] = steps[0]
@@ -1188,6 +1193,7 @@ class Flex(bpy.types.RenderEngine):
             textures[units[key]] = (baked[0], size[0], size[1] | 1 << 28 | bool(domain and domain[3]) << 29,
                 numpy.array((*value, 1)))
             baked[0] += -(-size.prod() // 2)
+            ops, hints = outer
             return 'BAKED', point, units[key]
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
@@ -1370,11 +1376,29 @@ class Flex(bpy.types.RenderEngine):
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
-        shape = [op[0] for op in ops], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
+        shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
             for row in layers], textures
-        piped = self.piped if shaded else sum(map(len, texels)) // 4
+        if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30
+            starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4
+            read = {texel for code, texel, _, height in ops if [*OPS][code] in READS and not height >> 28 & 1}
+            apart = [k > 0 and first not in read for k, first in enumerate(starts)]
+            at, counts = {}, [0, 0]
+            for first, entry, side in zip(starts, texels, apart):
+                at[first], counts[side] = (counts[side], side), counts[side] + len(entry) // 4
+            def relocated(ops):  # Of their reads' and tiles' firsts, those piped apart flagged
+                return [(code, at[texel][0], width, height | at[texel][1] << 30) if (code == 0 or [*OPS][code] in READS)
+                    and not height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops]
+            ops[:], aside[0][:] = relocated(ops), relocated(aside[0])
+            placed = [(at[tile][0], key, unit, (hint, relocated(steps)), value)
+                for tile, key, unit, (hint, steps), value in placed]
+            textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30, entry[3])
+                for key, entry in textures.items() if not isinstance(key, Bake)})
+            texels = [entry for entry, side in zip(texels, apart) if not side] + [
+                entry for entry, side in zip(texels, apart) if side]
+        piped, rows = self.piped if shaded else counts[0], len(ops)
+        bakes, again = [k + rows for k in bakes], [k + rows for k in again]  # The bakes' steps after the materials'
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
-            and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops]
+            and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures keep their shape
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)):
@@ -1387,10 +1411,18 @@ class Flex(bpy.types.RenderEngine):
             if any((means[key] != textures[key][3]).any() for key in tables):  # hints take, as the renderer has them
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
                 return self.start(depsgraph)
-            # Then per table its first texel, width and texels, until a width of 0; per program its first step and
-            # light power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again
-            self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for key in
-                tables for part in (struct.pack('<2I', *textures[key][:2]), *tables[key])), struct.pack('<2I', 0, 0),
+            # Then per table its first texel, width and texels, until a width of 0, those only bakes read flagged in bit
+            # 31, and with bakes to run again their images, as piped, and tiles; per program its first step and light
+            # power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again
+            def anew(key):  # An image only bakes read, read again as piped
+                texture(types.SimpleNamespace(type='TEX_IMAGE', image=key[0], extension=key[1]), {}, data := [])
+                return data
+            tables = [(entry[0] | (entry[2] >> 30 & 1) << 31, entry[1], tables[key]) for key, entry in textures.items()
+                if key in tables] + [(entry[0] | 1 << 31, len(data[0]) // 4, data) for key, entry in textures.items()
+                if again and isinstance(key, tuple) and entry[2] >> 30 & 1 for data in [anew(key)]] + [
+                (first | 1 << 31, len(tiles) // 4, [tiles]) for first, tiles in tilings.items() if again and len(tiles)]
+            self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for first,
+                width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
                 numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
                 numpy.array(again, 'I')))
             return
@@ -1404,7 +1436,8 @@ class Flex(bpy.types.RenderEngine):
         # generated, 9 object, 6 UV, 12 color, 12 tangent and 19 info floats, a material of its emission, program,
         # hidden flag, layer count, opaque flag and emission program (then the world's); then the steps of 4 integers,
         # the texels and the programs of the bakes.
-        self.requests.writelines((struct.pack('<6I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes)),
+        self.requests.writelines((struct.pack('<8I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
+            counts[1]),
             *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I')))

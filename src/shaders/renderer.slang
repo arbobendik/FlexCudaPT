@@ -40,6 +40,7 @@ struct Scene {
     Camera denoisedCamera;
     uint64_t anchorHandle; float3* anchorVertices; float3* anchorNormals; LightNode* anchorLights;
     uint64_t* anchorTrails;
+    uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
 };
 
 static const int STACK = 64;
@@ -496,8 +497,9 @@ float4 texel(Scene* scene, Op op, int x, int y) {
         x = x < width ? x : 2 * width - 1 - x; y = y < height ? y : 2 * height - 1 - y;
     }
     const uint i = y * width + x;
-    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(scene.texels[asuint(op.value.x) + i]);
-    const uint word = scene.texels[asuint(op.value.x) + i / 4][i % 4];
+    uint4* texels = (asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels; // Bit 30: only bakes'
+    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[asuint(op.value.x) + i]);
+    const uint word = texels[asuint(op.value.x) + i / 4][i % 4];
     const float4 c = float4(word & 255, word >> 8 & 255, word >> 16 & 255, word >> 24) * (1.0f / 255);
     return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
@@ -1511,7 +1513,7 @@ void bake(uint3 p, Scene* scene) {
         texels[p.y * width + p.x] = uint2(f32tof16(c.x) | f32tof16(c.y) << 16, f32tof16(c.z) | f32tof16(1.0f) << 16);
         return;
     }
-    const uint4 tile = scene.texels[asuint(scene.ops[program - 2].value.x) + p.x / 16];
+    const uint4 tile = scene.bakeTexels[asuint(scene.ops[program - 2].value.x) + p.x / 16];
     const uint x = tile.y * 16 + p.x % 16, y = tile.z * 16 + p.y;
     if (x >= width || y >= height) return;
     if ((scene.frame >> 31) != 0) {

@@ -121,12 +121,16 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
                 for (unsigned pass = 0, tiles = loaded.ops[bake - 2].width; pass < (tiles ? 2 : 1); ++pass) {
                     records[PASSES - 2].data = scene; // before the lights pass: 16 x 16 texels per tile, inside their
                     records[PASSES - 2].data.frame = bake | pass << 31; // triangles, then off their edges, as halves;
+                    records[PASSES - 2].data.ops = (Op*)loaded.bakeOps - loaded.rows; // the bakes' steps, numbered on
                     CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
                     const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};
                     CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, tiles ? 16 * tiles // or,
                         : texture.width, tiles ? 16 : texture.height, 1)); // without tiles, every texel at once
                 }
             }
+            if (loaded.bakeOps) // Freed once baked, as nothing else reads them: those the next steps need come again
+                release(loaded.bakeOps), release((CUdeviceptr)scene.bakeTexels), loaded.bakeOps = 0,
+                    scene.bakeTexels = {};
             std::vector<Material> materials = loaded.materials;
             if (scene.count) {
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));
