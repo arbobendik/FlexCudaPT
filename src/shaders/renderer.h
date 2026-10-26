@@ -94,4 +94,5 @@ struct Scene {
     Camera denoisedCamera;
     unsigned long long anchorHandle; float3 *anchorVertices, *anchorNormals; LightNode* anchorLights;
     unsigned long long* anchorTrails;
+    float4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
 };
