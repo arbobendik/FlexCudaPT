@@ -214,7 +214,7 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 // Of the scene last loaded: its arrays besides the vertices, the vertices and materials its light BVH is built from and
 // the scratch and output its BVH is refit in
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Material> materials;
-    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output; };
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output, bakeOps; unsigned rows; };
 
 // Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
@@ -242,7 +242,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     for (CUdeviceptr array : loaded.arrays) release(array);
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
-    struct { unsigned count, ops, texels, baked, bakes; } header;
+    struct { unsigned count, ops, texels, baked, bakes, rows, only; } header;
     std::fread(&header, sizeof(header), 1, stdin);
     scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
     scene.generated = load<float3>(3 * header.count), scene.objects = load<float3>(3 * header.count);
@@ -251,10 +251,15 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.infos = load<Info>(header.count);
     scene.materials = load<Material>(header.count + 1, loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
-    scene.ops = load<Op>(header.ops, loaded.ops), scene.count = header.count;
-    std::vector<float4> texels(header.texels + header.baked);
+    loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
+    std::fread(loaded.ops.data(), sizeof(Op), header.ops, stdin); // The materials' programs, then the bakes', apart
+    scene.ops = (Op*)allocate(header.rows * sizeof(Op), loaded.ops.data());
+    loaded.bakeOps = allocate((header.ops - header.rows) * sizeof(Op), loaded.ops.data() + header.rows);
+    std::vector<float4> texels(header.texels + header.baked), only(header.only); // Those only bakes read apart
     std::fread(texels.data(), sizeof(float4), header.texels, stdin);
+    std::fread(only.data(), sizeof(float4), header.only, stdin);
     scene.texels = (float4*)allocate(texels.size() * sizeof(float4), texels.data());
+    scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
     loaded.bakes.resize(header.bakes);
     std::fread(loaded.bakes.data(), sizeof(unsigned), header.bakes, stdin);
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
@@ -274,9 +279,13 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
 inline void updateSteps(Scene& scene, Loaded& loaded) {
     unsigned count;
     std::fread(&count, sizeof(count), 1, stdin);
-    update(scene.ops, 0, count, loaded.ops.data());
+    update(scene.ops, 0, loaded.rows, loaded.ops.data());
+    std::fread(loaded.ops.data() + loaded.rows, sizeof(Op), count - loaded.rows, stdin);
+    std::vector<float4> only; // Texels only bakes read, sent again for bakes to run again: first flagged in bit 31
     for (unsigned table[2]; std::fread(table, sizeof(table), 1, stdin) && table[1];)
-        update(scene.texels, table[0], table[1], std::vector<float4>(table[1]).data());
+        if (table[0] >> 31) only.resize(std::max<size_t>(only.size(), (table[0] & ~(1u << 31)) + table[1])),
+            std::fread(only.data() + (table[0] & ~(1u << 31)), sizeof(float4), table[1], stdin);
+        else update(scene.texels, table[0], table[1], std::vector<float4>(table[1]).data());
     std::unordered_map<unsigned, float> hints;
     for (std::pair<unsigned, float> hint; std::fread(&hint, sizeof(hint), 1, stdin) && hint.first != ~0u;)
         hints[hint.first] = hint.second;
@@ -284,6 +293,9 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
     std::fread(&count, sizeof(count), 1, stdin);
     loaded.rebakes.resize(count);
     std::fread(loaded.rebakes.data(), sizeof(unsigned), count, stdin);
+    if (count) // Those bakes' programs and texels for their pass alone, as a scene's
+        loaded.bakeOps = allocate((loaded.ops.size() - loaded.rows) * sizeof(Op), loaded.ops.data() + loaded.rows),
+        scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
 }
 
 // Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
