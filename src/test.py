@@ -915,6 +915,32 @@ for smooth in (False, True):
     assert [key[0] for _, key, *_ in exporter.placed] == ([None] if smooth else []), 'uv bakes within tolerance'
 baked, tolerance, module['BAKE_TOLERANCE'] = render(), module['BAKE_TOLERANCE'], -1  # Every bake strays
 assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked uv'
+# Once baked, what only bakes read is freed: the image the power reads through its bake alone isn't among the texels the
+# renderer keeps, but read live as well, as a base color, its 4 MiB of RGBA8 are
+def resident():  # The texels the export pipes for the renderer to keep once baked, in MiB, of the scene
+    bpy.context.window.scene, exporter = scene, types.SimpleNamespace(visible=(), requests=io.BytesIO())
+    scene.update_tag()  # Its settings as last set
+    Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+    return struct.unpack('<6I', exporter.requests.getvalue()[:24])[3] * 16 / 2 ** 20
+module['BAKE_TOLERANCE'] = tolerance  # As the planner has it again
+alone = resident()
+power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Base Color'])
+assert (live := resident()) - alone > 3.9, ('bake inputs freed', alone, live)
+power.links.remove(power.nodes['Principled BSDF'].inputs['Base Color'].links[0])
+# A value of the baked power edited after its bake bakes it again: the update of steps runs the bake again and pipes the
+# image only it reads anew, 4 MiB flagged in bit 31 for the renderer's bake pass alone
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, depsgraph := bpy.context.evaluated_depsgraph_get())
+exponent.inputs[1].default_value, exporter.requests = 2, io.BytesIO()
+material.update_tag()  # Its value edited, as Blender's editors tag it, and the scene evaluated with it
+depsgraph = bpy.context.evaluated_depsgraph_get()
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material, is_updated_geometry=False,
+    is_updated_transform=False)]))
+steps = exporter.requests.getvalue()
+count = struct.unpack('<2I', steps[:8])[1]
+first, width = struct.unpack('<2I', steps[8 + 16 * count:16 + 16 * count])
+assert struct.unpack('<I', steps[:4])[0] == flex.STEPS and first >> 31 and width * 16 >= 4 << 20, 'rebake after freeing'
 # The image alone, scaled by an emission strength, only restates it: no unit bakes it again
 power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Emission Color'])
 power.nodes['Principled BSDF'].inputs['Emission Strength'].default_value = 1.8
