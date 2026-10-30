@@ -545,6 +545,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, f
         CASE(SPECULAR) break;
         CASE(TRANSLUCENT) break;
         CASE(SHEEN) break;
+        CASE(ANISOTROPIC) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -713,7 +714,9 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, f
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
         used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0),
         used(SHEEN) && top - stack > 15 ? stack[14] : make_float3(0, 0, 0),
-        used(SHEEN) && top - stack > 15 ? stack[15].x : 0.5f};
+        used(SHEEN) && top - stack > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top - stack > 18 ? stack[16].x : 0,
+        used(ANISOTROPIC) && top - stack > 18 ? stack[17].x : 0,
+        used(ANISOTROPIC) && top - stack > 18 ? stack[18] : make_float3(0, 0, 0)};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -1086,8 +1089,11 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,
                 Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
-            const float3 through = surface.ior == 1 ? straightThrough(toward, surface.normal, BSDFMaterial{surface.albedo,
-                {}, surface.roughness, surface.metallic, surface.transparency}) : make_float3(0, 0, 0);
+            const float3 through = surface.ior == 1 ? straightThrough(toward, surface.normal, BSDFMaterial{
+                .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
+                .transmission = surface.transparency, .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
+                .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}) : make_float3(0, 0, 0);
             transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
             if (layer == 0 && surface.density > 0)
                 medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? Medium{} : volume(surface);
@@ -1197,7 +1203,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
             used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
             used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
-            used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f};
+            used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
+            used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+            used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
