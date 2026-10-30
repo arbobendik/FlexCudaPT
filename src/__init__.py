@@ -1513,19 +1513,23 @@ class Flex(bpy.types.RenderEngine):
         back = matrix.col[2].xyz
         x = right / projection[0][0]
         y = up / projection[1][1]
-        ortho = projection[3][3] == 1  # Orthographic: rays along the view from points across it, on its near plane,
-        # which a viewport's lies behind the view, and its shift; else from the origin, the shift in their direction
-        center = (back * (-(1 + projection[2][3]) / projection[2][2]) - x * projection[0][3] - y * projection[1][3]
-            if ortho else x * projection[0][2] + y * projection[1][2] - back)
-        # The volume the camera is in: of an instance filling one that a ray up from the camera leaves an odd number of
-        # times, its first triangle of a material filling it, or none
+        ortho = projection[3][3] == 1  # Orthographic: rays along the view from points across it and its shift; else
+        # from the origin, the shift in their direction
+        center = (-x * projection[0][3] - y * projection[1][3] if ortho
+            else x * projection[0][2] + y * projection[1][2] - back)
+        # Rays start on the near plane, at its depth along the view: the clip start, which a viewport's orthographic one
+        # has behind the view
+        near = ((1 + projection[2][3]) / projection[2][2] if ortho
+            else projection[2][3] / (projection[2][2] - 1))
+        # The volume the rays start in: of an instance filling one that a ray up from the near plane's center leaves an
+        # odd number of times, its first triangle of a material filling it, or none
         medium = next((self.slots[i][0] + first for i, (tree, first) in self.volumes.items()
-            if inside(tree, matrix.translation)), 2 ** 32 - 1)
+            if inside(tree, matrix.translation - back * near)), 2 ** 32 - 1)
         # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the camera's origin and its
         # ray direction per NDC x, per NDC y and at the center (orthographic: the rays' offsets), then the thin lens and
-        # whether orthographic.
-        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I18f', REQUEST, *sampling, launches, width, height,
-            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho))
+        # whether orthographic, and the near plane's depth.
+        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I19f', REQUEST, *sampling, launches, width, height,
+            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near))
         self.requests.flush()
         launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
         sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
