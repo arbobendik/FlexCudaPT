@@ -44,15 +44,16 @@ constexpr unsigned LOBE_DIFFUSE = 0u;
 constexpr unsigned LOBE_REFRACT = 1u;
 constexpr unsigned LOBE_REFLECT = 2u;
 constexpr unsigned LOBE_NONE = 3u;
+constexpr unsigned LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
 // Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length
 struct Ray { bool camera, shadow; unsigned lobe; float depth, length; };
 __device__ float lightPath(const Ray& ray, int output) {
     switch (output) {
         case 0: return ray.camera;
         case 1: return ray.shadow;
-        case 2: return ray.lobe == LOBE_DIFFUSE;
+        case 2: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET;
         case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT;
-        case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT;
+        case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET;
         case 6: return ray.lobe == LOBE_REFRACT;
         case 8: return ray.length;
         default: return ray.depth;
@@ -1084,13 +1085,13 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Each lobe competes with light sampling separately, except on the last bounce
         const auto lit = [&](float3 light_dir, float light) __attribute__((always_inline)) {
             // BSDF's lobes toward the light, each weighed against BSDF sampling but on the last bounce
-            FixedArray<float3, 3> throughputs;
-            FixedArray<float, 3> pdfs;
+            FixedArray<float3, 4> throughputs;
+            FixedArray<float, 4> pdfs;
             const float3 f = BSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
                 !(dot(geometry_n, -direction) * dot(geometry_n, light_dir) > 0), stream(r.seed, b), &throughputs, &pdfs);
             if (!(b < scene.settings.bounces)) return f;
             float3 weighted = make_float3(0, 0, 0);
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 if (!(pdfs[i] > 0)) continue;
                 const float ratio = pdfs[i] / light;
                 weighted = weighted + throughputs[i] * pdfs[i] / (light * (1 + ratio * ratio));
