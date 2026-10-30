@@ -266,15 +266,16 @@ template <typename T> T* upload(const std::vector<T>& data) {
 }
 
 // Scene piped in by the extension into scene, in place of the one of arrays: triangle, step, texel, baked texel, bake,
-// mesh triangle and instance counts, the meshes' arrays, the instances, then the steps, the texels and the programs of
-// its bakes, which the bake pass fills the baked texels after those piped with. Its instances' triangles are the
+// mesh triangle, instance and image counts, the meshes' arrays, the instances, then the steps, the texels, the
+// programs of its bakes, which the bake pass fills the baked texels after those piped with, and each image's float4
+// count and its texels. Its instances' triangles are the
 // scene's in world space. The vertices last denoised stay the previous ones while the triangle count does, others are
 // freed.
 inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
-    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances; } header;
+    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
     std::fread(&header, sizeof(header), 1, stdin);
     const size_t meshes = header.triangles;
     std::vector<Instance> instances(header.instances);
@@ -309,6 +310,11 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
     loaded.bakes.resize(header.bakes);
     std::fread(loaded.bakes.data(), sizeof(unsigned), header.bakes, stdin);
+    std::vector<unsigned> sizes(header.images); // Each image in its own array, found by its index
+    std::fread(sizes.data(), sizeof(unsigned), header.images, stdin);
+    std::vector<float4*> images(header.images);
+    for (unsigned k = 0; k < header.images; ++k) images[k] = load<float4>(sizes[k]);
+    scene.images = (float4**)allocate(header.images * sizeof(float4*), images.data());
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
         loaded.temp, loaded.output);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
@@ -316,7 +322,9 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.infos,
         (CUdeviceptr)scene.materials,
-        (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, loaded.temp, loaded.output};
+        (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels,
+        loaded.temp, loaded.output, (CUdeviceptr)scene.images};
+    for (float4* image : images) loaded.arrays.push_back((CUdeviceptr)image);
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
