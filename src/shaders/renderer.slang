@@ -60,9 +60,9 @@ float lightPath(Ray ray, int output) {
     switch (output) {
         case 0: return float(ray.camera);
         case 1: return float(ray.shadow);
-        case 2: return float(ray.lobe == LOBE_DIFFUSE);
+        case 2: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET);
         case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT);
-        case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT);
+        case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET);
         case 6: return float(ray.lobe == LOBE_REFRACT);
         case 8: return ray.length;
         default: return ray.depth;
@@ -1020,15 +1020,15 @@ float lightPdf(Scene* scene, float3 origin, float3 normal, uint triangle, float3
 float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material material, float eta_i,
     float eta_o, uint random_state, float light, bool competing) {
     // BSDF's lobes toward the light, each weighed against BSDF sampling where it competes (power heuristic)
-    float3 throughputs[3];
-    float pdfs[3];
+    float3 throughputs[4];
+    float pdfs[4];
     const float3 f = BSDF(in_dir, out_dir, n, material, eta_i, eta_o, !(dot(g_n, -in_dir) * dot(g_n, out_dir) > 0),
         random_state, throughputs, pdfs);
     if (!competing) {
         return f;
     }
     float3 weighted = float3(0);
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         if (pdfs[i] > 0) {
             const float ratio = pdfs[i] / light;
             weighted += throughputs[i] * pdfs[i] / (light * (1 + ratio * ratio));
