@@ -1379,7 +1379,8 @@ assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (
 
 # Camera rays start at the clip start: an emitter shows through a perspective camera past a black plane nearer than it.
 # And they start in the volume there, not the camera's: in an absorbing cube with the near plane below it, through
-# either camera, a floor shines unattenuated. On both backends
+# either camera, a floor shines unattenuated. And they end at the clip end: the emitter past it vanishes from either. On
+# both backends
 scene = new('clip')
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
 scene.flex_samples = 64
@@ -1397,10 +1398,15 @@ wall, glow, cube, camera = (bpy.data.objects[name] for name in ('wall', 'glow', 
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     wall.location.z, wall.hide_render, glow.location.z, cube.hide_render = 1.5, False, -1, True
-    camera.location.z, camera.data.type, camera.data.clip_start = 2, 'PERSP', 1
+    camera.location.z, camera.data.type, camera.data.clip_start, camera.data.clip_end = 2, 'PERSP', 1, 100
     assert abs(render().mean() - 1) < 0.05, f'clip start {device}'
     wall.hide_render, glow.location.z, cube.hide_render = True, -2, False
     camera.location.z, camera.data.clip_start = 0.9, 2
     for kind in ('ORTHO', 'PERSP'):
         camera.data.type = kind
         assert abs(render().mean() - 1) < 0.05, f'medium at the near plane {kind} {device}'
+    glow.location.z, cube.hide_render = -1, True
+    camera.location.z, camera.data.clip_start, camera.data.clip_end = 2, 0.1, 2
+    for kind in ('ORTHO', 'PERSP'):
+        camera.data.type = kind
+        assert render().mean() < 0.05, f'clip end {kind} {device}'
