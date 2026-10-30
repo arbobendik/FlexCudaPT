@@ -501,8 +501,8 @@ glass.id_data.links.new(absorption.outputs[0], glass.id_data.nodes['Material Out
 pixels = render()[24:40, 24:40]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.exp(numpy.array(COLOR) - 1) ** 0.5, rtol=0.02), 'absorption'
 # From inside the slab, 0.25 above its bottom face, the camera sees the sky through that depth of it, and an emitter in
-# the slab 0.15 below it through that depth
-scene.camera.location.z = 0
+# the slab 0.15 below it through that depth: its rays start at its clip start, made short of those
+scene.camera.location.z, scene.camera.data.clip_start = 0, 1e-3
 pixels = render()[24:40, 24:40]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.exp(numpy.array(COLOR) - 1) ** 0.25, rtol=0.02), 'camera in a volume'
 mesh = bpy.data.objects['slab'].data  # Its first face of a material filling no volume, the slab's others still filling it
@@ -527,7 +527,7 @@ scatter = glass.id_data.nodes.new('ShaderNodeVolumeScatter')
 glass.id_data.links.new(scatter.outputs[0], glass.id_data.nodes['Material Output'].inputs['Volume'])
 pixels = render()[24:40, 24:40]
 assert abs(pixels.mean() - 1) < 0.02, 'camera in a scattering volume'
-scene.camera.location.z = 1
+scene.camera.location.z, scene.camera.data.clip_start = 1, 0.1
 # Colored instead, the slab tints the light by its base color at each of its two sides, by the color squared
 glass.id_data.links.remove(glass.id_data.nodes['Material Output'].inputs['Volume'].links[0])
 glass.inputs['Base Color'].default_value = (*COLOR, 1)

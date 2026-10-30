@@ -896,6 +896,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
         origin = origin + offset;
     }
+    origin = origin + direction * (camera.lens.near / dot(direction, normalize(cross(camera.y, camera.x)))); // Clipped
     const float3 start = origin;
     Hit hit = {NONE};
     float distance = 0;
