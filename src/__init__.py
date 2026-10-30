@@ -89,12 +89,13 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
-    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color}
+    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color,
+    'ANISOTROPIC': lambda anisotropy: anisotropy}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
-# level, coverage, absorption, density, scattering color, translucent color, and sheen color and roughness, the last
-# three of which a program carries only marked
-GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5]
-BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5]
+# level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
+# its rotation and tangent, the last six of which a program carries only marked
+GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5, 0, 0, 0]
+BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5, 0, 0, 0]
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Volume shaders on surfaces
 # reflect nothing, and rays pass through a portal without a position or direction; any other shader is diffuse. The
@@ -304,8 +305,8 @@ def summarize(expression, table, scales):
     flags = [part[1] for part in sub]
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
-        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN') \
-        or any(part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
+        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
+        'ANISOTROPIC') or any(part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
         part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
@@ -467,7 +468,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN') and OPS[name] \
+    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC') and OPS[name] \
         and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
@@ -730,6 +731,14 @@ def vector_rotate(node, inputs, index):  # Of a vector rotate node about its cen
     if node.rotation_type == 'AXIS_ANGLE': angle = 'MULTIPLY', angle, ('LESS_THAN', 0, length(rotation[0]))
     return 'ADD', ('ROTATE', ('SUBTRACT', vector, center), axis, angle), center
 
+# Of a tangent node, as Cycles': radial about an axis through the middle of the generated points, its sign aside,
+# or the active UV map's MikkTSpace tangent; in the world
+def tangent(node, inputs, index):
+    return ('NORMAL_MAP', numpy.array((1, 0.5, 0.5))) if node.direction_type == 'UV_MAP' else radial(node.axis)
+
+def radial(axis):
+    return 'TRANSFORM', ('CROSS_PRODUCT', numpy.eye(3)['XYZ'.index(axis)], ('SUBTRACT', ('GENERATED',), 0.5)), 2
+
 def vector(x, y, z):
     return 'ADD', ('ADD', ('MULTIPLY', x, numpy.eye(3)[0]), ('MULTIPLY', y, numpy.eye(3)[1])), \
         ('MULTIPLY', z, numpy.eye(3)[2])
@@ -973,14 +982,14 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'CURVE_RGB': curves, 'CURVE_VEC': curves, 'CURVE_FLOAT': curves,
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, 15, 16)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, *range(15, 20))
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
         else COMPOSITES[node.operation](*inputs) if node.operation in COMPOSITES else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
     'COMBXYZ': lambda node, inputs, index: vector(*inputs),
-    'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate, 'VECT_TRANSFORM': vector_transform,
+    'MAPPING': mapping, 'VECTOR_ROTATE': vector_rotate, 'VECT_TRANSFORM': vector_transform, 'TANGENT': tangent,
     'TEX_COORD': coordinates, 'CAMERA': lambda node, inputs, index: (normalize(('CAMERA_POINT',)),
         ('DOT_PRODUCT', ('CAMERA_POINT',), numpy.eye(3)[2]), length(('CAMERA_POINT',)))[index],
     'NEW_GEOMETRY': lambda node, inputs, index: {0: ('POSITION',), 1: facing(('NORMAL',)), 4: ('INCOMING',),
@@ -1014,7 +1023,8 @@ def resolve(socket, groups=()):
     if not link:  # A virtual socket has no value; an animated one is left to the interpreter, never baked
         value = numpy.resize(getattr(socket, 'default_value', 0), 3)
         value = ('ANIMATED', value) if hasattr(socket, 'default_value') and animated(socket) else value
-        return {'Normal': ('NORMAL',), 'Coat Normal': ('NORMAL',), 'UV': ('UV',)}.get(socket.name, value)
+        return {'Normal': ('NORMAL',), 'Coat Normal': ('NORMAL',), 'UV': ('UV',), 'Tangent': radial('Z')}.get(
+            socket.name, value)
     node, output = link.from_node, link.from_socket
     index = [*node.outputs].index(output)
     # An input an option hides reads as under the option showing it, the closest Flex renders: Subsurface Scattering's
@@ -1084,6 +1094,13 @@ def resolve(socket, groups=()):
         sheen = get('Sheen Weight')
         sheen = ('SHEEN', get('Color')) if node.type == 'BSDF_SHEEN' else nonzero(sheen) and ('SHEEN', ('MULTIPLY',
             sheen, get('Sheen Tint', 1))) or 0
+        # Its anisotropy, Principled's and the Metallic BSDF's by their aspect, the Glossy BSDF's mapped onto it, the
+        # sign swapping the axes, as Cycles maps both; turned about the normal from the tangent, marked where there is one
+        principled = node.type == 'BSDF_PRINCIPLED'
+        anisotropy = get('Anisotropic' if principled else 'Anisotropy')
+        glossy = between(anisotropy, -0.99, 0.99)
+        anisotropy = nonzero(anisotropy) and ('ANISOTROPIC', ('DIVIDE', ('MULTIPLY', glossy, ('SUBTRACT', 2,
+            absolute(glossy))), -0.9) if node.type == 'BSDF_GLOSSY' else between(anisotropy, 0, 1)) or 0
         # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it. A volume
         # shader's Alpha is its Draine phase's α, which covers nothing
         alpha = 1 if hasattr(node, 'phase') else get('Alpha', 1)
@@ -1092,7 +1109,8 @@ def resolve(socket, groups=()):
             metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
             tint, level, alpha, absorption, density, scatter,
             ('TRANSLUCENT', get('Color')) if node.type == 'BSDF_TRANSLUCENT' else 0, sheen,
-            get('Roughness' if node.type == 'BSDF_SHEEN' else 'Sheen Roughness', 0.5)]
+            get('Roughness' if node.type == 'BSDF_SHEEN' else 'Sheen Roughness', 0.5), anisotropy,
+            get('Anisotropic Rotation' if principled else 'Rotation'), get('Tangent')]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if nonzero(weight):
@@ -1127,7 +1145,7 @@ def shade(material, program):
             vector(1, 1, 0)), {}, 'NORMAL')  # along it, where the surface reads the normal
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         surface = [*BLACK[:9], 0, *BLACK[10:]]
-    layers = [surface[:10]] if len(surface) == 16 else [[*surface[16][:4], surface[4], *surface[16][5:]],
+    layers = [surface[:10]] if len(surface) == 19 else [[*surface[19][:4], surface[4], *surface[19][5:]],
         [*surface[:4], 0, *surface[5:10]]]
     # FlexLight's BSDF transmits apart from metallic reflection: its transmission is the share transmitted of the share
     # not metallic, its ior that of the share not metallic
@@ -1135,8 +1153,9 @@ def shade(material, program):
     metallic, share = base[2], base[5]
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
-    # The base layer transmits the surface's translucent color diffusely and carries its sheen, a coat over it neither
-    attributes = [[*layer, *volume, *(surface[13:16] if layer is base else (0, 0, 0.5))] for layer in layers]
+    # The base layer transmits the surface's translucent color diffusely and carries its sheen and anisotropy, a coat
+    # over it none
+    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0))] for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1368,8 +1387,9 @@ class Flex(bpy.types.RenderEngine):
                 surface = [bake(attribute) for attribute in surface]
             if not emitted: return surface
             surface, first = fold(unanimated(surface)), len(ops)
-            # Its translucent color and sheen only marked: scenes without them run main's programs, the shader
-            # compiling them out
+            # Its translucent color, sheen and anisotropy only marked: scenes without them run main's programs, the
+            # shader compiling them out
+            if len(surface) == 19 and not marks(surface[16], 'ANISOTROPIC'): surface = surface[:16]
             if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
             emit(surface, [], textures, texels, alpha, uses, keys=keyed)
