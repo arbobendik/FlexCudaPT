@@ -8,8 +8,8 @@ import pathtracer;
 // As renderer.h declares them, laid out alike: Slang lays out what pointers reach as C++ does. A bool there is a byte,
 // a char2 two int8_t, an Op's texel, width and height the bits of its value, and Material SceneMaterial here, as the
 // shared code's Material is renderer.h's BSDFMaterial.
-struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near; }; // Orthographic: rays along z's
-// normal; rays start at the near plane's depth
+struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near, far; }; // Orthographic: rays along
+// z's normal; rays start at the near plane's depth and end at the far one's
 struct Camera { float3 origin, x, y, z; Lens lens; };
 [UnscopedEnum] enum Code : uint { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT,
     MAXIMUM, LOGARITHM, MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, GENERATED, NOISE, IMAGE_CUBIC,
@@ -923,13 +923,15 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
         origin = origin + offset;
     }
-    origin = origin + direction * (camera.lens.near / dot(direction, normalize(cross(camera.y, camera.x)))); // Clipped
+    const float along = dot(direction, normalize(cross(camera.y, camera.x))); // Clipped: from the near plane to the far
+    origin = origin + direction * (camera.lens.near / along);
+    float reach = (camera.lens.far - camera.lens.near) / along;
     const float3 start = origin;
     Hit hit = Hit(NONE, float2(0, 0));
     float distance = 0;
     do {
-        hit = traverse(scene, origin, direction, 1e16f, distance, distance < 1e-4f ? NONE : hit.triangle);
-        origin = origin + direction * distance;
+        hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : hit.triangle);
+        origin = origin + direction * distance, reach -= distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden != 0);
     return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, hit), hit);
 }

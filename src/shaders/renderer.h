@@ -3,8 +3,8 @@
 // renderer.slang declares these layouts again for Vulkan
 
 // Thin lens: aperture radius, depth of its focus plane, polygon sides (0 for a disk), rotation and anamorphic ratio.
-struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near; }; // Orthographic: rays along z's
-// normal; rays start at the near plane's depth
+struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near, far; }; // Orthographic: rays along
+// z's normal; rays start at the near plane's depth and end at the far one's
 // Perspective: the pinhole ray through NDC (u, v) leaves origin along x * u + y * v + z.
 struct Camera { float3 origin, x, y, z; Lens lens; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha

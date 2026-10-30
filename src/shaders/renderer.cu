@@ -896,13 +896,15 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
         origin = origin + offset;
     }
-    origin = origin + direction * (camera.lens.near / dot(direction, normalize(cross(camera.y, camera.x)))); // Clipped
+    const float along = dot(direction, normalize(cross(camera.y, camera.x))); // Clipped: from the near plane to the far
+    origin = origin + direction * (camera.lens.near / along);
+    float reach = (camera.lens.far - camera.lens.near) / along;
     const float3 start = origin;
     Hit hit = {NONE};
     float distance = 0;
     do {
-        hit = traverse(scene, origin, direction, 1e16f, distance, distance < 1e-4f ? NONE : hit.triangle);
-        origin = origin + direction * distance;
+        hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : hit.triangle);
+        origin = origin + direction * distance, reach -= distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden);
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, hit), hit};
 }
