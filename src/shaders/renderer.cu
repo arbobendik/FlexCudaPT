@@ -484,7 +484,8 @@ __device__ float4 texel(const Scene& scene, const Op& op, unsigned long long ima
 }
 // The vector transformed from its object into the world or back, or from the world into the camera's space or back, by
 // the mode: as a point, direction or normal of the object, of the world, then as a point or direction of the camera
-__device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& info) {
+// Inlined, as nvcc inlines it without the sheen's code, which OptiX folds away only after nvcc chose
+__device__ __forceinline__ float3 transform(const Scene& scene, float3 v, int mode, const Info& info) {
     const float* a = info.axes;
     const float3 x = make_float3(a[0], a[1], a[2]), y = make_float3(a[3], a[4], a[5]);
     const float3 z = make_float3(a[6], a[7], a[8]);
@@ -510,12 +511,15 @@ __device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& 
 struct Point { float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle; };
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
 // Whether the scene's programs take the step: bound at compile time, OptiX compiles out the cases of steps they do not
-__device__ bool used(unsigned code) { return params.ops[code >> 6] >> (code & 63) & 1; }
+__device__ bool used(unsigned code) {
+    return params.ops[code >> 6] >> (code & 63) & 1;
+}
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
 // incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped along its edges
-__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn,
-    const Point& point, float3 incoming, bool backfacing, const Ray& ray, const Info& info) {
+// Inlined likewise
+__device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, float3 normal,
+    SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray, const Info& info) {
     float u, v;
     float3 generated, object, position;
     float4 color;
@@ -530,6 +534,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(LOAD) *top++ = saved[op->texel]; break;
         CASE(SPECULAR) break;
         CASE(TRANSLUCENT) break;
+        CASE(SHEEN) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -689,7 +694,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
-        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0)};
+        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0),
+        used(SHEEN) && top - stack > 15 ? stack[14] : make_float3(0, 0, 0),
+        used(SHEEN) && top - stack > 15 ? stack[15].x : 0.5f};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -723,9 +730,9 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
 // Of a triangle at its barycentrics, reached along the direction by the ray, in a layer of its material, bumped by
-// points along its edges as near as the ray's length makes a pixel's
-__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
-    const Ray& ray, unsigned layer = 0, bool emission = false) {
+// points along its edges as near as the ray's length makes a pixel's; inlined likewise
+__device__ __forceinline__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal,
+    float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* normals = scene.normals + 3 * triangle;
     const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
@@ -939,8 +946,9 @@ __device__ Medium volume(const Surface& surface) {
 // as no direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
-__device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 shading, float offset,
-    float3 face, const Medium* sides, unsigned state, float3& direction, float& density, Ray ray) {
+// Not inlined, as nvcc chooses without the sheen's code
+__device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 shading,
+    float offset, float3 face, const Medium* sides, unsigned state, float3& direction, float& density, Ray ray) {
     direction = make_float3(0, 0, 0), density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
@@ -1091,7 +1099,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
             used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
-            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0)};
+            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
+            used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
