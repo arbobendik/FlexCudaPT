@@ -980,6 +980,25 @@ power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['T
 exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert not exporter.placed, 'trivial trees bake nothing'
+# A float image stores as halves, two texels to a float4, flagged in its height's bit 27: exactly where its values are
+# halves; one past half's largest value stays floats
+for peak, halves in ((4, True), (1e5, False)):
+    exact = bpy.data.images.new('exact', 8, 8, float_buffer=True)
+    exact.colorspace_settings.is_data = True  # Before its pixels: setting it reloads a generated image's
+    values = numpy.random.default_rng(2).integers(0, 1024, 256) / 256  # Multiples of 1 / 256 below 4: halves exactly
+    values[0] = peak
+    exact.pixels.foreach_set(values.astype('f'))
+    textures, stored = {}, []
+    first, _, height, _ = module['texture'](types.SimpleNamespace(type='TEX_IMAGE', image=exact), textures, stored)
+    read = stored[0].view(numpy.float16)[:256] if height >> 27 & 1 else stored[0]
+    assert bool(height >> 27 & 1) == halves and numpy.array_equal(read.astype('f'), values.astype('f')), 'half textures'
+# The bakes' planner reads a half image's texels as stored, its pixels again
+planned = bpy.data.images.new('planned', 8, 8, float_buffer=True)
+planned.colorspace_settings.is_data = True
+planned.pixels.foreach_set((numpy.arange(256) / 256).astype('f'))
+texels, filtered = module['texels_of'](types.SimpleNamespace(type='TEX_IMAGE', image=planned), {None: ({}, [])})
+assert numpy.array_equal(filtered(texels).astype('f'), (numpy.arange(256) / 256).astype('f').reshape(8, 8, 4)), \
+    'half textures planned'
 # Light Falloff's linear output, smoothed, emits as its strength by the ray's length, by the length squared over itself
 # plus the smoothing, built of Light Path's ray length and math; a material's displacement by bump alone bends its
 # normal as a Bump node of the height at the displacement's scale does, its midlevel no slope
