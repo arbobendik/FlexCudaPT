@@ -474,6 +474,11 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
         x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height),
         x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
     const float4* texels = op.height >> 30 & 1 ? scene.bakeTexels : scene.texels; // Bit 30: of only bakes' texels
+    if (op.height >> 27 & 1) { // Halves, two texels to a float4
+        const ushort4 h = ((const ushort4*)(texels + op.texel))[y * width + x];
+        return make_float4(__half2float(__ushort_as_half(h.x)), __half2float(__ushort_as_half(h.y)),
+            __half2float(__ushort_as_half(h.z)), __half2float(__ushort_as_half(h.w)));
+    }
     if (!(op.height >> 26 & 1)) return texels[op.texel + y * width + x];
     const unsigned word = ((const unsigned*)(texels + op.texel))[y * width + x];
     const float level = 1.0f / 255;

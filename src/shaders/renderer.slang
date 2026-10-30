@@ -498,6 +498,11 @@ float4 texel(Scene* scene, Op op, int x, int y) {
     }
     const uint i = y * width + x;
     uint4* texels = (asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels; // Bit 30: only bakes'
+    if ((asuint(op.value.z) >> 27 & 1) != 0) { // Halves, two texels to a uint4
+        const uint4 pair = texels[asuint(op.value.x) + i / 2];
+        const uint2 h = i % 2 == 0 ? pair.xy : pair.zw;
+        return float4(f16tof32(h.x), f16tof32(h.x >> 16), f16tof32(h.y), f16tof32(h.y >> 16));
+    }
     if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[asuint(op.value.x) + i]);
     const uint word = texels[asuint(op.value.x) + i / 4][i % 4];
     const float4 c = float4(word & 255, word >> 8 & 255, word >> 16 & 255, word >> 24) * (1.0f / 255);

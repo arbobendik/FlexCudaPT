@@ -140,10 +140,10 @@ def table(node):  # Colors of a wavelength, ramp or curves node, RGB curves afte
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
 
-# First texel, width, height, its top byte the extension and above it whether RGBA8 and, in bit 29, sRGB, and linear
-# mean of an image node's image or of a node's color table, added as linear floats at first use; those Blender reads as
-# k / 255 exactly as RGBA8, four texels to a float4, which the shader decodes to the same floats and from sRGB, before
-# it filters them
+# First texel, width, height, its top byte the extension and above it whether RGBA8, in bit 27 halves and in bit 29
+# sRGB, and linear mean of an image node's image or of a node's color table, added as linear floats at first use; those
+# Blender reads as k / 255 exactly as RGBA8, four texels to a float4, which the shader decodes to the same floats and
+# from sRGB, before it filters them; other images as halves, two texels to a float4, up to half's largest value
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     if isinstance(source, Bake): return textures[source]
@@ -170,9 +170,12 @@ def texture(source, textures, texels):
             if srgb: pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
             if straight: pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]
             mean = pixels.reshape(-1, 4).mean(0)
+        half = not (ramp or packed) and numpy.abs(pixels).max(initial=0) <= 65504  # Else floats, as half would overflow
         textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
-            'REPEAT' if ramp else key[1]) << 24 | packed << 26 | (packed and srgb) << 29, mean)
-        texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
+            'REPEAT' if ramp else key[1]) << 24 | packed << 26 | half << 27 | (packed and srgb) << 29, mean)
+        texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else
+            numpy.concatenate((pixels.astype(numpy.float16), numpy.zeros(-len(pixels) % 8, numpy.float16))).view('f')
+            if half else pixels)  # Halves, two texels to a slot
     return textures[key]
 
 # Recursions over resolve()'s expressions, whose parts are shared, take each part once per outermost call: memo by its
@@ -281,8 +284,8 @@ def texels_of(source, cache):  # An image's or table's texels as the export hold
         held = stores[1][numpy.searchsorted(numpy.cumsum([*map(len, stores[1])]) // 4, first, 'right')]
         scale, linear = numpy.float32(1 / 255) if height >> 26 & 1 else 1, decode if height >> 29 & 1 else numpy.asarray
         filtered = lambda c: numpy.concatenate((linear(c[..., :3] * scale), c[..., 3:] * scale), -1)  # RGBA8 as k / 255
-        cache[key] = (held.view('u1') if height >> 26 & 1 else held)[:width * (height & 0xFFFFFF) * 4].reshape(
-            height & 0xFFFFFF, width, 4), filtered
+        cache[key] = (held.view('u1') if height >> 26 & 1 else held.view(numpy.float16) if height >> 27 & 1 else held)[
+            :width * (height & 0xFFFFFF) * 4].reshape(height & 0xFFFFFF, width, 4), filtered
     return cache[key]
 
 ROWS = ('RGB_TO_HSV', 'HSV_TO_RGB', 'RGB_TO_HSL', 'HSL_TO_RGB', 'EQUIRECTANGULAR', 'MIRROR_BALL')  # Steps of one vector
