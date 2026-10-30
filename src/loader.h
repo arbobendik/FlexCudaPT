@@ -234,22 +234,69 @@ inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr verti
     return handle;
 }
 
-// World-space scene piped in by the extension into scene, in place of the one of arrays, then its arrays: triangle,
-// step, texel, baked texel and bake counts, then the scene's arrays in order and the programs of its bakes, which the
-// bake pass fills the baked texels after those piped with. The vertices last denoised stay the previous ones while the
-// triangle count does, others are freed.
+// Per instance of a mesh piped once: its first triangle and count, whether its mesh is in world space, its transform's
+// rows, the adjugate turning its normals and its object's info
+struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; };
+
+// Of an array per triangle corner of the meshes, the array per corner of the instances, in world space as the extension
+// made it: a point through the transform and a normal through the adjugate in doubles in its order, normalized
+template <typename T, typename F>
+std::vector<T> expand(const std::vector<Instance>& instances, size_t count, F corner) {
+    std::vector<T> mesh(3 * count), all;
+    std::fread(mesh.data(), sizeof(T), mesh.size(), stdin);
+    for (const Instance& instance : instances) for (unsigned c = 3 * instance.first; c < 3 * (instance.first +
+        instance.count); ++c) all.push_back(instance.world ? mesh[c] : corner(instance, mesh[c]));
+    return all;
+}
+inline float3 place(const Instance& instance, float3 p) {
+    const float* m = instance.matrix;
+    const auto row = [&](int j) { return float(double(p.x) * m[4 * j] + double(p.y) * m[4 * j + 1]
+        + double(p.z) * m[4 * j + 2] + m[4 * j + 3]); };
+    return {row(0), row(1), row(2)};
+}
+inline float3 turn(const Instance& instance, float3 n) {
+    const float* a = instance.adjugate;
+    double v[3];
+    for (int j = 0; j < 3; ++j) v[j] = double(n.x) * a[j] + double(n.y) * a[3 + j] + double(n.z) * a[6 + j];
+    const double length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    return {float(v[0] / length), float(v[1] / length), float(v[2] / length)};
+}
+template <typename T> T* upload(const std::vector<T>& data) {
+    return (T*)allocate(data.size() * sizeof(T), data.data());
+}
+
+// Scene piped in by the extension into scene, in place of the one of arrays: triangle, step, texel, baked texel, bake,
+// mesh triangle and instance counts, the meshes' arrays, the instances, then the steps, the texels and the programs of
+// its bakes, which the bake pass fills the baked texels after those piped with. Its instances' triangles are the
+// scene's in world space. The vertices last denoised stay the previous ones while the triangle count does, others are
+// freed.
 inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
-    struct { unsigned count, ops, texels, baked, bakes, rows, only; } header;
+    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances; } header;
     std::fread(&header, sizeof(header), 1, stdin);
-    scene.vertices = load<float3>(3 * header.count, loaded.vertices), scene.normals = load<float3>(3 * header.count);
-    scene.generated = load<float3>(3 * header.count), scene.objects = load<float3>(3 * header.count);
-    scene.uvs = load<float2>(3 * header.count), scene.colors = load<float4>(3 * header.count);
-    scene.tangents = load<float4>(3 * header.count);
-    scene.infos = load<Info>(header.count);
-    scene.materials = load<Material>(header.count + 1, loaded.materials);
+    const size_t meshes = header.triangles;
+    std::vector<Instance> instances(header.instances);
+    std::fread(instances.data(), sizeof(Instance), instances.size(), stdin);
+    const auto copy = [](const Instance&, auto value) { return value; };
+    loaded.vertices = expand<float3>(instances, meshes, place), scene.vertices = upload(loaded.vertices);
+    scene.normals = upload(expand<float3>(instances, meshes, turn));
+    scene.generated = upload(expand<float3>(instances, meshes, copy));
+    scene.objects = upload(expand<float3>(instances, meshes, copy));
+    scene.uvs = upload(expand<float2>(instances, meshes, copy));
+    scene.colors = upload(expand<float4>(instances, meshes, copy));
+    scene.tangents = upload(expand<float4>(instances, meshes, copy));
+    std::vector<float> passes(meshes); // Per triangle of the meshes its material's pass index, then its material
+    std::vector<Material> table(meshes + 1); // and the world's
+    std::fread(passes.data(), sizeof(float), meshes, stdin);
+    std::fread(table.data(), sizeof(Material), meshes + 1, stdin);
+    std::vector<Info> infos;
+    loaded.materials.clear();
+    for (const Instance& instance : instances) for (unsigned t = instance.first; t < instance.first + instance.count;
+        ++t) infos.push_back(instance.info), infos.back().material = passes[t], loaded.materials.push_back(table[t]);
+    loaded.materials.push_back(table[meshes]);
+    scene.infos = upload(infos), scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
     std::fread(loaded.ops.data(), sizeof(Op), header.ops, stdin); // The materials' programs, then the bakes', apart
