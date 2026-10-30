@@ -769,8 +769,10 @@ exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
 slot = next(i for i, item in enumerate(depsgraph.object_instances)
     if item.is_instance and item.object.original == member)
-first = exporter.slots[slot][0]
-before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=32 + 36 * first).copy()
+exporter.requests = io.BytesIO()  # Its triangles where they are, as an update pipes them
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
+before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16).copy()
 instance.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
@@ -792,11 +794,13 @@ twist.deform_axis, twist.angle = 'X', 0.6
 bpy.context.view_layer.update()
 exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
-first, count = exporter.slots[next(i for i, item in enumerate(depsgraph.object_instances)
-    if item.object.original == twisted)][:2]
-piped = exporter.requests.getvalue()
-generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=32 + 36 * (2 * numpy.frombuffer(piped, 'I', count=2)[1]
-    + first)).reshape(-1, 3)
+def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
+    header, k = numpy.frombuffer(piped, 'I', count=10), [*exporter.slots].index(i)
+    first, count = numpy.frombuffer(piped, 'I', count=2, offset=40 + 172 * k)
+    return numpy.frombuffer(piped, 'f', count=9 * count, offset=40 + 172 * header[9] + 36 * (2 * header[8]
+        + first)).reshape(-1, 3)
+generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
+    if item.object.original == twisted))
 mesh = twisted.data
 rest = (numpy.array([v.co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
 assert all(numpy.isclose(rest, point, atol=1e-5).all(1).any() for point in generated), 'undeformed generated coordinates'
@@ -815,9 +819,7 @@ Viewport.engine.start(exporter, depsgraph)
 piped, kinds = exporter.requests.getvalue(), set()
 for i, item in enumerate(depsgraph.object_instances):
     if item.object.original in made and item.object.type == 'MESH':
-        first, count = exporter.slots[i][:2]
-        generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=32 + 36 * (2 * numpy.frombuffer(piped, 'I',
-            count=2)[1] + first)).reshape(-1, 3)
+        generated = generated_of(piped, i)
         mesh, kinds = item.object.to_mesh(), kinds | {item.object.original.type}
         orco = (numpy.array([v.undeformed_co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(
             mesh.texspace_size)) + 0.5
@@ -1215,8 +1217,9 @@ quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The gr
 exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 piped = exporter.requests.getvalue()
-count = numpy.frombuffer(piped, 'I', count=2)[1]  # Triangles, after the four columns of 9 floats each before UVs
-assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * count, offset=32 + 36 * 4 * count) == 0.25), 'render uv map'
+header = numpy.frombuffer(piped, 'I', count=10)  # Mesh triangles, after the instances and four columns before UVs
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=40 + 172 * header[9] + 36 * 4 * header[8])
+    == 0.25), 'render uv map'
 
 # A chain of mixes, each multiplying the last into itself, shares the first one's expression 2^10 times: folding, keying
 # and summarizing each shared part once, its export takes linear time, not exponential

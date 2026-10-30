@@ -233,6 +233,17 @@ def jacobian(expression, input):
 # its derivative along the UVs, by its Frobenius norm, the 90th percentile over the triangles that have area in UV,
 # weighted by that area as their texels are: a sliver's derivative is only as exact as its UVs' last bits, which
 # Blender's threads leave to chance, so slivers must not decide it
+# Points through an object's transform and normals through its adjugate, normalized, as the renderer expands instances:
+# in doubles, term by term in this order, which numpy's products, by BLAS kernels of their own, don't keep to
+def transformed(points, matrix):
+    p, m = points.reshape(-1, 3).astype('d'), numpy.array(matrix, 'f').astype('d')
+    return numpy.stack([p[:, 0] * m[j, 0] + p[:, 1] * m[j, 1] + p[:, 2] * m[j, 2] + m[j, 3] for j in range(3)], 1)
+
+def turned(normals, matrix):
+    n, a = normals.reshape(-1, 3).astype('d'), numpy.array(matrix.to_3x3().adjugated(), 'f').astype('d')
+    v = numpy.stack([n[:, 0] * a[0, j] + n[:, 1] * a[1, j] + n[:, 2] * a[2, j] for j in range(3)], 1)
+    return v / numpy.sqrt(v[:, :1] * v[:, :1] + v[:, 1:2] * v[:, 1:2] + v[:, 2:3] * v[:, 2:3])
+
 def stretch(values, uvs):
     edges = lambda a: numpy.stack((a[:, 1] - a[:, 0], a[:, 2] - a[:, 0]), 2)
     area = numpy.abs(numpy.linalg.det(edges(uvs)))
@@ -1163,10 +1174,22 @@ class Flex(bpy.types.RenderEngine):
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
         # coordinates (the points in the mesh's texture space), object coordinates (the points in the object's space),
         # UVs, colors of the render color attributes (zero without, as Cycles' missing ones), MikkTSpace tangents and
-        # their handedness in object space, and per triangle its object's location, color, pass index, random number and
-        # its material's pass index, as Cycles' object info node tells, then the object's axes
-        columns = [[numpy.empty((0, *shape), 'f')] for shape in (*[(3, 3)] * 4, (3, 2), (3, 4), (3, 4), (19,))]
-        materials = []
+        # their handedness in object space, and per triangle its material's pass index: once per object's mesh and
+        # materials of all its instances, its vertices and normals in object space but of a light's or under an update
+        columns = [[numpy.empty((0, *shape), 'f')] for shape in (*[(3, 3)] * 4, (3, 2), (3, 4), (3, 4), ())]
+        materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
+        # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
+        # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
+        def record(i, instance, ob, entry, radiance=0):  # An instance exported, of the object's mesh entry
+            # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
+            random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
+                lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
+            matrix = instance.matrix_world
+            instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
+                numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
+                ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()]), dtype='f')))
+            slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
+                for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
@@ -1326,6 +1349,10 @@ class Flex(bpy.types.RenderEngine):
                     rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
                 current.clear()
                 continue
+            key = ob.type != 'LIGHT' and not moved and (ob.data and ob.data.as_pointer(), ob.name, ob.visible_camera)
+            if key in entries:  # Another instance of an object exported: its mesh and materials piped once
+                record(i, instance, ob, entries[key])
+                continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
                 sealing = closed(ob, mesh)  # Read while the evaluated mesh lives
@@ -1374,15 +1401,13 @@ class Flex(bpy.types.RenderEngine):
                     attribute.data.foreach_get('color', values.ravel())
                     color = values[vertex] if attribute.domain == 'POINT' else values
                 ob.to_mesh_clear()
-                matrix = numpy.array(instance.matrix_world)
-                positions = (co.reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3])[vertex[loops]].reshape(-1, 3, 3)
+                positions = transformed(co.reshape(-1, 3)[vertex[loops]], instance.matrix_world).reshape(-1, 3, 3)
                 if (filled := numpy.flatnonzero(numpy.isin(index, [k for k, slot in enumerate(ob.material_slots)
                         if slot.material and (output := slot.material.node_tree.get_output_node('CYCLES'))
                         and output.inputs['Volume'].is_linked]))).size:
                     volumes[i] = BVHTree.FromPolygons(positions.reshape(-1, 3).tolist(),
                         numpy.arange(3 * len(positions)).reshape(-1, 3).tolist()), int(filled[0])
-                normals = normal.reshape(-1, 3)[loops] @ numpy.array(instance.matrix_world.to_3x3().adjugated())
-                normals /= numpy.linalg.norm(normals, axis=1, keepdims=True)
+                normals = turned(normal.reshape(-1, 3)[loops], instance.matrix_world)
                 uv = uv.reshape(-1, 2)[loops].reshape(-1, 3, 2)
                 orco = orco[vertex[loops]].reshape(-1, 3, 3)
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
@@ -1395,7 +1420,7 @@ class Flex(bpy.types.RenderEngine):
                     t = uv[mask]
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
                         * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
-                    current.update(triangles=sum(map(len, columns[0])) + numpy.nonzero(mask)[0], uv=t, made=[],
+                    current.update(triangles=sum(slot[1] for slot in slots) + numpy.nonzero(mask)[0], uv=t, made=[],
                         scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
@@ -1438,29 +1463,31 @@ class Flex(bpy.types.RenderEngine):
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
-            # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
-            random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
-                lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
-            info = numpy.tile([*instance.matrix_world.translation, *ob.color, ob.pass_index, 0, random,
-                *numpy.array(instance.matrix_world.to_3x3()).T.ravel()], (len(index), 1))
-            info[:, 8] = passes[numpy.minimum(index, len(passes) - 1)]
-            # Triangles, normals turned as the faces turn, a material of its row each
-            for column, array in zip(columns, (positions, normals.reshape(-1, 3, 3), orco, point, uv, color, tangent,
-                info)): column.append(array)
+            world = not key or i in volumes  # In world space: a light, under an update or filling a volume, kept apart
+            entry = (sum(map(len, columns[0])), len(index), world)
+            # Triangles, normals turned as the faces turn (by the renderer for those in object space), a material of its
+            # row each
+            for column, array in zip(columns, (positions if world else point, (normals if world else
+                normal.reshape(-1, 3)[loops]).reshape(-1, 3, 3), orco, point, uv, color, tangent,
+                passes[numpy.minimum(index, len(passes) - 1)])): column.append(array)
             table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row),
                 row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
             materials.append(table[index])
-            slots.append((i, len(positions), (ob.visible_camera, [slot.material and slot.material.name
-                for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
+            if not world: entries[key] = entry
+            record(i, instance, ob, entry, ob.type == 'LIGHT' and radiance)
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
         if moved:
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
             self.volumes.update(volumes)
+            def info(k):  # Its object's info per triangle, as a scene's
+                values = numpy.tile(instances[k][3][21:], (len(columns[7][k + 1]), 1))
+                values[:, 8] = columns[7][k + 1]
+                return values
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
-                *(column[k + 1].astype('f') for column in columns)))))
+                *(column[k + 1].astype('f') for column in columns[:7]), info(k).astype('f')))))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
@@ -1521,14 +1548,16 @@ class Flex(bpy.types.RenderEngine):
         self.volumes = volumes
         self.cuts, self.placed, self.piped = cuts, placed, piped
         materials = numpy.concatenate(materials)
-        # Scene on stdin: triangle, step, texel, baked texel and bake counts; per triangle 9 vertex, 9 normal, 9
-        # generated, 9 object, 6 UV, 12 color, 12 tangent and 19 info floats, a material of its emission, program,
-        # hidden flag, layer count, opaque flag and emission program (then the world's); then the steps of 4 integers,
-        # the texels and the programs of the bakes.
-        self.requests.writelines((struct.pack('<8I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
-            counts[1]),
-            *(numpy.concatenate(column, dtype='f') for column in columns),
-            numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
+        # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
+        # the texels only bakes read, mesh triangle and instance counts; per instance its mesh's first triangle, count
+        # and whether in world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9
+        # vertex, 9 normal, 9 generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a
+        # material of its emission, program, hidden flag, layer count, opaque flag and emission program (then the
+        # world's); then the steps of 4 integers, the texels and the programs of the bakes.
+        self.requests.writelines((struct.pack('<10I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
+            counts[1], sum(map(len, columns[0])), len(instances)), *(part for first, count, world, values in instances
+            for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column, dtype='f') for
+            column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I')))
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
