@@ -3,7 +3,8 @@
 // renderer.slang declares these layouts again for Vulkan
 
 // Thin lens: aperture radius, depth of its focus plane, polygon sides (0 for a disk), rotation and anamorphic ratio.
-struct Lens { float aperture, focus, blades, rotation, ratio, ortho; }; // Orthographic: rays along z's normal
+struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near; }; // Orthographic: rays along z's
+// normal; rays start at the near plane's depth
 // Perspective: the pinhole ray through NDC (u, v) leaves origin along x * u + y * v + z.
 struct Camera { float3 origin, x, y, z; Lens lens; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
@@ -24,7 +25,7 @@ constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 576;
+constexpr unsigned RECORD_STRIDE = 592;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
