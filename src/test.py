@@ -1446,3 +1446,31 @@ for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size'
     assert drawn(flex.DATA_PT_flex_light, light=light) == ['type', 'color', 'energy', *read], ('light read', kind)
 assert drawn(flex.OBJECT_PT_flex_visibility, object=bpy.data.objects[0]) == ['hide_viewport', 'hide_render',
     'visible_camera'], 'visibility read'
+
+# Camera rays start at the clip start: an emitter shows through a perspective camera past a black plane nearer than it.
+# And they start in the volume there, not the camera's: in an absorbing cube with the near plane below it, through
+# either camera, a floor shines unattenuated. On both backends
+scene = new('clip')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.flex_samples = 64
+scene.camera = add(bpy.data.cameras.new('clip'), (0, 0, 2))
+plane('wall', 0, 0, 4).inputs['Base Color'].default_value = (0, 0, 0, 1)
+glow = plane('glow', 0, 0, 8)
+glow.inputs['Base Color'].default_value, glow.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+glow.inputs['Emission Strength'].default_value = 1
+murk = shape('murk', lambda bm: bmesh.ops.create_cube(bm, size=2), (0, 0, 0)).id_data
+murk.nodes.remove(murk.nodes['Principled BSDF'])
+absorb = murk.nodes.new('ShaderNodeVolumeAbsorption')
+absorb.inputs['Color'].default_value, absorb.inputs['Density'].default_value = (0.2, 0.2, 0.2, 1), 2
+murk.links.new(absorb.outputs[0], murk.nodes['Material Output'].inputs['Volume'])
+wall, glow, cube, camera = (bpy.data.objects[name] for name in ('wall', 'glow', 'murk', 'clip'))
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    wall.location.z, wall.hide_render, glow.location.z, cube.hide_render = 1.5, False, -1, True
+    camera.location.z, camera.data.type, camera.data.clip_start = 2, 'PERSP', 1
+    assert abs(render().mean() - 1) < 0.05, f'clip start {device}'
+    wall.hide_render, glow.location.z, cube.hide_render = True, -2, False
+    camera.location.z, camera.data.clip_start = 0.9, 2
+    for kind in ('ORTHO', 'PERSP'):
+        camera.data.type = kind
+        assert abs(render().mean() - 1) < 0.05, f'medium at the near plane {kind} {device}'
