@@ -1535,7 +1535,7 @@ class Flex(bpy.types.RenderEngine):
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
     # from the camera's matrix through its perspective projection under the settings; none launched if the view already
     # had its samples. A view other than the last starts over.
-    def trace(self, width, height, sampling, launches, settings, matrix, projection, camera=None):
+    def trace(self, width, height, sampling, launches, settings, matrix, projection, camera=None, clip_end=None):
         right = matrix.col[0].xyz
         up = matrix.col[1].xyz
         back = matrix.col[2].xyz
@@ -1546,18 +1546,19 @@ class Flex(bpy.types.RenderEngine):
         center = (-x * projection[0][3] - y * projection[1][3] if ortho
             else x * projection[0][2] + y * projection[1][2] - back)
         # Rays start on the near plane, at its depth along the view: the clip start, which a viewport's orthographic one
-        # has behind the view
-        near = ((1 + projection[2][3]) / projection[2][2] if ortho
-            else projection[2][3] / (projection[2][2] - 1))
+        # has behind the view; and end on the far one, at the clip end: a perspective one's as set, which its matrix
+        # holds too coarsely at wide clip ranges
+        near, far = (((1 + projection[2][3]) / projection[2][2], (projection[2][3] - 1) / projection[2][2]) if ortho
+            else (projection[2][3] / (projection[2][2] - 1), camera.data.clip_end if camera else clip_end))
         # The volume the rays start in: of an instance filling one that a ray up from the near plane's center leaves an
         # odd number of times, its first triangle of a material filling it, or none
         medium = next((self.slots[i][0] + first for i, (tree, first) in self.volumes.items()
             if inside(tree, matrix.translation - back * near)), 2 ** 32 - 1)
         # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the camera's origin and its
         # ray direction per NDC x, per NDC y and at the center (orthographic: the rays' offsets), then the thin lens and
-        # whether orthographic, and the near plane's depth.
-        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I19f', REQUEST, *sampling, launches, width, height,
-            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near))
+        # whether orthographic, and the near and far planes' depths.
+        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
+            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
         self.requests.flush()
         launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
         sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
@@ -1610,7 +1611,7 @@ class Flex(bpy.types.RenderEngine):
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
         launched, sums = self.trace(region.width, region.height, sampling(scene, True), VIEWPORT_SAMPLES,
             settings(scene, True, self.device), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
-            camera.evaluated_get(depsgraph) if camera else None)
+            camera.evaluated_get(depsgraph) if camera else None, context.space_data.clip_end)
         if launched:
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
             self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',
