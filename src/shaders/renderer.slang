@@ -8,7 +8,7 @@ import pathtracer;
 // As renderer.h declares them, laid out alike: Slang lays out what pointers reach as C++ does. A bool there is a byte,
 // a char2 two int8_t, an Op's texel, width and height the bits of its value, and Material SceneMaterial here, as the
 // shared code's Material is renderer.h's BSDFMaterial.
-struct Lens { float aperture, focus, blades, rotation, ratio; };
+struct Lens { float aperture, focus, blades, rotation, ratio, ortho; }; // Orthographic: rays along z's normal
 struct Camera { float3 origin, x, y, z; Lens lens; };
 [UnscopedEnum] enum Code : uint { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT,
     MAXIMUM, LOGARITHM, MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, GENERATED, NOISE, IMAGE_CUBIC,
@@ -556,7 +556,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             const Camera c = scene.camera; // world along its direction from the camera, as Cycles'
             const float3 d = program == scene.materials[scene.count].program ? at.position : at.position - c.origin;
             const float3 forward = normalize(cross(c.y, c.x));
-            const float3 q = d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its image plane
+            const float3 q = c.lens.ortho != 0 ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its
+            // image plane
             stack[top++] = op.code == CAMERA_POINT ? float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
@@ -911,8 +912,9 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
     uint state = stream(seed, STREAM_JITTER);
     const float x = pixel % size.x + random(state);
     const float y = pixel / size.x + random(state);
-    float3 direction = normalize(camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z);
-    float3 origin = camera.origin;
+    const float3 plane = camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z;
+    float3 direction = camera.lens.ortho != 0 ? normalize(cross(camera.y, camera.x)) : normalize(plane);
+    float3 origin = camera.lens.ortho != 0 ? camera.origin + plane : camera.origin;
     if (camera.lens.aperture > 0) {
         const float2 point = aperture(camera.lens, state);
         const float3 offset = normalize(camera.x) * point.x + normalize(camera.y) * point.y;
@@ -1449,6 +1451,9 @@ Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
 // Pixel coordinates a camera sees a position at
 float2 project(Camera camera, float3 position, uint3 size) {
     const float3 d = position - camera.origin;
+    if (camera.lens.ortho != 0)
+        return float2((1 + dot(d - camera.z, camera.x) / dot(camera.x, camera.x)) * 0.5f * size.x,
+            (1 - dot(d - camera.z, camera.y) / dot(camera.y, camera.y)) * 0.5f * size.y);
     // d = (x * u + y * v + z) * depth
     const float depth = dot(cross(camera.x, camera.y), d);
     return float2((1 + dot(cross(d, camera.y), camera.z) / depth) * 0.5f * size.x,
@@ -1712,7 +1717,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 560; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 576; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
