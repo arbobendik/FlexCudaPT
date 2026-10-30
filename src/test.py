@@ -1711,6 +1711,64 @@ furnace = render().mean(-1)[cosine > 0.15].mean()
 print('SHEEN furnace', furnace, flush=True)
 assert 0.99 <= furnace <= 1.002, 'sheen furnace'
 
+# Anisotropy under the white sky, seen in parallel at cosine 0.3 along x, on two rectangles 1 / 0.3 long along x, so
+# that each covers a square of the view: a white metal of roughness 0.5 and Principled Anisotropic 1 about Blender's
+# radial tangent returns, where that runs along the view, its albedo of the roughnesses Principled's mapping gives
+# along and across it, by midpoint quadrature over the hemisphere, and where it runs across, the other's; a white Glossy
+# BSDF of the same roughnesses by its own mapping, along its UV map's tangent turned by a quarter, the other's throughout
+scene = new('anisotropic')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+scene.flex_restir = False  # Path traced: the BSDF alone, without reuse between pixels whose tangents differ
+scene.camera = add(bpy.data.cameras.new('anisotropic'), (10 * math.sqrt(0.91), 0, 3), (math.acos(0.3), 0, math.pi / 2))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 2.4
+stretched = lambda bm: bmesh.ops.scale(bm, vec=(1 / 0.3, 1, 1), verts=bmesh.ops.create_grid(bm, size=0.5,
+    calc_uvs=True)['verts'])
+radial = shape('radial', stretched, (0, -0.6, 0))
+radial.inputs['Base Color'].default_value, radial.inputs['Metallic'].default_value = (1, 1, 1, 1), 1
+radial.inputs['Roughness'].default_value, radial.inputs['Anisotropic'].default_value = 0.5, 1
+glossy = shape('glossy', stretched, (0, 0.6, 0)).id_data
+turned, tangent = glossy.nodes.new('ShaderNodeBsdfGlossy'), glossy.nodes.new('ShaderNodeTangent')
+turned.inputs['Color'].default_value, turned.inputs['Roughness'].default_value = (1, 1, 1, 1), 0.5
+turned.inputs['Anisotropy'].default_value, turned.inputs['Rotation'].default_value = math.sqrt(0.1) - 1, 0.25
+tangent.direction_type = 'UV_MAP'
+glossy.links.new(tangent.outputs[0], turned.inputs['Tangent'])
+glossy.links.new(turned.outputs[0], glossy.get_output_node('CYCLES').inputs['Surface'])
+def anisotropic(ax, ay, mu=0.3):  # Of white GGX metal of the roughnesses along x and y, seen at cosine mu along x
+    view = numpy.array((math.sqrt(1 - mu * mu), 0, mu))
+    half = light + view
+    half /= numpy.linalg.norm(half, axis=-1, keepdims=True)
+    d = 1 / (math.pi * ax * ay * ((half[..., 0] / ax) ** 2 + (half[..., 1] / ay) ** 2 + half[..., 2] ** 2) ** 2)
+    g1 = lambda w: 2 * w[..., 2] / (w[..., 2] + numpy.sqrt((ax * w[..., 0]) ** 2 + (ay * w[..., 1]) ** 2 + w[..., 2] ** 2))
+    return (d * g1(view) * g1(light) / (4 * mu) * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512)
+along, across = anisotropic(0.25 / math.sqrt(0.1), 0.25 * math.sqrt(0.1)), anisotropic(0.25 * math.sqrt(0.1), 0.25 / math.sqrt(0.1))
+pixels = render().mean(-1)
+# Under each pixel the point x = -up / 0.3, y = right of the view, at the radial rectangle's generated point gx, gy
+right, up = numpy.meshgrid(*[((numpy.arange(SIZE) + 0.5) / SIZE - 0.5) * 2.4] * 2)
+gx, gy = 0.5 - up, right + 1.1
+inside = (numpy.abs(gx - 0.5) < 0.45) & (numpy.abs(gy - 0.5) < 0.45) & (numpy.hypot(gx - 0.5, gy - 0.5) > 0.15)
+bearing = numpy.arctan2(gx - 0.5, 0.5 - gy)  # Of the radial tangent from x
+for name, ring, expected in (('along', inside & (numpy.abs(numpy.cos(bearing)) > math.cos(0.15)), along),
+        ('across', inside & (numpy.abs(numpy.sin(bearing)) > math.cos(0.15)), across),
+        ('glossy', (numpy.abs(up) < 0.45) & (numpy.abs(right - 0.6) < 0.45), across)):
+    print('ANISOTROPIC', name, pixels[ring].mean(), 'of', ring.sum(), 'pixels, albedo', expected, flush=True)
+    assert numpy.isclose(pixels[ring].mean(), expected, rtol=0.03) and pixels[ring].mean() <= 1, 'anisotropic albedo'
+# A wall flat along its object's x, as Scale X 0 leaves one: its generated x is 1/2, so Blender's radial tangent lies
+# along its normal. Seen head-on in parallel, where any tangent gives the same albedo, it returns its roughnesses' at
+# cosine 1, finite throughout
+scene = new('flatwall')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+scene.flex_restir = False
+scene.camera = add(bpy.data.cameras.new('flatwall'), (4, 0, 0), (math.pi / 2, 0, math.pi / 2))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 1.6
+wall = shape('flatwall', lambda bm: [setattr(v, 'co', (0, v.co.x, v.co.y))
+    for v in bmesh.ops.create_grid(bm, size=1, calc_uvs=True)['verts']], (0, 0, 0))
+wall.inputs['Base Color'].default_value, wall.inputs['Metallic'].default_value = (1, 1, 1, 1), 1
+wall.inputs['Roughness'].default_value, wall.inputs['Anisotropic'].default_value = 0.5, 0.8
+pixels = render().mean(-1)
+albedo = anisotropic(0.25 / math.sqrt(0.28), 0.25 * math.sqrt(0.28), 1)
+print('ANISOTROPIC flat wall', pixels.mean(), 'albedo', albedo, flush=True)
+assert numpy.isfinite(pixels).all() and numpy.isclose(pixels.mean(), albedo, rtol=0.03), 'anisotropic flat wall'
+
 # Flex keeps its scene between an animation's frames, each reaching the renderer as an update of what changed and
 # rendering exactly as a fresh export of it does: in three jobs of two frames, as Blender updates whatever is animated
 # every frame, two objects' moves, a material's value, then a deformation, a light's change and objects removed and
