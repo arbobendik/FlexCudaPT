@@ -1120,8 +1120,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (replay && rc == RC_SURFACE && b > k && b == end && end_type == END_EMIT) {
             return Shift{throughput * emitted / r.jac, density / r.jac};
         }
-        // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF
-        const auto lit = [&](float3 light_dir, float light) {
+        // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF; inlined, as
+        // nvcc inlines it without the sheen FlexKernels' BSDF branches on, so that it folds the material's constants
+        const auto lit = [&](float3 light_dir, float light) __attribute__((always_inline)) {
             if (b < scene.settings.bounces)
                 return neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
                     !(dot(geometry_n, -direction) * dot(geometry_n, light_dir) > 0), light, true, stream(r.seed, b))
