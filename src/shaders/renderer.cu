@@ -473,7 +473,7 @@ __device__ float4 texel(const Scene& scene, const Op& op, unsigned long long ima
     return op.height >> 29 & 1 ? make_float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
 // v from object to world or back, or from world to camera or back, by mode: point, direction or normal
-__device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& info) {
+__device__ __forceinline__ float3 transform(const Scene& scene, float3 v, int mode, const Info& info) {
     const float* a = info.axes;
     const float3 x = make_float3(a[0], a[1], a[2]), y = make_float3(a[3], a[4], a[5]);
     const float3 z = make_float3(a[6], a[7], a[8]);
@@ -499,11 +499,13 @@ __device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& 
 struct Point { float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle; };
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
 // Whether the scene's programs take the step
-__device__ bool used(unsigned code) { return params.ops[code >> 6] >> (code & 63) & 1; }
+__device__ bool used(unsigned code) {
+    return params.ops[code >> 6] >> (code & 63) & 1;
+}
 #define CASE(code) case code: if (!used(code)) break;
-// Surface the program resolves to at the point
-__device__ Surface shade(const Scene& scene, unsigned program, float3 normal, SlangMatrix<float, 3, 3> tbn,
-    const Point& point, float3 incoming, bool backfacing, const Ray& ray, const Info& info) {
+// Surface a program resolves to at the point, for the ray; heights bumped along its edges
+__device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, float3 normal,
+    SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray, const Info& info) {
     float u, v;
     float3 generated, object, position;
     float4 color;
@@ -518,6 +520,7 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(LOAD) *top++ = saved[op->texel]; break;
         CASE(SPECULAR) break;
         CASE(TRANSLUCENT) break;
+        CASE(SHEEN) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -677,7 +680,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
-        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0)};
+        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0),
+        used(SHEEN) && top - stack > 15 ? stack[14] : make_float3(0, 0, 0),
+        used(SHEEN) && top - stack > 15 ? stack[15].x : 0.5f};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -710,9 +715,9 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
     return at(scene, point.triangle, axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Surface of a triangle at its barycentrics, in a layer of its material
-__device__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal, float3 direction,
-    const Ray& ray, unsigned layer = 0, bool emission = false) {
+// Of a triangle at its barycentrics, in a layer of its material, bumped by points a pixel's footprint along its edges
+__device__ __forceinline__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal,
+    float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* normals = scene.normals + 3 * triangle;
     const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
@@ -904,11 +909,10 @@ __device__ Medium volume(const Surface& surface) {
         (surface.scatter + make_float3(1, 1, 1) - surface.absorption) * surface.density};
 }
 
-// Light sampling: a light picked by the light tree, P(light) the product of child shares down to it
-// Triangle: uniform point, PDF = solidAngle(P(light))
-// radiance = L * T / PDF
-__device__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 face, const Medium* sides,
-    unsigned state, float3& direction, float& density, Ray ray) {
+// Light sampling: a triangle picked by the light BVH, a uniform point on it
+// => transmitted * emission / PDF, PDF in solid angle, transmitted through the media between
+__device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 face,
+    const Medium* sides, unsigned state, float3& direction, float& density, Ray ray) {
     direction = make_float3(0, 0, 0), density = 0;
     // Down the light tree by the children's importance, pick rescaled (pbrt-v4 BVHLightSampler::Sample)
     float pick = random(state), probability = 1;
@@ -1049,7 +1053,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
             used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
-            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0)};
+            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
+            used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f};
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
         if (surface.density > 0) {
