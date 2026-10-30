@@ -1342,3 +1342,37 @@ flex.Flex.start = start
 gc.collect()
 assert scene.render.use_persistent_data and engines[0](), 'user persistent data kept'
 scene.render.use_persistent_data = False
+
+# An orthographic view projects in parallel: two unit squares, one 3 units further, cover alike (64 / 3)^2 pixels in a
+# final render through an ORTHO camera and in an orthographic viewport, which as in modeling sees behind its pivot too
+scene = new('ortho')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('ortho'), (0, 0, 2))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 3
+for name, location, size in (('near', (-0.6, 0, 0), 1), ('far', (0.6, 0, -3), 1), ('behind', (0, 0.9, 3), 0.4)):
+    square = plane(name, 0, 0, size)
+    square.inputs['Base Color'].default_value, square.inputs['Emission Strength'].default_value = (0, 0, 0, 1), 1
+    bpy.data.objects[name].location = location
+def lit(image):  # Pixels of the near and the far square, rows from the bottom below the one behind, and of that one
+    bright = image[..., :3].mean(-1) > 0.5
+    return int(bright[:45, :SIZE // 2].sum()), int(bright[:45, SIZE // 2:].sum()), int(bright[45:].sum())
+area = (SIZE / 3) ** 2
+final = lit(render())
+assert all(abs(n - area) < 0.1 * area for n in final[:2]), f'ortho camera {final}'
+bpy.context.view_layer.update()
+depsgraph, viewport = bpy.context.evaluated_depsgraph_get(), Viewport()
+near, far = -50, 100  # A viewport's orthographic clip range, its start behind the view
+window = Matrix(((2 / 3, 0, 0, 0), (0, 2 / 3, 0, 0), (0, 0, -2 / (far - near), -(far + near) / (far - near)),
+    (0, 0, 0, 1)))
+context = types.SimpleNamespace(region=region, region_data=types.SimpleNamespace(view_matrix=Matrix.Translation(
+    (0, 0, -2)), window_matrix=window, view_perspective='ORTHO'), space_data=types.SimpleNamespace(camera=None))
+with offscreen.bind():
+    gpu.matrix.load_matrix(Matrix.Identity(4))
+    gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+    viewport.view_update(context, depsgraph)
+    viewport.view_draw(context, depsgraph)
+    while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)
+    drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+drawn = lit(drawn)
+assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (0.4 * SIZE / 3) ** 2, \
+    f'ortho viewport {drawn}'
