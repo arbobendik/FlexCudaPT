@@ -265,8 +265,10 @@ def summarize(expression, table, scales):
     need = max([0, *(part[4] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
     if scales and name == 'NOISE':
         detail, roughness, lacunarity = (0, 1, 1) if isinstance(operands[1], tuple) else numpy.resize(operands[1], 3)
-        octaves = detail if roughness >= 1 else min(detail, math.log(1 / 256) / math.log(max(roughness, 1e-3)))
-        need = math.inf if isinstance(operands[1], tuple) else max(need, 8 * lacunarity ** octaves * along())
+        rate = roughness * lacunarity if 'BUMP' in scales else roughness  # Under a bump of its gradient, at twice the
+        octaves = detail if rate >= 1 else min(detail, math.log(1 / 256) / math.log(max(rate, 1e-3)))  # samples
+        need = math.inf if isinstance(operands[1], tuple) else max(need, (16 if 'BUMP' in scales else 8) * lacunarity
+            ** octaves * along())
     table[id(expression)] = reads, affine, points, inputs, need
     return table[id(expression)]
 
@@ -1178,6 +1180,8 @@ class Flex(bpy.types.RenderEngine):
             size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
                 if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
             if size is None or (size > 4096).any():
+                if isinstance(expression, tuple) and expression[0] == 'BUMP': return bumped(*expression[1:], memo)
+                if memo.get('whole'): return expression  # Baked whole or not at all
                 if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
                         summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by
@@ -1221,6 +1225,27 @@ class Flex(bpy.types.RenderEngine):
             baked[0] += -(-size.prod() // 2)
             ops, hints = outer
             return 'BAKED', point, units[key]
+        # A Bump's heights as its height's gradient along its one point input, baked whole, at its shifted points, its
+        # height at its own point no matter; where no gradient bakes, its height baked on its images' lattice, else all
+        def bumped(normal, height, first, second, factors, memo):  # live, as a bake's texels differ none between points
+            # a bump shifts by less than one
+            inputs = isinstance(height, tuple) and summaries[id(height)][2] is not None and summaries[id(height)][3]
+            if inputs and len(inputs) == 1 and (point := next(iter(inputs))) in (current.get('scales') or ()):
+                scales = {**current['scales'], 'BUMP': 1}  # Central differences a quarter texel apart
+                step = scales[point] / 4 / max(64, summarize(height, {}, scales)[4])
+                shifted = lambda d: moved_to(height, ('ADD', (point,), d), {}, point)
+                gradient = fold(vector(*(('DIVIDE', ('SUBTRACT', shifted(e * step), shifted(-e * step)), 2 * step)
+                    if k < 2 or point != 'UV' else 0 for k, e in enumerate(numpy.eye(3)))))
+                summarize(gradient, summaries, scales)
+                if (read := bake(gradient, {'whole': True}))[0] == 'BAKED':
+                    return 'BUMP', bake(normal, memo), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED', ('SHIFT',
+                        k), (point,)), (point,))) for k in (1, 2)), bake(factors, memo)
+            seen = {}  # Of images alone, its texels' own gradient as live has it: the height baked on their lattice
+            noisy = lambda e: isinstance(e, tuple) and (seen[id(e)] if id(e) in seen else seen.setdefault(id(e), e[0] ==
+                'NOISE' or any(map(noisy, e[1:]))))
+            if isinstance(height, tuple) and summaries[id(height)][0] and not noisy(height):
+                return 'BUMP', *(bake(part, memo) for part in (normal, height, first, second, factors))
+            return 'BUMP', bake(normal, memo), height, first, second, bake(factors, memo)
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
