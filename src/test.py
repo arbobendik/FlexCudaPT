@@ -795,9 +795,9 @@ bpy.context.view_layer.update()
 exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
 def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
-    header, k = numpy.frombuffer(piped, 'I', count=10), [*exporter.slots].index(i)
-    first, count = numpy.frombuffer(piped, 'I', count=2, offset=40 + 172 * k)
-    return numpy.frombuffer(piped, 'f', count=9 * count, offset=40 + 172 * header[9] + 36 * (2 * header[8]
+    header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
+    first, count = numpy.frombuffer(piped, 'I', count=2, offset=44 + 172 * k)
+    return numpy.frombuffer(piped, 'f', count=9 * count, offset=44 + 172 * header[9] + 36 * (2 * header[8]
         + first)).reshape(-1, 3)
 generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
     if item.object.original == twisted))
@@ -946,11 +946,13 @@ baked, tolerance, module['BAKE_TOLERANCE'] = render(), module['BAKE_TOLERANCE'],
 assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked uv'
 # Once baked, what only bakes read is freed: the image the power reads through its bake alone isn't among the texels the
 # renderer keeps, but read live as well, as a base color, its 4 MiB of RGBA8 are
-def resident():  # The texels the export pipes for the renderer to keep once baked, in MiB, of the scene
-    bpy.context.window.scene, exporter = scene, types.SimpleNamespace(visible=(), requests=io.BytesIO())
-    scene.update_tag()  # Its settings as last set
+def resident():  # The texels the export pipes for the renderer to keep once baked, in MiB, of the scene: those with
+    bpy.context.window.scene, exporter = scene, types.SimpleNamespace(visible=(), requests=io.BytesIO())  # the steps
+    scene.update_tag()  # Its settings as last set; and each image's apart, four RGBA8 texels a float4
     Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
-    return struct.unpack('<6I', exporter.requests.getvalue()[:24])[3] * 16 / 2 ** 20
+    images = sum(-(-width * (height & 0xFFFFFF) // (4 if height >> 26 & 1 else 1)) for key, (_, width, height, _) in
+        exporter.shape[2].items() if isinstance(key, tuple) and height >> 31)
+    return (struct.unpack('<11I', exporter.requests.getvalue()[:44])[3] + images) * 16 / 2 ** 20
 module['BAKE_TOLERANCE'] = tolerance  # As the planner has it again
 alone = resident()
 power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Base Color'])
@@ -1217,8 +1219,8 @@ quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The gr
 exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 piped = exporter.requests.getvalue()
-header = numpy.frombuffer(piped, 'I', count=10)  # Mesh triangles, after the instances and four columns before UVs
-assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=40 + 172 * header[9] + 36 * 4 * header[8])
+header = numpy.frombuffer(piped, 'I', count=11)  # Mesh triangles, after the instances and four columns before UVs
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 172 * header[9] + 36 * 4 * header[8])
     == 0.25), 'render uv map'
 
 # A chain of mixes, each multiplying the last into itself at a factor of a half, which keeps it in both of the mix's
