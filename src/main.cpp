@@ -61,8 +61,11 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
         .hitgroupRecordStrideInBytes = sizeof(hit), .hitgroupRecordCount = 1};
     const auto specialize = [&] { // Module, programs and pipeline for params
         CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
+        // Scenes using no sheen load the PTX compiled without it, which nvcc inlined as before it
+        const bool sheen = params.ops[SHEEN >> 6] >> (SHEEN & 63) & 1;
         CHECK(optixModuleCreate(context, &moduleOptions, &compile,
-            (const char*)build_shaders_ptx, build_shaders_ptx_len, nullptr, nullptr, &module));
+            (const char*)(sheen ? build_shaders_ptx : build_shaders_sheenless_ptx),
+            sheen ? build_shaders_ptx_len : build_shaders_sheenless_ptx_len, nullptr, nullptr, &module));
         for (unsigned pass = 0; pass < PASSES; ++pass) {
             OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, PROGRAMS[pass]}};
             CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));

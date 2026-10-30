@@ -88,15 +88,17 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
-    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color}
+    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
-# level, coverage, absorption, density, scattering color and translucent color, which a program carries only marked
-GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0]
-BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0]
+# level, coverage, absorption, density, scattering color, translucent color, and sheen color and roughness, the last
+# three of which a program carries only marked
+GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5]
+BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5]
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Volume shaders on surfaces
 # reflect nothing, and rays pass through a portal without a position or direction; any other shader is diffuse. The
-# Translucent BSDF's color, which its diffuse lobe transmits, is the surface's translucent color.
+# Translucent BSDF's color, which its diffuse lobe transmits, is the surface's translucent color, and the Sheen BSDF's
+# color its sheen's, over nothing else.
 SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission Color', 'Emission Strength',
         'Transmission Weight', 'IOR'), 'BSDF_METALLIC': ('Base Color', 1, 'Roughness', 0, 0, 0, 1.5),
     'EEVEE_SPECULAR': ('Base Color', 0, 'Roughness', 'Emissive Color', 1, 'Transparency', 1.5),
@@ -105,7 +107,8 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
     'BSDF_GLOSSY': ('Color', 1, 'Roughness', 0, 0, 0, 1.5), 'BSDF_GLASS': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'),
     'BSDF_REFRACTION': ('Color', 0, 'Roughness', 0, 0, 1, 'IOR'), 'BSDF_TRANSPARENT': ('Color', 0, 0, 0, 0, 1, 1),
     'EMISSION': (0, 0, 1, 'Color', 'Strength', 0, 1), 'BACKGROUND': (0, 0, 1, 'Color', 'Strength', 0, 1),
-    'BSDF_TRANSLUCENT': (0, 0, 1, 0, 0, 0, 1), 'SUBSURFACE_SCATTERING': ('Color', 0, 'Roughness', 0, 0, 0, 'IOR')}
+    'BSDF_TRANSLUCENT': (0, 0, 1, 0, 0, 0, 1), 'BSDF_SHEEN': (0, 0, 1, 0, 0, 0, 1),
+    'SUBSURFACE_SCATTERING': ('Color', 0, 'Roughness', 0, 0, 0, 'IOR')}
 # Absorption color, density and scattering color per volume shader node; any other absorbs and scatters nothing
 VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density', 0), 'VOLUME_SCATTER': (1, 'Density', 'Color'),
     'PRINCIPLED_VOLUME': ('Absorption Color', 'Density', 'Color')}
@@ -257,8 +260,8 @@ def summarize(expression, table, scales):
     flags = [part[1] for part in sub]
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
-        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT') or any(
-        part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
+        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN') \
+        or any(part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
         part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
@@ -406,7 +409,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT') and OPS[name] \
+    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN') and OPS[name] \
         and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
@@ -910,7 +913,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'CURVE_RGB': curves, 'CURVE_VEC': curves, 'CURVE_FLOAT': curves,
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, 14)
+    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, 15, 16)
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
         for attribute, (a, b) in enumerate(zip(*inputs))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
@@ -995,12 +998,17 @@ def resolve(socket, groups=()):
         level = mix(('MULTIPLY', factor, 2), 1, transparency)
         if any(isinstance(x, tuple) or numpy.any(x != y) for x, y in ((tint, 1), (factor, 0.5))):
             tint = 'SPECULAR', tint
+        # Blender's sheen over the base by its weight and tint, or the Sheen BSDF's alone, marked where there is one
+        sheen = get('Sheen Weight')
+        sheen = ('SHEEN', get('Color')) if node.type == 'BSDF_SHEEN' else nonzero(sheen) and ('SHEEN', ('MULTIPLY',
+            sheen, get('Sheen Tint', 1))) or 0
         # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
             ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), ('MULTIPLY', transparency, ('SUBTRACT', 1,
             metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
             tint, level, get('Alpha', 1), absorption, density, scatter,
-            ('TRANSLUCENT', get('Color')) if node.type == 'BSDF_TRANSLUCENT' else 0]
+            ('TRANSLUCENT', get('Color')) if node.type == 'BSDF_TRANSLUCENT' else 0, sheen,
+            get('Roughness' if node.type == 'BSDF_SHEEN' else 'Sheen Roughness', 0.5)]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if nonzero(weight):
@@ -1035,7 +1043,7 @@ def shade(material, program):
             vector(1, 1, 0)), {}, 'NORMAL')  # height along it, where the surface reads the normal
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         surface = [*BLACK[:9], 0, *BLACK[10:]]
-    layers = [surface[:10]] if len(surface) == 14 else [[*surface[14][:4], surface[4], *surface[14][5:]],
+    layers = [surface[:10]] if len(surface) == 16 else [[*surface[16][:4], surface[4], *surface[16][5:]],
         [*surface[:4], 0, *surface[5:10]]]
     # FlexLight's BSDF transmits apart from metallic reflection: its transmission is the share transmitted of the share
     # not metallic, its ior that of the share not metallic
@@ -1043,8 +1051,8 @@ def shade(material, program):
     metallic, share = base[2], base[5]
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
-    # The base layer transmits the surface's translucent color diffusely, a coat over it none
-    attributes = [[*layer, *volume, surface[13] if layer is base else 0] for layer in layers]
+    # The base layer transmits the surface's translucent color diffusely and carries its sheen, a coat over it neither
+    attributes = [[*layer, *volume, *(surface[13:16] if layer is base else (0, 0, 0.5))] for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1256,7 +1264,9 @@ class Flex(bpy.types.RenderEngine):
                 surface = [bake(attribute) for attribute in surface]
             if not emitted: return surface
             surface, first = fold(unanimated(surface)), len(ops)
-            # Its translucent color only marked: scenes without one run main's programs, the shader compiling it out
+            # Its translucent color and sheen only marked: scenes without them run main's programs, the shader
+            # compiling them out
+            if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
             emit(surface, [], textures, texels, alpha, uses)
             emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
