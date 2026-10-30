@@ -1353,10 +1353,13 @@ def tapped(self, depsgraph):
 during = []  # The flag as each frame renders, and a file saved then
 def saving(scene, *_): during.append(scene.render.use_persistent_data), bpy.data.libraries.write(
     bpy.app.tempdir + 'during.blend', {scene})
-for animate, expected in ((lambda: keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
-        flex.UPDATE), (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
+for animate, expected in ((lambda: (keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
+        keys(bpy.data.objects['moving'], 'rotation_euler', (0, 0, 0), (0.3, 0.2, 0.5)),
+        keys(bpy.data.objects['moving'], 'scale', (1, 1, 1), (1, 1.5, 1))), flex.UPDATE),
+        (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
         (0.1, 0.6, 0.2, 1)), flex.STEPS), (lambda: keys(sealed.inputs['Base Color'], 'default_value',
-        (0.8, 0.8, 0.8, 1), (0.3, 0.6, 0.9, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'], 'value', 0, 1),
+        (0.8, 0.8, 0.8, 1), (0.3, 0.6, 0.9, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'],
+        'value', 0, 1),
         keys(lamp.data, 'energy', 20, 40), keys(lamp.data, 'color', (1, 1, 1), (1, 0.5, 0.2)),
         keys(bpy.data.objects['leaving'], 'hide_render', False, True),
         keys(bpy.data.objects['arriving'], 'hide_render', True, False)), flex.SCENE)):
@@ -1487,3 +1490,29 @@ for device in ('OPTIX', 'VULKAN'):
     camera.data.clip_start, camera.data.clip_end, glow.location.z, glow.scale = 1e-3, 1000, -1018, (100, 100, 1)
     assert render().mean() < 0.05, f'clip end of a wide range {device}'
     glow.scale = (1, 1, 1)
+
+# Instances of one mesh pipe its arrays once: a collection instanced three times, one of them turned and stretched,
+# exports one mesh and three instances, and renders exactly as three copies of their own of it do, which the renderer
+# expands alike
+scene = new('instances')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('instances'), (0, 0, 2))
+plane('shared', 0, 0, 0.4)
+shared, ob = bpy.data.collections.new('shared'), bpy.data.objects['shared']
+scene.collection.objects.unlink(ob), shared.objects.link(ob)
+empties = [bpy.data.objects.new(f'instance {x}', None) for x in (-0.5, 0, 0.5)]
+for empty, x in zip(empties, (-0.5, 0, 0.5)):
+    empty.instance_type, empty.instance_collection, empty.location = 'COLLECTION', shared, (x, 0, 0)
+    scene.collection.objects.link(empty)
+empties[2].rotation_euler, empties[2].scale = (0.3, 0.2, 0.5), (1, 1.5, 1)
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+header = numpy.frombuffer(exporter.requests.getvalue(), 'I', count=10)
+assert header[0] == flex.SCENE and (header[1], header[8], header[9]) == (6, 2, 3), 'mesh piped once'
+instanced = render()
+for empty in empties:
+    copy = bpy.data.objects.new('copy', ob.data.copy())  # Placed as the empty, as the mesh sits at the origin
+    copy.location, copy.rotation_euler, copy.scale = empty.location, empty.rotation_euler, empty.scale
+    scene.collection.objects.link(copy)
+    empty.hide_render = True
+assert numpy.array_equal(instanced, render()), 'instances as copies'
