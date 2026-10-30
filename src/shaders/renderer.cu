@@ -1081,8 +1081,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (replay && rc == RC_SURFACE && b > k && b == end && end_type == END_EMIT) {
             return Shift{throughput * emitted / r.jac, density / r.jac};
         }
-        // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF
-        const auto lit = [&](float3 light_dir, float light) {
+        // Each lobe competes with light sampling separately, except on the last bounce
+        const auto lit = [&](float3 light_dir, float light) __attribute__((always_inline)) {
             // BSDF's lobes toward the light, each weighed against BSDF sampling but on the last bounce
             FixedArray<float3, 3> throughputs;
             FixedArray<float, 3> pdfs;
