@@ -1317,6 +1317,45 @@ folded = render()
 assert numpy.allclose(kept, folded, atol=2e-3), ('values computed again past the slots',
     float(abs(kept - folded).max()))
 
+# Sheen under the white sky, on a sphere seen from 10 away: alone, a Sheen BSDF of roughness 0.5 returns at each
+# view cosine its albedo there, by midpoint quadrature over the hemisphere, rising toward the rim where a diffuse stays
+# flat; over the Principled BSDF's white diffuse by weight 1, at most and within 1% of what it receives
+scene = new('sheen')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+scene.camera = add(bpy.data.cameras.new('sheen'), (0, 0, 10))
+scene.camera.data.angle = 2 * math.atan(0.12)
+sheened = shape('sheened', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=128, v_segments=64, radius=1), (0, 0, 0))
+bpy.data.meshes['sheened'].shade_smooth()
+sheen = sheened.id_data.nodes.new('ShaderNodeBsdfSheen')
+sheen.inputs['Color'].default_value, sheen.inputs['Roughness'].default_value = (1, 1, 1, 1), 0.5
+sheened.id_data.links.new(sheen.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+theta, phi = numpy.meshgrid((numpy.arange(256) + 0.5) / 256 * math.pi / 2, (numpy.arange(512) + 0.5) / 512 * 2 * math.pi)
+light = numpy.stack([numpy.sin(theta) * numpy.cos(phi), numpy.sin(theta) * numpy.sin(phi), numpy.cos(theta)], -1)
+def albedo(mu):  # Of Charlie's distribution of roughness 0.5 by Ashikhmin's visibility, white
+    half = light + (math.sqrt(1 - mu * mu), 0, mu)
+    sine = 1 - (half[..., 2] / numpy.linalg.norm(half, axis=-1)) ** 2
+    return (4 * sine / (2 * math.pi) / (4 * (light[..., 2] + mu - light[..., 2] * mu)) * light[..., 2]
+        * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512)
+x = ((numpy.arange(SIZE) + 0.5) / SIZE * 2 - 1) * 0.12  # Each pixel's view cosine where its ray meets the sphere, or 0
+ray = numpy.stack([*numpy.meshgrid(x, x), -numpy.ones((SIZE, SIZE))], -1)
+ray /= numpy.linalg.norm(ray, axis=-1, keepdims=True)
+toward = -10 * ray[..., 2]
+reach = toward ** 2 - 99
+hit = numpy.array((0, 0, 10)) + (toward - numpy.sqrt(numpy.clip(reach, 0, None)))[..., None] * ray
+cosine = numpy.where(reach > 0, -(hit * ray).sum(-1), 0)
+expected = numpy.interp(cosine, numpy.linspace(0, 1, 33), [albedo(mu) for mu in numpy.linspace(0, 1, 33)])
+pixels = render().mean(-1)
+for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+    ring = (cosine > low) & (cosine <= high)
+    print('SHEEN at cosines', low, high, pixels[ring].mean(), 'albedo', expected[ring].mean(), flush=True)
+    assert numpy.isclose(pixels[ring].mean(), expected[ring].mean(), rtol=0.03), 'sheen albedo'
+sheened.inputs['Base Color'].default_value, sheened.inputs['IOR'].default_value = (1, 1, 1, 1), 1
+sheened.inputs['Sheen Weight'].default_value, sheened.inputs['Sheen Roughness'].default_value = 1, 0.5
+sheened.id_data.links.new(sheened.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+furnace = render().mean(-1)[cosine > 0.15].mean()
+print('SHEEN furnace', furnace, flush=True)
+assert 0.99 <= furnace <= 1.002, 'sheen furnace'
+
 # Flex keeps its scene between an animation's frames, each reaching the renderer as an update of what changed and
 # rendering exactly as a fresh export of it does: in three jobs of two frames, as Blender updates whatever is animated
 # every frame, a move, a material's value, then a deformation, a light's change and objects removed and added. The

@@ -20,6 +20,10 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flex
 	mkdir -p build
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
 	xxd -i build/shaders.ptx > $@
+	# And without sheen, which the host loads for scenes using none, so that nvcc folds its code away whole
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DWITHOUT_SHEEN -I$(OPTIX_PATH)/include $< \
+		-o build/shaders-sheenless.ptx
+	xxd -i build/shaders-sheenless.ptx >> $@
 
 # The same host on Vulkan, which src/vulkan stands in for CUDA and OptiX on
 build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulkan/cuda.h src/vulkan/optix_stubs.h \
@@ -32,6 +36,9 @@ build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/sh
 	mkdir -p build/vulkan
 	$(SLANGC) -warnings-disable 41035 -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/shaders.spv
 	xxd -i -n build_shaders_ptx build/vulkan/shaders.spv > $@
+	# Its specialization constants fold the sheen away before code generation, so one binary serves both
+	echo '#define build_shaders_sheenless_ptx build_shaders_ptx' >> $@
+	echo '#define build_shaders_sheenless_ptx_len build_shaders_ptx_len' >> $@
 
 $(SLANGC):
 	mkdir -p $(SLANG_PATH)

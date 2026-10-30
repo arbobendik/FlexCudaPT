@@ -509,7 +509,12 @@ __device__ float3 transform(const Scene& scene, float3 v, int mode, const Info& 
 struct Point { float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle; };
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
 // Whether the scene's programs take the step: bound at compile time, OptiX compiles out the cases of steps they do not
-__device__ bool used(unsigned code) { return params.ops[code >> 6] >> (code & 63) & 1; }
+__device__ bool used(unsigned code) {
+#ifdef WITHOUT_SHEEN  // Compiled out, as in the PTX the host loads for scenes using no sheen
+    if (code == SHEEN) return false;
+#endif
+    return params.ops[code >> 6] >> (code & 63) & 1;
+}
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
 // incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped along its edges
@@ -529,6 +534,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
         CASE(LOAD) *top++ = saved[op->texel]; break;
         CASE(SPECULAR) break;
         CASE(TRANSLUCENT) break;
+#ifndef WITHOUT_SHEEN  // Its scenes have no such step: the switch stays as before it, which nvcc inlines as before
+        CASE(SHEEN) break;
+#endif
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -683,7 +691,9 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
     }
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
-        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0)};
+        used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0),
+        used(SHEEN) && top - stack > 15 ? stack[14] : make_float3(0, 0, 0),
+        used(SHEEN) && top - stack > 15 ? stack[15].x : 0.5f};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -1085,7 +1095,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
             expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
             used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
-            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0)};
+            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
+            used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f};
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
