@@ -13,7 +13,7 @@ build/flex.zip: src/__init__.py src/blender_manifest.toml build/renderer build/r
 	python3 -m zipfile -c $@ $^
 
 build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
-	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) $< -o $@ $(LDLIBS)
+	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -ffp-contract=off $< -o $@ $(LDLIBS)
 
 build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flexkernels/pathtracer.cuh \
 	src/shaders/flexkernels/slang-cuda-prelude.h $(OPTIX_PATH)/include/optix.h
@@ -24,7 +24,7 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flex
 # The same host on Vulkan, which src/vulkan stands in for CUDA and OptiX on
 build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulkan/cuda.h src/vulkan/optix_stubs.h \
 	src/vulkan/vector_types.h build/vulkan/shaders.h $(OPTIX_PATH)/include/optix.h
-	$(CXX) -Isrc/vulkan -I$(OPTIX_PATH)/include -Ibuild/vulkan $(CXXFLAGS) $< -o $@ -lvulkan
+	$(CXX) -Isrc/vulkan -I$(OPTIX_PATH)/include -Ibuild/vulkan $(CXXFLAGS) -ffp-contract=off $< -o $@ -lvulkan
 
 # Under the name of the PTX, which the host loads; shading fills its program's stack before reading it
 build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/shaders/flexkernels/pathtracer.slang-module \
