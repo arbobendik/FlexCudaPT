@@ -8,7 +8,8 @@ import pathtracer;
 // As renderer.h declares them, laid out alike: Slang lays out what pointers reach as C++ does. A bool there is a byte,
 // a char2 two int8_t, an Op's texel, width and height the bits of its value, and Material SceneMaterial here, as the
 // shared code's Material is renderer.h's BSDFMaterial.
-struct Lens { float aperture, focus, blades, rotation, ratio, ortho; }; // Orthographic: rays along z's normal
+struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near; }; // Orthographic: rays along z's
+// normal; rays start at the near plane's depth
 struct Camera { float3 origin, x, y, z; Lens lens; };
 [UnscopedEnum] enum Code : uint { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT,
     MAXIMUM, LOGARITHM, MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, GENERATED, NOISE, IMAGE_CUBIC,
@@ -922,6 +923,7 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
         origin = origin + offset;
     }
+    origin = origin + direction * (camera.lens.near / dot(direction, normalize(cross(camera.y, camera.x)))); // Clipped
     const float3 start = origin;
     Hit hit = Hit(NONE, float2(0, 0));
     float distance = 0;
@@ -1717,7 +1719,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 576; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 592; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
