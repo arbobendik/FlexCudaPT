@@ -61,9 +61,9 @@ float lightPath(Ray ray, int output) {
     switch (output) {
         case 0: return float(ray.camera);
         case 1: return float(ray.shadow);
-        case 2: return float(ray.lobe == LOBE_DIFFUSE);
+        case 2: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET);
         case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT);
-        case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT);
+        case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET);
         case 6: return float(ray.lobe == LOBE_REFRACT);
         case 8: return ray.length;
         default: return ray.depth;
