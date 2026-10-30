@@ -34,6 +34,7 @@ struct Scene {
     uint64_t anchorHandle; float3* anchorVertices; float3* anchorNormals; LightNode* anchorLights;
     uint64_t* anchorTrails;
     uint4* bakeTexels; // Texels only bakes read, images and tiles
+    uint4** images; // Of each image the materials read, by its index
 };
 
 static const int STACK = 64;
@@ -481,9 +482,10 @@ float4 texel(Scene* scene, Op op, int x, int y) {
         x = x < width ? x : 2 * width - 1 - x; y = y < height ? y : 2 * height - 1 - y;
     }
     const uint i = y * width + x;
-    uint4* texels = (asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels; // Bit 30: only bakes'
-    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[asuint(op.value.x) + i]);
-    const uint word = texels[asuint(op.value.x) + i / 4][i % 4];
+    uint4* texels = asuint(op.value.z) >> 31 != 0 ? scene.images[asuint(op.value.x)] // Bit 31: an image by its index
+        : ((asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels) + asuint(op.value.x); // 30: bakes'
+    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[i]);
+    const uint word = texels[i / 4][i % 4];
     const float4 c = float4(word & 255, word >> 8 & 255, word >> 16 & 255, word >> 24) * (1.0f / 255);
     return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
@@ -1670,7 +1672,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 
 // A pass's record: its raygen program's number, then its scene
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 592; // From one record to the next
+static const uint RECORD_STRIDE = 608; // From one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
