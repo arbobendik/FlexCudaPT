@@ -179,7 +179,7 @@ region = types.SimpleNamespace(width=SIZE, height=SIZE)
 region_data = types.SimpleNamespace(view_matrix=scene.camera.matrix_world.inverted(),
     window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA')
 context = types.SimpleNamespace(region=region, region_data=region_data,
-    space_data=types.SimpleNamespace(camera=scene.camera))
+    space_data=types.SimpleNamespace(camera=scene.camera, clip_end=1000))
 with offscreen.bind():
     gpu.matrix.load_matrix(Matrix.Identity(4))
     # Pixel space, as in a viewport
@@ -1412,7 +1412,8 @@ near, far = -50, 100  # A viewport's orthographic clip range, its start behind t
 window = Matrix(((2 / 3, 0, 0, 0), (0, 2 / 3, 0, 0), (0, 0, -2 / (far - near), -(far + near) / (far - near)),
     (0, 0, 0, 1)))
 context = types.SimpleNamespace(region=region, region_data=types.SimpleNamespace(view_matrix=Matrix.Translation(
-    (0, 0, -2)), window_matrix=window, view_perspective='ORTHO'), space_data=types.SimpleNamespace(camera=None))
+    (0, 0, -2)), window_matrix=window, view_perspective='ORTHO'),
+    space_data=types.SimpleNamespace(camera=None, clip_end=1000))
 with offscreen.bind():
     gpu.matrix.load_matrix(Matrix.Identity(4))
     gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
