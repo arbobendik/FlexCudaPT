@@ -914,6 +914,10 @@ bpy.data.meshes['edge'].materials[0], exporter = plain, types.SimpleNamespace(vi
 uvs.foreach_set('uv', uv)
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert not exporter.placed, 'plain images bake nothing'
+# Each image the materials read goes apart from the texels, in its own array, read by its index: flagged in bit 31
+entries = [entry for key, entry in exporter.shape[2].items() if isinstance(key, tuple) and not entry[2] >> 30 & 1]
+assert entries and all(entry[2] >> 31 for entry in entries) and sorted(entry[0] for entry in entries) == [
+    *range(len(entries))] == [*range(struct.unpack('<11I', exporter.requests.getvalue()[:44])[10])], 'images apart'
 # A power of an image read through a mapping that scales the UV twice bakes over UV space only where it can within the
 # bake tolerance: white noise, whose kinks a bake rounds off, stays live; a smooth image bakes once, repeating with
 # the UV, its samples on the image's texels, and renders as live, at a tolerance below 0: at 256 samples and two
