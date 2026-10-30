@@ -1020,6 +1020,70 @@ links.new(bump.outputs['Normal'], nodes['Principled BSDF'].inputs['Normal'])
 links.remove(nodes['Material Output'].inputs['Displacement'].links[0])
 assert numpy.allclose(render(), by_displacement, atol=1e-4), 'displacement by bump'
 
+# A bump bakes its height's gradient along its point, central differences a quarter texel apart, the Bump's heights
+# its dot products with its shifted points' offsets: of a sine of the generated x, exactly its derivative's
+bumps, summarize = [], module['summarize']
+def summarized(expression, table, scales, depth=[0]):  # The top expressions summarized under a bump: height, gradient
+    if 'BUMP' in (scales or ()) and not depth[0]: bumps.append(expression)
+    depth[0] += 1
+    value = summarize(expression, table, scales)
+    depth[0] -= 1
+    return value
+bumped = bpy.data.scenes.new('bumped')
+bumped.render.engine, bumped.flex_samples = 'FLEX', 256
+bumped.render.resolution_x = bumped.render.resolution_y = 128
+bumped.render.image_settings.file_format, bumped.render.filepath = 'OPEN_EXR', bpy.app.tempdir + 'bumped.exr'
+bumped.world = bpy.data.worlds.new('dark')
+bumped.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+data, bm = bpy.data.meshes.new('bumped'), bmesh.new()
+bm.loops.layers.uv.new(), bmesh.ops.create_grid(bm, size=1, calc_uvs=True), bm.to_mesh(data)
+bumped.collection.objects.link(bpy.data.objects.new('bumped', data))
+nodes, links = (tree := bpy.data.materials.new('bumped')).node_tree.nodes, tree.node_tree.links
+data.materials.append(tree)
+axis, sine, bump = (nodes.new(kind) for kind in ('ShaderNodeSeparateXYZ', 'ShaderNodeMath', 'ShaderNodeBump'))
+links.new(nodes.new('ShaderNodeTexCoord').outputs['Generated'], axis.inputs[0])
+links.new(axis.outputs['X'], sine.inputs[0]), links.new(sine.outputs[0], bump.inputs['Height'])
+links.new(bump.outputs['Normal'], nodes['Principled BSDF'].inputs['Normal'])
+sine.operation, module['summarize'] = 'SINE', summarized
+sine_scaled = nodes.new('ShaderNodeMath')
+sine_scaled.operation, sine_scaled.inputs[1].default_value = 'MULTIPLY', 10
+links.new(axis.outputs['X'], sine_scaled.inputs[0]), links.new(sine_scaled.outputs[0], sine.inputs[0])
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+bpy.context.window.scene = bumped
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert len(bumps) == 2, 'bump gradient'  # Its height's and its gradient's
+at = numpy.array((0.3, 0.6, 0.5))
+gradient = flex.fold(flex.moved_to(bumps[1], at, {}, 'GENERATED'))
+assert numpy.allclose(gradient, (10 * math.cos(10 * at[0]), 0, 0), rtol=1e-3, atol=1e-3), ('gradient', gradient)
+# A noise bump at grazing light (scale 0.15, detail 5, roughness 0.25, lacunarity 4, distance 50), its gradient baked
+# at 16 samples a period of its finest octave, 3488 texels, as both its octaves' gradients and the period ask, renders
+# as live does within 0.016 (p99 of 128 x 128 pixels over 64 texels at 256 samples): baked 0.0124, against a seed
+# floor of 0.0053. Live's own one-sided step errs: on a stand-in fBm of this structure, against a float64 derivative,
+# live's gradient is 1% off (p99) and the bake's 0.5%, so most of what is left is likely live's. At 8 samples a period
+# it was 0.0246, at the height's octave cutoff 0.0815, and a baked height read at the Bump's shifted points, as before,
+# 1.36
+noise = nodes.new('ShaderNodeTexNoise')
+for name, value in (('Scale', 0.15), ('Detail', 5), ('Roughness', 0.25), ('Lacunarity', 4)):
+    noise.inputs[name].default_value = value
+links.new(noise.outputs['Fac'], bump.inputs['Height'])
+bump.inputs['Distance'].default_value = 50
+bumped.camera = bpy.data.objects.new('bumped camera', bpy.data.cameras.new('bumped camera'))
+bumped.collection.objects.link(bumped.camera)
+bumped.camera.location, bumped.camera.data.type, bumped.camera.data.ortho_scale = (0.1, 0.1, 1), 'ORTHO', 2 * 64 / 3488
+sun = bpy.data.objects.new('bumped sun', bpy.data.lights.new('bumped sun', 'SUN'))
+bumped.collection.objects.link(sun)
+sun.data.energy, sun.rotation_euler = 5, (math.radians(75), 0, math.radians(30))
+exporter.requests = io.BytesIO()
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert [exporter.shape[2][unit][1] for _, key, unit, *_ in exporter.placed] == [3488], 'bump bakes its gradient'
+def shaded():  # The bumped scene rendered, its pixels
+    bpy.ops.render.render(scene=bumped.name, write_still=True)
+    return numpy.array(bpy.data.images.load(bumped.render.filepath).pixels).reshape(128, 128, 4)[..., :3]
+baked, points, module['POINTS'] = shaded(), module['POINTS'], ()  # Live: no unit reads a point
+live, module['POINTS'], module['summarize'] = shaded(), points, summarize
+assert numpy.percentile(numpy.abs(baked - live).max(-1), 99) < 0.016, 'baked bump'
+bpy.context.window.scene = scene
+
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
 # silhouette, integrated numerically
