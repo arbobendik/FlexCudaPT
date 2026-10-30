@@ -538,7 +538,8 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             const Camera& c = scene.camera; // world along its direction from the camera, as Cycles'
             const float3 d = program == scene.materials[scene.count].program ? position : position - c.origin;
             const float3 forward = normalize(cross(c.y, c.x));
-            const float3 q = d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its image plane
+            const float3 q = c.lens.ortho ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its
+            // image plane
             *top++ = op->code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
@@ -885,8 +886,9 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
     unsigned state = stream(seed, STREAM_JITTER);
     const float x = pixel % size.x + random(state);
     const float y = pixel / size.x + random(state);
-    float3 direction = normalize(camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z);
-    float3 origin = camera.origin;
+    const float3 plane = camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z;
+    float3 direction = camera.lens.ortho ? normalize(cross(camera.y, camera.x)) : normalize(plane);
+    float3 origin = camera.lens.ortho ? camera.origin + plane : camera.origin;
     if (camera.lens.aperture > 0) {
         const float2 point = aperture(camera.lens, state);
         const float3 offset = normalize(camera.x) * point.x + normalize(camera.y) * point.y;
@@ -1417,6 +1419,9 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
 // Pixel coordinates a camera sees a position at
 __device__ float2 project(const Camera& camera, float3 position, uint3 size) {
     const float3 d = position - camera.origin;
+    if (camera.lens.ortho)
+        return make_float2((1 + dot(d - camera.z, camera.x) / dot(camera.x, camera.x)) * 0.5f * size.x,
+            (1 - dot(d - camera.z, camera.y) / dot(camera.y, camera.y)) * 0.5f * size.y);
     // d = (x * u + y * v + z) * depth
     const float depth = dot(cross(camera.x, camera.y), d);
     return make_float2((1 + dot(cross(d, camera.y), camera.z) / depth) * 0.5f * size.x,
