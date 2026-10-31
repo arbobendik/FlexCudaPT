@@ -1326,15 +1326,17 @@ class Flex(bpy.types.RenderEngine):
                 mesh.vertices.foreach_get('co', co)
                 mesh.loops.foreach_get('vertex_index', vertex)
                 mesh.corner_normals.foreach_get('vector', normal)
-                if mesh.uv_layers.active: mesh.uv_layers.active.uv.foreach_get('vector', uv)
+                render = next((layer for layer in mesh.uv_layers if layer.active_render), None)  # As Cycles renders
+                if render: render.uv.foreach_get('vector', uv)
                 else:  # Cycles makes default tangents from spherical coordinates of the mesh's positions
                     p = co.reshape(-1, 3)[vertex]
                     lengths = numpy.linalg.norm(p, axis=1)
                     sphere = numpy.column_stack((numpy.where(numpy.any(p[:, :2], axis=1),
                         0.5 - numpy.arctan2(p[:, 0], p[:, 1]) / (2 * math.pi), 0), numpy.where(lengths > 0,
                         1 - numpy.arccos(numpy.clip(p[:, 2] / numpy.maximum(lengths, 1e-30), -1, 1)) / math.pi, 0)))
-                    mesh.uv_layers.new().uv.foreach_set('vector', sphere.ravel())
-                if mesh.polygons: mesh.calc_tangents()  # Of faces, which curves without a bevel have none of
+                    (render := mesh.uv_layers.new()).uv.foreach_set('vector', sphere.ravel())
+                if mesh.polygons:  # Of faces, which curves without a bevel have none of, along the UVs exported
+                    mesh.calc_tangents(uvmap=render.name)
                 tangent, sign = numpy.empty(3 * len(mesh.loops), 'f'), numpy.empty(len(mesh.loops), 'f')
                 mesh.loops.foreach_get('tangent', tangent)
                 mesh.loops.foreach_get('bitangent_sign', sign)
