@@ -634,13 +634,13 @@ tree.links.new(emission.outputs[0], tree.nodes['Material Output'].inputs['Surfac
 scene.cycles.samples, scene.cycles.use_denoising = 16, False
 scene.cycles.pixel_filter_type, scene.cycles.filter_width = 'BOX', 1
 
-def node_matches(socket):
+def node_matches(socket, atol=1e-4):
     tree.links.new(socket, emission.inputs['Color'])
     colors = []
     for engine in ('FLEX', 'CYCLES'):
         scene.render.engine = engine
         colors.append(render()[24:40, 24:40].mean((0, 1)))
-    assert numpy.allclose(*colors, atol=1e-4), (socket.node.name, colors)
+    assert numpy.allclose(*colors, atol=atol), (socket.node.name, colors)
 
 noise = tree.nodes.new('ShaderNodeTexNoise')
 point = tree.nodes.new('ShaderNodeCombineXYZ')
@@ -714,19 +714,19 @@ image.image.alpha_mode, image.extension = 'NONE', 'CLIP'
 point = tree.nodes.new('ShaderNodeCombineXYZ')
 point.inputs[0].default_value, point.inputs[1].default_value = -0.1, 0.7
 tree.links.new(point.outputs[0], image.inputs[0])
-node_matches(image.outputs['Alpha'])
+node_matches(image.outputs['Alpha'], 2 ** -8)  # Filtered in hardware, of weights of 8 bits
 image.image.alpha_mode = 'STRAIGHT'
 tree.links.new(image.outputs['Alpha'], tree.nodes.new('ShaderNodeMath').inputs[0])  # An unused alpha link
-node_matches(image.outputs['Color'])
+node_matches(image.outputs['Color'], 2 ** -8)
 tree.links.remove(image.outputs['Alpha'].links[0])
 point.inputs[0].default_value = 0.5
 other = tree.nodes.new('ShaderNodeTexImage')
 other.image, other.extension = image.image, image.extension
 tree.links.new(point.outputs[0], other.inputs[0])
 tree.links.new(other.outputs['Alpha'], emission.inputs['Strength'])
-node_matches(image.outputs['Color'])
+node_matches(image.outputs['Color'], 2 ** -8)
 other.interpolation = 'Closest'
-node_matches(image.outputs['Color'])
+node_matches(image.outputs['Color'], 2 ** -8)
 tree.links.remove(emission.inputs['Strength'].links[0])
 normal = tree.nodes.new('ShaderNodeNormalMap')
 normal.inputs['Color'].default_value = (0.8, 0.7, 1, 1)
