@@ -1517,7 +1517,7 @@ class Flex(bpy.types.RenderEngine):
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
             starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4  # the images they read apart, by their index,
             read = {texel for code, texel, _, height in ops if [*OPS][code] in READS and not height >> 28 & 1}  # in 31
-            image = {entry[0] for key, entry in textures.items() if isinstance(key, tuple)}
+            image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
                 for k, (first, entry) in enumerate(zip(starts, texels))]  # shares its first with the next: no image
             at, counts = {}, [0, 0, 0]
@@ -1531,7 +1531,7 @@ class Flex(bpy.types.RenderEngine):
                 for tile, key, unit, (hint, steps), value in placed]
             textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30, entry[3])
                 for key, entry in textures.items() if not isinstance(key, Bake)})
-            images = [entry for entry, side in zip(texels, apart) if side == 2]
+            images = [(entry, image[first]) for first, entry, side in zip(starts, texels, apart) if side == 2]
             texels = [entry for entry, side in zip(texels, apart) if not side] + [
                 entry for entry, side in zip(texels, apart) if side == 1]
         piped, rows = self.piped if shaded else counts[0], len(ops)
@@ -1577,13 +1577,13 @@ class Flex(bpy.types.RenderEngine):
         # 9 vertex, 9 normal, 9 generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a
         # material of its emission, program, hidden flag, layer count, opaque flag and emission program (then the
         # world's); then the steps of 4 integers, the texels and the programs of the bakes;
-        # then each image's float4 count and its texels
+        # then each image's width and height, RGBA8 in its bit 26, and its texels
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), *(part for first, count, world, values
             in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,
             dtype='f') for column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'),
             materials[:, 1:].astype('I'))), numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'),
-            numpy.array([len(i) // 4 for i in images], 'I'), *images))
+            numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images)))
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view

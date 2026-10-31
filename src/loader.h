@@ -2,6 +2,7 @@
 #include "shaders/renderer.h"
 #include <algorithm>
 #include <vector>
+#include <tuple>
 #include <unordered_map>
 #include <random>
 #include <cuda.h>
@@ -214,7 +215,32 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 // Of the scene last loaded: its arrays besides the vertices, the vertices and materials its light BVH is built from and
 // the scratch and output its BVH is refit in
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Material> materials;
-    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output, bakeOps; unsigned rows; };
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output, bakeOps; unsigned rows;
+    std::vector<std::tuple<CUtexObject, CUarray, size_t>> textures; };
+
+// An image piped in, of its width and height, RGBA8 in bit 26, as a texture the shaders read whole texels of: RGBA8
+// as their bytes, others as their floats
+inline CUtexObject texture(unsigned width, unsigned height, Loaded& loaded) {
+    const bool bytes = height >> 26 & 1;
+    height &= 0xFFFFFF;
+    const size_t row = width * (bytes ? 4 : 16);
+    std::vector<char> texels((row * height + 15) / 16 * 16); // As piped, in whole float4s
+    std::fread(texels.data(), 1, texels.size(), stdin);
+    const CUDA_ARRAY_DESCRIPTOR array{width, height, bytes ? CU_AD_FORMAT_UNSIGNED_INT8 : CU_AD_FORMAT_FLOAT, 4};
+    CUarray data;
+    CHECK(cuArrayCreate(&data, &array));
+    const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_HOST, .srcHost = texels.data(), .srcPitch = row,
+        .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = data, .WidthInBytes = row, .Height = height};
+    CHECK(cuMemcpy2D(&copy));
+    const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY, .res = {.array = {data}}};
+    const CUDA_TEXTURE_DESC sampling{.addressMode = {CU_TR_ADDRESS_MODE_CLAMP, CU_TR_ADDRESS_MODE_CLAMP},
+        .filterMode = CU_TR_FILTER_MODE_POINT, .flags = CU_TRSF_READ_AS_INTEGER};
+    CUtexObject object;
+    CHECK(cuTexObjectCreate(&object, &resource, &sampling, nullptr));
+    memory_peak = std::max(memory_peak, memory_used += row * height);
+    loaded.textures.emplace_back(object, data, row * height);
+    return object;
+}
 
 // Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
@@ -273,6 +299,12 @@ template <typename T> T* upload(const std::vector<T>& data) {
 // freed.
 inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
+    for (auto [object, data, bytes] : loaded.textures) {
+        CHECK(cuTexObjectDestroy(object));
+        CHECK(cuArrayDestroy(data));
+        memory_used -= bytes;
+    }
+    loaded.textures.clear();
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
@@ -310,11 +342,11 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
     loaded.bakes.resize(header.bakes);
     std::fread(loaded.bakes.data(), sizeof(unsigned), header.bakes, stdin);
-    std::vector<unsigned> sizes(header.images); // Each image in its own array, found by its index
-    std::fread(sizes.data(), sizeof(unsigned), header.images, stdin);
-    std::vector<float4*> images(header.images);
-    for (unsigned k = 0; k < header.images; ++k) images[k] = load<float4>(sizes[k]);
-    scene.images = (float4**)allocate(header.images * sizeof(float4*), images.data());
+    std::vector<unsigned> shapes(2 * header.images); // Each image a texture, found by its index
+    std::fread(shapes.data(), sizeof(unsigned), shapes.size(), stdin);
+    std::vector<CUtexObject> images(header.images);
+    for (unsigned k = 0; k < header.images; ++k) images[k] = texture(shapes[2 * k], shapes[2 * k + 1], loaded);
+    scene.images = (CUtexObject*)allocate(header.images * sizeof(CUtexObject), images.data());
     scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
         loaded.temp, loaded.output);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
@@ -324,7 +356,6 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         (CUdeviceptr)scene.materials,
         (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels,
         loaded.temp, loaded.output, (CUdeviceptr)scene.images};
-    for (float4* image : images) loaded.arrays.push_back((CUdeviceptr)image);
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only

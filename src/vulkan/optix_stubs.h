@@ -77,7 +77,8 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
     *pipeline = new OptixPipeline_t;
     const VkPushConstantRange range{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .size = sizeof(Launch)};
     const VkPipelineLayoutCreateInfo layout{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
+        .setLayoutCount = 1, .pSetLayouts = &vulkan.texturesLayout, .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &range};
     if (vkCreatePipelineLayout(vulkan.device, &layout, nullptr, &(*pipeline)->layout)) return OPTIX_ERROR_INVALID_VALUE;
     // The module's op mask as renderer.slang's OPS0 and OPS1
     const VkSpecializationMapEntry entries[] = {{0, 0, 8}, {1, 8, 8}};
@@ -118,6 +119,8 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     const bool row = height == 1 && depth == 1;
     return run([&](VkCommandBuffer commands) {
         vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+        vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &vulkan.textures, 0,
+            nullptr);
         vkCmdPushConstants(commands, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(launch), &launch);
         vkCmdDispatch(commands, row ? (width + WORKGROUP * WORKGROUP - 1) / (WORKGROUP * WORKGROUP)
             : (width + WORKGROUP - 1) / WORKGROUP, (height + WORKGROUP - 1) / WORKGROUP, depth);

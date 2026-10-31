@@ -42,8 +42,10 @@ struct Scene {
     uint64_t anchorHandle; float3* anchorVertices; float3* anchorNormals; LightNode* anchorLights;
     uint64_t* anchorTrails;
     uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
-    uint4** images; // Of each image the materials read, by its index
+    uint64_t* images; // Of each image the materials read, its texture by its index
 };
+// The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
+[[vk::binding(0, 0)]] Texture2D<uint4> textures[];
 
 static const int STACK = 64;
 static const int SLOTS = 32; // Values a program keeps for reuse, as the extension's
@@ -499,11 +501,13 @@ float4 texel(Scene* scene, Op op, int x, int y) {
         x = x < width ? x : 2 * width - 1 - x; y = y < height ? y : 2 * height - 1 - y;
     }
     const uint i = y * width + x;
-    uint4* texels = asuint(op.value.z) >> 31 != 0 ? scene.images[asuint(op.value.x)] // Bit 31: an image by its index
-        : ((asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels) + asuint(op.value.x); // 30: bakes'
-    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(texels[i]);
-    const uint word = texels[i / 4][i % 4];
-    const float4 c = float4(word & 255, word >> 8 & 255, word >> 16 & 255, word >> 24) * (1.0f / 255);
+    uint4* texels = ((asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels) + asuint(op.value.x);
+    const bool image = asuint(op.value.z) >> 31 != 0; // Bit 31: an image's texture, by its index; 30: of only bakes'
+    const uint4 t = image // Its whole texel
+        ? textures[NonUniformResourceIndex(uint(scene.images[asuint(op.value.x)]))].Load(int3(x, y, 0)) : uint4(0);
+    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(image ? t : texels[i]);
+    const uint4 b = image ? t : texels[i / 4][i % 4] >> uint4(0, 8, 16, 24) & 255;
+    const float4 c = float4(b) * (1.0f / 255);
     return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
 // The vector transformed from its object into the world or back, or from the world into the camera's space or back, by
