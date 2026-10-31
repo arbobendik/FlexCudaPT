@@ -488,7 +488,7 @@ float spline(float t, int k) {
 }
 // Of the op's image by its extension: repeated, extended, clipped to none or mirrored; an RGBA8 image's bytes as the
 // floats Blender reads them as, k / 255, those of sRGB colors decoded to linear
-float4 texel(Scene* scene, Op op, int x, int y) {
+float4 texel(Scene* scene, Op op, uint image, int x, int y) {
     const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF);
     const int extension = int(asuint(op.value.z) >> 24 & 3);
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return float4(0, 0, 0, 0);
@@ -502,11 +502,10 @@ float4 texel(Scene* scene, Op op, int x, int y) {
     }
     const uint i = y * width + x;
     uint4* texels = ((asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels) + asuint(op.value.x);
-    const bool image = asuint(op.value.z) >> 31 != 0; // Bit 31: an image's texture, by its index; 30: of only bakes'
-    const uint4 t = image // Its whole texel
-        ? textures[NonUniformResourceIndex(uint(scene.images[asuint(op.value.x)]))].Load(int3(x, y, 0)) : uint4(0);
-    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(image ? t : texels[i]);
-    const uint4 b = image ? t : texels[i / 4][i % 4] >> uint4(0, 8, 16, 24) & 255;
+    const bool apart = asuint(op.value.z) >> 31 != 0; // Bit 31: an image's texture, the read's; 30: of only bakes'
+    const uint4 t = apart ? textures[NonUniformResourceIndex(image)].Load(int3(x, y, 0)) : uint4(0); // Its whole texel
+    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(apart ? t : texels[i]);
+    const uint4 b = apart ? t : texels[i / 4][i % 4] >> uint4(0, 8, 16, 24) & 255;
     const float4 c = float4(b) * (1.0f / 255);
     return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
@@ -616,21 +615,23 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 && !used(ALPHA_CUBIC)) break;
             const uint width = asuint(op.value.y), height = asuint(op.value.z);
             const bool repeat = (height >> 24 & 3) == 0;
+            const uint image = height >> 31 != 0 ? uint(scene.images[asuint(op.value.x)]) : 0; // Its texture, once
             float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * width;
             float y = (repeat ? wrap(stack[top - 1].y) : stack[top - 1].y) * (height & 0xFFFFFF);
-            float4 color = texel(scene, *op, int(floor(x)), int(floor(y)));
+            float4 color;
+            if (op.code == IMAGE || op.code == ALPHA) color = texel(scene, *op, image, int(floor(x)), int(floor(y)));
             if (op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floor(x)), j = int(floor(y));
-                color = mix(mix(texel(scene, *op, i, j), texel(scene, *op, i + 1, j), x - i),
-                    mix(texel(scene, *op, i, j + 1), texel(scene, *op, i + 1, j + 1), x - i), y - j);
+                color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
+                    mix(texel(scene, *op, image, i, j + 1), texel(scene, *op, image, i + 1, j + 1), x - i), y - j);
             }
             if (op.code == IMAGE_CUBIC || op.code == ALPHA_CUBIC) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floor(x)), j = int(floor(y));
                 color = float4(0, 0, 0, 0);
                 for (int k = 0; k < 16; ++k) {
-                    const float4 t = texel(scene, *op, i + k % 4 - 1, j + k / 4 - 1);
+                    const float4 t = texel(scene, *op, image, i + k % 4 - 1, j + k / 4 - 1);
                     const float w = spline(x - i, k % 4) * spline(y - j, k / 4);
                     color = float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
                 }
