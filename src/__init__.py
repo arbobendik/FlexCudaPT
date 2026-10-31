@@ -1276,17 +1276,26 @@ class Flex(bpy.types.RenderEngine):
             # Its translucent color only marked: scenes without one run main's programs, the shader compiling it out
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
             emit(surface, [], textures, texels, alpha, uses)
-            emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
-            # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
-            # straight through, so a program needs only as many slots as it keeps values at once
             store, load = [*OPS].index('STORE'), [*OPS].index('LOAD')
-            last, taken, renamed = {op[1]: k for k, op in enumerate(ops[first:], first) if op[0] == load}, set(), {}
-            for k in range(first, len(ops)):
-                code, slot = ops[k][:2]
-                if code == store: renamed[slot] = min(set(range(len(taken) + 1)) - taken); taken.add(renamed[slot])
-                if code in (store, load): ops[k] = (code, renamed[slot], 0, 0)
-                if code == load and last[slot] == k: taken.discard(renamed[slot])
-            assert max(renamed.values(), default=-1) < SLOTS, 'values a program keeps for reuse'
+            # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
+            # straight through, so a program needs only as many slots as it keeps values at once; while that is more
+            # than SLOTS, the value kept longest of those live at the most crowded step is computed again where read
+            while True:
+                del ops[first:]
+                slots.clear()
+                emitted = emit(surface, ops, textures, texels, alpha, uses, slots)
+                last, taken, renamed = {op[1]: k for k, op in enumerate(ops[first:], first) if op[0] == load}, set(), {}
+                stored, crowded = {}, set()
+                for k in range(first, len(ops)):
+                    code, slot = ops[k][:2]
+                    if code == store: renamed[slot] = min(set(range(len(taken) + 1)) - taken); taken.add(renamed[slot])
+                    if code == store: stored[slot] = k
+                    if len(taken) > len(crowded): crowded = {s for s in stored if last[s] >= k}
+                    if code in (store, load): ops[k] = (code, renamed[slot], 0, 0)
+                    if code == load and last[slot] == k: taken.discard(renamed[slot])
+                if len(crowded) <= SLOTS: break
+                spilled = max(crowded, key=lambda s: last[s] - stored[s])
+                uses[next(key for key, slot in slots.items() if slot == spilled)][0] = 1
             # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
             scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(numpy.resize(surface[k], 3)[0])
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
