@@ -15,9 +15,13 @@ typedef struct CUstream_st* CUstream;
 // A texture is its image's place in the descriptor array the shaders read, an array its image; of what loader.h
 // sets, in CUDA's order: of 4 channels, read whole
 typedef unsigned long long CUtexObject;
-typedef struct CUarray_st { VkImage image; VkDeviceMemory memory; VkImageView view; VkExtent3D extent; }* CUarray;
+typedef struct CUarray_st { VkImage image; VkDeviceMemory memory; VkImageView view, filtered; VkExtent3D extent;
+    bool bytes; }* CUarray; // Its view of whole texels, and of filtered ones once a texture filters it
 enum { CU_AD_FORMAT_UNSIGNED_INT8 = 0x01, CU_AD_FORMAT_FLOAT = 0x20, CU_MEMORYTYPE_HOST = 1, CU_MEMORYTYPE_ARRAY = 3,
-    CU_RESOURCE_TYPE_ARRAY = 0, CU_TR_ADDRESS_MODE_CLAMP = 1, CU_TR_FILTER_MODE_POINT = 0, CU_TRSF_READ_AS_INTEGER = 1 };
+    CU_RESOURCE_TYPE_ARRAY = 0, CU_TR_ADDRESS_MODE_WRAP = 0, CU_TR_ADDRESS_MODE_CLAMP = 1,
+    CU_TR_ADDRESS_MODE_MIRROR = 2, CU_TR_ADDRESS_MODE_BORDER = 3, CU_TR_FILTER_MODE_POINT = 0,
+    CU_TR_FILTER_MODE_LINEAR = 1, CU_TRSF_READ_AS_INTEGER = 1, CU_TRSF_NORMALIZED_COORDINATES = 2,
+    CU_TRSF_SRGB = 0x10 };
 struct CUDA_ARRAY_DESCRIPTOR { size_t Width, Height; int Format; unsigned NumChannels; };
 struct CUDA_MEMCPY2D { int srcMemoryType; const void* srcHost; size_t srcPitch; int dstMemoryType; CUarray dstArray;
     size_t WidthInBytes, Height; };
@@ -42,8 +46,9 @@ inline struct {
     VkDeviceMemory stagingMemory;
     void* mapped;
     VkDescriptorSetLayout texturesLayout;
-    VkDescriptorSet textures; // Bindless, renderer.slang's: of every array's image, at its texture's place
-    std::vector<bool> taken; // Of those places
+    // Bindless, renderer.slang's: of every array's image whole, and filtered, at its texture's place, which a filtering
+    VkDescriptorSet textures; // texture's number has in its bits from 32
+    std::vector<bool> taken[2]; // Of those places
     PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
     PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
     PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
@@ -148,24 +153,36 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
     const VkFenceCreateInfo fence{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     vkCreateFence(vulkan.device, &fence, nullptr, &vulkan.fence);
     const uint32_t textures = std::min(vulkan.properties.limits.maxPerStageDescriptorSampledImages, 1u << 16);
-    const VkDescriptorBindingFlags partly = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkSampler samplers[4]; // Filtering linearly by the extension: repeated, extended, clipped to none or mirrored
+    for (int k = 0; k < 4; ++k) {
+        const VkSamplerAddressMode mode[] = {VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT};
+        const VkSamplerCreateInfo sampler{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR,
+            .minFilter = VK_FILTER_LINEAR, .addressModeU = mode[k], .addressModeV = mode[k],
+            .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK};
+        vkCreateSampler(vulkan.device, &sampler, nullptr, &samplers[k]);
+    }
+    const VkDescriptorBindingFlags partly[] = {VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, 0};
     const VkDescriptorSetLayoutBindingFlagsCreateInfo flags{
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, .bindingCount = 1,
-        .pBindingFlags = &partly};
-    const VkDescriptorSetLayoutBinding binding{.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-        .descriptorCount = textures, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, .bindingCount = 3,
+        .pBindingFlags = partly};
+    const VkDescriptorSetLayoutBinding bindings[] = {{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, textures,
+        VK_SHADER_STAGE_COMPUTE_BIT}, {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, textures, VK_SHADER_STAGE_COMPUTE_BIT},
+        {2, VK_DESCRIPTOR_TYPE_SAMPLER, 4, VK_SHADER_STAGE_COMPUTE_BIT, samplers}};
     const VkDescriptorSetLayoutCreateInfo layout{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .pNext = &flags, .bindingCount = 1, .pBindings = &binding};
+        .pNext = &flags, .bindingCount = 3, .pBindings = bindings};
     vkCreateDescriptorSetLayout(vulkan.device, &layout, nullptr, &vulkan.texturesLayout);
-    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, textures};
+    const VkDescriptorPoolSize size[] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2 * textures},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 4}};
     const VkDescriptorPoolCreateInfo sets{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
-        .poolSizeCount = 1, .pPoolSizes = &size};
+        .poolSizeCount = 2, .pPoolSizes = size};
     VkDescriptorPool texturesPool;
     vkCreateDescriptorPool(vulkan.device, &sets, nullptr, &texturesPool);
     const VkDescriptorSetAllocateInfo set{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool = texturesPool, .descriptorSetCount = 1, .pSetLayouts = &vulkan.texturesLayout};
     vkAllocateDescriptorSets(vulkan.device, &set, &vulkan.textures);
-    vulkan.taken.assign(textures, false);
+    vulkan.taken[0].assign(textures, false), vulkan.taken[1].assign(textures, false);
 #define LOAD(name) vulkan.name = (PFN_##name)vkGetDeviceProcAddr(vulkan.device, #name)
     LOAD(vkGetAccelerationStructureBuildSizesKHR);
     LOAD(vkCreateAccelerationStructureKHR);
@@ -280,8 +297,10 @@ inline CUresult cuMemsetD8(CUdeviceptr ptr, unsigned char value, size_t count) {
 
 // An image of an array's texels as unsigned integers, bytes or floats' words, which the shaders load whole
 inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc) {
-    *array = new CUarray_st{.extent = {uint32_t(desc->Width), uint32_t(desc->Height), 1}};
-    const VkImageCreateInfo info{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+    *array = new CUarray_st{.extent = {uint32_t(desc->Width), uint32_t(desc->Height), 1},
+        .bytes = desc->Format != CU_AD_FORMAT_FLOAT};
+    const VkImageCreateInfo info{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D,
         .format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UINT,
         .extent = (*array)->extent, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
@@ -334,25 +353,38 @@ inline CUresult cuMemcpy2D(const CUDA_MEMCPY2D* copy) {
 
 inline CUresult cuArrayDestroy(CUarray array) {
     vkDestroyImageView(vulkan.device, array->view, nullptr);
+    vkDestroyImageView(vulkan.device, array->filtered, nullptr);
     vkDestroyImage(vulkan.device, array->image, nullptr);
     vkFreeMemory(vulkan.device, array->memory, nullptr);
     delete array;
     return 0;
 }
 
-// An array's image at the first free place of the shaders' textures, the texture's number
-inline CUresult cuTexObjectCreate(CUtexObject* object, const CUDA_RESOURCE_DESC* resource, const CUDA_TEXTURE_DESC*,
-    const void*) {
-    *object = std::find(vulkan.taken.begin(), vulkan.taken.end(), false) - vulkan.taken.begin();
-    if (*object == vulkan.taken.size()) return VK_ERROR_OUT_OF_POOL_MEMORY;
-    vulkan.taken[*object] = true;
-    const VkDescriptorImageInfo image{.imageView = resource->res.array.hArray->view,
+// An array's image at the first free place of the shaders' textures, whole, or filtered through a view of floats,
+// RGBA8 as k / 255 from sRGB if the texture reads it so, by the sampler of its extension; the texture's number
+inline CUresult cuTexObjectCreate(CUtexObject* object, const CUDA_RESOURCE_DESC* resource,
+    const CUDA_TEXTURE_DESC* texture, const void*) {
+    const CUarray array = resource->res.array.hArray;
+    const bool filtered = texture->filterMode == CU_TR_FILTER_MODE_LINEAR;
+    std::vector<bool>& taken = vulkan.taken[filtered];
+    *object = std::find(taken.begin(), taken.end(), false) - taken.begin();
+    if (*object == taken.size()) return VK_ERROR_OUT_OF_POOL_MEMORY;
+    taken[*object] = true;
+    if (filtered) {
+        const VkImageViewCreateInfo view{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = array->image,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = !array->bytes ? VK_FORMAT_R32G32B32A32_SFLOAT
+            : texture->flags & CU_TRSF_SRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (VkResult result = vkCreateImageView(vulkan.device, &view, nullptr, &array->filtered)) return result;
+    }
+    const VkDescriptorImageInfo image{.imageView = filtered ? array->filtered : array->view,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     const VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = vulkan.textures,
-        .dstArrayElement = uint32_t(*object), .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-        .pImageInfo = &image};
+        .dstBinding = filtered, .dstArrayElement = uint32_t(*object), .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &image};
     vkUpdateDescriptorSets(vulkan.device, 1, &write, 0, nullptr);
+    *object |= CUtexObject(filtered) << 32;
     return 0;
 }
 
-inline CUresult cuTexObjectDestroy(CUtexObject object) { return vulkan.taken[object] = false; }
+inline CUresult cuTexObjectDestroy(CUtexObject object) { return vulkan.taken[object >> 32][uint32_t(object)] = false; }

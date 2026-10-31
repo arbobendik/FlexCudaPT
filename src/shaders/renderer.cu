@@ -590,13 +590,15 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
             const bool repeat = (op->height >> 24 & 3) == 0;
-            const unsigned long long image = op->height >> 31 ? scene.images[op->texel] : 0; // Its texture, once
+            const unsigned long long image = op->height >> 31 ? scene.images[2 * op->texel] : 0; // Its texture, once
             float x = (repeat ? wrap(top[-1].x) : top[-1].x) * op->width;
             float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
             float4 color;
             if (op->code == IMAGE || op->code == ALPHA)
                 color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
-            if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
+            if ((op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
+                color = tex2D<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y); // extension
+            else if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
                 color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
