@@ -1283,6 +1283,37 @@ Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), 
 pixels = render()
 assert numpy.isfinite(pixels).all() and pixels.mean() > 0, 'values a program keeps for reuse'
 
+# Values kept past the slots: 32 parts of a noise of the camera's point, which nothing bakes, summed into a height
+# displacing by bump and summed again, the other way round, into the base color, live from the normal's bump, emitted
+# first, to the base color: more at once than the slots hold. Those kept longest are computed again where read, so it
+# exports, and renders as its sums folded, the noise
+spill = plane('spill', 3, 0)
+tree = spill.id_data
+bpy.data.objects['spill'].active_material.displacement_method = 'BUMP'
+noise, displacement = tree.nodes.new('ShaderNodeTexNoise'), tree.nodes.new('ShaderNodeDisplacement')
+tree.links.new(tree.nodes.new('ShaderNodeTexCoord').outputs['Camera'], noise.inputs['Vector'])
+noise = noise.outputs['Fac']
+tree.links.new(displacement.outputs[0], tree.get_output_node('CYCLES').inputs['Displacement'])
+def total(sockets):  # Their sum, in their order
+    for socket in sockets[1:]:
+        part = tree.nodes.new('ShaderNodeMath')
+        tree.links.new(sockets[0], part.inputs[0]), tree.links.new(socket, part.inputs[1])
+        sockets = [part.outputs[0]]
+    return sockets[0]
+parts = []
+for k in range(1, 33):
+    part = tree.nodes.new('ShaderNodeMath')
+    part.operation, part.inputs[1].default_value = 'MULTIPLY', k / 528  # Summing to the noise
+    tree.links.new(noise, part.inputs[0]), parts.append(part.outputs[0])
+tree.links.new(total(parts), displacement.inputs['Height'])
+tree.links.new(total(parts[::-1]), spill.inputs['Base Color'])
+scene.camera.location.x = 3
+kept = render()
+tree.links.new(noise, displacement.inputs['Height']), tree.links.new(noise, spill.inputs['Base Color'])
+folded = render()
+assert numpy.allclose(kept, folded, atol=2e-3), ('values computed again past the slots',
+    float(abs(kept - folded).max()))
+
 # Flex keeps its scene between an animation's frames, each reaching the renderer as an update of what changed and
 # rendering exactly as a fresh export of it does: in three jobs of two frames, as Blender updates whatever is animated
 # every frame, a move, a material's value, then a deformation, a light's change and objects removed and added. The
