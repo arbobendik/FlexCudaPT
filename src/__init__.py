@@ -111,9 +111,25 @@ VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density', 0), 'VOLUME_SCATTER': (1, '
     'PRINCIPLED_VOLUME': ('Absorption Color', 'Density', 'Color')}
 # Luminance of a color and mean of a vector, as Blender converts them to values
 WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
-# Blender's material and camera panels the engine shows
-PANELS = ('EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'MATERIAL_PT_custom_props',
-    'MATERIAL_PT_animation', *(panel.__name__ for panel in CAMERA_PANELS))
+# Blender's panels the engine shows, those whose settings it reads; lights and an object's visibility, which it reads in
+# part, it draws in panels of its own. A feature that reads a setting shows its panel.
+PANELS = (
+    # A material's node tree: its surface, its volume, its displacement under Bump or Both, and its pass index
+    'EEVEE_MATERIAL_PT_context_material', 'EEVEE_MATERIAL_PT_surface', 'EEVEE_MATERIAL_PT_volume',
+    'EEVEE_MATERIAL_PT_displacement', 'EEVEE_MATERIAL_PT_settings', 'MATERIAL_PT_custom_props', 'MATERIAL_PT_animation',
+    'EEVEE_WORLD_PT_surface', 'WORLD_PT_context_world', 'WORLD_PT_animation', 'WORLD_PT_custom_props',  # Its surface
+    # A mesh as evaluated: its modifiers' and shape keys' result, UV maps, color attributes and texture space
+    'DATA_PT_context_mesh', 'DATA_PT_shape_keys', 'DATA_PT_uv_texture', 'DATA_PT_vertex_colors',
+    'DATA_PT_mesh_attributes', 'DATA_PT_texture_space', 'DATA_PT_mesh_animation', 'DATA_PT_custom_props_mesh',
+    'DATA_PT_vertex_groups', 'DATA_PT_remesh', 'DATA_PT_customdata',
+    'DATA_PT_context_light', 'DATA_PT_light_animation', 'DATA_PT_custom_props_light',
+    # The output: its format, file and frames, the compositor's work on it, its color management, and simplify
+    'RENDER_PT_format', 'RENDER_PT_output', 'RENDER_PT_frame_range', 'RENDER_PT_post_processing',
+    'RENDER_PT_color_management', 'RENDER_PT_color_management_advanced', 'RENDER_PT_color_management_curves',
+    'RENDER_PT_color_management_white_balance', 'RENDER_PT_color_management_working_space',
+    'RENDER_PT_output_color_management', 'RENDER_PT_simplify', 'RENDER_PT_simplify_render',
+    'RENDER_PT_simplify_viewport',
+    *(panel.__name__ for panel in CAMERA_PANELS if panel.__name__ != 'DATA_PT_camera_stereoscopy'))  # One view
 SCENE, REQUEST, UPDATE, STEPS = range(4)  # Kinds of what the renderer is piped
 
 def span(node):  # Of the points of a curves node's curves
@@ -1097,6 +1113,7 @@ def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blad
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
+    bl_use_shading_nodes_custom = False  # The Shader Editor offers Blender's shading nodes, which the engine resolves
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1620,8 +1637,39 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, 'flex_denoise')
-        for name in ('resolution_x', 'resolution_y', 'resolution_percentage'):
-            self.layout.prop(context.scene.render, name)
+
+class DATA_PT_flex_light(bpy.types.Panel):  # A light's settings the engine reads, of its type
+    bl_label = 'Light'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'data'
+
+    @classmethod
+    def poll(cls, context): return context.engine == Flex.bl_idname and context.light
+
+    def draw(self, context):
+        light = context.light
+        self.layout.row().prop(light, 'type', expand=True)
+        self.layout.use_property_split = True
+        for name in ('color', 'energy', *{'POINT': ('shadow_soft_size',), 'SPOT': ('shadow_soft_size', 'spot_size'),
+                'SUN': ('angle',), 'AREA': ('shape', 'size', 'size_y')}[light.type]):
+            if name != 'size_y' or light.shape in {'RECTANGLE', 'ELLIPSE'}: self.layout.prop(light, name)
+
+class OBJECT_PT_flex_visibility(bpy.types.Panel):  # An object's visibility the engine reads
+    bl_label = 'Visibility'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'object'
+
+    @classmethod
+    def poll(cls, context): return context.engine == Flex.bl_idname and context.object
+
+    def draw(self, context):
+        self.layout.use_property_split = True
+        shown = self.layout.column(heading='Show In')
+        shown.prop(context.object, 'hide_viewport', text='Viewports', toggle=False, invert_checkbox=True)
+        shown.prop(context.object, 'hide_render', text='Renders', toggle=False, invert_checkbox=True)
+        self.layout.column(heading='Ray Visibility').prop(context.object, 'visible_camera', text='Camera')
 
 class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
     bl_label = 'ReSTIR'
@@ -1697,7 +1745,7 @@ def release(scene, *_):  # Only once the job is done: setting it off frees the d
         scene.render.use_persistent_data = False
 HANDLERS = ((bpy.app.handlers.render_init, persist), (bpy.app.handlers.render_pre, restore),
     (bpy.app.handlers.render_complete, release), (bpy.app.handlers.render_cancel, release))
-CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir)
+CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir, DATA_PT_flex_light, OBJECT_PT_flex_visibility)
 
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
 def reload():

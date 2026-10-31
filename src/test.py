@@ -1392,3 +1392,26 @@ with offscreen.bind():
 drawn = lit(drawn)
 assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (0.4 * SIZE / 3) ** 2, \
     f'ortho viewport {drawn}'
+
+# Flex offers Blender's shading nodes, shows the panels whose settings it reads, hides those it ignores, and draws its
+# own of what it reads of a light and of an object's visibility, each property one the export reads
+assert getattr(flex.Flex, 'bl_use_shading_nodes_custom', True) is False, 'shading nodes offered'
+shown = lambda name: flex.Flex.bl_idname in getattr(bpy.types, name).COMPAT_ENGINES
+assert all(map(shown, ('RENDER_PT_format', 'RENDER_PT_color_management', 'RENDER_PT_post_processing',
+    'RENDER_PT_simplify', 'DATA_PT_uv_texture', 'DATA_PT_shape_keys', 'EEVEE_MATERIAL_PT_volume',
+    'EEVEE_WORLD_PT_surface', 'DATA_PT_context_light'))), 'panels shown'
+assert not any(map(shown, ('RENDER_PT_stereoscopy', 'DATA_PT_camera_stereoscopy', 'RENDER_PT_stamp',
+    'RENDER_PT_time_stretching', 'MATERIAL_PT_preview', 'NODE_PT_texture_mapping', 'DATA_PT_EEVEE_light'))), 'hidden'
+class Layout(types.SimpleNamespace):  # Records the properties a panel draws
+    def __getattr__(self, name): return (lambda *args, **kwargs: self.drawn.append(args[1])) if name == 'prop' \
+        else lambda *args, **kwargs: self
+def drawn(panel, **context):
+    panel.draw(types.SimpleNamespace(layout=(layout := Layout(drawn=[]))), types.SimpleNamespace(**context))
+    return layout.drawn
+for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size', 'spot_size']), ('SUN', ['angle']),
+        ('AREA', ['shape', 'size', 'size_y'])):
+    light = bpy.data.lights.new(kind, kind)
+    if kind == 'AREA': light.shape = 'RECTANGLE'
+    assert drawn(flex.DATA_PT_flex_light, light=light) == ['type', 'color', 'energy', *read], ('light read', kind)
+assert drawn(flex.OBJECT_PT_flex_visibility, object=bpy.data.objects[0]) == ['hide_viewport', 'hide_render',
+    'visible_camera'], 'visibility read'
