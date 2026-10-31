@@ -96,5 +96,5 @@ struct Scene {
     unsigned long long anchorHandle; float3 *anchorVertices, *anchorNormals; LightNode* anchorLights;
     unsigned long long* anchorTrails;
     float4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
-    float4** images; // Of each image the materials read, by its index
+    unsigned long long* images; // Of each image the materials read, its texture by its index
 };
