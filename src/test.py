@@ -769,8 +769,10 @@ exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
 slot = next(i for i, item in enumerate(depsgraph.object_instances)
     if item.is_instance and item.object.original == member)
-first = exporter.slots[slot][0]
-before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=32 + 36 * first).copy()
+exporter.requests = io.BytesIO()  # Its triangles where they are, as an update pipes them
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
+before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16).copy()
 instance.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
@@ -792,11 +794,13 @@ twist.deform_axis, twist.angle = 'X', 0.6
 bpy.context.view_layer.update()
 exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
-first, count = exporter.slots[next(i for i, item in enumerate(depsgraph.object_instances)
-    if item.object.original == twisted)][:2]
-piped = exporter.requests.getvalue()
-generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=32 + 36 * (2 * numpy.frombuffer(piped, 'I', count=2)[1]
-    + first)).reshape(-1, 3)
+def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
+    header, k = numpy.frombuffer(piped, 'I', count=10), [*exporter.slots].index(i)
+    first, count = numpy.frombuffer(piped, 'I', count=2, offset=40 + 172 * k)
+    return numpy.frombuffer(piped, 'f', count=9 * count, offset=40 + 172 * header[9] + 36 * (2 * header[8]
+        + first)).reshape(-1, 3)
+generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
+    if item.object.original == twisted))
 mesh = twisted.data
 rest = (numpy.array([v.co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(mesh.texspace_size)) + 0.5
 assert all(numpy.isclose(rest, point, atol=1e-5).all(1).any() for point in generated), 'undeformed generated coordinates'
@@ -815,9 +819,7 @@ Viewport.engine.start(exporter, depsgraph)
 piped, kinds = exporter.requests.getvalue(), set()
 for i, item in enumerate(depsgraph.object_instances):
     if item.object.original in made and item.object.type == 'MESH':
-        first, count = exporter.slots[i][:2]
-        generated = numpy.frombuffer(piped, 'f', count=9 * count, offset=32 + 36 * (2 * numpy.frombuffer(piped, 'I',
-            count=2)[1] + first)).reshape(-1, 3)
+        generated = generated_of(piped, i)
         mesh, kinds = item.object.to_mesh(), kinds | {item.object.original.type}
         orco = (numpy.array([v.undeformed_co for v in mesh.vertices]) - mesh.texspace_location) / (2 * numpy.array(
             mesh.texspace_size)) + 0.5
@@ -1303,10 +1305,13 @@ def tapped(self, depsgraph):
 during = []  # The flag as each frame renders, and a file saved then
 def saving(scene, *_): during.append(scene.render.use_persistent_data), bpy.data.libraries.write(
     bpy.app.tempdir + 'during.blend', {scene})
-for animate, expected in ((lambda: keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
-        flex.UPDATE), (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
+for animate, expected in ((lambda: (keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
+        keys(bpy.data.objects['moving'], 'rotation_euler', (0, 0, 0), (0.3, 0.2, 0.5)),
+        keys(bpy.data.objects['moving'], 'scale', (1, 1, 1), (1, 1.5, 1))), flex.UPDATE),
+        (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
         (0.1, 0.6, 0.2, 1)), flex.STEPS), (lambda: keys(sealed.inputs['Base Color'], 'default_value',
-        (0.8, 0.8, 0.8, 1), (0.3, 0.6, 0.9, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'], 'value', 0, 1),
+        (0.8, 0.8, 0.8, 1), (0.3, 0.6, 0.9, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'],
+        'value', 0, 1),
         keys(lamp.data, 'energy', 20, 40), keys(lamp.data, 'color', (1, 1, 1), (1, 0.5, 0.2)),
         keys(bpy.data.objects['leaving'], 'hide_render', False, True),
         keys(bpy.data.objects['arriving'], 'hide_render', True, False)), flex.SCENE)):
@@ -1376,3 +1381,29 @@ with offscreen.bind():
 drawn = lit(drawn)
 assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (0.4 * SIZE / 3) ** 2, \
     f'ortho viewport {drawn}'
+
+# Instances of one mesh pipe its arrays once: a collection instanced three times, one of them turned and stretched,
+# exports one mesh and three instances, and renders exactly as three copies of their own of it do, which the renderer
+# expands alike
+scene = new('instances')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('instances'), (0, 0, 2))
+plane('shared', 0, 0, 0.4)
+shared, ob = bpy.data.collections.new('shared'), bpy.data.objects['shared']
+scene.collection.objects.unlink(ob), shared.objects.link(ob)
+empties = [bpy.data.objects.new(f'instance {x}', None) for x in (-0.5, 0, 0.5)]
+for empty, x in zip(empties, (-0.5, 0, 0.5)):
+    empty.instance_type, empty.instance_collection, empty.location = 'COLLECTION', shared, (x, 0, 0)
+    scene.collection.objects.link(empty)
+empties[2].rotation_euler, empties[2].scale = (0.3, 0.2, 0.5), (1, 1.5, 1)
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+header = numpy.frombuffer(exporter.requests.getvalue(), 'I', count=10)
+assert header[0] == flex.SCENE and (header[1], header[8], header[9]) == (6, 2, 3), 'mesh piped once'
+instanced = render()
+for empty in empties:
+    copy = bpy.data.objects.new('copy', ob.data.copy())  # Placed as the empty, as the mesh sits at the origin
+    copy.location, copy.rotation_euler, copy.scale = empty.location, empty.rotation_euler, empty.scale
+    scene.collection.objects.link(copy)
+    empty.hide_render = True
+assert numpy.array_equal(instanced, render()), 'instances as copies'
