@@ -1202,6 +1202,22 @@ for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.isclose(render().mean(), 1, rtol=0.01), f'parallel sun {device}'
 
+# A mesh renders with the UV map marked for rendering, as in Cycles, not the one selected for editing: a plane's render
+# map of a quarter everywhere is the one it exports
+scene = new('render uv')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('render uv'), (0, 0, 2))
+plane('render uv', 0, 0)
+mesh = bpy.data.meshes['render uv']
+quarter = mesh.uv_layers.new(name='render')
+quarter.uv.foreach_set('vector', [0.25] * 2 * len(mesh.loops))
+quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The grid's own UVs selected
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+piped = exporter.requests.getvalue()
+count = numpy.frombuffer(piped, 'I', count=2)[1]  # Triangles, after the four columns of 9 floats each before UVs
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * count, offset=32 + 36 * 4 * count) == 0.25), 'render uv map'
+
 # A chain of mixes, each multiplying the last into itself, shares the first one's expression 2^10 times: folding, keying
 # and summarizing each shared part once, its export takes linear time, not exponential
 scene = new('chain')
