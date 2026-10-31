@@ -501,8 +501,8 @@ glass.id_data.links.new(absorption.outputs[0], glass.id_data.nodes['Material Out
 pixels = render()[24:40, 24:40]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.exp(numpy.array(COLOR) - 1) ** 0.5, rtol=0.02), 'absorption'
 # From inside the slab, 0.25 above its bottom face, the camera sees the sky through that depth of it, and an emitter in
-# the slab 0.15 below it through that depth
-scene.camera.location.z = 0
+# the slab 0.15 below it through that depth: its rays start at its clip start, made short of those
+scene.camera.location.z, scene.camera.data.clip_start = 0, 1e-3
 pixels = render()[24:40, 24:40]
 assert numpy.allclose(pixels.mean((0, 1)), numpy.exp(numpy.array(COLOR) - 1) ** 0.25, rtol=0.02), 'camera in a volume'
 mesh = bpy.data.objects['slab'].data  # Its first face of a material filling no volume, the slab's others still filling it
@@ -527,7 +527,7 @@ scatter = glass.id_data.nodes.new('ShaderNodeVolumeScatter')
 glass.id_data.links.new(scatter.outputs[0], glass.id_data.nodes['Material Output'].inputs['Volume'])
 pixels = render()[24:40, 24:40]
 assert abs(pixels.mean() - 1) < 0.02, 'camera in a scattering volume'
-scene.camera.location.z = 1
+scene.camera.location.z, scene.camera.data.clip_start = 1, 0.1
 # Colored instead, the slab tints the light by its base color at each of its two sides, by the color squared
 glass.id_data.links.remove(glass.id_data.nodes['Material Output'].inputs['Volume'].links[0])
 glass.inputs['Base Color'].default_value = (*COLOR, 1)
@@ -1376,3 +1376,31 @@ with offscreen.bind():
 drawn = lit(drawn)
 assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (0.4 * SIZE / 3) ** 2, \
     f'ortho viewport {drawn}'
+
+# Camera rays start at the clip start: an emitter shows through a perspective camera past a black plane nearer than it.
+# And they start in the volume there, not the camera's: in an absorbing cube with the near plane below it, through
+# either camera, a floor shines unattenuated. On both backends
+scene = new('clip')
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.flex_samples = 64
+scene.camera = add(bpy.data.cameras.new('clip'), (0, 0, 2))
+plane('wall', 0, 0, 4).inputs['Base Color'].default_value = (0, 0, 0, 1)
+glow = plane('glow', 0, 0, 8)
+glow.inputs['Base Color'].default_value, glow.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+glow.inputs['Emission Strength'].default_value = 1
+murk = shape('murk', lambda bm: bmesh.ops.create_cube(bm, size=2), (0, 0, 0)).id_data
+murk.nodes.remove(murk.nodes['Principled BSDF'])
+absorb = murk.nodes.new('ShaderNodeVolumeAbsorption')
+absorb.inputs['Color'].default_value, absorb.inputs['Density'].default_value = (0.2, 0.2, 0.2, 1), 2
+murk.links.new(absorb.outputs[0], murk.nodes['Material Output'].inputs['Volume'])
+wall, glow, cube, camera = (bpy.data.objects[name] for name in ('wall', 'glow', 'murk', 'clip'))
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    wall.location.z, wall.hide_render, glow.location.z, cube.hide_render = 1.5, False, -1, True
+    camera.location.z, camera.data.type, camera.data.clip_start = 2, 'PERSP', 1
+    assert abs(render().mean() - 1) < 0.05, f'clip start {device}'
+    wall.hide_render, glow.location.z, cube.hide_render = True, -2, False
+    camera.location.z, camera.data.clip_start = 0.9, 2
+    for kind in ('ORTHO', 'PERSP'):
+        camera.data.type = kind
+        assert abs(render().mean() - 1) < 0.05, f'medium at the near plane {kind} {device}'
