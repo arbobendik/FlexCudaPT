@@ -473,13 +473,14 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
     if (extension == 3)
         x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height),
         x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
-    const float4* texels = op.height >> 31 ? scene.images[op.texel] // Bit 31: an image by its index; 30: of only bakes'
-        : (op.height >> 30 & 1 ? scene.bakeTexels : scene.texels) + op.texel;
-    if (!(op.height >> 26 & 1)) return texels[y * width + x];
-    const unsigned word = ((const unsigned*)texels)[y * width + x];
+    const float4* texels = (op.height >> 30 & 1 ? scene.bakeTexels : scene.texels) + op.texel; // Bit 30: only bakes'
+    const bool image = op.height >> 31; // Bit 31: an image's texture, by its index, read at the texel's center
+    if (!(op.height >> 26 & 1))
+        return image ? tex2D<float4>(scene.images[op.texel], x + 0.5f, y + 0.5f) : texels[y * width + x];
+    const uchar4 b = image ? tex2D<uchar4>(scene.images[op.texel], x + 0.5f, y + 0.5f)
+        : ((const uchar4*)texels)[y * width + x];
     const float level = 1.0f / 255;
-    const float4 c = make_float4((word & 255) * level, (word >> 8 & 255) * level, (word >> 16 & 255) * level,
-        (word >> 24) * level);
+    const float4 c = make_float4(b.x * level, b.y * level, b.z * level, b.w * level);
     return op.height >> 29 & 1 ? make_float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }
 // The vector transformed from its object into the world or back, or from the world into the camera's space or back, by
