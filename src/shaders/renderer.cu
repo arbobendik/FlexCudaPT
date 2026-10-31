@@ -464,7 +464,7 @@ __device__ float spline(float t, int k) {
 }
 // Of the op's image by its extension: repeated, extended, clipped to none or mirrored; an RGBA8 image's bytes as the
 // floats Blender reads them as, k / 255, those of sRGB colors decoded to linear
-__device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
+__device__ float4 texel(const Scene& scene, const Op& op, unsigned long long image, int x, int y) {
     const int width = op.width, height = op.height & 0xFFFFFF, extension = op.height >> 24 & 3;
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return make_float4(0, 0, 0, 0);
     if (extension == 1) x = min(max(x, 0), width - 1), y = min(max(y, 0), height - 1);
@@ -474,10 +474,9 @@ __device__ float4 texel(const Scene& scene, const Op& op, int x, int y) {
         x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height),
         x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
     const float4* texels = (op.height >> 30 & 1 ? scene.bakeTexels : scene.texels) + op.texel; // Bit 30: only bakes'
-    const bool image = op.height >> 31; // Bit 31: an image's texture, by its index, read at the texel's center
-    if (!(op.height >> 26 & 1))
-        return image ? tex2D<float4>(scene.images[op.texel], x + 0.5f, y + 0.5f) : texels[y * width + x];
-    const uchar4 b = image ? tex2D<uchar4>(scene.images[op.texel], x + 0.5f, y + 0.5f)
+    if (!(op.height >> 26 & 1)) // Bit 31: an image's texture, the read's, at the texel's center
+        return op.height >> 31 ? tex2D<float4>(image, x + 0.5f, y + 0.5f) : texels[y * width + x];
+    const uchar4 b = op.height >> 31 ? tex2D<uchar4>(image, x + 0.5f, y + 0.5f)
         : ((const uchar4*)texels)[y * width + x];
     const float level = 1.0f / 255;
     const float4 c = make_float4(b.x * level, b.y * level, b.z * level, b.w * level);
@@ -591,21 +590,24 @@ __device__ Surface shade(const Scene& scene, unsigned program, float3 normal, Sl
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
             const bool repeat = (op->height >> 24 & 3) == 0;
+            const unsigned long long image = op->height >> 31 ? scene.images[op->texel] : 0; // Its texture, once
             float x = (repeat ? wrap(top[-1].x) : top[-1].x) * op->width;
             float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
-            float4 color = texel(scene, *op, int(floorf(x)), int(floorf(y)));
+            float4 color;
+            if (op->code == IMAGE || op->code == ALPHA)
+                color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
             if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
-                color = mix(mix(texel(scene, *op, i, j), texel(scene, *op, i + 1, j), x - i),
-                    mix(texel(scene, *op, i, j + 1), texel(scene, *op, i + 1, j + 1), x - i), y - j);
+                color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
+                    mix(texel(scene, *op, image, i, j + 1), texel(scene, *op, image, i + 1, j + 1), x - i), y - j);
             }
             if (op->code == IMAGE_CUBIC || op->code == ALPHA_CUBIC) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
                 color = make_float4(0, 0, 0, 0);
                 for (int k = 0; k < 16; ++k) {
-                    const float4 t = texel(scene, *op, i + k % 4 - 1, j + k / 4 - 1);
+                    const float4 t = texel(scene, *op, image, i + k % 4 - 1, j + k / 4 - 1);
                     const float w = spline(x - i, k % 4) * spline(y - j, k / 4);
                     color = make_float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
                 }
