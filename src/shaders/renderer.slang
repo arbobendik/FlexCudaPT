@@ -46,6 +46,8 @@ struct Scene {
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
+[[vk::binding(1, 0)]] Texture2D<float4> filtered[]; // And as floats, RGBA8 as k / 255 decoded from sRGB if it is
+[[vk::binding(2, 0)]] SamplerState samplers[4]; // Linear, by extension: repeated, extended, clipped to none, mirrored
 
 static const int STACK = 64;
 static const int SLOTS = 32; // Values a program keeps for reuse, as the extension's
@@ -615,12 +617,15 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 && !used(ALPHA_CUBIC)) break;
             const uint width = asuint(op.value.y), height = asuint(op.value.z);
             const bool repeat = (height >> 24 & 3) == 0;
-            const uint image = height >> 31 != 0 ? uint(scene.images[asuint(op.value.x)]) : 0; // Its texture, once
+            const uint image = height >> 31 != 0 ? uint(scene.images[2 * asuint(op.value.x)]) : 0; // Its texture, once
             float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * width;
             float y = (repeat ? wrap(stack[top - 1].y) : stack[top - 1].y) * (height & 0xFFFFFF);
             float4 color;
             if (op.code == IMAGE || op.code == ALPHA) color = texel(scene, *op, image, int(floor(x)), int(floor(y)));
-            if (op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) {
+            if ((op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) && height >> 31 != 0) // In hardware, by its
+                color = filtered[NonUniformResourceIndex(uint(scene.images[2 * asuint(op.value.x) + 1]))].SampleLevel(
+                    samplers[height >> 24 & 3], stack[top - 1].xy, 0); // extension
+            else if (op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floor(x)), j = int(floor(y));
                 color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
