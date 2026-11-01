@@ -237,10 +237,11 @@ READ_COSTS = {'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches of the read
 # Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
 # all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
 def jacobian(expression, input):
-    at = lambda e, value: (value if e == (input,) else numpy.full(3, 0.5) if len(e) == 1 and e[0] in POINTS
-        or e[0] == 'NOISE'
-        else (e[0], *(at(operand, value) for operand in e[1:]))) if isinstance(e, tuple) else e
-    values = [fold(at(expression, numpy.full(3, 0.5) + 1e-3 * step)) for step in (*numpy.eye(3), numpy.zeros(3))]
+    def at(e, value, memo):  # The expression at the value, each shared part once and shared still, as fold() takes it
+        if isinstance(e, tuple) and id(e) not in memo: memo[id(e)] = value if e == (input,) else numpy.full(3, 0.5) \
+            if len(e) == 1 and e[0] in POINTS or e[0] == 'NOISE' else (e[0], *(at(part, value, memo) for part in e[1:]))
+        return memo[id(e)] if isinstance(e, tuple) else e
+    values = [fold(at(expression, numpy.full(3, 0.5) + 1e-3 * step, {})) for step in (*numpy.eye(3), numpy.zeros(3))]
     if any(isinstance(value, tuple) for value in values): return math.inf
     return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
 
