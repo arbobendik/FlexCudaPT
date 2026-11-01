@@ -827,10 +827,10 @@ exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
 slot = next(i for i, item in enumerate(depsgraph.object_instances)
     if item.is_instance and item.object.original == member)
-exporter.requests = io.BytesIO()  # Its triangles where they are, as an update pipes them
+exporter.requests = io.BytesIO()  # Its transform where it is, as an update pipes it
 Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
     object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
-before = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16).copy()
+before = numpy.frombuffer(exporter.requests.getvalue(), 'f')[-21:-9].copy()  # Its transform's rows, before its adjugate
 instance.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
@@ -838,8 +838,8 @@ Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene
     object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
 assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=4)) == (flex.UPDATE, 1,
     *exporter.slots[slot][:2]), 'instancer update'
-after = numpy.frombuffer(exporter.requests.getvalue(), 'f', count=9, offset=16)
-assert numpy.allclose(after.reshape(3, 3), before.reshape(3, 3) + (1, 0, 0)), 'instance motion'
+after = numpy.frombuffer(exporter.requests.getvalue(), 'f')[-21:-9]
+assert numpy.allclose(after - before, (0, 0, 0, 1) + (0,) * 8), 'instance motion'
 # Twisted, a mesh keeps the generated coordinates of its vertices undeformed, those of a final render, though this
 # depsgraph, evaluated for no render as the viewport's first, holds no orco layer
 twisted = bpy.data.objects.new('twisted', bpy.data.meshes.new('twisted'))
@@ -1611,9 +1611,9 @@ assert 0.99 <= furnace <= 1.002, 'sheen furnace'
 
 # Flex keeps its scene between an animation's frames, each reaching the renderer as an update of what changed and
 # rendering exactly as a fresh export of it does: in three jobs of two frames, as Blender updates whatever is animated
-# every frame, a move, a material's value, then a deformation, a light's change and objects removed and added. The
-# user's persistent data reads as it was, during the job too, so saved files never hold Flex's; the engine is let go
-# once a job is done or cancelled; and a user's own persistent data stays on
+# every frame, two objects' moves, a material's value, then a deformation, a light's change and objects removed and
+# added. The user's persistent data reads as it was, during the job too, so saved files never hold Flex's; the engine
+# is let go once a job is done or cancelled; and a user's own persistent data stays on
 scene = new('frames')
 bpy.context.window.scene = scene
 scene.camera = add(bpy.data.cameras.new('frames'), (0, 0, 2))
@@ -1647,7 +1647,8 @@ def saving(scene, *_): during.append(scene.render.use_persistent_data), bpy.data
     bpy.app.tempdir + 'during.blend', {scene})
 for animate, expected in ((lambda: (keys(bpy.data.objects['moving'], 'location', (-0.5, 0.5, 0), (-0.3, 0.5, 0)),
         keys(bpy.data.objects['moving'], 'rotation_euler', (0, 0, 0), (0.3, 0.2, 0.5)),
-        keys(bpy.data.objects['moving'], 'scale', (1, 1, 1), (1, 1.5, 1))), flex.UPDATE),
+        keys(bpy.data.objects['moving'], 'scale', (1, 1, 1), (1, 1.5, 1)),
+        keys(bpy.data.objects['tinted'], 'location', (0.5, 0.5, 0), (0.6, 0.4, 0))), flex.UPDATE),
         (lambda: keys(tinted.inputs['Base Color'], 'default_value', (0.8, 0.2, 0.1, 1),
         (0.1, 0.6, 0.2, 1)), flex.STEPS), (lambda: keys(sealed.inputs['Base Color'], 'default_value',
         (0.8, 0.8, 0.8, 1), (0.3, 0.6, 0.9, 1)), flex.STEPS), (lambda: (keys(bent.data.shape_keys.key_blocks['bent'],
@@ -1806,6 +1807,21 @@ Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 header = numpy.frombuffer(exporter.requests.getvalue(), 'I', count=10)
 assert header[0] == flex.SCENE and (header[1], header[8], header[9]) == (6, 2, 3), 'mesh piped once'
 instanced = render()
+# A bake reads its own mesh's UVs past the instances sharing one: a noise baked over a plane after them renders as
+# when they're hidden, its plane's mesh then the first; the bottom rows see it alone
+baking = plane('baking', 0, -0.5, 0.3)
+baking.inputs['Base Color'].default_value, baking.inputs['Emission Strength'].default_value = (0, 0, 0, 1), 1
+noise = baking.id_data.nodes.new('ShaderNodeTexNoise')
+noise.inputs['Scale'].default_value = 50
+baking.id_data.links.new(noise.outputs['Color'], baking.inputs['Emission Color'])
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+baked = render()[:20]
+for empty in empties: empty.hide_render = True
+alone = render()[:20]
+for empty in empties: empty.hide_render = False
+assert exporter.placed and numpy.abs(alone - baked).mean() < 0.005, 'bake past shared meshes'
+bpy.data.objects['baking'].hide_render = True
 for empty in empties:
     copy = bpy.data.objects.new('copy', ob.data.copy())  # Placed as the empty, as the mesh sits at the origin
     copy.location, copy.rotation_euler, copy.scale = empty.location, empty.rotation_euler, empty.scale

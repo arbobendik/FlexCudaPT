@@ -198,26 +198,39 @@ inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNod
     return nodes[index] = node;
 }
 
-// Light BVH over the instances' emitting triangles, as leaves of their bounds, normal and power pi * emitted * area,
-// else a leaf of no power, uploaded to the GPU with the trails to the triangles' leaves (pbrt-v4's bit trails)
+// A point of a mesh through an instance's transform, in doubles
+inline float3 place(const Instance& instance, float3 p) {
+    const float* m = instance.matrix;
+    const auto row = [&](int j) { return float(double(p.x) * m[4 * j] + double(p.y) * m[4 * j + 1]
+        + double(p.z) * m[4 * j + 2] + m[4 * j + 3]); };
+    return {row(0), row(1), row(2)};
+}
+
+// Light BVH over the instances' emitting triangles, as leaves of their bounds, normal and power pi * emitted * area in
+// the world, else a leaf of no power, uploaded to the GPU with the trails to the triangles' leaves by their numbers in
+// the scene's order (pbrt-v4's bit trails)
 inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Instance>& instances,
     const std::vector<Material>& materials, unsigned long long*& trails) {
     std::vector<LightNode> lights, nodes;
-    for (unsigned i = 0; i < instances.size(); ++i) for (unsigned t = instances[i].key; t < instances[i].key +
-        instances[i].count; ++t) {
-        const float3 a = vertices[3 * t], b = vertices[3 * t + 1], c = vertices[3 * t + 2], n = cross(b - a, c - a);
-        if (materials[t].emitted * length(n) > 0)
+    for (unsigned i = 0; i < instances.size(); ++i) for (unsigned m = instances[i].first; m < instances[i].first +
+        instances[i].count; ++m) {
+        const unsigned t = instances[i].key + m - instances[i].first;
+        if (!(materials[t].emitted > 0)) continue;
+        const float3 a = place(instances[i], vertices[3 * m]), b = place(instances[i], vertices[3 * m + 1]);
+        const float3 c = place(instances[i], vertices[3 * m + 2]), n = cross(b - a, c - a);
+        if (length(n) > 0)
             lights.push_back({lower(lower(a, b), c), upper(upper(a, b), c), n * (1 / length(n)),
-                float(M_PI) * materials[t].emitted * length(n) / 2, 1, t, i, true});
+                float(M_PI) * materials[t].emitted * length(n) / 2, 1, m, i, true});
     }
     if (lights.empty()) lights.push_back({.leaf = true});
     buildLights(nodes, lights, 0, lights.size());
     std::vector<unsigned long long> trail(nodes.size()), leaves(materials.size());
     std::vector<unsigned> depth(nodes.size());
     for (size_t i = 0; i < nodes.size(); ++i) {
-        if (nodes[i].leaf) leaves[nodes[i].child] = trail[i];
-        else trail[i + 1] = trail[i], trail[nodes[i].child] = trail[i] | 1ull << depth[i],
+        if (!nodes[i].leaf) trail[i + 1] = trail[i], trail[nodes[i].child] = trail[i] | 1ull << depth[i],
             depth[i + 1] = depth[nodes[i].child] = depth[i] + 1;
+        else if (nodes[i].phi > 0) leaves[instances[nodes[i].instance].key + nodes[i].child
+            - instances[nodes[i].instance].first] = trail[i]; // Not the placeholder of a scene without emitters
     }
     trails = (unsigned long long*)allocate(leaves.size() * sizeof(unsigned long long), leaves.data());
     return (LightNode*)allocate(nodes.size() * sizeof(LightNode), nodes.data());
@@ -326,31 +339,13 @@ inline unsigned long long buildScene(OptixDeviceContext context, const float3* v
     return buildInstances(context, placed, top);
 }
 
-// Of an array per triangle corner of the meshes, the array per corner of the instances, in world space as the extension
-// made it: a point through the transform and a normal through the adjugate in doubles in its order, normalized
-template <typename T, typename F>
-std::vector<T> expand(const std::vector<Instance>& instances, size_t count, F corner) {
-    std::vector<T> mesh(3 * count), all;
-    receive(mesh.data(), sizeof(T), mesh.size());
-    for (const Instance& instance : instances) for (unsigned c = 3 * instance.first; c < 3 * (instance.first +
-        instance.count); ++c) all.push_back(instance.world ? mesh[c] : corner(instance, mesh[c]));
-    return all;
-}
-inline float3 place(const Instance& instance, float3 p) {
-    const float* m = instance.matrix;
-    const auto row = [&](int j) { return float(double(p.x) * m[4 * j] + double(p.y) * m[4 * j + 1]
-        + double(p.z) * m[4 * j + 2] + m[4 * j + 3]); };
-    return {row(0), row(1), row(2)};
-}
-inline float3 turn(const Instance& instance, float3 n) {
-    const float* a = instance.adjugate;
-    double v[3];
-    for (int j = 0; j < 3; ++j) v[j] = double(n.x) * a[j] + double(n.y) * a[3 + j] + double(n.z) * a[6 + j];
-    const double length = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    return {float(v[0] / length), float(v[1] / length), float(v[2] / length)};
-}
 template <typename T> T* upload(const std::vector<T>& data) {
     return (T*)allocate(data.size() * sizeof(T), data.data());
+}
+template <typename T> std::vector<T> read(size_t count) { // Piped in
+    std::vector<T> data(count);
+    receive(data.data(), sizeof(T), count);
+    return data;
 }
 // Rows and adjugate of no transform, of an instance of a mesh in world space
 constexpr float IDENTITY_ROWS[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
@@ -359,9 +354,8 @@ constexpr float IDENTITY_ADJUGATE[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 // Scene piped in by the extension into scene, in place of the one of arrays: triangle, step, texel, baked texel, bake,
 // mesh triangle, instance and image counts, the meshes' arrays, the instances, then the steps, the texels, the
 // programs of its bakes, which the bake pass fills the baked texels after those piped with, and each image's float4
-// count and its texels. Its instances' triangles are the
-// scene's in world space. The vertices last denoised stay the previous ones while the triangle count does, others are
-// freed.
+// count and its texels. The meshes keep their own space, those of instances in world space untransformed. The vertices
+// last denoised stay the previous ones while the meshes' triangle count does, others are freed.
 inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
     for (auto [object, filtering, data, bytes] : loaded.textures) {
@@ -372,7 +366,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     }
     loaded.textures.clear();
     float3* const last = scene.vertices;
-    const unsigned count = scene.count;
+    const size_t corners = loaded.vertices.size();
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
     receive(&header, sizeof(header), 1);
     const size_t meshes = header.triangles;
@@ -380,29 +374,22 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     instances.resize(header.instances);
     for (Instance& instance : instances) receive(&instance, offsetof(Instance, key), 1);
     std::erase_if(instances, [](const Instance& instance) { return !instance.count; }); // Of no triangles, nothing
-    const auto copy = [](const Instance&, auto value) { return value; };
-    loaded.vertices = expand<float3>(instances, meshes, place), scene.vertices = upload(loaded.vertices);
-    scene.normals = upload(expand<float3>(instances, meshes, turn));
-    scene.generated = upload(expand<float3>(instances, meshes, copy));
-    scene.objects = upload(expand<float3>(instances, meshes, copy));
-    scene.uvs = upload(expand<float2>(instances, meshes, copy));
-    scene.colors = upload(expand<float4>(instances, meshes, copy));
-    scene.tangents = upload(expand<float4>(instances, meshes, copy));
-    std::vector<float> passes(meshes); // Per triangle of the meshes its material's pass index, then its material
-    std::vector<Material> table(meshes + 1); // and the world's
-    receive(passes.data(), sizeof(float), meshes);
-    receive(table.data(), sizeof(Material), meshes + 1);
-    std::vector<float> keyed;
+    loaded.vertices = read<float3>(3 * meshes), scene.vertices = upload(loaded.vertices);
+    scene.normals = upload(read<float3>(3 * meshes)), scene.generated = upload(read<float3>(3 * meshes));
+    scene.objects = upload(read<float3>(3 * meshes)), scene.uvs = upload(read<float2>(3 * meshes));
+    scene.colors = upload(read<float4>(3 * meshes)), scene.tangents = upload(read<float4>(3 * meshes));
+    scene.passes = upload(read<float>(meshes)); // Per triangle of the meshes its material's pass index, then its
+    const std::vector<Material> table = read<Material>(meshes + 1); // material and the world's
     loaded.materials.clear();
     for (Instance& instance : instances) {
         instance.key = loaded.materials.size();
-        for (unsigned t = instance.first; t < instance.first + instance.count; ++t)
-            keyed.push_back(passes[t]), loaded.materials.push_back(table[t]);
-        instance.first = instance.key, instance.world = true; // Its own mesh, expanded into world space (temporary)
-        std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
+        const auto mesh = table.begin() + instance.first;
+        loaded.materials.insert(loaded.materials.end(), mesh, mesh + instance.count);
+        if (instance.world)
+            std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
     loaded.materials.push_back(table[meshes]);
-    scene.instances = upload(instances), scene.instanceCount = instances.size(), scene.passes = upload(keyed);
+    scene.instances = upload(instances), scene.instanceCount = instances.size();
     scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
@@ -424,7 +411,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
-    if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
+    if (3 * meshes != corners) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
@@ -458,8 +445,9 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
 }
 
 // Triangles of objects that moved or deformed, piped in by the extension into the scene in place, as FlexLight updates
-// the slots of its instances: a count of ranges, then per range its first triangle and triangle count and theirs in
-// the scene's order. The light BVH is built anew and the BVH refit. The vertices last denoised stay the previous ones.
+// the slots of its instances: a count of ranges, then per range its first triangle's number and triangle count in the
+// scene's order, each an instance's, then their arrays, in place, and its transform's rows and adjugate. The light BVH
+// is built anew and the meshes' BVHs refit. The vertices last denoised stay the previous ones.
 inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     const size_t bytes = loaded.vertices.size() * sizeof(float3);
     if (scene.previousVertices == scene.vertices) {
@@ -471,22 +459,29 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
     for (unsigned r = 0; r < ranges; ++r) {
         struct { unsigned first, count; } range;
         receive(&range, sizeof(range), 1);
+        const auto instance = std::upper_bound(loaded.instances.begin(), loaded.instances.end(), range.first,
+            [](unsigned key, const Instance& instance) { return key < instance.key; }) - loaded.instances.begin() - 1;
+        const unsigned first = loaded.instances[instance].first; // Of the instance's mesh, in place
         std::vector<Info> scratch(range.count); // As large as any of the range's arrays piped in, then its info
-        update(scene.vertices, 3 * range.first, 3 * range.count, &loaded.vertices[3 * range.first]);
-        update(scene.normals, 3 * range.first, 3 * range.count, scratch.data());
-        update(scene.generated, 3 * range.first, 3 * range.count, scratch.data());
-        update(scene.objects, 3 * range.first, 3 * range.count, scratch.data());
-        update(scene.uvs, 3 * range.first, 3 * range.count, scratch.data());
-        update(scene.colors, 3 * range.first, 3 * range.count, scratch.data());
-        update(scene.tangents, 3 * range.first, 3 * range.count, scratch.data());
+        update(scene.vertices, 3 * first, 3 * range.count, &loaded.vertices[3 * first]);
+        update(scene.normals, 3 * first, 3 * range.count, scratch.data());
+        update(scene.generated, 3 * first, 3 * range.count, scratch.data());
+        update(scene.objects, 3 * first, 3 * range.count, scratch.data());
+        update(scene.uvs, 3 * first, 3 * range.count, scratch.data());
+        update(scene.colors, 3 * first, 3 * range.count, scratch.data());
+        update(scene.tangents, 3 * first, 3 * range.count, scratch.data());
         receive(scratch.data(), sizeof(Info), range.count); // Its instance's info per triangle, with
         std::vector<float> passes(range.count); // the triangle's pass index
         for (unsigned t = 0; t < range.count; ++t) passes[t] = scratch[t].material;
-        CHECK(cuMemcpyHtoD((CUdeviceptr)(scene.passes + range.first), passes.data(), range.count * sizeof(float)));
-        const auto instance = std::upper_bound(loaded.instances.begin(), loaded.instances.end(), range.first,
-            [](unsigned key, const Instance& instance) { return key < instance.key; }) - loaded.instances.begin() - 1;
-        if (range.count)
-            CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[instance].info, scratch.data(), sizeof(Info)));
+        CHECK(cuMemcpyHtoD((CUdeviceptr)(scene.passes + first), passes.data(), range.count * sizeof(float)));
+        float rows[21]; // Its transform's rows and adjugate, of no use to a mesh in world space
+        receive(rows, sizeof(float), 21);
+        Instance& entry = loaded.instances[instance];
+        if (range.count) {
+            if (!entry.world) std::copy_n(rows, 12, entry.matrix), std::copy_n(rows + 12, 9, entry.adjugate);
+            entry.info = scratch[0];
+            CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[instance], &entry, sizeof(Instance)));
+        }
     }
     scene.handle = buildScene(context, scene.vertices, loaded.instances, loaded.meshes, OPTIX_BUILD_OPERATION_UPDATE,
         loaded.top);

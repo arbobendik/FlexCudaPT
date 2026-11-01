@@ -1603,7 +1603,8 @@ extern "C" __global__ void __raygen__bake() {
     }
     // Inside, or on an edge the triangle takes by the top-left rule, exactly on a grid of 512ths of a texel that
     // the triangles of a shared edge agree on: one of them bakes each texel
-    const float2* uv = scene.uvs + 3 * tile.x;
+    const Hit unit = owned(scene, tile.x); // Its mesh's triangle, whose UVs it bakes over
+    const float2* uv = scene.uvs + 3 * unit.triangle;
     long long px[3], py[3];
     for (int k = 0; k < 3; ++k)
         px[k] = floorf(uv[k].x * bake.width * 512), py[k] = floorf(uv[k].y * bake.height * 512);
@@ -1617,7 +1618,6 @@ extern "C" __global__ void __raygen__bake() {
     const float2 e = uv[1] - uv[0], f = uv[2] - uv[0];
     const float2 c = make_float2((x + 0.5f) / bake.width - uv[0].x, (y + 0.5f) / bake.height - uv[0].y);
     const float det = e.x * f.y - e.y * f.x;
-    const Hit unit = owned(scene, tile.x);
     const Point point = at(scene, unit.instance, unit.triangle, (c.x * f.y - c.y * f.x) / det,
         (e.x * c.y - e.y * c.x) / det);
     const float3 z = make_float3(0, 0, 1), albedo = shade(scene, program, z, SlangMatrix<float, 3, 3>{}, point, z,
