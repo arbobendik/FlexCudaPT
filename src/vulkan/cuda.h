@@ -16,8 +16,9 @@ typedef struct CUstream_st* CUstream;
 // sets, in CUDA's order: of 4 channels, read whole
 typedef unsigned long long CUtexObject;
 typedef struct CUarray_st { VkImage image; VkDeviceMemory memory; VkImageView view, filtered; VkExtent3D extent;
-    bool bytes; }* CUarray; // Its view of whole texels, and of filtered ones once a texture filters it
-enum { CU_AD_FORMAT_UNSIGNED_INT8 = 0x01, CU_AD_FORMAT_FLOAT = 0x20, CU_MEMORYTYPE_HOST = 1, CU_MEMORYTYPE_ARRAY = 3,
+    int format; }* CUarray; // Its view of whole texels, and of floats, of RGBA8 once its filtering texture reads it
+enum { CU_AD_FORMAT_UNSIGNED_INT8 = 0x01, CU_AD_FORMAT_UNSIGNED_INT16 = 0x02, CU_AD_FORMAT_HALF = 0x10,
+    CU_AD_FORMAT_FLOAT = 0x20, CU_MEMORYTYPE_HOST = 1, CU_MEMORYTYPE_ARRAY = 3,
     CU_RESOURCE_TYPE_ARRAY = 0, CU_TR_ADDRESS_MODE_WRAP = 0, CU_TR_ADDRESS_MODE_CLAMP = 1,
     CU_TR_ADDRESS_MODE_MIRROR = 2, CU_TR_ADDRESS_MODE_BORDER = 3, CU_TR_FILTER_MODE_POINT = 0,
     CU_TR_FILTER_MODE_LINEAR = 1, CU_TRSF_READ_AS_INTEGER = 1, CU_TRSF_NORMALIZED_COORDINATES = 2,
@@ -299,13 +300,14 @@ inline CUresult cuMemsetD8(CUdeviceptr ptr, unsigned char value, size_t count) {
     return cuMemsetD32(ptr, value * 0x01010101u, (count + 3) / 4);
 }
 
-// An image of an array's texels as unsigned integers, bytes or floats' words, which the shaders load whole
+// An image of an array's texels: bytes or floats' words as unsigned integers, halves, or 16-bit UNORM
 inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc) {
-    *array = new CUarray_st{.extent = {uint32_t(desc->Width), uint32_t(desc->Height), 1},
-        .bytes = desc->Format != CU_AD_FORMAT_FLOAT};
+    *array = new CUarray_st{.extent = {uint32_t(desc->Width), uint32_t(desc->Height), 1}, .format = desc->Format};
     const VkImageCreateInfo info{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D,
-        .format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_UINT : VK_FORMAT_R8G8B8A8_UINT,
+        .format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_UINT : desc->Format == CU_AD_FORMAT_HALF
+        ? VK_FORMAT_R16G16B16A16_SFLOAT : desc->Format == CU_AD_FORMAT_UNSIGNED_INT16 ? VK_FORMAT_R16G16B16A16_UNORM
+        : VK_FORMAT_R8G8B8A8_UINT,
         .extent = (*array)->extent, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     if (VkResult result = vkCreateImage(vulkan.device, &info, nullptr, &(*array)->image)) return result;
@@ -316,10 +318,13 @@ inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc)
         .memoryTypeIndex = uint32_t(memoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))};
     if (VkResult result = vkAllocateMemory(vulkan.device, &allocate, nullptr, &(*array)->memory)) return result;
     if (VkResult result = vkBindImageMemory(vulkan.device, (*array)->image, (*array)->memory, 0)) return result;
-    const VkImageViewCreateInfo view{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = (*array)->image,
+    VkImageViewCreateInfo view{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = (*array)->image,
         .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = info.format,
         .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
-    return vkCreateImageView(vulkan.device, &view, nullptr, &(*array)->view);
+    if (VkResult result = vkCreateImageView(vulkan.device, &view, nullptr, &(*array)->view)) return result;
+    if (desc->Format == CU_AD_FORMAT_UNSIGNED_INT8) return 0; // Its view of floats as its texture reads it, sRGB or not
+    view.format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_SFLOAT : info.format;
+    return vkCreateImageView(vulkan.device, &view, nullptr, &(*array)->filtered);
 }
 
 // An image's layout changed, after all earlier commands' writes and before all later commands' accesses
@@ -369,16 +374,16 @@ inline CUresult cuArrayDestroy(CUarray array) {
 inline CUresult cuTexObjectCreate(CUtexObject* object, const CUDA_RESOURCE_DESC* resource,
     const CUDA_TEXTURE_DESC* texture, const void*) {
     const CUarray array = resource->res.array.hArray;
-    const bool filtered = texture->filterMode == CU_TR_FILTER_MODE_LINEAR;
+    const bool filtered = texture->filterMode == CU_TR_FILTER_MODE_LINEAR // Read as floats
+        || !(texture->flags & CU_TRSF_READ_AS_INTEGER);
     std::vector<bool>& taken = vulkan.taken[filtered];
     *object = std::find(taken.begin(), taken.end(), false) - taken.begin();
     if (*object == taken.size()) return VK_ERROR_OUT_OF_POOL_MEMORY;
     taken[*object] = true;
-    if (filtered) {
+    if (filtered && array->format == CU_AD_FORMAT_UNSIGNED_INT8) { // Its one filtering texture, RGBA8 as k / 255
         const VkImageViewCreateInfo view{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = array->image,
-            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = !array->bytes ? VK_FORMAT_R32G32B32A32_SFLOAT
-            : texture->flags & CU_TRSF_SRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
-            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = texture->flags & CU_TRSF_SRGB ? VK_FORMAT_R8G8B8A8_SRGB
+            : VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
         if (VkResult result = vkCreateImageView(vulkan.device, &view, nullptr, &array->filtered)) return result;
     }
     const VkDescriptorImageInfo image{.imageView = filtered ? array->filtered : array->view,
