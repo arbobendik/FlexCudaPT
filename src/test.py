@@ -1239,6 +1239,23 @@ chain.id_data.links.new(last, chain.inputs['Base Color'])
 start = time.perf_counter()
 Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), bpy.context.evaluated_depsgraph_get())
 assert time.perf_counter() - start < 1, 'shared expressions once'
+# An image read at a point of such a chain on the UV: measuring how fast the point moves along the UV, its parts
+# taken at a UV each once and shared still, its export takes linear time too
+read = plane('read', 2, 0)
+last = read.id_data.nodes.new('ShaderNodeTexCoord').outputs['UV']
+for _ in range(20):
+    mix = read.id_data.nodes.new('ShaderNodeMix')
+    mix.data_type, mix.blend_type, mix.inputs[7].default_value = 'RGBA', 'MULTIPLY', (0.9, 0.8, 0.7, 1)
+    mix.inputs['Factor'].default_value = 0.5
+    read.id_data.links.new(last, mix.inputs[6])
+    last = mix.outputs[2]
+image = read.id_data.nodes.new('ShaderNodeTexImage')
+image.image = texture.image
+read.id_data.links.new(last, image.inputs['Vector'])
+read.id_data.links.new(image.outputs['Color'], read.inputs['Base Color'])
+start = time.perf_counter()
+Viewport.engine.start(types.SimpleNamespace(visible=(), requests=io.BytesIO()), bpy.context.evaluated_depsgraph_get())
+assert time.perf_counter() - start < 1, 'shared points once'
 
 # Classroom's schoolDesk_wood rebuilt: one image three times under mappings and curves, mixed by the object's random
 # number, overlaid with a color attribute and bumping its diffuse shader by the mix. It keeps 37 values for reuse but
