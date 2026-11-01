@@ -199,13 +199,13 @@ inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNod
 // Light BVH over the emitting triangles, as leaves of their bounds, normal and power pi * emitted * area, else a leaf
 // of no power, uploaded to the GPU with the trails to the triangles' leaves (pbrt-v4's bit trails)
 inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Material>& materials,
-    unsigned long long*& trails) {
+    const std::vector<unsigned>& owners, unsigned long long*& trails) {
     std::vector<LightNode> lights, nodes;
     for (unsigned t = 0; t + 1 < materials.size(); ++t) {
         const float3 a = vertices[3 * t], b = vertices[3 * t + 1], c = vertices[3 * t + 2], n = cross(b - a, c - a);
         if (materials[t].emitted * length(n) > 0)
             lights.push_back({lower(lower(a, b), c), upper(upper(a, b), c), n * (1 / length(n)),
-                float(M_PI) * materials[t].emitted * length(n) / 2, 1, t, true});
+                float(M_PI) * materials[t].emitted * length(n) / 2, 1, t, owners[t], true});
     }
     if (lights.empty()) lights.push_back({.leaf = true});
     buildLights(nodes, lights, 0, lights.size());
@@ -373,6 +373,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
                 loaded.materials.push_back(table[t]);
     }
     loaded.materials.push_back(table[meshes]);
+    for (Instance& instance : instances) instance.first = instance.key; // As the meshes are expanded (temporary)
     scene.instances = upload(instances), scene.owners = upload(loaded.owners), scene.passes = upload(keyed);
     scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
