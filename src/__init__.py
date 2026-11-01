@@ -245,10 +245,10 @@ READ_COSTS = {'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches of the read
 # Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
 # all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
 def jacobian(expression, input):
-    at = lambda e, value: (value if e == (input,) else numpy.full(3, 0.5) if len(e) == 1 and e[0] in POINTS
-        or e[0] == 'NOISE'
-        else (e[0], *(at(operand, value) for operand in e[1:]))) if isinstance(e, tuple) else e
-    values = [fold(at(expression, numpy.full(3, 0.5) + 1e-3 * step)) for step in (*numpy.eye(3), numpy.zeros(3))]
+    at = lambda value: lambda e: value if e == (input,) else numpy.full(3, 0.5) if len(e) == 1 and e[0] in POINTS \
+        or e[0] == 'NOISE' else None  # The expression at the value, as fold() takes it
+    values = [fold(mapped(expression, at(numpy.full(3, 0.5) + 1e-3 * step), {}))
+        for step in (*numpy.eye(3), numpy.zeros(3))]
     if any(isinstance(value, tuple) for value in values): return math.inf
     return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
 
@@ -395,13 +395,15 @@ def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone:
                 numpy.r_[span, 1], size, repeat)  # Repeating, at the first object's corner, as it was baked there
     cache[key] = None
 
-def moved_to(expression, point, memo, leaf='UV'):  # The expression, or a surface, with its UV (or another leaf) at the
-    if isinstance(expression, list): return [moved_to(part, point, memo, leaf) for part in expression]  # point, each
-    if not isinstance(expression, tuple): return expression  # shared part once
-    if expression[0] == leaf: return point
-    if id(expression) not in memo: memo[id(expression)] = expression[0], *(moved_to(part, point, memo, leaf)
-        for part in expression[1:])
+def mapped(expression, change, memo):  # The expression, or a surface, its parts changed where change gives a value
+    if isinstance(expression, list): return [mapped(part, change, memo) for part in expression]  # (not None), each
+    if not isinstance(expression, tuple): return expression  # shared part once and shared still
+    if id(expression) not in memo: memo[id(expression)] = changed if (changed := change(expression)) is not None \
+        else (expression[0], *(mapped(part, change, memo) for part in expression[1:]))
     return memo[id(expression)]
+
+def moved_to(expression, point, memo, leaf='UV'):  # The expression, or a surface, with its UV (or another leaf) at the
+    return mapped(expression, lambda e: point if e[0] == leaf else None, memo)  # point
 
 def alpha_reads(expression, seen=None):  # Image samples whose alpha contributes to the resolved surface, each part
     seen = set() if seen is None else seen  # shared entered once
@@ -475,13 +477,8 @@ def folded(expression, memo):
     return name, *operands
 
 def unanimated(value, memo=None):  # The expression with its animated values, which its cut keeps from bakes, as
-    # constants
-    memo = {} if memo is None else memo
-    if isinstance(value, list): return [unanimated(part, memo) for part in value]
-    if not isinstance(value, tuple): return value
-    if id(value) not in memo: memo[id(value)] = unanimated(value[1], memo) if value[0] == 'ANIMATED' else (
-        value[0], *(unanimated(part, memo) for part in value[1:]))
-    return memo[id(value)]
+    memo = {} if memo is None else memo  # constants
+    return mapped(value, lambda e: unanimated(e[1], memo) if e[0] == 'ANIMATED' else None, memo)
 
 def nonzero(value):  # Whether a value resolved is an expression or a constant not zero, its animated ones as constants
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
