@@ -47,7 +47,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
 
     // Embedded PTX compiled for the steps the scene's programs take, bound in params, once the first scene's arrive
-    OptixPipelineCompileOptions compile{.numPayloadValues = 6, // The triangle a ray skips, a layer and its gathering
+    OptixPipelineCompileOptions compile{ // Rays traverse instances of BVHs of triangles
+        .traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
+        .numPayloadValues = 6, // The triangle a ray skips, a layer and its gathering
         .pipelineLaunchParamsVariableName = "params"};
     Params params{};
     const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};
@@ -129,8 +131,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     loadView(scene, 1); // For the first view to free like any later one's
     scene.vertices = scene.previousVertices = (float3*)allocate(0); // For the first scene to keep or free
     // The reservoirs the last view starting over ended with and their duplication, its camera and the scratch and
-    // output of the BVH of the scene it was traced in
-    CUdeviceptr anchor = allocate(0), anchorTemp = allocate(0), anchorOutput = allocate(0);
+    // output of the BVH of the scene it was traced in, and the buffer of the BVH over its instance
+    CUdeviceptr anchor = allocate(0), anchorTemp = allocate(0), anchorOutput = allocate(0), anchorTop = allocate(0);
     Camera anchorCamera{};
     scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
     scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
@@ -266,8 +268,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.anchorNormals = (float3*)copy((CUdeviceptr)scene.normals);
             scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
             scene.anchorTrails = (unsigned long long*)copy((CUdeviceptr)scene.trails);
-            scene.anchorHandle = buildBVH(context, (CUdeviceptr)scene.anchorVertices, scene.count,
-                OPTIX_BUILD_OPERATION_BUILD, anchorTemp, anchorOutput);
+            scene.anchorHandle = buildInstances(context, {identity(buildBVH(context, (CUdeviceptr)scene.anchorVertices,
+                scene.count, OPTIX_BUILD_OPERATION_BUILD, anchorTemp, anchorOutput))}, anchorTop);
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
