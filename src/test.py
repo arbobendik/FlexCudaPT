@@ -1790,7 +1790,7 @@ preferences.device = 'OPTIX'  # The default again, for the tests below
 
 # Instances of one mesh pipe its arrays once: a collection instanced three times, one of them turned and stretched,
 # exports one mesh and three instances, and renders exactly as three copies of their own of it do, which the renderer
-# expands alike
+# traces alike
 scene = new('instances')
 bpy.context.window.scene = scene
 scene.camera = add(bpy.data.cameras.new('instances'), (0, 0, 2))
@@ -1888,3 +1888,47 @@ for device in ('OPTIX', 'VULKAN'):
     print('LEAF', device, float(front), float(behind))
     assert front > 0.01 and behind < 1e-3 * front, ('leaf card lit through', device, float(front), float(behind))
 devices.device = 'OPTIX'
+# Rays reach a mesh in its own space through its instance's transform, its normals turned by the adjugate: a smooth
+# sphere turned and stretched unevenly under the sun shades as a copy of it with the transform applied to its mesh does,
+# on both backends
+scene = new('turned')
+bpy.context.window.scene = scene
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.camera = add(bpy.data.cameras.new('turned view'), (0, 0, 4))
+add(bpy.data.lights.new('turned sun', 'SUN'), (0, 0, 5), (0.5, 0.3, 0)).data.energy = math.pi
+shape('turned', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=48, v_segments=24, radius=1), (0, 0, 0),
+    (0.4, 0.3, 0.2))
+ball = bpy.data.objects['turned']
+ball.data.shade_smooth()
+ball.scale = (1, 0.5, 0.7)
+turned = [render_on(device) for device in ('OPTIX', 'VULKAN')]
+ball.data.transform(ball.matrix_world)
+ball.matrix_world = Matrix.Identity(4)
+for device, before in zip(('OPTIX', 'VULKAN'), turned):
+    after = render_on(device)
+    assert numpy.isclose(before.mean(), after.mean(), rtol=0.01), f'turned instance {device}'
+    assert numpy.allclose(blocks(before), blocks(after), atol=0.02), f'turned instance blocks {device}'
+# Mirrored by a negative scale, it shades as its mirrored copy, whose faces flip as applying the scale flips them
+ball.scale = (-1, 0.5, 0.7)
+mirrored = [render_on(device) for device in ('OPTIX', 'VULKAN')]
+ball.data.transform(ball.matrix_world)
+ball.data.flip_normals()
+ball.matrix_world = Matrix.Identity(4)
+for device, before in zip(('OPTIX', 'VULKAN'), mirrored):
+    after = render_on(device)
+    assert numpy.isclose(before.mean(), after.mean(), rtol=0.01), f'mirrored instance {device}'
+    assert numpy.allclose(blocks(before), blocks(after), atol=0.02), f'mirrored instance blocks {device}'
+preferences.device = 'OPTIX'
+
+# An object of no triangles adds none: a mesh of points alone, linked before a plane and placed apart from it, leaves
+# the render the plane's alone
+scene = new('none')
+bpy.context.window.scene = scene
+scene.camera = add(bpy.data.cameras.new('none'), (0, 0, 2))
+points = bpy.data.meshes.new('points')
+points.from_pydata([(0, 0, 0), (0.1, 0, 0), (0, 0.1, 0)], [], [])
+add(points, (0.5, 0, 0))
+plane('lone', -0.5, 0, 0.5)
+pointed = render()
+bpy.data.objects['points'].hide_render = True
+assert numpy.array_equal(pointed, render()), 'no triangles, no geometry'
