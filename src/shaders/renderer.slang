@@ -1634,7 +1634,8 @@ void bake(uint3 p, Scene* scene) {
         }
         return;
     }
-    float2* uv = scene.uvs + 3 * tile.x;
+    const Hit unit = owned(scene, tile.x); // Its mesh's triangle, whose UVs it bakes over
+    float2* uv = scene.uvs + 3 * unit.triangle;
     int64_t px[3], py[3];
     for (int k = 0; k < 3; ++k) {
         px[k] = int64_t(floor(uv[k].x * width * 512)); py[k] = int64_t(floor(uv[k].y * height * 512));
@@ -1648,7 +1649,6 @@ void bake(uint3 p, Scene* scene) {
     }
     const float2 e = uv[1] - uv[0], f = uv[2] - uv[0], c = float2((x + 0.5f) / width, (y + 0.5f) / height) - uv[0];
     const float det = e.x * f.y - e.y * f.x;
-    const Hit unit = owned(scene, tile.x);
     const Point point = at(scene, unit.instance, unit.triangle, (c.x * f.y - c.y * f.x) / det,
         (e.x * c.y - e.y * c.x) / det);
     const float3 albedo = shade(scene, program, float3(0, 0, 1), float3x3(float3(0), float3(0), float3(0)), point,
