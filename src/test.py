@@ -958,6 +958,28 @@ def resident():  # The texels the export pipes for the renderer to keep once bak
         exporter.shape[2].items() if isinstance(key, tuple) and height >> 31)
     return (struct.unpack('<11I', exporter.requests.getvalue()[:44])[3] + images) * 16 / 2 ** 20
 module['BAKE_TOLERANCE'] = tolerance  # As the planner has it again
+# A repeating bake read below the corner it was planned at, on both backends as live renders it: a plane before the
+# edge, its UVs 1.37 lower, reads the power's bake of an image 1023 texels wide where the camera looks, at points that
+# wrap from below zero. NVIDIA's Vulkan driver took a negative dividend's remainder as if unsigned, shifting the read
+# 2^32 mod 1023 = 4 texels: Vulkan's 99th percentile was 0.012, OptiX's 0.00023
+odd, texels = bpy.data.images.new('odd', 1023, 1023), numpy.random.default_rng(2).random((1023, 1023, 4), 'f')
+for axis in (0, 1): texels[..., :3] = sum(numpy.roll(texels[..., :3], k, axis) for k in range(16)) / 16
+texels[..., 3] = 1
+odd.pixels.foreach_set(texels.ravel())
+image.image, mapping.inputs['Scale'].default_value[:2] = odd, (1, 1)
+plane('front', 0, 0, 2)
+bpy.data.objects['front'].location.z, bpy.data.meshes['front'].materials[0] = 0.01, material
+front = bpy.data.meshes['front'].uv_layers.active.data
+front_uv = numpy.zeros(2 * len(front), 'f')
+front.foreach_get('uv', front_uv), front.foreach_set('uv', front_uv - 1.37)
+devices = bpy.context.preferences.addons[flex.__name__].preferences
+for device in ('OPTIX', 'VULKAN'):
+    devices.device, module['BAKE_TOLERANCE'] = device, tolerance
+    baked, module['BAKE_TOLERANCE'] = render(), -1  # Then every bake strays
+    assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, ('wrapped from below', device)
+devices.device, module['BAKE_TOLERANCE'] = 'OPTIX', tolerance
+bpy.data.objects.remove(bpy.data.objects['front'])
+image.image, mapping.inputs['Scale'].default_value[:2] = detail, (2, 2)
 alone = resident()
 power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Base Color'])
 assert (live := resident()) - alone > 3.9, ('bake inputs freed', alone, live)
