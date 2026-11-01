@@ -604,8 +604,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             float3 c[4];
             for (int k = 0; k < 4; ++k) {
                 const int a = j + k / 2, b = i + k % 2;
-                const uint t = (repeating ? (a % height + height) % height : min(max(a, 0), height - 1)) * width
-                    + (repeating ? (b % width + width) % width : min(max(b, 0), width - 1));
+                const uint t = (repeating ? (rem(a, height) + height) % height : min(max(a, 0), height - 1)) * width
+                    + (repeating ? (rem(b, width) + width) % width : min(max(b, 0), width - 1));
                 const uint4 pair = scene.texels[asuint(op.value.x) + t / 2];
                 const uint2 h = t % 2 == 0 ? pair.xy : pair.zw;
                 c[k] = float3(f16tof32(h.x), f16tof32(h.x >> 16), f16tof32(h.y));
