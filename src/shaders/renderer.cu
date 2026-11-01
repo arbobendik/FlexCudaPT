@@ -717,8 +717,15 @@ __device__ Corners corners(const float3* vertices, const Instance& instance, uns
 __device__ Corners cornerNormals(const float3* normals, const Instance& instance, unsigned triangle) {
     return {normals + 3 * triangle, instance};
 }
-// Instance of a triangle in the scene's order (temporary: its owner, of the meshes expanded)
-__device__ unsigned owner(const Scene& scene, unsigned triangle) { return scene.owners[triangle]; }
+// Instance of a triangle by its number in the scene's order: the last one numbered no higher, by bisection
+__device__ unsigned owner(const Scene& scene, unsigned number) {
+    unsigned low = 0, high = scene.instanceCount;
+    while (high - low > 1) {
+        const unsigned middle = (low + high) / 2;
+        (scene.instances[middle].key <= number ? low : high) = middle;
+    }
+    return low;
+}
 // Number in the scene's order of a triangle of an instance, which its material and trail and skipping it go by, and the
 // triangle of an instance a number names
 __device__ unsigned key(const Scene& scene, unsigned instance, unsigned triangle) {
@@ -838,9 +845,9 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
     if (!optixHitObjectIsHit()) return {NONE};
     distance = optixHitObjectGetRayTmax() - back;
     // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
-    const unsigned triangle = optixHitObjectGetPrimitiveIndex();
-    return {triangle, owner(scene, triangle), make_float2(__uint_as_float(optixHitObjectGetAttribute_0()),
-        __uint_as_float(optixHitObjectGetAttribute_1()))};
+    const unsigned instance = optixHitObjectGetInstanceIndex(), triangle = optixHitObjectGetPrimitiveIndex();
+    return {scene.instances[instance].first + triangle, instance,
+        make_float2(__uint_as_float(optixHitObjectGetAttribute_0()), __uint_as_float(optixHitObjectGetAttribute_1()))};
 }
 
 // Next layer along the ray from origin within far past the triangle after at distance at, by distance, then index, so
@@ -848,21 +855,24 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
 // slack, the order is the any-hit program's alone: the nearest hit past the layer, traversal culling beyond it, then of
 // the hits at exactly its distance the lowest index past the layer, every candidate skipped
 __device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, float far, float& at, unsigned after) {
-    unsigned layer = __float_as_uint(at), gather = __float_as_uint(INFINITY), index = NONE, u, v;
+    unsigned layer = __float_as_uint(at), gather = __float_as_uint(INFINITY), index = NONE, u, v, instance;
     optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), far, 0.0f, 255, OPTIX_RAY_FLAG_NONE,
-        0, 1, 0, after, layer, gather, index, u, v);
+        0, 1, 0, after, layer, gather, index, u, v, instance);
     if (!optixHitObjectIsHit()) return {NONE};
     at = optixHitObjectGetRayTmax(), gather = __float_as_uint(at);
     optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), at * (1 + 4.76837158203125e-7f), 0.0f,
-        255, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v);
-    return {index, index == NONE ? NONE : owner(scene, index), make_float2(__uint_as_float(u), __uint_as_float(v))};
+        255, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v, instance);
+    if (index == NONE) return {NONE};
+    return {scene.instances[instance].first + index - scene.instances[instance].key, instance,
+        make_float2(__uint_as_float(u), __uint_as_float(v))};
 }
 
-// Rays skip the triangle of payload 0. Rays past a layer, of it at the distance of payload 1, skip the triangles before it
-// by distance, then index; gathering at the distance of payload 2, they skip every candidate, keeping the lowest index
-// there and its barycentrics in payloads 3 to 5
+// Rays skip the triangle of payload 0. Rays past a layer, of it at the distance of payload 1, skip the triangles before
+// it by distance, then number; gathering at the distance of payload 2, they skip every candidate, keeping the lowest
+// number there, its barycentrics and its instance in payloads 3 to 6. Triangles go by their numbers in the scene's
+// order, each instance's id its first's
 extern "C" __global__ void __anyhit__skip() {
-    const unsigned triangle = optixGetPrimitiveIndex(), skip = optixGetPayload_0();
+    const unsigned triangle = optixGetInstanceId() + optixGetPrimitiveIndex(), skip = optixGetPayload_0();
     const float at = __uint_as_float(optixGetPayload_1());
     if (at == -INFINITY) {
         if (triangle == skip) optixIgnoreIntersection();
@@ -873,7 +883,8 @@ extern "C" __global__ void __anyhit__skip() {
         optixIgnoreIntersection();
     else if (gather != INFINITY) {
         if (t == gather && triangle < optixGetPayload_3())
-            optixSetPayload_3(triangle), optixSetPayload_4(optixGetAttribute_0()), optixSetPayload_5(optixGetAttribute_1());
+            optixSetPayload_3(triangle), optixSetPayload_4(optixGetAttribute_0()),
+                optixSetPayload_5(optixGetAttribute_1()), optixSetPayload_6(optixGetInstanceIndex());
         optixIgnoreIntersection();
     }
 }
