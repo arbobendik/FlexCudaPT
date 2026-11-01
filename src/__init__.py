@@ -1564,7 +1564,7 @@ class Flex(bpy.types.RenderEngine):
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
-            world = not key or i in volumes  # In world space: a light, under an update or filling a volume, kept apart
+            world = ob.type == 'LIGHT' or i in volumes  # In world space: a light or filling a volume, kept apart
             entry = (sum(map(len, columns[0])), len(index), world)
             # Triangles, normals turned as the faces turn (by the renderer for those in object space), a material of its
             # row each
@@ -1574,10 +1574,11 @@ class Flex(bpy.types.RenderEngine):
             table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row),
                 row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
             materials.append(table[index])
-            if not world: entries[key] = entry
+            if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'))
-        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
+        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene and
+        # its transform's rows and adjugate
         if moved:
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
@@ -1589,7 +1590,8 @@ class Flex(bpy.types.RenderEngine):
                 return values
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
-                *(column[k + 1].astype('f') for column in columns[:7]), info(k).astype('f')))))
+                *(column[k + 1].astype('f') for column in columns[:7]), info(k).astype('f'),
+                instances[k][3][:21].astype('f')))))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
