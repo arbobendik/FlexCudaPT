@@ -515,10 +515,12 @@ __device__ bool used(unsigned code) {
 }
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
-// incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped along its edges
+// incoming direction, on the back of its face or not, for the ray, of the info's object and the material's pass index;
+// heights are bumped along its edges
 // Inlined likewise
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, float3 normal,
-    SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray, const Info& info) {
+    SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
+    const Info& info, float material = 0) {
     float u, v;
     float3 generated, object, position;
     float4 color;
@@ -554,7 +556,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, f
             const int output = int(top[-1].x);
             top[-1] = output == 0 ? make_float3(info.location[0], info.location[1], info.location[2]) : output == 1
                 ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
-                * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? info.material : info.random);
+                * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
         CASE(NORMAL) *top++ = normal; break;
         CASE(POSITION) *top++ = position; break;
@@ -703,6 +705,8 @@ __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, floa
     const float3 tangent = a + (b - a) * s + (make_float3(p[2].x, p[2].y, p[2].z) - a) * t;
     return makeMatrix<float, 3, 3>(tangent, cross(n, tangent) * p[0].w, n);
 }
+// Instance of a triangle in the scene's order (temporary: its owner, of the meshes expanded)
+__device__ unsigned owner(const Scene& scene, unsigned triangle) { return scene.owners[triangle]; }
 // Of a triangle at its barycentrics
 __device__ Point at(const Scene& scene, unsigned triangle, float s, float t) {
     const float2* uv = scene.uvs + 3 * triangle;
@@ -734,16 +738,17 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned triangle, 
     float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* normals = scene.normals + 3 * triangle;
-    const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
-    const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
-    const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
+    const Info& object = scene.instances[owner(scene, triangle)].info;
+    const float3 a = transform(scene, normals[0], 5, object);
+    const float3 b = transform(scene, normals[1], 5, object);
+    const float3 c = transform(scene, normals[2], 5, object);
     unsigned program = emission ? scene.materials[triangle].emission : scene.materials[triangle].program;
     // Each layer's program follows the end of the one above it
     while (layer) layer -= scene.ops[program++].code == END;
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, triangle, s, t), -direction,
-        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, scene.infos[triangle]);
+        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, object, scene.passes[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
