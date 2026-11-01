@@ -505,9 +505,10 @@ float4 texel(Scene* scene, Op op, uint image, int x, int y) {
     const uint i = y * width + x;
     uint4* texels = ((asuint(op.value.z) >> 30 & 1) != 0 ? scene.bakeTexels : scene.texels) + asuint(op.value.x);
     const bool apart = asuint(op.value.z) >> 31 != 0; // Bit 31: an image's texture, the read's; 30: of only bakes'
-    const uint4 t = apart ? textures[NonUniformResourceIndex(image)].Load(int3(x, y, 0)) : uint4(0); // Its whole texel
-    if ((asuint(op.value.z) >> 26 & 1) == 0) return asfloat(apart ? t : texels[i]);
-    const uint4 b = apart ? t : texels[i / 4][i % 4] >> uint4(0, 8, 16, 24) & 255;
+    if ((asuint(op.value.z) >> 26 & 3) != 1) // Floats, halves or 16-bit UNORM, a texture's whole texel by its view of
+        return apart ? filtered[NonUniformResourceIndex(image)].Load(int3(x, y, 0)) : asfloat(texels[i]); // floats
+    const uint4 b = apart ? textures[NonUniformResourceIndex(image)].Load(int3(x, y, 0))
+        : texels[i / 4][i % 4] >> uint4(0, 8, 16, 24) & 255;
     const float4 c = float4(b) * (1.0f / 255);
     return (asuint(op.value.z) >> 29 & 1) != 0 ? float4(decode(c.x), decode(c.y), decode(c.z), c.w) : c;
 }

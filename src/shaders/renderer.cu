@@ -473,7 +473,7 @@ __device__ float4 texel(const Scene& scene, const Op& op, unsigned long long ima
         x = (x % (2 * width) + 2 * width) % (2 * width), y = (y % (2 * height) + 2 * height) % (2 * height),
         x = x < width ? x : 2 * width - 1 - x, y = y < height ? y : 2 * height - 1 - y;
     const float4* texels = (op.height >> 30 & 1 ? scene.bakeTexels : scene.texels) + op.texel; // Bit 30: only bakes'
-    if (!(op.height >> 26 & 1)) // Bit 31: an image's texture, the read's, at the texel's center
+    if ((op.height >> 26 & 3) != 1) // Floats, halves or 16-bit UNORM; bit 31: the read's texture, at the texel's center
         return op.height >> 31 ? tex2D<float4>(image, x + 0.5f, y + 0.5f) : texels[y * width + x];
     const uchar4 b = op.height >> 31 ? tex2D<uchar4>(image, x + 0.5f, y + 0.5f)
         : ((const uchar4*)texels)[y * width + x];
