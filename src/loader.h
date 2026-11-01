@@ -218,16 +218,18 @@ struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; s
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output, bakeOps; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUarray, size_t>> textures; };
 
-// An image piped in, of its width and height, its extension in bits 24 and 25, RGBA8 in bit 26 and sRGB in 29, as two
+// An image piped in, of its width and height, its extension in bits 24 and 25, in 26 and 27 its format (floats, RGBA8,
+// halves or 16-bit UNORM, read as k / 65535 rounded) and sRGB in 29, as two
 // textures: one the shaders read whole texels of, RGBA8 as their bytes, others as their floats; and one that filters
 // linearly, by its extension, RGBA8 as k / 255 decoded from sRGB if it is, to the image's index's place and the next
 inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject* objects) {
-    const bool bytes = shape >> 26 & 1;
-    const unsigned height = shape & 0xFFFFFF;
-    const size_t row = width * (bytes ? 4 : 16);
+    const unsigned form = shape >> 26 & 3, height = shape & 0xFFFFFF, sizes[] = {16, 4, 8, 8};
+    const size_t row = width * sizes[form];
     std::vector<char> texels((row * height + 15) / 16 * 16); // As piped, in whole float4s
     std::fread(texels.data(), 1, texels.size(), stdin);
-    const CUDA_ARRAY_DESCRIPTOR array{width, height, bytes ? CU_AD_FORMAT_UNSIGNED_INT8 : CU_AD_FORMAT_FLOAT, 4};
+    const decltype(CU_AD_FORMAT_FLOAT) formats[] = {CU_AD_FORMAT_FLOAT, CU_AD_FORMAT_UNSIGNED_INT8, CU_AD_FORMAT_HALF,
+        CU_AD_FORMAT_UNSIGNED_INT16};
+    const CUDA_ARRAY_DESCRIPTOR array{width, height, formats[form], 4};
     CUarray data;
     CHECK(cuArrayCreate(&data, &array));
     const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_HOST, .srcHost = texels.data(), .srcPitch = row,
@@ -235,7 +237,7 @@ inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject*
     CHECK(cuMemcpy2D(&copy));
     const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY, .res = {.array = {data}}};
     const CUDA_TEXTURE_DESC sampling{.addressMode = {CU_TR_ADDRESS_MODE_CLAMP, CU_TR_ADDRESS_MODE_CLAMP},
-        .filterMode = CU_TR_FILTER_MODE_POINT, .flags = CU_TRSF_READ_AS_INTEGER};
+        .filterMode = CU_TR_FILTER_MODE_POINT, .flags = form == 1 ? unsigned(CU_TRSF_READ_AS_INTEGER) : 0};
     const decltype(CU_TR_ADDRESS_MODE_WRAP) extensions[] = {CU_TR_ADDRESS_MODE_WRAP, CU_TR_ADDRESS_MODE_CLAMP,
         CU_TR_ADDRESS_MODE_BORDER, CU_TR_ADDRESS_MODE_MIRROR}, extension = extensions[shape >> 24 & 3];
     const CUDA_TEXTURE_DESC filtering{.addressMode = {extension, extension}, .filterMode = CU_TR_FILTER_MODE_LINEAR,

@@ -416,6 +416,15 @@ def alpha_reads(expression, seen=None):  # Image samples whose alpha contributes
             yield operands[-1].key
         for part in operands[:1] if name == 'UNASSOCIATE' else operands: yield from alpha_reads(part, seen)
 
+def differentiated(expression, seen=None, height=False):  # Images read in a Bump's heights, which it differentiates
+    seen = set() if seen is None else seen
+    if (id(expression), height) in seen: return
+    seen.add((id(expression), height))
+    if isinstance(expression, ImageRead) and height: yield expression.node.image
+    elif isinstance(expression, (list, tuple)):
+        bump = isinstance(expression, tuple) and expression[0] == 'BUMP'
+        for k, part in enumerate(expression): yield from differentiated(part, seen, height or bump and 2 <= k <= 4)
+
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
 # textures of their mean. Without slots it counts in uses each expression met at the point it is read at, a height
 # shifted by a bump read at its shift, entering none twice; with them those met again are kept in a slot and loaded.
@@ -1220,6 +1229,7 @@ class Flex(bpy.types.RenderEngine):
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
+        derived = set()  # Images a Bump differentiates, kept floats
         baked, bakes, units, summaries, placed, again = [0], [], {}, {}, [], []  # Texels baked after those piped, each
         # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
         # unit's place, and the bakes to run again. A unit's texture's steps, and the end before its program with its
@@ -1320,6 +1330,7 @@ class Flex(bpy.types.RenderEngine):
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
             surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
+            derived.update(differentiated(surface))
             if cut:  # Its expressions as units, all, then its units cut
                 summaries.clear()
                 for attribute in surface: summarize(attribute, summaries, current.get('scales'))
@@ -1532,18 +1543,33 @@ class Flex(bpy.types.RenderEngine):
             image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
                 for k, (first, entry) in enumerate(zip(starts, texels))]  # shares its first with the next: no image
+            def compact(pixels):  # A float image's texture in the smallest format exact for it, or that its read
+                words = numpy.rint(pixels * 65535).astype('u2')  # rounds to within an ulp: 16-bit UNORM where Blender
+                if numpy.array_equal(words * (numpy.float32(1) / numpy.float32(65535)), pixels): return words, 3  # read
+                halves = pixels.astype(numpy.float16)  # k * (1 / 65535), its hardware read the correctly rounded k /
+                return (halves, 2) if numpy.array_equal(halves, pixels) else (pixels, 0)  # 65535; halves where exact
+            # Filtered in hardware, 16-bit UNORM errs by up to half its ulp and halves round to halves, which a Bump's
+            # differences magnify: the images it differentiates keep floats
+            derived = {entry[0] for key, entry in textures.items() if isinstance(key, tuple) and key[0] in derived}
+            formats = {first: compact(entry) for first, entry, side in zip(starts, texels, apart)  # Bits 26 and 27: 2
+                if side == 2 and not image[first][1] >> 26 & 1 and first not in derived}  # halves, 3 16-bit UNORM
+            form = lambda first: formats[first][1] << 26 if first in formats else 0
             at, counts = {}, [0, 0, 0]
             for first, entry, side in zip(starts, texels, apart):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
             def relocated(ops):  # Of their reads' and tiles' firsts, those piped apart flagged
-                return [(code, at[texel][0], width, height | at[texel][1] << 30) if (code == 0 or [*OPS][code] in READS)
-                    and not height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops]
+                return [(code, at[texel][0], width, height | at[texel][1] << 30 | form(texel))
+                    if (code == 0 or [*OPS][code] in READS) and not height >> 28 & 1 else (code, texel, width, height)
+                    for code, texel, width, height in ops]
             ops[:], aside[0][:] = relocated(ops), relocated(aside[0])
             placed = [(at[tile][0], key, unit, (hint, relocated(steps)), value)
                 for tile, key, unit, (hint, steps), value in placed]
-            textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30, entry[3])
+            textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30 | form(entry[0]),
+                entry[3])
                 for key, entry in textures.items() if not isinstance(key, Bake)})
-            images = [(entry, image[first]) for first, entry, side in zip(starts, texels, apart) if side == 2]
+            images = [(numpy.concatenate((formats[first][0], numpy.zeros(-len(entry) % 8, formats[first][0].dtype)))
+                .view('f') if form(first) else entry, (image[first][0], image[first][1] | form(first)))  # 16-bit: two
+                for first, entry, side in zip(starts, texels, apart) if side == 2]  # texels to a float4
             texels = [entry for entry, side in zip(texels, apart) if not side] + [
                 entry for entry, side in zip(texels, apart) if side == 1]
         piped, rows = self.piped if shaded else counts[0], len(ops)
@@ -1552,7 +1578,9 @@ class Flex(bpy.types.RenderEngine):
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures keep their shape
-                    textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)):
+                    textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
+                    or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
+                    if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
                 self.visible = None
                 return self.start(depsgraph)
             read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
