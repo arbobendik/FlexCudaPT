@@ -49,7 +49,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // Embedded PTX compiled for the steps the scene's programs take, bound in params, once the first scene's arrive
     OptixPipelineCompileOptions compile{ // Rays traverse instances of BVHs of triangles
         .traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
-        .numPayloadValues = 6, // The triangle a ray skips, a layer and its gathering
+        .numPayloadValues = 7, // The triangle a ray skips, a layer and its gathering
         .pipelineLaunchParamsVariableName = "params"};
     Params params{};
     const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};
@@ -130,9 +130,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
     loadView(scene, 1); // For the first view to free like any later one's
     scene.vertices = scene.previousVertices = (float3*)allocate(0); // For the first scene to keep or free
-    // The reservoirs the last view starting over ended with and their duplication, its camera and the scratch and
-    // output of the BVH of the scene it was traced in, and the buffer of the BVH over its instance
-    CUdeviceptr anchor = allocate(0), anchorTemp = allocate(0), anchorOutput = allocate(0), anchorTop = allocate(0);
+    // The reservoirs the last view starting over ended with and their duplication, its camera and the BVHs of the
+    // meshes of the scene it was traced in and over its instances
+    CUdeviceptr anchor = allocate(0), anchorTop = allocate(0);
+    std::map<unsigned, Mesh> anchorMeshes;
     Camera anchorCamera{};
     scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
     scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
@@ -183,7 +184,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
             }
             unsigned long long* trails;
-            LightNode* const lights = loadLights(loaded.vertices, materials, loaded.owners, trails);
+            LightNode* const lights = loadLights(loaded.vertices, loaded.instances, materials, trails);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.trails, (CUdeviceptr)trails);
             release((CUdeviceptr)scene.lights), release((CUdeviceptr)scene.trails);
@@ -262,14 +263,14 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         if (!reused && launched && done == samples) {
             CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * (sizeof(Reservoir) + sizeof(float))));
             for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
-                (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTemp, anchorOutput})
+                (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails})
                 release(array);
             scene.anchorVertices = (float3*)copy((CUdeviceptr)scene.vertices);
             scene.anchorNormals = (float3*)copy((CUdeviceptr)scene.normals);
             scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
             scene.anchorTrails = (unsigned long long*)copy((CUdeviceptr)scene.trails);
-            scene.anchorHandle = buildInstances(context, {identity(buildBVH(context, (CUdeviceptr)scene.anchorVertices,
-                scene.count, OPTIX_BUILD_OPERATION_BUILD, anchorTemp, anchorOutput))}, anchorTop);
+            scene.anchorHandle = buildScene(context, scene.anchorVertices, loaded.instances, anchorMeshes,
+                OPTIX_BUILD_OPERATION_BUILD, anchorTop);
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
