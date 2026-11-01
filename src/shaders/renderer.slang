@@ -725,12 +725,16 @@ float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
     const float3 tangent = a + (b - a) * s + (p[2].xyz - a) * t;
     return float3x3(tangent, cross(n, tangent) * p[0].w, n);
 }
+// A triangle's corners and normals in the world
+struct Corners { float3* p; __subscript(int k) -> float3 { get { return p[k]; } } };
+Corners corners(float3* vertices, Instance instance, uint triangle) { return Corners(vertices + 3 * triangle); }
+Corners cornerNormals(float3* normals, Instance instance, uint triangle) { return Corners(normals + 3 * triangle); }
 // Instance of a triangle in the scene's order
 uint owner(Scene* scene, uint triangle) { return scene.owners[triangle]; }
 // Of a triangle of an instance at its barycentrics
 Point at(Scene* scene, uint instance, uint triangle, float s, float t) {
     float2* uv = scene.uvs + 3 * triangle;
-    float3* vertex = scene.vertices + 3 * triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
     float3* generated = scene.generated + 3 * triangle;
     float3* object = scene.objects + 3 * triangle;
     float4* color = scene.colors + 3 * triangle;
@@ -744,7 +748,7 @@ Point at(Scene* scene, uint instance, uint triangle, float s, float t) {
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
 Point shifted(Scene* scene, Point point, Ray ray, int axis) {
     if (point.triangle == NONE) return point;
-    float3* vertex = scene.vertices + 3 * point.triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
     const float step = 1e-4f * max(ray.length, 1e-3f);
     return at(scene, point.instance, point.triangle,
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
@@ -753,8 +757,8 @@ Point shifted(Scene* scene, Point point, Ray ray, int axis) {
 // Surface of an instance's triangle at its barycentrics, in a layer of its material
 Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray,
     uint layer = 0, bool emission = false) {
-    float3* vertex = scene.vertices + 3 * triangle;
-    float3* normals = scene.normals + 3 * triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
+    const Corners normals = cornerNormals(scene.normals, scene.instances[instance], triangle);
     const Info object = scene.instances[instance].info;
     const float3 a = transform(scene, normals[0], 5, object);
     const float3 b = transform(scene, normals[1], 5, object);
@@ -860,18 +864,18 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
 bool pastLayer(float t, uint triangle, float at, uint after) { return t > at || (t == at && triangle > after); }
 
 
-float3 hitPosition(float3* vertices, Hit hit) { // On the triangles of vertices
-    vertices = vertices + 3 * hit.triangle;
-    return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
+float3 hitPosition(float3* vertices, Instance* instances, Hit hit) { // Of those vertices
+    const Corners vertex = corners(vertices, instances[hit.instance], hit.triangle);
+    return vertex[0] + (vertex[1] - vertex[0]) * hit.uv.x + (vertex[2] - vertex[0]) * hit.uv.y;
 }
 
 float3 faceNormal(Scene* scene, uint instance, uint triangle) {
-    float3* vertices = scene.vertices + 3 * triangle;
+    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
     return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
 }
 
 float3 smoothNormal(Scene* scene, Hit hit) {
-    float3* normals = scene.normals + 3 * hit.triangle;
+    const Corners normals = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
 
@@ -921,7 +925,8 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
         hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : hit.triangle);
         origin = origin + direction * distance, reach -= distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden != 0);
-    return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, hit), hit);
+    return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit),
+        hit);
 }
 
 // World: equirectangular texture along the direction
@@ -966,9 +971,8 @@ Medium volume(Surface surface) {
     if (node == 0 && !(importance(bounds(scene.lights[0]), origin, normal) > 0))
         return float3(0, 0, 0);
     const uint light = scene.lights[node].child, instance = owner(scene, light);
-    const float3 la = scene.vertices[3 * light];
-    const float3 lb = scene.vertices[3 * light + 1];
-    const float3 lc = scene.vertices[3 * light + 2];
+    const Corners corner = corners(scene.vertices, scene.instances[instance], light);
+    const float3 la = corner[0], lb = corner[1], lc = corner[2];
     const float3 lightNormal = cross(lb - la, lc - la);
     const float side = sqrt(random(state));
     const float along = random(state);
@@ -1023,7 +1027,7 @@ float lightPdf(Scene* scene, float3 origin, float3 normal, uint instance, uint t
             origin, normal, taken);
         node = taken == 1 ? scene.lights[node].child : node + 1;
     }
-    float3* vertices = scene.vertices + 3 * triangle;
+    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
     return scene.lights[node].child == triangle && importance(bounds(scene.lights[node]), origin, normal) > 0
         && (dot(normal, normal) == 0 || dot(normal, point - origin) > 0) ? solidAngle(probability,
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - origin) : 0;
@@ -1083,7 +1087,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
     // Medium the ray travels in, from the camera that of the volume it is in
     const uint held = scene.settings.medium, holder = held == NONE ? NONE : owner(scene, held);
     Medium medium = held == NONE ? NO_MEDIUM : volume(shade(scene, holder, held, 0, 0,
-        scene.normals[3 * held], direction, Ray(true, false, LOBE_NONE, 0.0f, distance)));
+        cornerNormals(scene.normals, scene.instances[holder], held)[0], direction,
+        Ray(true, false, LOBE_NONE, 0.0f, distance)));
     throughput = exp((medium.scatter - medium.extinction) * distance);
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (uint b = 0u; ; b++) {
@@ -1230,7 +1235,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         SampleBSDF lobe = SampleBSDF();
         if (connect) {
             if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene.vertices, hitOf(r.rc));
+                reconnection = hitPosition(scene.vertices, scene.instances, hitOf(r.rc));
                 dir = normalize(reconnection - origin);
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
@@ -1595,7 +1600,7 @@ void denoise(uint3 p, uint3 size, Scene* scene) {
     const Domain dom = pixelDomain(scene, scene.camera, index, size, index);
     const Camera last = scene.denoisedCamera;
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
-        : hitPosition(scene.previousVertices, dom.hit);
+        : hitPosition(scene.previousVertices, scene.instances, dom.hit);
     const float2 then = project(last, before, size);
     scene.flow[index] = project(scene.camera, dom.x1, size) - then;
     const int x = int(floor(then.x)), y = int(floor(then.y));
