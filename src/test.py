@@ -980,6 +980,20 @@ for device in ('OPTIX', 'VULKAN'):
 devices.device, module['BAKE_TOLERANCE'] = 'OPTIX', tolerance
 bpy.data.objects.remove(bpy.data.objects['front'])
 image.image, mapping.inputs['Scale'].default_value[:2] = detail, (2, 2)
+# A ramp over the power, a lookup of its table at the power's value, bakes over UV space as any other step on the UV
+# does and renders as live, all but 1% of pixels within 0.0018: a lookup reads a table, not an image, so it may root a
+# unit, which main took for an image's read and kept live
+ramp = power.nodes.new('ShaderNodeValToRGB')
+ramp.color_ramp.elements[0].color, ramp.color_ramp.elements[1].color = (0.1, 0.2, 0.9, 1), (1, 0.6, 0.1, 1)
+power.links.new(exponent.outputs[0], ramp.inputs['Fac'])
+power.links.new(ramp.outputs['Color'], power.nodes['Principled BSDF'].inputs['Emission Color'])
+exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert [key[0] for _, key, *_ in exporter.placed] == [None], 'ramps bake'
+baked, module['BAKE_TOLERANCE'] = render(), -1  # Every bake strays
+assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked ramp'
+module['BAKE_TOLERANCE'] = tolerance
+power.links.new(exponent.outputs[0], power.nodes['Principled BSDF'].inputs['Emission Color'])
 alone = resident()
 power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Base Color'])
 assert (live := resident()) - alone > 3.9, ('bake inputs freed', alone, live)
