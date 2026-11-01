@@ -25,7 +25,7 @@ constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 608;
+constexpr unsigned RECORD_STRIDE = 624;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -52,6 +52,9 @@ struct Info { float location[3], color[4], index, material, random, axes[9]; };
 // their points, their power and the cone of their normals around w. A leaf holds triangle child, an interior node is
 // followed by its first child, child is its second.
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child; bool leaf; };
+// Per instance of a mesh: its first triangle and count, whether its mesh is in world space, its transform's rows, the
+// adjugate turning its normals, its object's info and its first triangle in the scene's order
+struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; unsigned key; };
 // Point of a triangle at its barycentrics, triangle NONE for no point
 constexpr unsigned NONE = ~0u;
 struct Hit { unsigned triangle; float2 uv; };
@@ -77,9 +80,10 @@ struct Shift { float3 f; float jac; };
 struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
-// Per triangle: three vertices, normals, generated points, points in their object, UVs, colors and tangents, an info and one
-// material; the world's material last. The light BVH from its root and per triangle the trail to its leaf, from
-// the first bit: whether it takes the second child.
+// Per triangle: three vertices, normals, generated points, points in their object, UVs, colors and tangents, its
+// material's pass index, its instance (temporary: of the meshes expanded into the scene's triangles) and one material;
+// the world's material last. Per instance its entry. The light BVH from its root and per triangle the trail to its
+// leaf, from the first bit: whether it takes the second child.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
 // frame's initial and temporal reservoir and the shifts of the latter to the pixel's partner in each reuse texture.
 // The frame's number seeds it.
@@ -89,7 +93,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // trails.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated, *objects; float2* uvs;
-    float4 *colors, *tangents; Info* infos;
+    float4 *colors, *tangents; Instance* instances; unsigned* owners; float* passes;
     Material* materials; LightNode* lights; unsigned long long* trails; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
