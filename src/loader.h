@@ -211,9 +211,9 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 }
 
 // Of the scene last loaded: its arrays besides the vertices, the vertices and materials its light BVH is built from,
-// per triangle its instance, and the scratch and output its BVH is refit in
+// per triangle its instance, the scratch and output its BVH is refit in, and the buffer of the BVH over its instance
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Material> materials;
-    std::vector<unsigned> owners;
+    std::vector<unsigned> owners; CUdeviceptr top{};
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr temp, output, bakeOps; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUarray, size_t>> textures; };
 
@@ -263,6 +263,34 @@ inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr verti
     CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, scratch, output, sizes.outputSizeInBytes, &handle,
         nullptr, 0));
     return handle;
+}
+
+// BVH rays traverse, over instances of BVHs of triangles by their transforms, built into the buffer allocated for it
+// at its start, as Vulkan's levels start at multiples of 256, then the instances and its scratch, in place of the one it
+// held
+inline unsigned long long buildInstances(OptixDeviceContext context, const std::vector<OptixInstance>& instances,
+    CUdeviceptr& buffer) {
+    OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES,
+        .instanceArray = {.numInstances = unsigned(instances.size())}};
+    const OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
+    OptixAccelBufferSizes sizes{};
+    CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
+    const auto aligned = [](size_t bytes) { return (bytes + OPTIX_ACCEL_BUFFER_BYTE_ALIGNMENT - 1)
+        & ~size_t(OPTIX_ACCEL_BUFFER_BYTE_ALIGNMENT - 1); };
+    const size_t placed = aligned(sizes.outputSizeInBytes);
+    const size_t temp = placed + aligned(instances.size() * sizeof(OptixInstance));
+    if (buffer) release(buffer);
+    buffer = allocate(temp + sizes.tempSizeInBytes);
+    CHECK(cuMemcpyHtoD(buffer + placed, instances.data(), instances.size() * sizeof(OptixInstance)));
+    input.instanceArray.instances = buffer + placed;
+    unsigned long long handle;
+    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, buffer + temp, sizes.tempSizeInBytes, buffer,
+        sizes.outputSizeInBytes, &handle, nullptr, 0));
+    return handle;
+}
+// The one instance of a BVH of triangles, untransformed
+inline OptixInstance identity(unsigned long long bvh) {
+    return {.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, .visibilityMask = 255, .traversableHandle = bvh};
 }
 
 // Of an array per triangle corner of the meshes, the array per corner of the instances, in world space as the extension
@@ -354,8 +382,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     std::vector<CUtexObject> images(2 * header.images); // Each image's two textures
     for (unsigned k = 0; k < header.images; ++k) texture(shapes[2 * k], shapes[2 * k + 1], loaded, &images[2 * k]);
     scene.images = (CUtexObject*)allocate(images.size() * sizeof(CUtexObject), images.data());
-    scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, header.count, OPTIX_BUILD_OPERATION_BUILD,
-        loaded.temp, loaded.output);
+    scene.handle = buildInstances(context, {identity(buildBVH(context, (CUdeviceptr)scene.vertices, header.count,
+        OPTIX_BUILD_OPERATION_BUILD, loaded.temp, loaded.output))}, loaded.top);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (header.count != count) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
@@ -420,6 +448,6 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         if (range.count) CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[loaded.owners[range.first]].info,
             scratch.data(), sizeof(Info)));
     }
-    scene.handle = buildBVH(context, (CUdeviceptr)scene.vertices, scene.count, OPTIX_BUILD_OPERATION_UPDATE,
-        loaded.temp, loaded.output);
+    scene.handle = buildInstances(context, {identity(buildBVH(context, (CUdeviceptr)scene.vertices, scene.count,
+        OPTIX_BUILD_OPERATION_UPDATE, loaded.temp, loaded.output))}, loaded.top);
 }
