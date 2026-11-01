@@ -183,7 +183,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
             }
             unsigned long long* trails;
-            LightNode* const lights = loadLights(loaded.vertices, materials, trails);
+            LightNode* const lights = loadLights(loaded.vertices, materials, loaded.owners, trails);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.trails, (CUdeviceptr)trails);
             release((CUdeviceptr)scene.lights), release((CUdeviceptr)scene.trails);

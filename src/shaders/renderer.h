@@ -49,9 +49,9 @@ struct Material { float emitted; unsigned program, hidden, layers, opaque, emiss
 // pass index and its random number, then its axes, which with its location transform it into the world
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of
-// their points, their power and the cone of their normals around w. A leaf holds triangle child, an interior node is
-// followed by its first child, child is its second.
-struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child; bool leaf; };
+// their points, their power and the cone of their normals around w. A leaf holds triangle child of the instance, an
+// interior node is followed by its first child, child is its second.
+struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, instance; bool leaf; };
 // Per instance of a mesh: its first triangle and count, whether its mesh is in world space, its transform's rows, the
 // adjugate turning its normals, its object's info and its first triangle in the scene's order
 struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; unsigned key; };
