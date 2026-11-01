@@ -1,6 +1,6 @@
 // The OptiX host API main.cpp and loader.h call, on Vulkan: the module is renderer.slang's SPIR-V, whose one compute
-// shader runs the raygen program a launch's record names in its header; a BVH is OptiX's triangles under a top level
-// of one instance; the denoiser is OptiX's alone
+// shader runs the raygen program a launch's record names in its header; a BVH of triangles is a bottom level, one of
+// instances of those a top level; the denoiser is OptiX's alone
 #pragma once
 #include "cuda.h"
 #include "../shaders/renderer.h"
@@ -143,51 +143,47 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     }) ? OPTIX_ERROR_LAUNCH_FAILURE : OPTIX_SUCCESS;
 }
 
-// The triangles of a build input, as the bottom level takes them, and the one instance of it the top level takes
+// A build input as its level takes it: triangles at the bottom, instances of bottom levels on top
 struct Geometry {
-    VkAccelerationStructureGeometryKHR triangles, instances;
-    VkAccelerationStructureBuildGeometryInfoKHR bottom, top;
+    VkAccelerationStructureGeometryKHR geometry;
+    VkAccelerationStructureBuildGeometryInfoKHR info;
     uint32_t count;
+    bool top;
 };
 inline void describe(Geometry& geometry, const OptixBuildInput& input, const OptixAccelBuildOptions& options) {
     const OptixBuildInputTriangleArray& array = input.triangleArray;
-    geometry.count = array.numVertices / 3;
-    geometry.triangles = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+    geometry.top = input.type == OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+    geometry.count = geometry.top ? input.instanceArray.numInstances : array.numVertices / 3;
+    geometry.geometry = geometry.top ? VkAccelerationStructureGeometryKHR{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .geometry = {.instances = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR}}}
+        : VkAccelerationStructureGeometryKHR{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
         .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR, .geometry = {.triangles = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
         .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
         .vertexData = {.deviceAddress = array.vertexBuffers ? *array.vertexBuffers : 0},
         .vertexStride = 3 * sizeof(float), .maxVertex = array.numVertices ? array.numVertices - 1 : 0, .indexType = VK_INDEX_TYPE_NONE_KHR}}};
-    geometry.instances = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
-        .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .geometry = {.instances = {
-        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR}}};
-    geometry.bottom = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
-        .flags = VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
+    geometry.info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = geometry.top ? VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR
+        : VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+        .flags = geometry.top ? 0u : VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
         .mode = options.operation == OPTIX_BUILD_OPERATION_UPDATE ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
-        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR, .geometryCount = 1, .pGeometries = &geometry.triangles};
-    geometry.top = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
-        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
-        .geometryCount = 1, .pGeometries = &geometry.instances};
+        : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR, .geometryCount = 1, .pGeometries = &geometry.geometry};
 }
 
-// Of each level, the offsets of the top level and its instance after the bottom level in the output, each at the
-// alignment of BVHs, and of the scratch for building or updating either
-struct Layout { VkDeviceSize bottom, top, offset, instance, output, scratch; };
+// Of a level, its size and the offset of Vulkan's form of its instances after it in the output, at the alignment of
+// BVHs, the output's size and the scratch for building or updating it
+struct Layout { VkDeviceSize size, instances, output, scratch; };
 inline Layout layout(const Geometry& geometry) {
-    VkAccelerationStructureBuildSizesInfoKHR bottom{.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR},
-        top = bottom;
-    const uint32_t instances = 1;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     vulkan.vkGetAccelerationStructureBuildSizesKHR(vulkan.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-        &geometry.bottom, &geometry.count, &bottom);
-    vulkan.vkGetAccelerationStructureBuildSizesKHR(vulkan.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
-        &geometry.top, &instances, &top);
-    const auto aligned = [](VkDeviceSize bytes) { return (bytes + 255) & ~VkDeviceSize(255); };
-    const VkDeviceSize offset = aligned(bottom.accelerationStructureSize);
-    const VkDeviceSize instance = offset + aligned(top.accelerationStructureSize);
-    return {bottom.accelerationStructureSize, top.accelerationStructureSize, offset, instance,
-        instance + sizeof(VkAccelerationStructureInstanceKHR),
-        std::max({bottom.buildScratchSize, bottom.updateScratchSize, top.buildScratchSize})};
+        &geometry.info, &geometry.count, &sizes);
+    const VkDeviceSize instances = (sizes.accelerationStructureSize + 255) & ~VkDeviceSize(255);
+    return {sizes.accelerationStructureSize, instances,
+        instances + (geometry.top ? geometry.count * sizeof(VkAccelerationStructureInstanceKHR) : 0),
+        std::max(sizes.buildScratchSize, sizes.updateScratchSize)};
 }
 
 inline OptixResult optixAccelComputeMemoryUsage(OptixDeviceContext, const OptixAccelBuildOptions* options,
@@ -200,8 +196,8 @@ inline OptixResult optixAccelComputeMemoryUsage(OptixDeviceContext, const OptixA
     return OPTIX_SUCCESS;
 }
 
-// Builds or updates the bottom level, created in the output on a build, then builds the top level over it, the handle
-// its address
+// Builds or updates a level, created in the output on a build, the handle its address; a top level over OptiX's
+// instances, put in Vulkan's form after it
 inline OptixResult optixAccelBuild(OptixDeviceContext, CUstream, const OptixAccelBuildOptions* options,
     const OptixBuildInput* inputs, unsigned, CUdeviceptr temp, size_t, CUdeviceptr output, size_t,
     OptixTraversableHandle* handle, const OptixAccelEmitDesc*, unsigned) {
@@ -210,39 +206,37 @@ inline OptixResult optixAccelBuild(OptixDeviceContext, CUstream, const OptixAcce
     const Layout bytes = layout(geometry);
     auto [allocation, offset] = find(output);
     if (options->operation == OPTIX_BUILD_OPERATION_BUILD) {
-        allocation.bvhs.resize(2);
-        for (int level = 0; level < 2; ++level) {
-            const VkAccelerationStructureCreateInfoKHR info{
-                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR, .buffer = allocation.buffer,
-                .offset = offset + (level ? bytes.offset : 0),
-                .size = level ? bytes.top : bytes.bottom,
-                .type = level ? VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR : VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR};
-            if (vulkan.vkCreateAccelerationStructureKHR(vulkan.device, &info, nullptr, &allocation.bvhs[level]))
-                return OPTIX_ERROR_INVALID_VALUE;
-        }
+        allocation.bvhs.resize(1);
+        const VkAccelerationStructureCreateInfoKHR info{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR, .buffer = allocation.buffer,
+            .offset = offset, .size = bytes.size, .type = geometry.info.type};
+        if (vulkan.vkCreateAccelerationStructureKHR(vulkan.device, &info, nullptr, &allocation.bvhs[0]))
+            return OPTIX_ERROR_INVALID_VALUE;
     }
-    geometry.bottom.srcAccelerationStructure = geometry.bottom.mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+    geometry.info.srcAccelerationStructure = geometry.info.mode == VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
         ? allocation.bvhs[0] : VK_NULL_HANDLE;
-    geometry.bottom.dstAccelerationStructure = allocation.bvhs[0];
-    geometry.top.dstAccelerationStructure = allocation.bvhs[1];
-    geometry.bottom.scratchData.deviceAddress = geometry.top.scratchData.deviceAddress = temp;
-    const VkAccelerationStructureDeviceAddressInfoKHR bottom{
-        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
-        .accelerationStructure = allocation.bvhs[0]}, top{bottom.sType, nullptr, allocation.bvhs[1]};
-    const VkAccelerationStructureInstanceKHR instance{.transform = {.matrix = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}},
-        .mask = 0xFF, .accelerationStructureReference = vulkan.vkGetAccelerationStructureDeviceAddressKHR(vulkan.device,
-        &bottom)};
-    geometry.instances.geometry.instances.data.deviceAddress = output + bytes.instance;
-    const VkAccelerationStructureBuildRangeInfoKHR triangles{.primitiveCount = geometry.count}, instances{1};
-    const VkAccelerationStructureBuildRangeInfoKHR *bottomRange = &triangles, *topRange = &instances;
+    geometry.info.dstAccelerationStructure = allocation.bvhs[0];
+    geometry.info.scratchData.deviceAddress = temp;
+    if (geometry.top) {
+        std::vector<OptixInstance> from(geometry.count);
+        std::vector<VkAccelerationStructureInstanceKHR> to(geometry.count);
+        cuMemcpyDtoH(from.data(), inputs->instanceArray.instances, from.size() * sizeof(OptixInstance));
+        for (uint32_t i = 0; i < geometry.count; ++i) {
+            std::memcpy(&to[i].transform, from[i].transform, sizeof(to[i].transform));
+            to[i].instanceCustomIndex = from[i].instanceId, to[i].mask = from[i].visibilityMask;
+            to[i].instanceShaderBindingTableRecordOffset = from[i].sbtOffset, to[i].flags = 0;
+            to[i].accelerationStructureReference = from[i].traversableHandle;
+        }
+        cuMemcpyHtoD(output + bytes.instances, to.data(), to.size() * sizeof(VkAccelerationStructureInstanceKHR));
+        geometry.geometry.geometry.instances.data.deviceAddress = output + bytes.instances;
+    }
+    const VkAccelerationStructureBuildRangeInfoKHR range{.primitiveCount = geometry.count}, *ranges = &range;
     if (run([&](VkCommandBuffer commands) {
-        vulkan.vkCmdBuildAccelerationStructuresKHR(commands, 1, &geometry.bottom, &bottomRange);
-        vkCmdUpdateBuffer(commands, allocation.buffer, offset + bytes.instance, sizeof(instance), &instance);
-        barrier(VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR
-            | VK_ACCESS_SHADER_READ_BIT);
-        vulkan.vkCmdBuildAccelerationStructuresKHR(commands, 1, &geometry.top, &topRange);
+        vulkan.vkCmdBuildAccelerationStructuresKHR(commands, 1, &geometry.info, &ranges);
     })) return OPTIX_ERROR_INVALID_VALUE;
-    *handle = vulkan.vkGetAccelerationStructureDeviceAddressKHR(vulkan.device, &top);
+    const VkAccelerationStructureDeviceAddressInfoKHR level{
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        .accelerationStructure = allocation.bvhs[0]};
+    *handle = vulkan.vkGetAccelerationStructureDeviceAddressKHR(vulkan.device, &level);
     return OPTIX_SUCCESS;
 }
