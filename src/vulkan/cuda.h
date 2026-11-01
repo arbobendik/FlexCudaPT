@@ -142,6 +142,10 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
     const VkDeviceCreateInfo info{.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
         .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue, .enabledExtensionCount = uint32_t(std::size(extensions)),
         .ppEnabledExtensionNames = extensions};
+    VkFormatProperties floats;  // Float images filtered linearly, which Vulkan leaves optional
+    vkGetPhysicalDeviceFormatProperties(vulkan.physical, VK_FORMAT_R32G32B32A32_SFLOAT, &floats);
+    if (!(floats.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
     if (VkResult result = vkCreateDevice(vulkan.physical, &info, nullptr, &vulkan.device)) return result;
     vkGetDeviceQueue(vulkan.device, family, 0, &vulkan.queue);
     const VkCommandPoolCreateInfo pool{.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
