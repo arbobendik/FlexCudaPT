@@ -80,9 +80,9 @@ struct Shift { float3 f; float jac; };
 struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
-// Per triangle of the meshes, each instance's its own expanded into world space (temporary): three vertices, normals,
-// generated points, points in their object, UVs, colors and tangents, and its material's pass index. Per instance its
-// entry, and their count. Per triangle of the instances in the scene's order one material; the world's material last.
+// Per triangle of the meshes, in their own space: three vertices, normals, generated points, points in their object,
+// UVs, colors and tangents, and its material's pass index. Per instance its entry, and their count. Per triangle of
+// the instances in the scene's order one material; the world's material last.
 // The light BVH from its root and per triangle the trail to its leaf, from the first bit: whether it takes the second
 // child.
 // Per pixel: the reservoir the last frame ended with and the share of its neighborhood holding the same sample, this
