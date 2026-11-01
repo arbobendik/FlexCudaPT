@@ -507,8 +507,11 @@ __device__ __forceinline__ float3 transform(const Scene& scene, float3 v, int mo
         default: return r * v.x + u * v.y + f * v.z;
     }
 }
-// Of a point shaded: its UV, generated point, point in its object, color, position and triangle barycentrics
-struct Point { float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle; };
+// Of a point shaded: its UV, generated point, point in its object, color, position, triangle barycentrics, triangle
+// and instance
+struct Point {
+    float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle, instance;
+};
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
 // Whether the scene's programs take the step: bound at compile time, OptiX compiles out the cases of steps they do not
 __device__ bool used(unsigned code) {
@@ -708,8 +711,8 @@ __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, floa
 }
 // Instance of a triangle in the scene's order (temporary: its owner, of the meshes expanded)
 __device__ unsigned owner(const Scene& scene, unsigned triangle) { return scene.owners[triangle]; }
-// Of a triangle at its barycentrics
-__device__ Point at(const Scene& scene, unsigned triangle, float s, float t) {
+// Of a triangle of an instance at its barycentrics
+__device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, float s, float t) {
     const float2* uv = scene.uvs + 3 * triangle;
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* generated = scene.generated + 3 * triangle;
@@ -723,23 +726,24 @@ __device__ Point at(const Scene& scene, unsigned triangle, float s, float t) {
             color[0].y + (color[1].y - color[0].y) * s + (color[2].y - color[0].y) * t,
             color[0].z + (color[1].z - color[0].z) * s + (color[2].z - color[0].z) * t,
             color[0].w + (color[1].w - color[0].w) * s + (color[2].w - color[0].w) * t),
-        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, s, t, triangle};
+        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, s, t, triangle, instance};
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis) {
     if (point.triangle == NONE) return point;
     const float3* vertex = scene.vertices + 3 * point.triangle;
     const float step = 1e-4f * fmaxf(ray.length, 1e-3f);
-    return at(scene, point.triangle, axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
+    return at(scene, point.instance, point.triangle,
+        axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Of a triangle at its barycentrics, reached along the direction by the ray, in a layer of its material, bumped by
-// points along its edges as near as the ray's length makes a pixel's; inlined likewise
-__device__ __forceinline__ Surface shade(const Scene& scene, unsigned triangle, float s, float t, float3 normal,
-    float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
+// Of a triangle of an instance at its barycentrics, reached along the direction by the ray, in a layer of its material,
+// bumped by points along its edges as near as the ray's length makes a pixel's; inlined likewise
+__device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
+    float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
     const float3* vertex = scene.vertices + 3 * triangle;
     const float3* normals = scene.normals + 3 * triangle;
-    const Info& object = scene.instances[owner(scene, triangle)].info;
+    const Info& object = scene.instances[instance].info;
     const float3 a = transform(scene, normals[0], 5, object);
     const float3 b = transform(scene, normals[1], 5, object);
     const float3 c = transform(scene, normals[2], 5, object);
@@ -748,7 +752,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned triangle, 
     while (layer) layer -= scene.ops[program++].code == END;
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
-        at(scene, triangle, s, t), -direction,
+        at(scene, instance, triangle, s, t), -direction,
         dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, object, scene.passes[triangle]);
 }
 
@@ -815,7 +819,8 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
     if (!optixHitObjectIsHit()) return {NONE};
     distance = optixHitObjectGetRayTmax() - back;
     // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
-    return {optixHitObjectGetPrimitiveIndex(), make_float2(__uint_as_float(optixHitObjectGetAttribute_0()),
+    const unsigned triangle = optixHitObjectGetPrimitiveIndex();
+    return {triangle, owner(scene, triangle), make_float2(__uint_as_float(optixHitObjectGetAttribute_0()),
         __uint_as_float(optixHitObjectGetAttribute_1()))};
 }
 
@@ -831,7 +836,7 @@ __device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, fl
     at = optixHitObjectGetRayTmax(), gather = __float_as_uint(at);
     optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), at * (1 + 4.76837158203125e-7f), 0.0f,
         255, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v);
-    return {index, make_float2(__uint_as_float(u), __uint_as_float(v))};
+    return {index, index == NONE ? NONE : owner(scene, index), make_float2(__uint_as_float(u), __uint_as_float(v))};
 }
 
 // Rays skip the triangle of payload 0. Rays past a layer, of it at the distance of payload 1, skip the triangles before it
@@ -859,7 +864,7 @@ __device__ float3 hitPosition(const float3* vertices, Hit hit) { // On the trian
     return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
 }
 
-__device__ float3 faceNormal(const Scene& scene, unsigned triangle) {
+__device__ float3 faceNormal(const Scene& scene, unsigned instance, unsigned triangle) {
     const float3* vertices = scene.vertices + 3 * triangle;
     return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
 }
@@ -968,7 +973,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     }
     if (node == 0 && !(importance(scene.lights[0], origin, normal) > 0))
         return make_float3(0, 0, 0);
-    const unsigned light = scene.lights[node].child;
+    const unsigned light = scene.lights[node].child, instance = owner(scene, light);
     const float3 la = scene.vertices[3 * light];
     const float3 lb = scene.vertices[3 * light + 1];
     const float3 lc = scene.vertices[3 * light + 2];
@@ -1002,26 +1007,28 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
         if (scene.materials[hit.triangle].opaque) return make_float3(0, 0, 0);  // Shading it would pass nothing
         transmitted = transmitted * exponential(medium.extinction * -occluder);
         for (unsigned layer = 0; layer < scene.materials[hit.triangle].layers; ++layer) {
-            const Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), toward,
+            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
+                smoothNormal(scene, hit), toward,
                 Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
             const float3 through = surface.ior == 1 ? straightThrough(toward, surface.normal, BSDFMaterial{surface.albedo,
                 {}, surface.roughness, surface.metallic, surface.transparency}) : make_float3(0, 0, 0);
             transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
             if (layer == 0 && surface.density > 0)
-                medium = dot(faceNormal(scene, hit.triangle), toward) > 0 ? Medium{} : volume(surface);
+                medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? Medium{} : volume(surface);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return make_float3(0, 0, 0);
     }
     return transmitted * exponential(medium.extinction * (before - left))
-        * shade(scene, light, side * (1 - along), side * along, lightNormal, direction,
+        * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
         / (density = solidAngle(probability, lightNormal, shadow));
 }
 
 // Density in solid angle of light sampling from origin picking point on triangle, down the trail to its leaf
 // (pbrt-v4's BVHLightSampler::PMF)
-__device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, float3 start, unsigned triangle, float3 point) {
+__device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, float3 start, unsigned instance,
+    unsigned triangle, float3 point) {
     float probability = 1;
     unsigned node = 0;
     for (unsigned long long trail = scene.trails[triangle]; !scene.lights[node].leaf; trail >>= 1) {
@@ -1072,8 +1079,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     // Medium the ray travels in: from the camera that of the volume it is in, by the first triangle of the volume's
     // instance, which absorbs on the way to the first hit; what it scatters out there it is taken to scatter back in
-    Medium medium = scene.settings.medium == NONE ? Medium{} : volume(shade(scene, scene.settings.medium, 0, 0,
-        scene.normals[3 * scene.settings.medium], direction, Ray{true, false, LOBE_NONE, 0.0f, distance}));
+    const unsigned held = scene.settings.medium, holder = held == NONE ? NONE : owner(scene, held);
+    Medium medium = held == NONE ? Medium{} : volume(shade(scene, holder, held, 0, 0,
+        scene.normals[3 * held], direction, Ray{true, false, LOBE_NONE, 0.0f, distance}));
     throughput = exponential((medium.scatter - medium.extinction) * distance);
     // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
     const auto survives = [&](unsigned b) {
@@ -1085,10 +1093,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         return true;
     };
     for (unsigned b = 0u; ; b++) {
-        const float3 face = faceNormal(scene, hit.triangle);
+        const float3 face = faceNormal(scene, hit.instance, hit.triangle);
         const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance};
-        Surface surface = shade(scene, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit), direction, ray,
-            layer);
+        Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
+            direction, ray, layer);
         // Only the top layer emits, where the ray first meets it
         if (passed) surface.emissive = make_float3(0, 0, 0);
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
@@ -1143,7 +1151,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
         const float3 emitted = surface.emissive * (direct_light_emission || !(rgb_to_greyscale(surface.emissive) > 0.0f)
-            ? 1.0f : powerHeuristic(nee_pdf, lightPdf(scene, nee_origin, nee_normal, nee_start, hit.triangle, origin)));
+            ? 1.0f : powerHeuristic(nee_pdf, lightPdf(scene, nee_origin, nee_normal, nee_start, hit.instance,
+                hit.triangle, origin)));
         if (replay && rc == RC_SURFACE && b > k && b == end && end_type == END_EMIT) {
             return Shift{throughput * emitted / r.jac, density / r.jac};
         }
@@ -1553,7 +1562,8 @@ extern "C" __global__ void __raygen__bake() {
     const float2 e = uv[1] - uv[0], f = uv[2] - uv[0];
     const float2 c = make_float2((x + 0.5f) / bake.width - uv[0].x, (y + 0.5f) / bake.height - uv[0].y);
     const float det = e.x * f.y - e.y * f.x;
-    const Point point = at(scene, tile.x, (c.x * f.y - c.y * f.x) / det, (e.x * c.y - e.y * c.x) / det);
+    const Point point = at(scene, owner(scene, tile.x), tile.x, (c.x * f.y - c.y * f.x) / det,
+        (e.x * c.y - e.y * c.x) / det);
     const float3 z = make_float3(0, 0, 1), albedo = shade(scene, program, z, SlangMatrix<float, 3, 3>{}, point, z,
         false, {false, false, LOBE_NONE, 0, 0}, Info{}).albedo;
     texels[y * bake.width + x] = make_ushort4(
@@ -1567,13 +1577,15 @@ extern "C" __global__ void __raygen__lights() {
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
     Material& material = scene.materials[triangle];
     if (!(material.emitted > 0)) return;
+    const unsigned instance = owner(scene, triangle);
     constexpr unsigned LIGHT_SAMPLES = 256;
     unsigned state = hash(triangle);
     float mean = 0;
     for (unsigned i = 0; i < LIGHT_SAMPLES; ++i) {
         const float side = sqrtf((i + random(state)) / LIGHT_SAMPLES), along = random(state);
-        const float3 emission = shade(scene, triangle, side * (1 - along), side * along, faceNormal(scene, triangle),
-            -faceNormal(scene, triangle), {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
+        const float3 emission = shade(scene, instance, triangle, side * (1 - along), side * along,
+            faceNormal(scene, instance, triangle), -faceNormal(scene, instance, triangle),
+            {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
         mean += fmaxf(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     material.emitted = fmaxf(mean, material.emitted * 0.001f);
