@@ -18,11 +18,11 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT };
+    TRANSLUCENT, SHEEN };
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
-    float level, coverage; float3 absorption; float density; float3 scatter, translucent;
+    float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
@@ -548,6 +548,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(LOAD) stack[top++] = saved[asuint(op.value.x)]; break;
         CASE(SPECULAR) break;
         CASE(TRANSLUCENT) break;
+        CASE(SHEEN) break;
         CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
         CASE(GENERATED) stack[top++] = at.generated; break;
         CASE(OBJECT) stack[top++] = at.object; break;
@@ -719,7 +720,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
     }
     return Surface(normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
-        used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0));
+        used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[14]
+        : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f);
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1116,7 +1118,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface(surface.normal, float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
-                float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter, float3(0, 0, 0));
+                float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter, float3(0, 0, 0),
+                float3(0, 0, 0), 0.5f);
         // Surfaces transmitting nothing face the ray, as in Cycles
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
@@ -1127,7 +1130,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         const Material material = Material(surface.albedo, surface.emissive, surface.roughness, surface.metallic,
             surface.transparency, surface.ior, exp(surface.density * (surface.absorption - 1)),
             used(SPECULAR) ? surface.tint : float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
-            used(TRANSLUCENT) ? surface.translucent : float3(0, 0, 0));
+            used(TRANSLUCENT) ? surface.translucent : float3(0, 0, 0), used(SHEEN) ? surface.sheen : float3(0, 0, 0),
+            used(SHEEN) ? surface.sheen_roughness : 0.5f);
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
