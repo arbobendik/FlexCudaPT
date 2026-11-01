@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref
+import bpy, bmesh, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref, zlib
 from mathutils import Matrix
 
 SIZE = 64
@@ -1185,6 +1185,59 @@ def shaded():  # The bumped scene rendered, its pixels
 baked, points, module['POINTS'] = shaded(), module['POINTS'], ()  # Live: no unit reads a point
 live, module['POINTS'], module['summarize'] = shaded(), points, summarize
 assert numpy.percentile(numpy.abs(baked - live).max(-1), 99) < 0.016, 'baked bump'
+# Each image the materials read is stored in the smallest format exact for it: a heightmap read from a 16-bit PNG,
+# 0.5 + 0.02 sin(16 pi u) over 2048 texels, as 16-bit UNORM, read as the correctly rounded k / 65535 where Blender has
+# k * (1 / 65535) (512 of the 65536 codes an ulp apart); floats that are halves as halves; others as floats. Filtered
+# in hardware, 16-bit UNORM errs by up to half its ulp and halves round to halves, which a Bump's differences magnify:
+# under a Bump of distance 1, sun at 15 degrees, 4 pixels a texel, the heightmap rendered as 16-bit UNORM every pixel
+# off its floats, by 0.04 at the median. Images a Bump differentiates keep floats, and render as their floats do
+size = 2048
+heights = numpy.rint((0.5 + 0.02 * numpy.sin(16 * math.pi * (numpy.arange(size) + 0.5) / size)) * 65535)
+rows = numpy.tile(numpy.stack((heights, heights, heights, numpy.full(size, 65535)), -1).astype('>u2'), (size, 1, 1))
+chunk = lambda kind, data: struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+open(bpy.app.tempdir + 'heights.png', 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size,
+    size, 16, 6, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b''.join(b'\0' + row.tobytes() for row in rows))) + chunk(
+    b'IEND', b''))  # RGBA of 16 bits, its rows unfiltered
+sixteen = bpy.data.images.load(bpy.app.tempdir + 'heights.png')
+sixteen.colorspace_settings.is_data = True
+floats, halves = (bpy.data.images.new(name, size, size, float_buffer=True) for name in ('heights', 'halves'))
+floats.colorspace_settings.is_data = halves.colorspace_settings.is_data = True
+pixels = numpy.empty(4 * size * size, 'f')
+sixteen.pixels.foreach_get(pixels)
+pixels.reshape(-1, 4)[:, 3] = 1e5
+floats.pixels.foreach_set(pixels)
+halves.pixels.foreach_set((numpy.rint(pixels * 1024) / 1024).clip(0, 1).astype('f'))  # Multiples of 2^-10: halves
+read = nodes.new('ShaderNodeTexImage')
+links.new(read.outputs['Color'], nodes['Principled BSDF'].inputs['Base Color'])
+def stored(image):  # The format the export stores the image in, as the materials read it
+    read.image, export = image, types.SimpleNamespace(visible=(), requests=io.BytesIO())  # Anew, not an update
+    Viewport.engine.start(export, bpy.context.evaluated_depsgraph_get())
+    return next(entry for key, entry in export.shape[2].items() if key == (image, read.extension))[2] >> 26 & 3
+assert [stored(image) for image in (sixteen, halves, floats)] == [3, 2, 0], '16-bit heights stored'
+other = nodes.new('ShaderNodeTexImage')  # The halves under the Bump, then an edit swapping the two images' links: the
+other.image, read.image = halves, sixteen  # update starts anew, as an export anew keeps the heightmap floats
+links.new(other.outputs['Color'], bump.inputs['Height'])
+export = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+export.start = lambda depsgraph: Viewport.engine.start(export, depsgraph)  # As the engine starts anew
+Viewport.engine.start(export, bpy.context.evaluated_depsgraph_get())
+links.new(read.outputs['Color'], bump.inputs['Height'])
+links.new(other.outputs['Color'], nodes['Principled BSDF'].inputs['Base Color'])
+depsgraph, export.requests = bpy.context.evaluated_depsgraph_get(), io.BytesIO()
+Viewport.engine.start(export, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=tree, is_updated_geometry=False,
+    is_updated_transform=False)]))
+assert export.shape[2][sixteen, read.extension][2] >> 26 & 3 == 0, '16-bit heights swapped'
+assert [stored(image) for image in (sixteen, halves)] == [0, 0], '16-bit heights differentiated'
+bump.inputs['Distance'].default_value, bumped.camera.data.ortho_scale, sun.rotation_euler.z = 1, 2 * 32 / size, \
+    math.radians(90)
+preferences = bpy.context.preferences.addons[module['__name__']].preferences
+device = preferences.device
+for preferences.device in ('OPTIX', 'VULKAN'):
+    read.image = sixteen
+    rendered = shaded()
+    read.image = floats
+    assert numpy.array_equal(rendered, shaded()), ('16-bit heights', preferences.device)
+preferences.device = device
 bpy.context.window.scene = scene
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
