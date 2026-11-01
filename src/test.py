@@ -1785,6 +1785,7 @@ for device in ('OPTIX', 'VULKAN'):
     camera.data.clip_start, camera.data.clip_end, glow.location.z, glow.scale = 1e-3, 1000, -1018, (100, 100, 1)
     assert render().mean() < 0.05, f'clip end of a wide range {device}'
     glow.scale = (1, 1, 1)
+preferences.device = 'OPTIX'  # The default again, for the tests below
 
 # Instances of one mesh pipe its arrays once: a collection instanced three times, one of them turned and stretched,
 # exports one mesh and three instances, and renders exactly as three copies of their own of it do, which the renderer
