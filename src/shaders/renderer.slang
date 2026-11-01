@@ -27,13 +27,14 @@ struct Surface {
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child; uint8_t leaf; };
+struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; uint key; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 static const int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
-    float2* uvs; float4* colors; float4* tangents; Info* infos;
+    float2* uvs; float4* colors; float4* tangents; Instance* instances; uint* owners; float* passes;
     SceneMaterial* materials; LightNode* lights; uint64_t* trails; Op* ops; uint4* texels; uint count; Camera camera;
     Reservoir* previous; Reservoir* initial; Reservoir* temporal; float* duplication; Shift* shifts; int8_t* pairing[3];
     uint frame; Camera previousCamera; Settings settings;
@@ -544,9 +545,10 @@ struct Point { float u, v; float3 generated, object; float4 color; float3 positi
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
-// incoming direction, on the back of its face or not, for the ray, of the info's object; heights are bumped along its edges
+// incoming direction, on the back of its face or not, for the ray, of the info's object and the material's pass index;
+// heights are bumped along its edges
 [noinline] Surface shade(Scene* scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming,
-    bool backfacing, Ray ray, Info info) {
+    bool backfacing, Ray ray, Info info, float material = 0) {
     Point at = point;
     float3 stack[STACK], saved[SLOTS];
     int top = 0;
@@ -577,7 +579,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             const int output = int(stack[top - 1].x);
             stack[top - 1] = output == 0 ? float3(info.location[0], info.location[1], info.location[2]) : output == 1
                 ? float3(info.color[0], info.color[1], info.color[2]) : float3(1, 1, 1)
-                * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? info.material : info.random);
+                * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
         CASE(NORMAL) stack[top++] = normal; break;
         CASE(POSITION) stack[top++] = at.position; break;
@@ -742,6 +744,8 @@ float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
     const float3 tangent = a + (b - a) * s + (p[2].xyz - a) * t;
     return float3x3(tangent, cross(n, tangent) * p[0].w, n);
 }
+// Instance of a triangle in the scene's order (temporary: its owner, of the meshes expanded)
+uint owner(Scene* scene, uint triangle) { return scene.owners[triangle]; }
 // Of a triangle at its barycentrics
 Point at(Scene* scene, uint triangle, float s, float t) {
     float2* uv = scene.uvs + 3 * triangle;
@@ -770,16 +774,17 @@ Surface shade(Scene* scene, uint triangle, float s, float t, float3 normal, floa
     bool emission = false) {
     float3* vertex = scene.vertices + 3 * triangle;
     float3* normals = scene.normals + 3 * triangle;
-    const float3 a = transform(scene, normals[0], 5, scene.infos[triangle]);
-    const float3 b = transform(scene, normals[1], 5, scene.infos[triangle]);
-    const float3 c = transform(scene, normals[2], 5, scene.infos[triangle]);
+    const Info object = scene.instances[owner(scene, triangle)].info;
+    const float3 a = transform(scene, normals[0], 5, object);
+    const float3 b = transform(scene, normals[1], 5, object);
+    const float3 c = transform(scene, normals[2], 5, object);
     uint program = emission ? scene.materials[triangle].emission : scene.materials[triangle].program;
     // Each layer's program follows the end of the one above it
     while (layer != 0) layer -= uint(scene.ops[program++].code == END);
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, triangle, s, t), -direction,
-        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, scene.infos[triangle]);
+        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, object, scene.passes[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -1758,7 +1763,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 608; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 624; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
