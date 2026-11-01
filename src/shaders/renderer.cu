@@ -709,12 +709,21 @@ __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, floa
     const float3 tangent = a + (b - a) * s + (make_float3(p[2].x, p[2].y, p[2].z) - a) * t;
     return makeMatrix<float, 3, 3>(tangent, cross(n, tangent) * p[0].w, n);
 }
+// Of a triangle of an instance, from the vertices and normals of the meshes: its corners and normals in the world, each
+// read where taken
+struct Corners { const float3* p; const Instance& instance; __device__ float3 operator[](int k) const { return p[k]; } };
+__device__ Corners corners(const float3* vertices, const Instance& instance, unsigned triangle) {
+    return {vertices + 3 * triangle, instance};
+}
+__device__ Corners cornerNormals(const float3* normals, const Instance& instance, unsigned triangle) {
+    return {normals + 3 * triangle, instance};
+}
 // Instance of a triangle in the scene's order (temporary: its owner, of the meshes expanded)
 __device__ unsigned owner(const Scene& scene, unsigned triangle) { return scene.owners[triangle]; }
 // Of a triangle of an instance at its barycentrics
 __device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, float s, float t) {
     const float2* uv = scene.uvs + 3 * triangle;
-    const float3* vertex = scene.vertices + 3 * triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
     const float3* generated = scene.generated + 3 * triangle;
     const float3* object = scene.objects + 3 * triangle;
     const float4* color = scene.colors + 3 * triangle;
@@ -731,7 +740,7 @@ __device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, fl
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis) {
     if (point.triangle == NONE) return point;
-    const float3* vertex = scene.vertices + 3 * point.triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
     const float step = 1e-4f * fmaxf(ray.length, 1e-3f);
     return at(scene, point.instance, point.triangle,
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
@@ -741,8 +750,8 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 // bumped by points along its edges as near as the ray's length makes a pixel's; inlined likewise
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
     float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
-    const float3* vertex = scene.vertices + 3 * triangle;
-    const float3* normals = scene.normals + 3 * triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
+    const Corners normals = cornerNormals(scene.normals, scene.instances[instance], triangle);
     const Info& object = scene.instances[instance].info;
     const float3 a = transform(scene, normals[0], 5, object);
     const float3 b = transform(scene, normals[1], 5, object);
@@ -859,25 +868,25 @@ extern "C" __global__ void __anyhit__skip() {
     }
 }
 
-__device__ float3 hitPosition(const float3* vertices, Hit hit) { // On the triangles of vertices
-    vertices += 3 * hit.triangle;
-    return vertices[0] + (vertices[1] - vertices[0]) * hit.uv.x + (vertices[2] - vertices[0]) * hit.uv.y;
+__device__ float3 hitPosition(const float3* vertices, const Instance* instances, Hit hit) { // Of those vertices
+    const Corners vertex = corners(vertices, instances[hit.instance], hit.triangle);
+    return vertex[0] + (vertex[1] - vertex[0]) * hit.uv.x + (vertex[2] - vertex[0]) * hit.uv.y;
 }
 
 __device__ float3 faceNormal(const Scene& scene, unsigned instance, unsigned triangle) {
-    const float3* vertices = scene.vertices + 3 * triangle;
+    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
     return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
 }
 
 __device__ float3 smoothNormal(const Scene& scene, Hit hit) {
-    const float3* normals = scene.normals + 3 * hit.triangle;
+    const Corners normals = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
 
 // Distance along the smooth normal rays leave a hit at position from, of its triangle, as FlexKernels shares it
 __device__ float geometryOffset(const Scene& scene, Hit hit, float3 face, float3 position) {
-    const float3* vertex = scene.vertices + 3 * hit.triangle;
-    const float3* normal = scene.normals + 3 * hit.triangle;
+    const Corners vertex = corners(scene.vertices, scene.instances[hit.instance], hit.triangle);
+    const Corners normal = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return geometryOffset(vertex[0], vertex[1], vertex[2], normal[0], normal[1], normal[2], face,
         make_float3(1 - hit.uv.x - hit.uv.y, hit.uv.x, hit.uv.y), position);
 }
@@ -929,7 +938,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
         hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : hit.triangle);
         origin = origin + direction * distance, reach -= distance;
     } while (hit.triangle != NONE && scene.materials[hit.triangle].hidden);
-    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, hit), hit};
+    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit};
 }
 
 // World: equirectangular texture along the direction
@@ -974,9 +983,8 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     if (node == 0 && !(importance(scene.lights[0], origin, normal) > 0))
         return make_float3(0, 0, 0);
     const unsigned light = scene.lights[node].child, instance = owner(scene, light);
-    const float3 la = scene.vertices[3 * light];
-    const float3 lb = scene.vertices[3 * light + 1];
-    const float3 lc = scene.vertices[3 * light + 2];
+    const Corners corner = corners(scene.vertices, scene.instances[instance], light);
+    const float3 la = corner[0], lb = corner[1], lc = corner[2];
     const float3 lightNormal = cross(lb - la, lc - la);
     const float side = sqrtf(random(state));
     const float along = random(state);
@@ -1036,7 +1044,7 @@ __device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, floa
             trail & 1);
         node = trail & 1 ? scene.lights[node].child : node + 1;
     }
-    const float3* vertices = scene.vertices + 3 * triangle;
+    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
     return scene.lights[node].child == triangle && importance(scene.lights[node], origin, normal) > 0
         && (dot(normal, normal) == 0 || dot(normal, point - start) > 0) ? solidAngle(probability,
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - start) : 0;
@@ -1081,7 +1089,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     // instance, which absorbs on the way to the first hit; what it scatters out there it is taken to scatter back in
     const unsigned held = scene.settings.medium, holder = held == NONE ? NONE : owner(scene, held);
     Medium medium = held == NONE ? Medium{} : volume(shade(scene, holder, held, 0, 0,
-        scene.normals[3 * held], direction, Ray{true, false, LOBE_NONE, 0.0f, distance}));
+        cornerNormals(scene.normals, scene.instances[holder], held)[0], direction,
+        Ray{true, false, LOBE_NONE, 0.0f, distance}));
     throughput = exponential((medium.scatter - medium.extinction) * distance);
     // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
     const auto survives = [&](unsigned b) {
@@ -1255,7 +1264,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         SampleBSDF lobe = SampleBSDF{};
         if (connect) {
             if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene.vertices, r.rc);
+                reconnection = hitPosition(scene.vertices, scene.instances, r.rc);
                 dir = normalize(reconnection - lift(scene, origin,
                     surface.normal * sign(dot(reconnection - origin, side_n)), offset));
             }
@@ -1636,7 +1645,7 @@ extern "C" __global__ void __raygen__denoise() {
     const Domain dom = pixelDomain(scene, scene.camera, index, size, index);
     const Camera& last = scene.denoisedCamera;
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
-        : hitPosition(scene.previousVertices, dom.hit);
+        : hitPosition(scene.previousVertices, scene.instances, dom.hit);
     const float2 then = project(last, before, size);
     scene.flow[index] = project(scene.camera, dom.x1, size) - then;
     const int x = int(floorf(then.x)), y = int(floorf(then.y));
