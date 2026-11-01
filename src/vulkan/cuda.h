@@ -32,7 +32,7 @@ struct CUDA_TEXTURE_DESC { int addressMode[3], filterMode; unsigned flags; };
 // Bytes copied through the host visible buffer at a time
 constexpr size_t STAGING = 64 << 20;
 
-struct Allocation { VkBuffer buffer; VkDeviceMemory memory; size_t bytes; std::vector<VkAccelerationStructureKHR> bvhs; };
+struct Allocation { VkBuffer buffer; VkDeviceMemory memory; size_t bytes; VkAccelerationStructureKHR bvh{}; };
 inline struct {
     VkInstance instance;
     VkPhysicalDevice physical;
@@ -245,8 +245,7 @@ inline CUresult cuMemAlloc(CUdeviceptr* ptr, size_t bytes) {
 
 inline CUresult cuMemFree(CUdeviceptr ptr) {
     const Allocation& allocation = vulkan.allocations.at(ptr);
-    for (VkAccelerationStructureKHR bvh : allocation.bvhs)
-        vulkan.vkDestroyAccelerationStructureKHR(vulkan.device, bvh, nullptr);
+    if (allocation.bvh) vulkan.vkDestroyAccelerationStructureKHR(vulkan.device, allocation.bvh, nullptr);
     vkDestroyBuffer(vulkan.device, allocation.buffer, nullptr);
     vkFreeMemory(vulkan.device, allocation.memory, nullptr);
     vulkan.allocations.erase(ptr);
