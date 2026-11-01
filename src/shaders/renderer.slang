@@ -34,7 +34,7 @@ struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise
 static const int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
-    float2* uvs; float4* colors; float4* tangents; Instance* instances; uint* owners; float* passes;
+    float2* uvs; float4* colors; float4* tangents; Instance* instances; float* passes; uint instanceCount;
     SceneMaterial* materials; LightNode* lights; uint64_t* trails; Op* ops; uint4* texels; uint count; Camera camera;
     Reservoir* previous; Reservoir* initial; Reservoir* temporal; float* duplication; Shift* shifts; int8_t* pairing[3];
     uint frame; Camera previousCamera; Settings settings;
@@ -752,8 +752,15 @@ float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
 struct Corners { float3* p; __subscript(int k) -> float3 { get { return p[k]; } } };
 Corners corners(float3* vertices, Instance instance, uint triangle) { return Corners(vertices + 3 * triangle); }
 Corners cornerNormals(float3* normals, Instance instance, uint triangle) { return Corners(normals + 3 * triangle); }
-// Instance of a triangle in the scene's order (temporary: its owner, of the meshes expanded)
-uint owner(Scene* scene, uint triangle) { return scene.owners[triangle]; }
+// Instance of a triangle by its number in the scene's order: the last one numbered no higher, by bisection
+uint owner(Scene* scene, uint number) {
+    uint low = 0, high = scene.instanceCount;
+    while (high - low > 1) {
+        const uint middle = (low + high) / 2;
+        if (scene.instances[middle].key <= number) low = middle; else high = middle;
+    }
+    return low;
+}
 // Number in the scene's order of a triangle of an instance, which its material and trail and skipping it go by, and the
 // triangle of an instance a number names
 uint key(Scene* scene, uint instance, uint triangle) {
@@ -869,11 +876,14 @@ Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout flo
     query.TraceRayInline(RaytracingAccelerationStructure(scene.handle),
         skip == NONE ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE, 255,
         RayDesc(origin - direction * back, 1e-4f - back, direction, far + back));
-    while (query.Proceed()) if (query.CandidatePrimitiveIndex() != skip) query.CommitNonOpaqueTriangleHit();
+    while (query.Proceed())
+        if (scene.instances[query.CandidateInstanceIndex()].key + query.CandidatePrimitiveIndex() != skip)
+            query.CommitNonOpaqueTriangleHit();
     if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return Hit(NONE, NONE, float2(0, 0));
     distance = query.CommittedRayT() - back;
-    const uint triangle = query.CommittedPrimitiveIndex();
-    return Hit(triangle, owner(scene, triangle), query.CommittedTriangleBarycentrics());
+    const uint instance = query.CommittedInstanceIndex();
+    return Hit(scene.instances[instance].first + query.CommittedPrimitiveIndex(), instance,
+        query.CommittedTriangleBarycentrics());
 }
 
 // Next layer along the ray from origin within far past the triangle after at distance at, by distance, then index, so
@@ -884,7 +894,8 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
         RayDesc(origin, at * (1 - 4.76837158203125e-7f), direction, far));
-    while (query.Proceed()) if (pastLayer(query.CandidateTriangleRayT(), query.CandidatePrimitiveIndex(), at, after))
+    while (query.Proceed()) if (pastLayer(query.CandidateTriangleRayT(),
+        scene.instances[query.CandidateInstanceIndex()].key + query.CandidatePrimitiveIndex(), at, after))
         query.CommitNonOpaqueTriangleHit();
     if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return Hit(NONE, NONE, float2(0, 0));
     const float t = query.CommittedRayT();
@@ -892,11 +903,15 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
     RayQuery<RAY_FLAG_NONE> gather;
     gather.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
         RayDesc(origin, t * (1 - 4.76837158203125e-7f), direction, t * (1 + 4.76837158203125e-7f)));
-    while (gather.Proceed()) if (gather.CandidateTriangleRayT() == t && gather.CandidatePrimitiveIndex() < hit.triangle
-        && pastLayer(t, gather.CandidatePrimitiveIndex(), at, after))
-        hit = Hit(gather.CandidatePrimitiveIndex(), NONE, gather.CandidateTriangleBarycentrics());
+    uint lowest = NONE; // Number of the hit kept
+    while (gather.Proceed()) {
+        const uint instance = gather.CandidateInstanceIndex();
+        const uint number = scene.instances[instance].key + gather.CandidatePrimitiveIndex();
+        if (gather.CandidateTriangleRayT() == t && number < lowest && pastLayer(t, number, at, after))
+            lowest = number, hit = Hit(scene.instances[instance].first + gather.CandidatePrimitiveIndex(), instance,
+                gather.CandidateTriangleBarycentrics());
+    }
     at = t;
-    if (hit.triangle != NONE) hit.instance = owner(scene, hit.triangle);
     return hit;
 }
 
