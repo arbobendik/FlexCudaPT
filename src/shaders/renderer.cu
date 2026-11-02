@@ -975,6 +975,8 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = make_float3(1, 1, 1);
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
+    if (dot(normal, normal) > 0 && !(dot(normal, shadow) > 0))  // As BSDF sampling sees it, from the lifted start
+        return make_float3(0, 0, 0);
     if (dot(normal, normal) == 0 && !(dot(face, shadow) * dot(face, toLight) > 0))
         return make_float3(0, 0, 0);
     const float left = length(shadow) * (1 - 1e-4f);
@@ -1023,7 +1025,7 @@ __device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, floa
     }
     const float3* vertices = scene.vertices + 3 * triangle;
     return scene.lights[node].child == triangle && importance(scene.lights[node], origin, normal) > 0
-        && (dot(normal, normal) == 0 || dot(normal, point - origin) > 0) ? solidAngle(probability,
+        && (dot(normal, normal) == 0 || dot(normal, point - start) > 0) ? solidAngle(probability,
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - start) : 0;
 }
 
@@ -1127,6 +1129,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
         const float3 light_normal = surface.transparency > 0 && scene.materials[hit.triangle].layers == 1 || sided
             ? make_float3(0, 0, 0) : surface.normal;
+        // The side light and bounces leave by: for surfaces transmitting nothing and seen from the shading normal's
+        // side, the shading normal's, so a smooth normal is lit where it faces the light though its face doesn't
+        // (the shadow terminator); else the face's, so a ray arriving behind the shading normal leaves no way through
+        const float3 side_n = surface.transparency > 0 || sided || !(dot(surface.normal, -direction) > 0) ? geometry_n
+            : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
         const float3 emitted = surface.emissive * (direct_light_emission || !(rgb_to_greyscale(surface.emissive) > 0.0f)
@@ -1139,9 +1146,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const auto lit = [&](float3 light_dir, float light) __attribute__((always_inline)) {
             if (b < scene.settings.bounces)
                 return neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
-                    !(dot(geometry_n, -direction) * dot(geometry_n, light_dir) > 0), light, true, stream(r.seed, b))
+                    !(dot(side_n, -direction) * dot(side_n, light_dir) > 0), light, true, stream(r.seed, b))
                     * light;
-            const float3 f = BSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
+            const float3 f = BSDF(direction, light_dir, surface.normal, side_n, material, eta_i, eta_o,
                 stream(r.seed, b));
             // Translucent's share selected, not branched on, so scenes without it compile to BSDF alone
             const float3 correction = translucentCorrection(direction, light_dir, surface.normal, geometry_n, material,
@@ -1169,7 +1176,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (k == end && end_type == END_NEE) {
                 float3 light_dir;
                 float light;
-                const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
+                const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
                     sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray)
                     : make_float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
@@ -1186,7 +1193,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 // random numbers pick again (unit Jacobian)
                 float3 light_dir;
                 float light;
-                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
+                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
                     sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift{throughput * lit(light_dir, light) * radiance, 1.0f} : fail;
@@ -1206,7 +1213,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (nee) {
                 float3 light_dir;
                 float light;
-                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, geometry_n,
+                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
                     sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lit(light_dir, light) * radiance : fail.f;
@@ -1235,13 +1242,13 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             if (rc == RC_SURFACE) {
                 reconnection = hitPosition(scene.vertices, r.rc);
                 dir = normalize(reconnection - lift(scene, origin,
-                    surface.normal * sign(dot(reconnection - origin, geometry_n)), offset));
+                    surface.normal * sign(dot(reconnection - origin, side_n)), offset));
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             // A translucent diffuse lobe past the shading normal refracts, as in FlexKernels' BSDF
             const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
             if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
-                geometry_n)) {
+                side_n)) {
                 return fail;
             }
         } else if (!arrived) {
@@ -1250,7 +1257,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // A direction the smooth normal sends to the wrong side of the face carries on at an unknown density:
             // through transmitting surfaces sampled again against the face normal, pretending the self reflection
             // faces along it, elsewhere mirrored across the face, keeping its lobe and weight
-            const bool wrong = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, geometry_n);
+            const bool wrong = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, side_n);
             const bool fallback = wrong && surface.transparency > 0;
             if (fallback) {
                 const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, material,
@@ -1281,7 +1288,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Inverse ray footprint criterion for the density of the direction leaving this vertex (Eq. 5)
         const bool inverse_footprint = withinInverseFootprint(lobe.pdf, lobe_index == LOBE_DIFFUSE, prev.cos, distance,
             threshold);
-        const bool rough = roughLobe(lobe.pdf, lobe_index == LOBE_DIFFUSE, surface.roughness);
+        // Directions between the face and the shading normal (the shadow terminator's) are judged by a side depending on
+        // the incoming direction, which shifts change, so no reconnection is made along them
+        const bool wedge = dot(dir, surface.normal) * dot(dir, geometry_n) < 0;
+        const bool rough = !wedge && roughLobe(lobe.pdf, lobe_index == LOBE_DIFFUSE, surface.roughness);
         if (arrived) {
             if (!inverse_footprint) {
                 return fail;
@@ -1319,11 +1329,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             : NONE;
         direction = dir;
         // Off the side it leaves through, where light sampling toward it starts as well
-        const float3 leaving = lift(scene, origin, surface.normal * sign(dot(direction, geometry_n)),
+        const float3 leaving = lift(scene, origin, surface.normal * sign(dot(direction, side_n)),
             lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : offset);
         if (weighs) nee_start = leaving;
         origin = passes || through != NONE ? origin : leaving;
-        if (!passes) medium = sides[dot(direction, geometry_n) > 0];
+        if (!passes) medium = sides[dot(direction, side_n) > 0];
         if (!replay && !survives(b)) {
             break;
         }
