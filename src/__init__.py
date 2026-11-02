@@ -95,6 +95,11 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
 # three of which a program carries only marked
 GRAY = [('NORMAL',), 0.8, 0, 0.5, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5]
 BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5]
+# Of those, the ones shading isn't linear in: normal (bumps, displacement, normal maps), roughness, ior, specular level
+# (an ior), absorption, density, scattering color and sheen roughness, whose filtered values don't shade as their texels
+# do: read at level 0, as are those of attributes not affine in their reads (curves, ramps, powers of a texel), and
+# emission and coverage, which light sampling and shadow rays read with no cone, one value for both
+UNFILTERED = (0, 3, 4, 6, 8, 9, 10, 11, 12, 15)
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Volume shaders on surfaces
 # reflect nothing, and rays pass through a portal without a position or direction; any other shader is diffuse. The
@@ -248,10 +253,10 @@ POINTS = ('GENERATED', 'UV')  # What units read: undeformed, so no motion bakes 
 READ_COSTS = {'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches of the reads a unit over UV space may take
 # Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
 # all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
-def jacobian(expression, input):
+def jacobian(expression, input, around=0.5):
     at = lambda value: lambda e: value if e == (input,) else numpy.full(3, 0.5) if len(e) == 1 and e[0] in POINTS \
         or e[0] == 'NOISE' else None  # The expression at the value, as fold() takes it
-    values = [fold(mapped(expression, at(numpy.full(3, 0.5) + 1e-3 * step), {}))
+    values = [fold(mapped(expression, at(numpy.full(3, around) + 1e-3 * step), {}))
         for step in (*numpy.eye(3), numpy.zeros(3))]
     if any(isinstance(value, tuple) for value in values): return math.inf
     return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
@@ -433,6 +438,13 @@ def differentiated(expression, seen=None, height=False):  # Images read in a Bum
         bump = isinstance(expression, tuple) and expression[0] == 'BUMP'
         for k, part in enumerate(expression): yield from differentiated(part, seen, height or bump and 2 <= k <= 4)
 
+def unfiltered(expression, seen):  # Marks the image reads in an expression to read at level 0
+    if id(expression) in seen: return
+    seen.add(id(expression))
+    if isinstance(expression, ImageRead): expression.unfiltered = True
+    elif isinstance(expression, (list, tuple)):
+        for part in expression: unfiltered(part, seen)
+
 # Appends the steps of an expression to ops, operands first, a surface's seven before an end; returns its value under
 # textures of their mean. Without slots it counts in uses each expression met at the point it is read at, a height
 # shifted by a bump read at its shift, entering none twice; with them those met again are kept in a slot and loaded.
@@ -455,7 +467,15 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
     if name == 'UNASSOCIATE':
         return emit(('DIVIDE', *operands) if operands[1][-1].key in alphas else operands[0], ops, textures, texels,
             alphas, uses, slots, shift, keys)
+    source = operands[-1] if name in READS else None
     payload = texture(operands.pop(), textures, texels) if name in READS else (0, 0, 0, numpy.ones(4))
+    # In bits 20 on of its width, log2 of how far its point moves per unit of the UVs in 64ths, by which its mip level
+    # follows the ray's cone; reads not by the UVs or not affine in them, and those of UNFILTERED attributes, at level 0
+    if name in ('IMAGE_LINEAR', 'ALPHA_LINEAR') and slots is not None:
+        scale = 0 if getattr(source, 'unfiltered', False) or not math.isclose(*(jacobian(operands[0], 'UV', around)
+            for around in (0.25, 0.75)), rel_tol=1e-3) else jacobian(operands[0], 'UV')
+        payload = (payload[0], payload[1] | (min(max(round(64 * math.log2(scale)), -2047), 2047) if 0 < scale < math.inf
+            else -2048) % 4096 << 20, *payload[2:])
     values = [emit(operand, ops, textures, texels, alphas, uses, slots,
         operands[0] if name == 'SHIFTED' and k else shift, keys) for k, operand in enumerate(operands)]
     ops.append(([*OPS].index(name), *payload[:3]))
@@ -1409,6 +1429,10 @@ class Flex(bpy.types.RenderEngine):
             # the last's; with emitted false only cut
             surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
             derived.update(differentiated(surface))
+            seen, table = set(), {}  # Reads of attributes shading isn't linear in, or that aren't affine in their reads
+            for k, attribute in enumerate(surface):
+                if k % len(GRAY) in UNFILTERED or summarize(attribute, table, None)[1] is None:
+                    unfiltered(attribute, seen)
             if cut:  # Its expressions as units, all, then its units cut
                 summaries.clear()
                 for attribute in surface: summarize(attribute, summaries, current.get('scales'))
@@ -1671,6 +1695,8 @@ class Flex(bpy.types.RenderEngine):
             formats = {first: compact(entry) for first, entry, side in zip(starts, texels, apart)  # Bits 26 and 27: 2
                 if side == 2 and not image[first][1] >> 26 & 1 and first not in derived}  # halves, 3 16-bit UNORM
             form = lambda first: formats[first][1] << 26 if first in formats else 0
+            chained = {texel for code, texel, width, _ in ops if [*OPS][code] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
+                and width >> 20 != 2048}  # Read by a ray's cone at some level: a mip chain, flagged in bit 31 of width
             at, counts = {}, [0, 0, 0]
             for first, entry, side in zip(starts, texels, apart):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
@@ -1685,7 +1711,8 @@ class Flex(bpy.types.RenderEngine):
                 entry[3])
                 for key, entry in textures.items() if not isinstance(key, Bake)})
             images = [(numpy.concatenate((formats[first][0], numpy.zeros(-len(entry) % 8, formats[first][0].dtype)))
-                .view('f') if form(first) else entry, (image[first][0], image[first][1] | form(first)))  # 16-bit: two
+                .view('f') if form(first) else entry, (image[first][0] | (first in chained) << 31, image[first][1]
+                | form(first)))  # 16-bit: two
                 for first, entry, side in zip(starts, texels, apart) if side == 2]  # texels to a float4
             texels = [entry for entry, side in zip(texels, apart) if not side] + [
                 entry for entry, side in zip(texels, apart) if side == 1]
