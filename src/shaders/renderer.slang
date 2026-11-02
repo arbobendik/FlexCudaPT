@@ -747,11 +747,37 @@ float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
     const float3 tangent = a + (b - a) * s + (p[2].xyz - a) * t;
     return float3x3(tangent, cross(n, tangent) * p[0].w, n);
 }
+float3 place(Instance instance, float3 p) { // Through the instance's transform
+    return float3(instance.matrix[0] * p.x + instance.matrix[1] * p.y + instance.matrix[2] * p.z + instance.matrix[3],
+        instance.matrix[4] * p.x + instance.matrix[5] * p.y + instance.matrix[6] * p.z + instance.matrix[7],
+        instance.matrix[8] * p.x + instance.matrix[9] * p.y + instance.matrix[10] * p.z + instance.matrix[11]);
+}
+float3 turn(Instance instance, float3 n) { // Through the instance's adjugate, normalized
+    return normalize(float3(n.x * instance.adjugate[0] + n.y * instance.adjugate[3] + n.z * instance.adjugate[6],
+        n.x * instance.adjugate[1] + n.y * instance.adjugate[4] + n.z * instance.adjugate[7],
+        n.x * instance.adjugate[2] + n.y * instance.adjugate[5] + n.z * instance.adjugate[8]));
+}
+// In its object's space, of a corner of an instance's mesh: its normal, mirrored where the transform mirrors faces, or
+// one of a mesh in world space turned there
+float3 objectNormal(Scene* scene, Instance instance, float3 n) {
+    return instance.world != 0 ? transform(scene, n, 5, instance.info) : n * sign(instance.matrix[0]
+        * instance.adjugate[0] + instance.matrix[1] * instance.adjugate[3] + instance.matrix[2] * instance.adjugate[6]);
+}
 // Of a triangle of an instance, from the vertices and normals of the meshes: its corners and normals in the world, each
-// read where taken
-struct Corners { float3* p; __subscript(int k) -> float3 { get { return p[k]; } } };
-Corners corners(float3* vertices, Instance instance, uint triangle) { return Corners(vertices + 3 * triangle); }
-Corners cornerNormals(float3* normals, Instance instance, uint triangle) { return Corners(normals + 3 * triangle); }
+// read where taken, a point placed by the instance, a normal turned; a point at barycentrics and the face's unit normal
+// taken from the mesh's through the instance once
+struct Corners {
+    float3* p; Instance instance; bool normal;
+    __subscript(int k) -> float3 { get { return normal ? turn(instance, p[k]) : place(instance, p[k]); } }
+    float3 at(float s, float t) { return place(instance, p[0] + (p[1] - p[0]) * s + (p[2] - p[0]) * t); }
+    float3 face() { return turn(instance, cross(p[1] - p[0], p[2] - p[0])); }
+};
+Corners corners(float3* vertices, Instance instance, uint triangle) {
+    return Corners(vertices + 3 * triangle, instance, false);
+}
+Corners cornerNormals(float3* normals, Instance instance, uint triangle) {
+    return Corners(normals + 3 * triangle, instance, true);
+}
 // Instance of a triangle by its number in the scene's order: the last one numbered no higher, by bisection
 uint owner(Scene* scene, uint number) {
     uint low = 0, high = scene.instanceCount;
@@ -783,7 +809,7 @@ Point at(Scene* scene, uint instance, uint triangle, float s, float t) {
         generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
         object[0] + (object[1] - object[0]) * s + (object[2] - object[0]) * t,
         color[0] + (color[1] - color[0]) * s + (color[2] - color[0]) * t,
-        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, s, t, triangle, instance);
+        vertex.at(s, t), s, t, triangle, instance);
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
 Point shifted(Scene* scene, Point point, Ray ray, int axis) {
@@ -799,11 +825,11 @@ Point shifted(Scene* scene, Point point, Ray ray, int axis) {
 Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray,
     uint layer = 0, bool emission = false) {
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
-    const Corners normals = cornerNormals(scene.normals, scene.instances[instance], triangle);
+    float3* normals = scene.normals + 3 * triangle;
     const Info object = scene.instances[instance].info;
-    const float3 a = transform(scene, normals[0], 5, object);
-    const float3 b = transform(scene, normals[1], 5, object);
-    const float3 c = transform(scene, normals[2], 5, object);
+    const float3 a = objectNormal(scene, vertex.instance, normals[0]);
+    const float3 b = objectNormal(scene, vertex.instance, normals[1]);
+    const float3 c = objectNormal(scene, vertex.instance, normals[2]);
     const SceneMaterial material = scene.materials[key(scene, instance, triangle)];
     uint program = emission ? material.emission : material.program;
     // Each layer's program follows the end of the one above it
@@ -811,7 +837,7 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, instance, triangle, s, t), -direction,
-        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, object, scene.passes[triangle]);
+        dot(vertex.face(), direction) > 0, ray, object, scene.passes[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -920,13 +946,11 @@ bool pastLayer(float t, uint triangle, float at, uint after) { return t > at || 
 
 
 float3 hitPosition(float3* vertices, Instance* instances, Hit hit) { // Of those vertices
-    const Corners vertex = corners(vertices, instances[hit.instance], hit.triangle);
-    return vertex[0] + (vertex[1] - vertex[0]) * hit.uv.x + (vertex[2] - vertex[0]) * hit.uv.y;
+    return corners(vertices, instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
 }
 
 float3 faceNormal(Scene* scene, uint instance, uint triangle) {
-    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
-    return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
+    return corners(scene.vertices, scene.instances[instance], triangle).face();
 }
 
 float3 smoothNormal(Scene* scene, Hit hit) {
