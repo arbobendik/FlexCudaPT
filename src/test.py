@@ -1260,6 +1260,35 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     assert numpy.array_equal(rendered, shaded()), ('16-bit heights', preferences.device)
 preferences.device = device
 bpy.context.window.scene = scene
+# Mips: a plane emitting a checker of single texels, 1024 a side over 100 units, seen 10 degrees below the horizon
+# from a unit above at 4 samples. Its far rows, where a pixel spans tens of texels, read the level the ray's cone covers
+# and average to the checker's mean of 0.5 within 0.05 (their spread across pixels); read at level 0 they spread by 0.25
+mips = new('mips')
+mips.flex_samples = 4
+mips.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+mesh = bpy.data.meshes.new('ground')
+bm = bmesh.new()
+bm.loops.layers.uv.new()
+bmesh.ops.create_grid(bm, size=50, calc_uvs=True)
+bm.to_mesh(mesh)
+mips.collection.objects.link(bpy.data.objects.new('ground', mesh))
+mesh.materials.append(bpy.data.materials.new('checker'))
+nodes, links = mesh.materials[0].node_tree.nodes, mesh.materials[0].node_tree.links
+glow, checker = nodes.new('ShaderNodeEmission'), nodes.new('ShaderNodeTexImage')
+checker.image = bpy.data.images.new('checker', 1024, 1024)
+checker.image.pixels.foreach_set(numpy.repeat(numpy.indices((1024, 1024)).sum(0) % 2, 4).clip(
+    numpy.tile((0, 0, 0, 1), 1024 * 1024)).astype('f'))  # Opaque
+links.new(checker.outputs['Color'], glow.inputs['Color'])
+links.new(glow.outputs[0], nodes['Material Output'].inputs['Surface'])
+mips.camera = bpy.data.objects.new('mips camera', bpy.data.cameras.new('mips camera'))
+mips.collection.objects.link(mips.camera)
+mips.camera.location, mips.camera.rotation_euler, mips.camera.data.angle = (0, -50, 1), (math.radians(80), 0, 0), \
+    math.pi / 2
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=mips.name, write_still=True)
+    far = numpy.array(bpy.data.images.load(mips.render.filepath).pixels).reshape(SIZE, SIZE, 4)[30:36, :, 0]
+    assert abs(far.mean() - 0.5) < 0.05 and far.std() < 0.05, ('mips', preferences.device, far.mean(), far.std())
+preferences.device = device
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
