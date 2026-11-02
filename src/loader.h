@@ -7,11 +7,14 @@
 #include <utility>
 #include <unordered_map>
 #include <random>
+#include <bit>
+#include <array>
+#include <thread>
+#include <cmath>
 #include <cuda.h>
 #include <optix_stubs.h>
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
 #define CHECK(call) do { int error = (call); if (error) { \
     std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::exit(1); } } while (0)
 
@@ -233,36 +236,93 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
     std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows;
-    std::vector<std::tuple<CUtexObject, CUtexObject, CUarray, size_t>> textures; };
+    std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures; };
+
+// Of an image's texels in its format, a level's of half its width and height, odd ones floored, each texel the mean of
+// the 2 x 2 it covers in linear light: floats as they are, halves rounded back, RGBA8 and 16-bit UNORM rounded to their
+// nearest, RGBA8 decoded from sRGB first and encoded again if it is
+inline std::vector<char> halved(const std::vector<char>& above, unsigned width, unsigned height, unsigned form,
+    bool srgb) {
+    const unsigned w = std::max(width / 2, 1u), h = std::max(height / 2, 1u), sizes[] = {16, 4, 8, 8};
+    std::vector<char> below(size_t(w) * h * sizes[form]);
+    static const auto decoded = [] { // Of sRGB bytes, as read below
+        std::array<float, 256> table;
+        for (int k = 0; k < 256; ++k) table[k] = k / 255.0f <= 0.04045f ? k / 255.0f / 12.92f
+            : std::pow((k / 255.0f + 0.055f) / 1.055f, 2.4f);
+        return table;
+    }();
+    const auto read = [&](size_t i, int c) -> float {
+        if (form == 0) return ((const float*)above.data())[4 * i + c];
+        if (form == 2) return float(((const _Float16*)above.data())[4 * i + c]);
+        if (form == 3) return ((const uint16_t*)above.data())[4 * i + c] / 65535.0f;
+        const unsigned char b = above[4 * i + c];
+        return srgb && c < 3 ? decoded[b] : b / 255.0f;
+    };
+    std::vector<std::thread> workers(std::max(1u, std::min(h, std::thread::hardware_concurrency())));
+    for (unsigned t = 0; t < workers.size(); ++t) workers[t] = std::thread([&, t] { // Rows interleaved among them
+    for (unsigned y = t; y < h; y += workers.size()) for (unsigned x = 0; x < w; ++x) for (int c = 0; c < 4; ++c) {
+        const unsigned x0 = std::min(2 * x, width - 1), x1 = std::min(2 * x + 1, width - 1);
+        const unsigned y0 = std::min(2 * y, height - 1), y1 = std::min(2 * y + 1, height - 1);
+        float v = (read(size_t(y0) * width + x0, c) + read(size_t(y0) * width + x1, c) + read(size_t(y1) * width + x0,
+            c) + read(size_t(y1) * width + x1, c)) / 4;
+        const size_t i = 4 * (size_t(y) * w + x) + c;
+        if (form == 0) ((float*)below.data())[i] = v;
+        else if (form == 2) ((_Float16*)below.data())[i] = _Float16(v);
+        else if (form == 3) ((uint16_t*)below.data())[i] = uint16_t(std::lround(v * 65535));
+        else {
+            if (srgb && c < 3) v = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1 / 2.4f) - 0.055f;
+            below[i] = char(std::lround(std::clamp(v, 0.0f, 1.0f) * 255));
+        }
+    } });
+    for (std::thread& worker : workers) worker.join();
+    return below;
+}
 
 // An image piped in, of its width and height, its extension in bits 24 and 25, in 26 and 27 its format (floats, RGBA8,
-// halves or 16-bit UNORM, read as k / 65535 rounded) and sRGB in 29, as two
-// textures: one the shaders read whole texels of, RGBA8 as their bytes, others as their floats; and one that filters
-// linearly, by its extension, RGBA8 as k / 255 decoded from sRGB if it is, to the image's index's place and the next
+// halves or 16-bit UNORM, read as k / 65535 rounded) and sRGB in 29, with its mip chain down to one texel if bit 31
+// of its width asks for one, as some read samples it by its ray's cone, as two
+// textures: one the shaders read whole texels of its first level, RGBA8 as their bytes, others as their floats; and one
+// that filters linearly, by its extension, RGBA8 as k / 255 decoded from sRGB if it is, to the image's index's place
+// and the next
 inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject* objects) {
+    const bool chained = width >> 31;
+    width &= ~(1u << 31);
     const unsigned form = shape >> 26 & 3, height = shape & 0xFFFFFF, sizes[] = {16, 4, 8, 8};
-    const size_t row = width * sizes[form];
-    std::vector<char> texels((row * height + 15) / 16 * 16); // As piped, in whole float4s
+    std::vector<char> texels((size_t(width) * sizes[form] * height + 15) / 16 * 16); // As piped, in whole float4s
     receive(texels.data(), 1, texels.size());
     const decltype(CU_AD_FORMAT_FLOAT) formats[] = {CU_AD_FORMAT_FLOAT, CU_AD_FORMAT_UNSIGNED_INT8, CU_AD_FORMAT_HALF,
         CU_AD_FORMAT_UNSIGNED_INT16};
-    const CUDA_ARRAY_DESCRIPTOR array{width, height, formats[form], 4};
-    CUarray data;
-    CHECK(cuArrayCreate(&data, &array));
-    const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_HOST, .srcHost = texels.data(), .srcPitch = row,
-        .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = data, .WidthInBytes = row, .Height = height};
-    CHECK(cuMemcpy2D(&copy));
-    const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY, .res = {.array = {data}}};
+    const unsigned levels = chained ? std::bit_width(std::max(width, height)) : 1;
+    const CUDA_ARRAY3D_DESCRIPTOR array{width, height, 0, formats[form], 4, 0};
+    CUmipmappedArray chain;
+    CHECK(cuMipmappedArrayCreate(&chain, &array, levels));
+    CUarray first;
+    size_t bytes = 0;
+    for (unsigned k = 0, w = width, h = height; k < levels; ++k) {
+        if (k) texels = halved(texels, w, h, form, shape >> 29 & 1), w = std::max(w / 2, 1u), h = std::max(h / 2, 1u);
+        CUarray level;
+        CHECK(cuMipmappedArrayGetLevel(&level, chain, k));
+        if (!k) first = level;
+        const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_HOST, .srcHost = texels.data(),
+            .srcPitch = w * sizes[form], .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = level,
+            .WidthInBytes = w * sizes[form], .Height = h};
+        CHECK(cuMemcpy2D(&copy));
+        bytes += size_t(w) * sizes[form] * h;
+    }
+    const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY, .res = {.array = {first}}};
     const CUDA_TEXTURE_DESC sampling{.addressMode = {CU_TR_ADDRESS_MODE_CLAMP, CU_TR_ADDRESS_MODE_CLAMP},
         .filterMode = CU_TR_FILTER_MODE_POINT, .flags = form == 1 ? unsigned(CU_TRSF_READ_AS_INTEGER) : 0};
     const decltype(CU_TR_ADDRESS_MODE_WRAP) extensions[] = {CU_TR_ADDRESS_MODE_WRAP, CU_TR_ADDRESS_MODE_CLAMP,
         CU_TR_ADDRESS_MODE_BORDER, CU_TR_ADDRESS_MODE_MIRROR}, extension = extensions[shape >> 24 & 3];
+    CUDA_RESOURCE_DESC mipmapped{.resType = CU_RESOURCE_TYPE_MIPMAPPED_ARRAY};
+    mipmapped.res.mipmap.hMipmappedArray = chain;
     const CUDA_TEXTURE_DESC filtering{.addressMode = {extension, extension}, .filterMode = CU_TR_FILTER_MODE_LINEAR,
-        .flags = CU_TRSF_NORMALIZED_COORDINATES | (shape >> 29 & 1 ? CU_TRSF_SRGB : 0)};
+        .flags = CU_TRSF_NORMALIZED_COORDINATES | (shape >> 29 & 1 ? CU_TRSF_SRGB : 0),
+        .mipmapFilterMode = CU_TR_FILTER_MODE_LINEAR, .maxMipmapLevelClamp = float(levels - 1)};
     CHECK(cuTexObjectCreate(&objects[0], &resource, &sampling, nullptr));
-    CHECK(cuTexObjectCreate(&objects[1], &resource, &filtering, nullptr));
-    memory_peak = std::max(memory_peak, memory_used += row * height);
-    loaded.textures.emplace_back(objects[0], objects[1], data, row * height);
+    CHECK(cuTexObjectCreate(&objects[1], &mipmapped, &filtering, nullptr));
+    memory_peak = std::max(memory_peak, memory_used += bytes);
+    loaded.textures.emplace_back(objects[0], objects[1], chain, bytes);
 }
 
 // Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
@@ -351,7 +411,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     for (auto [object, filtering, data, bytes] : loaded.textures) {
         CHECK(cuTexObjectDestroy(object));
         CHECK(cuTexObjectDestroy(filtering));
-        CHECK(cuArrayDestroy(data));
+        CHECK(cuMipmappedArrayDestroy(data));
         memory_used -= bytes;
     }
     loaded.textures.clear();
