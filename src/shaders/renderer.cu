@@ -709,14 +709,38 @@ __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, floa
     const float3 tangent = a + (b - a) * s + (make_float3(p[2].x, p[2].y, p[2].z) - a) * t;
     return makeMatrix<float, 3, 3>(tangent, cross(n, tangent) * p[0].w, n);
 }
+__device__ float3 place(const Instance& instance, float3 p) { // Through the instance's transform
+    const float* m = instance.matrix;
+    return make_float3(m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3], m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
+        m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]);
+}
+__device__ float3 turn(const Instance& instance, float3 n) { // Through the instance's adjugate, normalized
+    const float* a = instance.adjugate;
+    return normalize(make_float3(n.x * a[0] + n.y * a[3] + n.z * a[6], n.x * a[1] + n.y * a[4] + n.z * a[7],
+        n.x * a[2] + n.y * a[5] + n.z * a[8]));
+}
+// In its object's space, of a corner of an instance's mesh: its normal, mirrored where the transform mirrors faces, or
+// one of a mesh in world space turned there
+__device__ float3 objectNormal(const Scene& scene, const Instance& instance, float3 n) {
+    const float* m = instance.matrix, * a = instance.adjugate;
+    return instance.world ? transform(scene, n, 5, instance.info) : n * sign(m[0] * a[0] + m[1] * a[3] + m[2] * a[6]);
+}
 // Of a triangle of an instance, from the vertices and normals of the meshes: its corners and normals in the world, each
-// read where taken
-struct Corners { const float3* p; const Instance& instance; __device__ float3 operator[](int k) const { return p[k]; } };
+// read where taken, a point placed by the instance, a normal turned; a point at barycentrics and the face's unit normal
+// taken from the mesh's through the instance once
+struct Corners {
+    const float3* p; const Instance& instance; bool normal;
+    __device__ float3 operator[](int k) const { return normal ? turn(instance, p[k]) : place(instance, p[k]); }
+    __device__ float3 at(float s, float t) const {
+        return place(instance, p[0] + (p[1] - p[0]) * s + (p[2] - p[0]) * t);
+    }
+    __device__ float3 face() const { return turn(instance, cross(p[1] - p[0], p[2] - p[0])); }
+};
 __device__ Corners corners(const float3* vertices, const Instance& instance, unsigned triangle) {
-    return {vertices + 3 * triangle, instance};
+    return {vertices + 3 * triangle, instance, false};
 }
 __device__ Corners cornerNormals(const float3* normals, const Instance& instance, unsigned triangle) {
-    return {normals + 3 * triangle, instance};
+    return {normals + 3 * triangle, instance, true};
 }
 // Instance of a triangle by its number in the scene's order: the last one numbered no higher, by bisection
 __device__ unsigned owner(const Scene& scene, unsigned number) {
@@ -752,7 +776,7 @@ __device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, fl
             color[0].y + (color[1].y - color[0].y) * s + (color[2].y - color[0].y) * t,
             color[0].z + (color[1].z - color[0].z) * s + (color[2].z - color[0].z) * t,
             color[0].w + (color[1].w - color[0].w) * s + (color[2].w - color[0].w) * t),
-        vertex[0] + (vertex[1] - vertex[0]) * s + (vertex[2] - vertex[0]) * t, s, t, triangle, instance};
+        vertex.at(s, t), s, t, triangle, instance};
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis) {
@@ -768,11 +792,11 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
     float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
-    const Corners normals = cornerNormals(scene.normals, scene.instances[instance], triangle);
+    const float3* normals = scene.normals + 3 * triangle;
     const Info& object = scene.instances[instance].info;
-    const float3 a = transform(scene, normals[0], 5, object);
-    const float3 b = transform(scene, normals[1], 5, object);
-    const float3 c = transform(scene, normals[2], 5, object);
+    const float3 a = objectNormal(scene, vertex.instance, normals[0]);
+    const float3 b = objectNormal(scene, vertex.instance, normals[1]);
+    const float3 c = objectNormal(scene, vertex.instance, normals[2]);
     const Material& material = scene.materials[key(scene, instance, triangle)];
     unsigned program = emission ? material.emission : material.program;
     // Each layer's program follows the end of the one above it
@@ -780,7 +804,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, instance, triangle, s, t), -direction,
-        dot(cross(vertex[1] - vertex[0], vertex[2] - vertex[0]), direction) > 0, ray, object, scene.passes[triangle]);
+        dot(vertex.face(), direction) > 0, ray, object, scene.passes[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026) on top of the path tracing of walk below.
@@ -891,13 +915,11 @@ extern "C" __global__ void __anyhit__skip() {
 }
 
 __device__ float3 hitPosition(const float3* vertices, const Instance* instances, Hit hit) { // Of those vertices
-    const Corners vertex = corners(vertices, instances[hit.instance], hit.triangle);
-    return vertex[0] + (vertex[1] - vertex[0]) * hit.uv.x + (vertex[2] - vertex[0]) * hit.uv.y;
+    return corners(vertices, instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
 }
 
 __device__ float3 faceNormal(const Scene& scene, unsigned instance, unsigned triangle) {
-    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
-    return normalize(cross(vertices[1] - vertices[0], vertices[2] - vertices[0]));
+    return corners(scene.vertices, scene.instances[instance], triangle).face();
 }
 
 __device__ float3 smoothNormal(const Scene& scene, Hit hit) {

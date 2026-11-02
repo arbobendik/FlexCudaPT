@@ -398,7 +398,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         instance.key = loaded.materials.size();
         for (unsigned t = instance.first; t < instance.first + instance.count; ++t)
             keyed.push_back(passes[t]), loaded.materials.push_back(table[t]);
-        instance.first = instance.key; // Its own mesh, expanded into world space (temporary)
+        instance.first = instance.key, instance.world = true; // Its own mesh, expanded into world space (temporary)
         std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
     loaded.materials.push_back(table[meshes]);
