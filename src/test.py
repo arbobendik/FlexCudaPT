@@ -1811,3 +1811,63 @@ for empty in empties:
     scene.collection.objects.link(copy)
     empty.hide_render = True
 assert numpy.array_equal(instanced, render()), 'instances as copies'
+
+# The shadow terminator: a sphere of 16 segments, smooth, lit near its terminator by a sun and by a point light, renders
+# as one of 256 segments does there, not cut along its faces: of the pixels where the fine sphere reads 1-40% of its
+# brightest, under 7% read under half of it, on both backends (main f8b1f30: 22.5% under the sun, 9.4% under the point)
+scene = new('terminator')
+bpy.context.window.scene = scene
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.camera = add(bpy.data.cameras.new('terminator'), (0, -4, 0), (math.pi / 2, 0, 0))
+spheres = {}
+for segments in (16, 256):  # Smooth, white Diffuse
+    bsdf = shape(f'sphere {segments}', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=segments,
+        v_segments=segments // 2, radius=1), (0, 0, 0))
+    bsdf.inputs['Base Color'].default_value, bsdf.inputs['IOR'].default_value = (0.8, 0.8, 0.8, 1), 1
+    spheres[segments] = next(ob for ob in scene.objects if ob.type == 'MESH' and ob not in spheres.values())
+    spheres[segments].data.shade_smooth()
+sun = add(bpy.data.lights.new('terminator sun', 'SUN'), (0, 0, 0), (0, math.pi / 2, math.radians(-5)))
+sun.data.energy, sun.data.angle = 3, 0.01
+point = add(bpy.data.lights.new('terminator point', 'POINT'), (4, -0.35, 0.3))
+point.data.energy, point.data.shadow_soft_size = 1000, 0.05
+scene.render.resolution_x = scene.render.resolution_y = 128  # Finer than SIZE, so the band holds enough pixels
+def lum():  # The scene rendered at its own size, its pixels' mean of the channels
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(128, 128, 4)[..., :3].mean(2)
+devices = bpy.context.preferences.addons[flex.__name__].preferences
+for device in ('OPTIX', 'VULKAN'):
+    devices.device = device
+    for light, other in ((sun, point), (point, sun)):
+        light.hide_render, other.hide_render = False, True
+        spheres[16].hide_render, spheres[256].hide_render = True, False
+        fine = lum()
+        spheres[16].hide_render, spheres[256].hide_render = False, True
+        coarse = lum()
+        top = numpy.percentile(fine[fine > 0], 99)
+        band = (fine > 0.01 * top) & (fine < 0.4 * top)
+        dark = (coarse[band] < 0.5 * fine[band]).mean()
+        assert dark < 0.07, ('shadow terminator', device, light.data.type, float(dark))
+devices.device = 'OPTIX'
+# A leaf card, open and lit only from behind, passes at most a thousandth of what the same panel gives it from the front,
+# though its shading normals lean 15 degrees: a bounce arriving behind a shading normal keeps the face's sides (without
+# that, 0.84% came through)
+for ob in (*spheres.values(), sun, point): ob.hide_render = True
+card = shape('card', lambda bm: bmesh.ops.create_grid(bm, x_segments=8, y_segments=8, size=0.1), (0, 0, 0))
+card.inputs['Base Color'].default_value, card.inputs['IOR'].default_value = (0.8, 0.8, 0.8, 1), 1
+bpy.data.meshes['card'].shade_smooth()
+bpy.data.meshes['card'].normals_split_custom_set([(math.sin(math.pi / 12), 0, math.cos(math.pi / 12))]
+    * len(bpy.data.meshes['card'].loops))
+panel = shape('panel', lambda bm: bmesh.ops.create_grid(bm, size=0.15), (0, 0, -0.05))
+panel.inputs['Base Color'].default_value, panel.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+panel.inputs['Emission Strength'].default_value, bpy.data.objects['panel'].visible_camera = 1, False
+scene.camera.location, scene.camera.rotation_euler = (0, 0, 0.5), (0, 0, 0)
+lamp = bpy.data.objects['panel']
+for device in ('OPTIX', 'VULKAN'):
+    devices.device = device
+    lamp.location.z, lamp.rotation_euler.x = 0.05, math.pi  # In front, facing the card
+    front = lum().mean()
+    lamp.location.z, lamp.rotation_euler.x = -0.05, 0
+    behind = lum().mean()
+    print('LEAF', device, float(front), float(behind))
+    assert front > 0.01 and behind < 1e-3 * front, ('leaf card lit through', device, float(front), float(behind))
+devices.device = 'OPTIX'
