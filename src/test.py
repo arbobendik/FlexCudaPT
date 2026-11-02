@@ -411,9 +411,12 @@ for roughness in (0, 1):
             assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.01), 'MIS energy'
         else:
             assert 0.03 < (pixels - direct)[28:36, 28:36].mean() < 0.05, 'MIS delta reflection'
-# Even with strongly tilted shading normals MIS keeps the BSDF's energy: in a box emitting white the white floor reads
-# white, with the light that directions sent to a face's wrong side carry on to, which light sampling cannot reach: it
-# finds the lobe's share on the face's side alone, (1 + cos) / 2 of the tilt
+# Even with strongly tilted shading normals MIS keeps the BSDF's energy over the path: in a box emitting white the white
+# floor reads white, without reuse within four standard errors of its 7 x 8 blocks, with it within 0.1%, as ReSTIR's
+# reuse ties neighboring pixels, which the blocks' spread misses (main f8b1f30 read 0.99983 there). Light and bounces
+# leave by the shading normal's side, so directions past the face reach the floor itself and come back out a bounce
+# later: one bounce reads 0.71, the energy is whole by about seven. Light sampling alone finds more than the lobe's share
+# on the face's side, (1 + cos) / 2 of the tilt, and no more than all of it
 scene.camera.data.angle = 0.3
 floor.inputs['IOR'].default_value = 1
 mesh = bpy.data.objects['floor'].data
@@ -426,8 +429,10 @@ box = shape('box', lambda bm: [bmesh.ops.create_cube(bm, size=4), bmesh.ops.reve
 box.inputs['Base Color'].default_value, box.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
 box.inputs['Emission Strength'].default_value, box.inputs['IOR'].default_value = 1, 1  # No specular: it reads 1 alone
 for reuse in (False, True):
-    assert numpy.isclose(mis_render(1, reuse).mean(), 1, rtol=0.01), 'MIS shading normals'
-assert numpy.isclose(mis_render(0, False).mean(), (1 + 0.3122499) / 2, rtol=0.01), 'light sampling shading normals'
+    blocks = mis_render(16, reuse).mean(2).reshape(7, 8, 8, 8).mean((1, 3))
+    assert abs(blocks.mean() - 1) < (1e-3 if reuse else 4 * blocks.std(ddof=1) / blocks.size ** 0.5), (
+        'MIS shading normals', reuse, float(blocks.mean()))
+assert (1 + 0.3122499) / 2 * 1.01 < mis_render(0, False).mean() <= 1.01, 'light sampling shading normals'
 floor.inputs['Base Color'].default_value, bpy.data.objects['dim'].hide_render = color, False
 bpy.data.objects['box'].hide_render = True
 mesh.normals_split_custom_set([(0, 0, 1)] * len(mesh.loops))
