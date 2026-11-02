@@ -46,8 +46,11 @@ constexpr unsigned LOBE_REFRACT = 1u;
 constexpr unsigned LOBE_REFLECT = 2u;
 constexpr unsigned LOBE_NONE = 3u;
 constexpr unsigned LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
-// Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length
-struct Ray { bool camera, shadow; unsigned lobe; float depth, length; };
+// Share of a ray cone's width a mip level covers, 2^-1.5
+constexpr float CONE_SHARE = 0.35355339f;
+// Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length,
+// and its cone: its width where it hits and the mip level of the hit's UVs that width covers
+struct Ray { bool camera, shadow; unsigned lobe; float depth, length, width, level; };
 __device__ float lightPath(const Ray& ray, int output) {
     switch (output) {
         case 0: return ray.camera;
@@ -453,7 +456,7 @@ __device__ float spline(float t, int k) {
 }
 // Texel of the op's image by its extension; RGBA8 as k / 255, sRGB decoded to linear
 __device__ float4 texel(const Scene& scene, const Op& op, unsigned long long image, int x, int y) {
-    const int width = op.width, height = op.height & 0xFFFFFF, extension = op.height >> 24 & 3;
+    const int width = op.width & 0xFFFFF, height = op.height & 0xFFFFFF, extension = op.height >> 24 & 3;
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return make_float4(0, 0, 0, 0);
     if (extension == 1) x = min(max(x, 0), width - 1), y = min(max(y, 0), height - 1);
     // Repeated images wrap once, mirrored ones over an image and its reflection; extended and clipped are in range
@@ -588,13 +591,15 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, f
                 && !used(ALPHA_CUBIC)) break;
             const bool repeat = (op->height >> 24 & 3) == 0;
             const unsigned long long image = op->height >> 31 ? scene.images[2 * op->texel] : 0; // Its texture, once
-            float x = (repeat ? wrap(top[-1].x) : top[-1].x) * op->width;
+            float x = (repeat ? wrap(top[-1].x) : top[-1].x) * (op->width & 0xFFFFF);
             float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
             float4 color;
             if (op->code == IMAGE || op->code == ALPHA)
                 color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
             if ((op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
-                color = tex2DLod<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y, 0); // extension, at 0
+                color = tex2DLod<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y, ray.width > 0 // at the
+                    ? ray.level + log2f(float(op->width & 0xFFFFF) * (op->height & 0xFFFFFF)) / 2 // level of its cone,
+                    + (int(op->width) >> 20) / 64.0f : 0); // its texels and the change of its point by the UVs
             else if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
@@ -783,10 +788,19 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
     unsigned program = emission ? material.emission : material.program;
     // Each layer's program follows the end of the one above it
     while (layer) layer -= scene.ops[program++].code == END;
+    // Footprint of the ray cone over the UVs (Akenine-Moller et al. 2019)
+    // FOOTPRINT = width^2 / |cos| * UV_AREA / AREA, |cos| = |dot(face, direction)| / |face|
+    // uv_cross = (uv[1] - uv[0]) x (uv[2] - uv[0]), UV_AREA / AREA = |uv_cross| / |face|
+    // => level = log2(width * CONE_SHARE * sqrt(|uv_cross| / |dot(face, direction)|))
+    const float2* uv = scene.uvs + 3 * triangle;
+    const float3 face = cross(vertex[1] - vertex[0], vertex[2] - vertex[0]);
+    Ray cone = ray;
+    cone.level = log2f(ray.width * CONE_SHARE * sqrtf(fabsf(((uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
+        - (uv[2].x - uv[0].x) * (uv[1].y - uv[0].y)) / dot(face, direction))));
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, instance, triangle, s, t), -direction,
-        dot(vertex.face(), direction) > 0, ray, object, scene.passes[triangle]);
+        dot(vertex.face(), direction) > 0, cone, object, scene.passes[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026), paths in primary sample space
@@ -824,6 +838,7 @@ struct Domain {
     float3 x0;
     float3 x1;
     Hit hit;
+    float width, spread;
 };
 
 // Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
@@ -948,7 +963,10 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
         hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : key(scene, hit));
         origin = origin + direction * distance, reach -= distance;
     } while (hit.triangle != NONE && scene.materials[key(scene, hit)].hidden);
-    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit};
+    // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
+    const float across = 2 * length(camera.x) / size.x;
+    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit,
+        camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : across / length(plane)};
 }
 
 // World: equirectangular texture along the direction
@@ -1065,6 +1083,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     float3 direction = normalize(dom.x1 - dom.x0);
     Hit hit = dom.hit;
     float distance = length(dom.x1 - dom.x0);
+    // Ray cone (Akenine-Moller et al. 2019): width = dom.width + spread * distance
+    // Omega = 1 / PDF ~= PI * theta^2 => spread += 2 * sqrt(1 / (PI * PDF)), at most PI; delta lobes keep it
+    float spread = dom.spread, width = dom.width + spread * distance;
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
     // Replaying the densities of the reconnection, generating the product of Russian roulette survival probabilities
     float density = 1.0f;
@@ -1100,7 +1121,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (unsigned b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.instance, hit.triangle);
-        const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance};
+        const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance, width};
         Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
             direction, ray, layer);
         // Only the top layer emits, where the ray first meets it
@@ -1337,6 +1358,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             chain_throughput = throughput;
         }
         prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
+        spread += delta ? 0 : fminf(2 * sqrtf(1 / (PI * lobe.pdf)), PI);
         viewed = viewed && lobe_index == LOBE_REFRACT && eta_i == eta_o;
         // Off the side it leaves through, or right from where it passes straight through
         const unsigned through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? key(scene, hit)
@@ -1384,6 +1406,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             b++;
             viewed = false;  // Scattered: no longer seen straight from the camera
             origin = origin + direction * along;
+            width += spread * along, spread += PI;
             throughput = throughput * medium.scatter * exponential((make_float3(1, 1, 1) * sigma - medium.extinction)
                 * along) / sigma;
             const Medium around[2] = {medium, medium};
@@ -1442,6 +1465,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Unscattered: T(distance) / P(along > distance) = exp((sigma - extinction) * distance)
         throughput = throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
+        width += spread * distance;
     }
     return fail;
 }
