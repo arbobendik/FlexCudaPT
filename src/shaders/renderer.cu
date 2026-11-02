@@ -611,7 +611,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, f
             if (op->code == IMAGE || op->code == ALPHA)
                 color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
             if ((op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
-                color = tex2D<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y); // extension
+                color = tex2DLod<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y, 0); // extension, at 0
             else if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
