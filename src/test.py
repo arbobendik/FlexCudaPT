@@ -1603,7 +1603,10 @@ for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size'
         ('SUN', ['angle']), ('AREA', ['shape', 'size', 'size_y', 'spread'])):
     light = bpy.data.lights.new(kind, kind)
     if kind == 'AREA': light.shape = 'RECTANGLE'
-    assert drawn(flex.DATA_PT_flex_light, light=light) == ['type', 'color', 'energy', *read], ('light read', kind)
+    assert drawn(flex.DATA_PT_flex_light, light=light) == ['type', 'color', 'use_temperature', 'energy', 'exposure',
+        'normalize', *read], ('light read', kind)
+    light.use_temperature = True
+    assert 'temperature' in drawn(flex.DATA_PT_flex_light, light=light), ('temperature read', kind)
 assert drawn(flex.OBJECT_PT_flex_visibility, object=bpy.data.objects[0]) == ['hide_viewport', 'hide_render',
     'visible_camera'], 'visibility read'
 
