@@ -1859,3 +1859,33 @@ for empty in empties:
     scene.collection.objects.link(copy)
     empty.hide_render = True
 assert numpy.array_equal(instanced, render()), 'instances as copies'
+
+# A leaf card, open and lit only from behind, passes at most a thousandth of what the same panel gives it from the front,
+# though its shading normals lean 15 degrees: a bounce arriving behind a shading normal keeps the face's sides
+scene = new('leaf')
+bpy.context.window.scene = scene
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene.camera = add(bpy.data.cameras.new('leaf'), (0, 0, 0.5))
+scene.render.resolution_x = scene.render.resolution_y = 128
+def lum():  # The scene rendered at its own size, its pixels' mean of the channels
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(128, 128, 4)[..., :3].mean(2)
+devices = bpy.context.preferences.addons[flex.__name__].preferences
+card = shape('card', lambda bm: bmesh.ops.create_grid(bm, x_segments=8, y_segments=8, size=0.1), (0, 0, 0))
+card.inputs['Base Color'].default_value, card.inputs['IOR'].default_value = (0.8, 0.8, 0.8, 1), 1
+bpy.data.meshes['card'].shade_smooth()
+bpy.data.meshes['card'].normals_split_custom_set([(math.sin(math.pi / 12), 0, math.cos(math.pi / 12))]
+    * len(bpy.data.meshes['card'].loops))
+panel = shape('panel', lambda bm: bmesh.ops.create_grid(bm, size=0.15), (0, 0, -0.05))
+panel.inputs['Base Color'].default_value, panel.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+panel.inputs['Emission Strength'].default_value, bpy.data.objects['panel'].visible_camera = 1, False
+lamp = bpy.data.objects['panel']
+for device in ('OPTIX', 'VULKAN'):
+    devices.device = device
+    lamp.location.z, lamp.rotation_euler.x = 0.05, math.pi  # In front, facing the card
+    front = lum().mean()
+    lamp.location.z, lamp.rotation_euler.x = -0.05, 0
+    behind = lum().mean()
+    print('LEAF', device, float(front), float(behind))
+    assert front > 0.01 and behind < 1e-3 * front, ('leaf card lit through', device, float(front), float(behind))
+devices.device = 'OPTIX'
