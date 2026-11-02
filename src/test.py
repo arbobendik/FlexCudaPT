@@ -1599,8 +1599,8 @@ class Layout(types.SimpleNamespace):  # Records the properties a panel draws
 def drawn(panel, **context):
     panel.draw(types.SimpleNamespace(layout=(layout := Layout(drawn=[]))), types.SimpleNamespace(**context))
     return layout.drawn
-for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size', 'spot_size']), ('SUN', ['angle']),
-        ('AREA', ['shape', 'size', 'size_y'])):
+for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size', 'spot_size', 'spot_blend']),
+        ('SUN', ['angle']), ('AREA', ['shape', 'size', 'size_y', 'spread'])):
     light = bpy.data.lights.new(kind, kind)
     if kind == 'AREA': light.shape = 'RECTANGLE'
     assert drawn(flex.DATA_PT_flex_light, light=light) == ['type', 'color', 'energy', *read], ('light read', kind)
