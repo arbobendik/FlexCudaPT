@@ -16,18 +16,23 @@ typedef struct CUstream_st* CUstream;
 // sets, in CUDA's order: of 4 channels, read whole
 typedef unsigned long long CUtexObject;
 typedef struct CUarray_st { VkImage image; VkDeviceMemory memory; VkImageView view, filtered; VkExtent3D extent;
-    int format; }* CUarray; // Its view of whole texels, and of floats, of RGBA8 once its filtering texture reads it
+    int format; uint32_t levels, level; std::vector<CUarray_st*> below; }* CUarray; // Its view of whole texels of its
+// first level, and of floats of all, of RGBA8 once its filtering texture reads it; a level of a chain shares its image
+typedef CUarray CUmipmappedArray;
 enum { CU_AD_FORMAT_UNSIGNED_INT8 = 0x01, CU_AD_FORMAT_UNSIGNED_INT16 = 0x02, CU_AD_FORMAT_HALF = 0x10,
     CU_AD_FORMAT_FLOAT = 0x20, CU_MEMORYTYPE_HOST = 1, CU_MEMORYTYPE_ARRAY = 3,
-    CU_RESOURCE_TYPE_ARRAY = 0, CU_TR_ADDRESS_MODE_WRAP = 0, CU_TR_ADDRESS_MODE_CLAMP = 1,
-    CU_TR_ADDRESS_MODE_MIRROR = 2, CU_TR_ADDRESS_MODE_BORDER = 3, CU_TR_FILTER_MODE_POINT = 0,
-    CU_TR_FILTER_MODE_LINEAR = 1, CU_TRSF_READ_AS_INTEGER = 1, CU_TRSF_NORMALIZED_COORDINATES = 2,
-    CU_TRSF_SRGB = 0x10 };
+    CU_RESOURCE_TYPE_ARRAY = 0, CU_RESOURCE_TYPE_MIPMAPPED_ARRAY = 1, CU_TR_ADDRESS_MODE_WRAP = 0,
+    CU_TR_ADDRESS_MODE_CLAMP = 1, CU_TR_ADDRESS_MODE_MIRROR = 2, CU_TR_ADDRESS_MODE_BORDER = 3,
+    CU_TR_FILTER_MODE_POINT = 0, CU_TR_FILTER_MODE_LINEAR = 1, CU_TRSF_READ_AS_INTEGER = 1,
+    CU_TRSF_NORMALIZED_COORDINATES = 2, CU_TRSF_SRGB = 0x10 };
 struct CUDA_ARRAY_DESCRIPTOR { size_t Width, Height; int Format; unsigned NumChannels; };
+struct CUDA_ARRAY3D_DESCRIPTOR { size_t Width, Height, Depth; int Format; unsigned NumChannels, Flags; };
 struct CUDA_MEMCPY2D { int srcMemoryType; const void* srcHost; size_t srcPitch; int dstMemoryType; CUarray dstArray;
     size_t WidthInBytes, Height; };
-struct CUDA_RESOURCE_DESC { int resType; union { struct { CUarray hArray; } array; } res; };
-struct CUDA_TEXTURE_DESC { int addressMode[3], filterMode; unsigned flags; };
+struct CUDA_RESOURCE_DESC { int resType; union { struct { CUarray hArray; } array;
+    struct { CUmipmappedArray hMipmappedArray; } mipmap; } res; };
+struct CUDA_TEXTURE_DESC { int addressMode[3], filterMode; unsigned flags, maxAnisotropy; int mipmapFilterMode;
+    float mipmapLevelBias, minMipmapLevelClamp, maxMipmapLevelClamp; }; // The levels' filter the sampler's
 
 // Bytes copied through the host visible buffer at a time
 constexpr size_t STAGING = 64 << 20;
@@ -163,7 +168,8 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
         const VkSamplerAddressMode mode[] = {VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
             VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER, VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT};
         const VkSamplerCreateInfo sampler{.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR,
-            .minFilter = VK_FILTER_LINEAR, .addressModeU = mode[k], .addressModeV = mode[k],
+            .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, .addressModeU = mode[k],
+            .addressModeV = mode[k], .maxLod = VK_LOD_CLAMP_NONE,
             .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK};
         vkCreateSampler(vulkan.device, &sampler, nullptr, &samplers[k]);
     }
@@ -300,15 +306,16 @@ inline CUresult cuMemsetD8(CUdeviceptr ptr, unsigned char value, size_t count) {
     return cuMemsetD32(ptr, value * 0x01010101u, (count + 3) / 4);
 }
 
-// An image of an array's texels: bytes or floats' words as unsigned integers, halves, or 16-bit UNORM
-inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc) {
-    *array = new CUarray_st{.extent = {uint32_t(desc->Width), uint32_t(desc->Height), 1}, .format = desc->Format};
+// An image of a mip chain's texels, of its levels: bytes or floats' words as unsigned integers, halves, or 16-bit UNORM
+inline CUresult cuMipmappedArrayCreate(CUmipmappedArray* array, const CUDA_ARRAY3D_DESCRIPTOR* desc, unsigned levels) {
+    *array = new CUarray_st{.extent = {uint32_t(desc->Width), uint32_t(desc->Height), 1}, .format = desc->Format,
+        .levels = levels};
     const VkImageCreateInfo info{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, .imageType = VK_IMAGE_TYPE_2D,
         .format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_UINT : desc->Format == CU_AD_FORMAT_HALF
         ? VK_FORMAT_R16G16B16A16_SFLOAT : desc->Format == CU_AD_FORMAT_UNSIGNED_INT16 ? VK_FORMAT_R16G16B16A16_UNORM
         : VK_FORMAT_R8G8B8A8_UINT,
-        .extent = (*array)->extent, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .extent = (*array)->extent, .mipLevels = levels, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
     if (VkResult result = vkCreateImage(vulkan.device, &info, nullptr, &(*array)->image)) return result;
     VkMemoryRequirements requirements;
@@ -324,16 +331,30 @@ inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc)
     if (VkResult result = vkCreateImageView(vulkan.device, &view, nullptr, &(*array)->view)) return result;
     if (desc->Format == CU_AD_FORMAT_UNSIGNED_INT8) return 0; // Its view of floats as its texture reads it, sRGB or not
     view.format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_SFLOAT : info.format;
+    view.subresourceRange.levelCount = levels;
     return vkCreateImageView(vulkan.device, &view, nullptr, &(*array)->filtered);
 }
 
+inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc) {
+    const CUDA_ARRAY3D_DESCRIPTOR chain{desc->Width, desc->Height, 0, desc->Format, desc->NumChannels, 0};
+    return cuMipmappedArrayCreate(array, &chain, 1);
+}
+
+// A chain's level, its first the chain itself
+inline CUresult cuMipmappedArrayGetLevel(CUarray* level, CUmipmappedArray array, unsigned k) {
+    if (!k) return *level = array, 0;
+    *level = array->below.emplace_back(new CUarray_st{.image = array->image, .extent = {std::max(array->extent.width
+        >> k, 1u), std::max(array->extent.height >> k, 1u), 1}, .format = array->format, .levels = 1, .level = k});
+    return 0;
+}
+
 // An image's layout changed, after all earlier commands' writes and before all later commands' accesses
-inline void layout(VkCommandBuffer commands, VkImage image, VkImageLayout from, VkImageLayout to) {
+inline void layout(VkCommandBuffer commands, VkImage image, VkImageLayout from, VkImageLayout to, uint32_t level = 0) {
     const VkImageMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, .oldLayout = from, .newLayout = to,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = image,
-        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1}};
     vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
         nullptr, 0, nullptr, 1, &barrier);
 }
@@ -348,19 +369,20 @@ inline CUresult cuMemcpy2D(const CUDA_MEMCPY2D* copy) {
         std::memcpy(vulkan.mapped, (const char*)copy->srcHost + row * copy->srcPitch, count * copy->WidthInBytes);
         if (CUresult result = run([&](VkCommandBuffer commands) {
             layout(commands, array->image, row ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            const VkBufferImageCopy region{.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, array->level);
+            const VkBufferImageCopy region{.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, array->level, 0, 1},
                 .imageOffset = {0, int32_t(row), 0}, .imageExtent = {array->extent.width, count, 1}};
             vkCmdCopyBufferToImage(commands, vulkan.staging, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                 &region);
             layout(commands, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, array->level);
         })) return result;
     }
     return 0;
 }
 
 inline CUresult cuArrayDestroy(CUarray array) {
+    for (CUarray level : array->below) delete level;
     vkDestroyImageView(vulkan.device, array->view, nullptr);
     vkDestroyImageView(vulkan.device, array->filtered, nullptr);
     vkDestroyImage(vulkan.device, array->image, nullptr);
@@ -369,11 +391,14 @@ inline CUresult cuArrayDestroy(CUarray array) {
     return 0;
 }
 
+inline CUresult cuMipmappedArrayDestroy(CUmipmappedArray array) { return cuArrayDestroy(array); }
+
 // An array's image at the first free place of the shaders' textures, whole, or filtered through a view of floats,
 // RGBA8 as k / 255 from sRGB if the texture reads it so, by the sampler of its extension; the texture's number
 inline CUresult cuTexObjectCreate(CUtexObject* object, const CUDA_RESOURCE_DESC* resource,
     const CUDA_TEXTURE_DESC* texture, const void*) {
-    const CUarray array = resource->res.array.hArray;
+    const CUarray array = resource->resType == CU_RESOURCE_TYPE_ARRAY ? resource->res.array.hArray
+        : resource->res.mipmap.hMipmappedArray;
     const bool filtered = texture->filterMode == CU_TR_FILTER_MODE_LINEAR // Read as floats
         || !(texture->flags & CU_TRSF_READ_AS_INTEGER);
     std::vector<bool>& taken = vulkan.taken[filtered];
@@ -383,7 +408,7 @@ inline CUresult cuTexObjectCreate(CUtexObject* object, const CUDA_RESOURCE_DESC*
     if (filtered && array->format == CU_AD_FORMAT_UNSIGNED_INT8) { // Its one filtering texture, RGBA8 as k / 255
         const VkImageViewCreateInfo view{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = array->image,
             .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = texture->flags & CU_TRSF_SRGB ? VK_FORMAT_R8G8B8A8_SRGB
-            : VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            : VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, array->levels, 0, 1}};
         if (VkResult result = vkCreateImageView(vulkan.device, &view, nullptr, &array->filtered)) return result;
     }
     const VkDescriptorImageInfo image{.imageView = filtered ? array->filtered : array->view,
