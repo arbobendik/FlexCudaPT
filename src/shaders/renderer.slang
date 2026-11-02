@@ -56,8 +56,11 @@ float sinpi(float x) { return sin(PI * (x - 2 * round(x / 2))); }
 float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 
 static const uint LOBE_NONE = 3u;
-// Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length
-struct Ray { bool camera, shadow; uint lobe; float depth, length; };
+// Share of a ray cone's width a mip level covers, 2^-1.5
+static const float CONE_SHARE = 0.35355339;
+// Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length,
+// and its cone: its width where it hits and the mip level of the hit's UVs that width covers
+struct Ray { bool camera, shadow; uint lobe; float depth, length, width = 0, level = 0; };
 float lightPath(Ray ray, int output) {
     switch (output) {
         case 0: return float(ray.camera);
@@ -472,7 +475,7 @@ float spline(float t, int k) {
 }
 // Texel of the op's image by its extension; RGBA8 as k / 255, sRGB decoded to linear
 float4 texel(Scene* scene, Op op, uint image, int x, int y) {
-    const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF);
+    const int width = int(asuint(op.value.y) & 0xFFFFF), height = int(asuint(op.value.z) & 0xFFFFFF);
     const int extension = int(asuint(op.value.z) >> 24 & 3);
     if (extension == 2 && (x < 0 || x >= width || y < 0 || y >= height)) return float4(0, 0, 0, 0);
     if (extension == 1) { x = min(max(x, 0), width - 1); y = min(max(y, 0), height - 1); }
@@ -605,13 +608,15 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             const uint width = asuint(op.value.y), height = asuint(op.value.z);
             const bool repeat = (height >> 24 & 3) == 0;
             const uint image = height >> 31 != 0 ? uint(scene.images[2 * asuint(op.value.x)]) : 0; // Its texture, once
-            float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * width;
+            float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * (width & 0xFFFFF);
             float y = (repeat ? wrap(stack[top - 1].y) : stack[top - 1].y) * (height & 0xFFFFFF);
             float4 color;
             if (op.code == IMAGE || op.code == ALPHA) color = texel(scene, *op, image, int(floor(x)), int(floor(y)));
             if ((op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) && height >> 31 != 0) // In hardware, by its
                 color = filtered[NonUniformResourceIndex(uint(scene.images[2 * asuint(op.value.x) + 1]))].SampleLevel(
-                    samplers[height >> 24 & 3], stack[top - 1].xy, 0); // extension
+                    samplers[height >> 24 & 3], stack[top - 1].xy, ray.width > 0 ? ray.level + log2(float(width
+                    & 0xFFFFF) * (height & 0xFFFFFF)) / 2 + (int(width) >> 20) / 64.0f : 0); // extension, at the level
+                    // of its cone, its texels and the change of its point by the UVs
             else if (op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floor(x)), j = int(floor(y));
@@ -809,10 +814,19 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
     uint program = emission ? material.emission : material.program;
     // Each layer's program follows the end of the one above it
     while (layer != 0) layer -= uint(scene.ops[program++].code == END);
+    // Footprint of the ray cone over the UVs (Akenine-Moller et al. 2019)
+    // FOOTPRINT = width^2 / |cos| * UV_AREA / AREA, |cos| = |dot(face, direction)| / |face|
+    // uv_cross = (uv[1] - uv[0]) x (uv[2] - uv[0]), UV_AREA / AREA = |uv_cross| / |face|
+    // => level = log2(width * CONE_SHARE * sqrt(|uv_cross| / |dot(face, direction)|))
+    float2* uv = scene.uvs + 3 * triangle;
+    const float3 face = cross(vertex[1] - vertex[0], vertex[2] - vertex[0]);
+    Ray cone = ray;
+    cone.level = log2(ray.width * CONE_SHARE * sqrt(abs(((uv[1].x - uv[0].x) * (uv[2].y - uv[0].y) - (uv[2].x - uv[0].x)
+        * (uv[1].y - uv[0].y)) / dot(face, direction))));
     return shade(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, instance, triangle, s, t), -direction,
-        dot(vertex.face(), direction) > 0, ray, object, scene.passes[triangle]);
+        dot(vertex.face(), direction) > 0, cone, object, scene.passes[triangle]);
 }
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026), paths in primary sample space
@@ -848,6 +862,7 @@ struct Domain {
     float3 x0;
     float3 x1;
     Hit hit;
+    float width, spread;
 };
 
 // Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
@@ -974,8 +989,10 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
         hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : key(scene, hit));
         origin = origin + direction * distance, reach -= distance;
     } while (hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0);
+    // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
+    const float across = 2 * length(camera.x) / size.x;
     return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit),
-        hit);
+        hit, camera.lens.ortho != 0 ? across : 0, camera.lens.ortho != 0 ? 0 : across / length(plane));
 }
 
 // World: equirectangular texture along the direction
@@ -1129,6 +1146,9 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
     float3 direction = normalize(dom.x1 - dom.x0);
     Hit hit = dom.hit;
     float distance = length(dom.x1 - dom.x0);
+    // Ray cone (Akenine-Moller et al. 2019): width = dom.width + spread * distance
+    // Omega = 1 / PDF ~= PI * theta^2 => spread += 2 * sqrt(1 / (PI * PDF)), at most PI; delta lobes keep it
+    float spread = dom.spread, width = dom.width + spread * distance;
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     // Replaying the densities of the reconnection, generating the product of Russian roulette survival probabilities
     float density = 1.0f;
@@ -1156,7 +1176,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (uint b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.instance, hit.triangle);
-        const Ray ray = Ray(b == 0u, false, b != 0 ? prev.lobe : LOBE_NONE, float(b), distance);
+        const Ray ray = Ray(b == 0u, false, b != 0 ? prev.lobe : LOBE_NONE, float(b), distance, width);
         Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
             direction, ray,
             layer);
@@ -1381,6 +1401,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             chain_throughput = throughput;
         }
         prev = Vertex(rough, lobe_index, lobe.pdf, abs(dot(geometry_n, dir)));
+        spread += delta ? 0 : min(2 * sqrt(1 / (PI * lobe.pdf)), PI);
         viewed = viewed && lobe_index == LOBE_REFRACT && eta_i == eta_o;
         // Off the side it leaves through, or right from where it passes straight through
         const uint through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? key(scene, hit)
@@ -1429,6 +1450,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             b++;
             viewed = false;  // Scattered: no longer seen straight from the camera
             origin = origin + direction * along;
+            width += spread * along, spread += PI;
             throughput = throughput * medium.scatter * exp((float3(1, 1, 1) * sigma - medium.extinction)
                 * along) / sigma;
             const Medium around[2] = {medium, medium};
@@ -1489,6 +1511,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         // Unscattered: T(distance) / P(along > distance) = exp((sigma - extinction) * distance)
         throughput = throughput * exp((float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
+        width += spread * distance;
     }
     return fail;
 }
