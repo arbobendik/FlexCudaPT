@@ -1234,8 +1234,10 @@ class Flex(bpy.types.RenderEngine):
             reads, affine, cost, inputs, need = summaries[id(expression)] if isinstance(expression, tuple) \
                 else (set(), False, None, set(), 0)
             uvs = current.get('uv', numpy.empty((0, 3, 2))).reshape(-1, 2)
-            unit = isinstance(expression, tuple) and expression[0] not in (*READS, 'UNASSOCIATE') \
-                and not (affine and len(reads) == 1) and (cost or 0) >= 10 and current.get('scales')
+            # An image's read is never one, but a ramp's or curves' lookup, a read of its table, is a step as others
+            unit = isinstance(expression, tuple) and expression[0] != 'UNASSOCIATE' and not (expression[0] in READS
+                and isinstance(expression[-1], ImageRead)) and not (affine and len(reads) == 1) and (cost or 0) >= 10 \
+                and current.get('scales')
             domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, keys)
             size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
                 if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
