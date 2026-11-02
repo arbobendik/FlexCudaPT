@@ -8,6 +8,7 @@ from bpy_extras import anim_utils
 
 SUN_DISTANCE = 1e5
 SUN_MIN_ANGLE = 1e-4  # Blender's parallel sun of angle 0 as the smallest disk, which delivers the same irradiance
+SPREAD_ZERO = math.radians(5)  # An area light's spread of 0, a parallel beam no light sample meets, as 5 degrees
 VIEWPORT_SAMPLES = 4  # Per redraw
 RENDER_SAMPLES = 64  # At most, per update of a final render
 SLOTS = 32  # Values a program keeps for reuse, as the shader's
@@ -1190,7 +1191,7 @@ class Flex(bpy.types.RenderEngine):
     # Starts the renderer on the exported scene when what it renders changed. Blender also reports selection, scene
     # settings and cameras, which need none. Objects that only moved or deformed update their triangles in place, as
     # FlexLight updates the slots of its instances, while they keep their count and the key of their materials: camera
-    # visibility, those of their slots and a light's radiance.
+    # visibility, those of their slots and a light's radiance, and its axes if it shapes its light by them.
     def start(self, depsgraph):
         visible = [instance.object.name for instance in depsgraph.object_instances]
         trees = (*bpy.data.node_groups, *(material.node_tree for material in (*bpy.data.materials, *bpy.data.worlds)))
@@ -1216,7 +1217,7 @@ class Flex(bpy.types.RenderEngine):
         materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
         # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
         # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
-        def record(i, instance, ob, entry, radiance=0):  # An instance exported, of the object's mesh entry
+        def record(i, instance, ob, entry, light=False):  # An instance exported, of the object's mesh entry
             # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
             random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
                 lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
@@ -1225,7 +1226,7 @@ class Flex(bpy.types.RenderEngine):
                 numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
                 ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()]), dtype='f')))
             slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
-                for slot in ob.material_slots], ob.type == 'LIGHT' and f'{radiance:.4g}')))
+                for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
@@ -1477,13 +1478,6 @@ class Flex(bpy.types.RenderEngine):
             if ob.type == 'LIGHT':
                 light = ob.data
                 radius = max(light.shadow_soft_size, 0.01)
-                # Cone tangent to the emitter, rim 6 radii wide on the spot cone: soft edge centered on spot_size
-                if light.type == 'SPOT':
-                    angle = min(light.spot_size / 2, 1.5)
-                    apex = radius / math.sin(angle - math.asin(math.sin(angle) / 6))
-                    depth = apex + 6 * radius / math.tan(angle)
-                    bmesh.ops.create_cone(bm, segments=32, radius1=6 * radius / math.cos(math.pi / 32), radius2=0,
-                        depth=depth, matrix=Matrix.Translation((0, 0, apex - depth / 2)))
                 if light.type == 'AREA':  # Back side
                     sides = 4 if light.shape in {'SQUARE', 'RECTANGLE'} else 32
                     size = light.size, light.size_y if light.shape in {'RECTANGLE', 'ELLIPSE'} else light.size
@@ -1500,8 +1494,29 @@ class Flex(bpy.types.RenderEngine):
                 area = sum(face.calc_area() for face in bm.faces if not face.material_index)
                 # Sun irradiance, else watts
                 radiance = light.energy * (SUN_DISTANCE ** 2 if light.type == 'SUN' else 1 / math.pi) / area
+                emission, shaped = radiance * numpy.array(light.color), 1
+                # Spot cone and area spread on the direction emitted, as Cycles'; the lights pass, shading no ray, takes
+                # the unshaped power, a bound for the cone and exact for the spread, whose mean over the hemisphere is 1
+                if light.type == 'SPOT':
+                    local = vector(*(('DOT_PRODUCT', ('INCOMING',), numpy.array(row))
+                        for row in instance.matrix_world.inverted().to_3x3()))
+                    cosine, edge = ('DOT_PRODUCT', normalize(local), -numpy.eye(3)[2]), math.cos(light.spot_size / 2)
+                    shaped = 'LESS_THAN', edge, cosine
+                    if light.spot_blend:
+                        t = clamp(('MULTIPLY', ('SUBTRACT', cosine, edge), 1 / ((1 - edge) * light.spot_blend)))
+                        shaped = 'MULTIPLY', ('MULTIPLY', t, t), ('SUBTRACT', 3, ('MULTIPLY', t, 2))
+                if light.type == 'AREA' and light.spread < math.pi:
+                    half = (light.spread or SPREAD_ZERO) / 2
+                    normal = -numpy.array(instance.matrix_world.to_3x3().col[2].normalized())
+                    cosine = 'DOT_PRODUCT', ('INCOMING',), normal
+                    tangent = 'DIVIDE', length(('CROSS_PRODUCT', ('INCOMING',), normal)), cosine
+                    # None behind the light or along its plane, where the tangent turns negative
+                    shaped = 'MULTIPLY', ('MAXIMUM', ('MULTIPLY', ('SUBTRACT', math.tan(half), tangent),
+                        1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), ('LESS_THAN', 0, cosine)
+                if isinstance(shaped, tuple):
+                    emission = 'MULTIPLY', emission, mix(1, shaped, ('LESS_THAN', 0, ('LIGHT_PATH', 8)))
                 # Black reflects nothing
-                shades = [[program([*BLACK[:4], radiance * numpy.array(light.color), *BLACK[5:]])], [program(BLACK)]]
+                shades = [[program([*BLACK[:4], emission, *BLACK[5:]])], [program(BLACK)]]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
@@ -1518,7 +1533,8 @@ class Flex(bpy.types.RenderEngine):
                 row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
             materials.append(table[index])
             if not world: entries[key] = entry
-            record(i, instance, ob, entry, ob.type == 'LIGHT' and radiance)
+            record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
+                and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'))
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene
         if moved:
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
@@ -1760,8 +1776,8 @@ class DATA_PT_flex_light(bpy.types.Panel):  # A light's settings the engine read
         light = context.light
         self.layout.row().prop(light, 'type', expand=True)
         self.layout.use_property_split = True
-        for name in ('color', 'energy', *{'POINT': ('shadow_soft_size',), 'SPOT': ('shadow_soft_size', 'spot_size'),
-                'SUN': ('angle',), 'AREA': ('shape', 'size', 'size_y')}[light.type]):
+        for name in ('color', 'energy', *{'POINT': ('shadow_soft_size',), 'SPOT': ('shadow_soft_size', 'spot_size',
+                'spot_blend'), 'SUN': ('angle',), 'AREA': ('shape', 'size', 'size_y', 'spread')}[light.type]):
             if name != 'size_y' or light.shape in {'RECTANGLE', 'ELLIPSE'}: self.layout.prop(light, name)
 
 class OBJECT_PT_flex_visibility(bpy.types.Panel):  # An object's visibility the engine reads
