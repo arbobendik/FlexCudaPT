@@ -906,6 +906,8 @@ def curves(node, inputs, index):  # Of an RGB, vector or float curves node, each
 def normal_map(node, inputs, index):
     strength, color = inputs
     if node.space == 'TANGENT':
+        if getattr(node, 'convention', 'OPENGL') == 'DIRECTX':  # Its green the other way
+            color = 'ADD', ('MULTIPLY', color, numpy.array((1, -1, 1))), numpy.array((0, 1, 0))
         color = 'ADD', ('MULTIPLY', ('SUBTRACT', color, 0.5), vector(strength, strength, clamp(strength))), \
             ('MULTIPLY', ('SUBTRACT', 1, clamp(strength)), numpy.array((0, 0, 0.5)))
         return 'NORMAL_MAP', ('ADD', color, 0.5)
@@ -1016,7 +1018,11 @@ def resolve(socket, groups=()):
         return {'Normal': ('NORMAL',), 'Coat Normal': ('NORMAL',), 'UV': ('UV',)}.get(socket.name, value)
     node, output = link.from_node, link.from_socket
     index = [*node.outputs].index(output)
-    get = lambda name, default=0: resolve(node.inputs[name], groups) if name in node.inputs else default
+    # An input an option hides reads as under the option showing it, the closest Flex renders: Subsurface Scattering's
+    # IOR and roughness, which Christensen-Burley and Random Walk (Skin) hide, as Random Walk reads them
+    hidden = ('IOR', 'Roughness') if node.type == 'SUBSURFACE_SCATTERING' else ()
+    get = lambda name, default=0: next(resolve(input, groups) for input in node.inputs if input.name == name) \
+        if name in node.inputs or name in hidden else default
     if node.type == 'GROUP_INPUT': value = resolve(groups[-1].inputs[index], groups[:-1])
     elif node.mute or not (node.type in NODES or node.type == 'GROUP' or output.type == 'SHADER'):
         value = ([resolve(passed.from_socket, groups) for passed in node.internal_links if passed.to_socket == output]
@@ -1034,6 +1040,24 @@ def resolve(socket, groups=()):
         albedo, metallic, roughness, emissive, strength, transparency, ior, absorption, density, scatter = (get(source)
             if isinstance(source, str) else source for source in SHADERS.get(node.type, ('Color', 0, 1, 0, 0, 0, 1))
             + VOLUMES.get(node.type, (1, 0, 0)))
+        if node.type == 'BSDF_METALLIC' and node.fresnel_type == 'PHYSICAL_CONDUCTOR':  # Its reflectance at normal
+            n, k = get('IOR'), get('Extinction')  # incidence, by its complex IOR
+            k = 'MULTIPLY', k, k
+            albedo = 'DIVIDE', ('ADD', ('MULTIPLY', ('SUBTRACT', n, 1), ('SUBTRACT', n, 1)), k), \
+                ('ADD', ('MULTIPLY', ('ADD', n, 1), ('ADD', n, 1)), k)
+        # Principled hair renders as a diffuse of its color: by melanin or absorption, of the color derived from
+        # Blender's documented parameters by the formulas Cycles' source reads them with, the absorption of a color at
+        # the radial roughness, and melanin's by eumelanin's and pheomelanin's coefficients and the tint's
+        if node.type == 'BSDF_HAIR_PRINCIPLED' and node.parametrization != 'COLOR':  # An approximation, as hair's is
+            fit, x = 0.245, get('Radial Roughness')
+            for c in (5.574, -10.73, 2.532, -0.215, 5.969): fit = 'MULTIPLY_ADD', fit, x, c
+            sigma = get('Absorption Coefficient')
+            if node.parametrization == 'MELANIN':  # Its amount from the input's perceptually linear one
+                tint = 'DIVIDE', ('LOGARITHM', get('Tint'), math.e), fit
+                melanin = 'MULTIPLY', -1, ('LOGARITHM', ('MAXIMUM', ('SUBTRACT', 1, get('Melanin')), 1e-4), math.e)
+                sigma = 'ADD', ('MULTIPLY', melanin, mix(numpy.array((0.506, 0.841, 1.653)),
+                    numpy.array((0.343, 0.733, 1.924)), get('Melanin Redness'))), ('MULTIPLY', tint, tint)
+            albedo = 'EXPONENT', ('MULTIPLY', ('POWER', sigma, 0.5), ('MULTIPLY', fit, -1))
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
@@ -1096,10 +1120,10 @@ def shade(material, program):
     if not output: return [program(BLACK)]
     surface = resolve(output.inputs['Surface'])  # Its volume, or the medium its subsurface scattering fills
     volume = resolve(output.inputs['Volume'])[10:13] if output.inputs['Volume'].is_linked else surface[10:13]
-    if output.inputs['Displacement'].is_linked and material.displacement_method in ('BUMP', 'BOTH'):  # Onto the
-        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # normal alone: a Bump of the
+    if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
+        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
-            vector(1, 1, 0)), {}, 'NORMAL')  # height along it, where the surface reads the normal
+            vector(1, 1, 0)), {}, 'NORMAL')  # along it, where the surface reads the normal
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         surface = [*BLACK[:9], 0, *BLACK[10:]]
     layers = [surface[:10]] if len(surface) == 16 else [[*surface[16][:4], surface[4], *surface[16][5:]],
