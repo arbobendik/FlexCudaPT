@@ -1447,7 +1447,9 @@ class Flex(bpy.types.RenderEngine):
                 orco = numpy.empty(3 * len(mesh.vertices), 'f')
                 rest.vertices.foreach_get('co' if rest is not mesh else 'undeformed_co', orco)
                 orco = (orco.reshape(-1, 3) - rest.texspace_location) / (2 * numpy.array(rest.texspace_size)) + 0.5
-                if any(face.loop_total > 4 for face in mesh.polygons):
+                totals = numpy.empty(len(mesh.polygons), 'i')  # Corners per face, read at once
+                mesh.polygons.foreach_get('loop_total', totals)
+                if (totals > 4).any():
                     bm.from_mesh(mesh)
                     # By the mesh's own fill, which Cycles triangulates n-gons by, without BMesh's beautify
                     bmesh.ops.triangulate(bm, faces=[face for face in bm.faces if len(face.verts) > 4],
