@@ -284,6 +284,53 @@ for output, target in ((image.outputs['Color'], bsdf.inputs['Base Color']), (ima
 surface = flex.fold(flex.resolve(identities.nodes['Material Output'].inputs['Surface']))
 assert 'ROTATE' not in str(surface[1]) and not any(isinstance(surface[k], tuple) for k in (3, 5)), 'identities fold'
 assert not isinstance(surface[4], tuple) and not numpy.any(surface[4]), 'degenerate range guarded'
+# Options Flex lacks render as the closest it has: Subsurface Scattering's Burley and Skin as Random Walk, which main
+# read with an IOR of 0, as no subsurface; a DirectX normal map as the OpenGL one of its green inverted; a displacement
+# alone as its bump. A physical conductor's color is its reflectance at normal incidence, and Principled hair's by
+# melanin or absorption the color derived from Blender's documented parameters, by Cycles' source's formulas, at three
+# values each
+closest = bpy.data.materials.new('closest')
+nodes, links, out = closest.node_tree.nodes, closest.node_tree.links, closest.node_tree.nodes['Material Output']
+surface_of = lambda node: (links.new(node.outputs[0], out.inputs['Surface']),
+    flex.fold(flex.resolve(out.inputs['Surface'])))[1]
+scattering = nodes.new('ShaderNodeSubsurfaceScattering')
+walk = repr(surface_of(scattering))
+for falloff in ('BURLEY', 'RANDOM_WALK_SKIN'):
+    scattering.falloff = falloff
+    assert repr(surface_of(scattering)) == walk, ('subsurface as random walk', falloff)
+diffuse, normal = nodes.new('ShaderNodeBsdfDiffuse'), nodes.new('ShaderNodeNormalMap')
+links.new(normal.outputs[0], diffuse.inputs['Normal'])
+normal.inputs['Color'].default_value = (0.5, 0.25, 1, 1)
+opengl = repr(surface_of(diffuse))
+normal.convention, normal.inputs['Color'].default_value = 'DIRECTX', (0.5, 0.75, 1, 1)
+assert repr(surface_of(diffuse)) == opengl, 'directx normal map'
+links.new(nodes.new('ShaderNodeTexNoise').outputs['Fac'], nodes.new('ShaderNodeDisplacement').inputs['Height'])
+links.new(nodes['Displacement'].outputs[0], out.inputs['Displacement'])
+links.new(nodes.new('ShaderNodeBsdfDiffuse').outputs[0], out.inputs['Surface'])  # Its normal unmapped, as bumped
+programs = [(setattr(closest, 'displacement_method', method), repr(flex.shade(closest, lambda *rows, **marks: (rows,
+    marks))))[1] for method in ('BUMP', 'DISPLACEMENT')]
+assert 'BUMP' in programs[0] and programs[0] == programs[1], 'displacement as bump'
+links.remove(out.inputs['Displacement'].links[0])
+metal = nodes.new('ShaderNodeBsdfMetallic')
+metal.fresnel_type, metal.inputs['IOR'].default_value, metal.inputs['Extinction'].default_value = \
+    'PHYSICAL_CONDUCTOR', (0.2, 1.5, 3), (3.9, 0, 1)
+n, k = (numpy.array(metal.inputs[name].default_value) for name in ('IOR', 'Extinction'))
+assert numpy.allclose(surface_of(metal)[1], ((n - 1) ** 2 + k ** 2) / ((n + 1) ** 2 + k ** 2)), 'physical conductor'
+hair = nodes.new('ShaderNodeBsdfHairPrincipled')
+fit = lambda x: ((((0.245 * x + 5.574) * x - 10.73) * x + 2.532) * x - 0.215) * x + 5.969  # As Cycles' source has it
+hair.parametrization, hair.inputs['Tint'].default_value = 'MELANIN', (1, 0.5, 0.25, 1)
+tint = numpy.array(hair.inputs['Tint'].default_value[:3])
+for melanin, redness, roughness in ((0.2, 0, 0.3), (0.5, 0.5, 0.5), (0.8, 1, 0.9)):
+    for name, value in (('Melanin', melanin), ('Melanin Redness', redness), ('Radial Roughness', roughness)):
+        hair.inputs[name].default_value = value
+    m, r, x = (hair.inputs[name].default_value for name in ('Melanin', 'Melanin Redness', 'Radial Roughness'))
+    sigma = -numpy.log(max(1 - m, 1e-4)) * ((1 - r) * numpy.array((0.506, 0.841, 1.653)) + r * numpy.array((0.343,
+        0.733, 1.924))) + (numpy.log(tint) / fit(x)) ** 2
+    assert numpy.allclose(surface_of(hair)[1], numpy.exp(-numpy.sqrt(sigma) * fit(x))), ('hair by melanin', melanin)
+hair.parametrization = 'ABSORPTION'
+sigma = numpy.array(hair.inputs['Absorption Coefficient'].default_value)
+x = hair.inputs['Radial Roughness'].default_value
+assert numpy.allclose(surface_of(hair)[1], numpy.exp(-numpy.sqrt(sigma) * fit(x))), 'hair by absorption'
 pixels = render()
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
 assert green > 50 * max(red, blue), 'specular tint'
@@ -1017,6 +1064,14 @@ def resident():  # The texels the export pipes for the renderer to keep once bak
         exporter.shape[2].items() if isinstance(key, tuple) and height >> 31)
     return (struct.unpack('<11I', exporter.requests.getvalue()[:44])[3] + images) * 16 / 2 ** 20
 module['BAKE_TOLERANCE'] = tolerance  # As the planner has it again
+# A mirrored image's bake, past its edge where the doubled UV reads its reflection, renders as its read live, all but 1%
+# of pixels within 0.0018 as above: main planned its bake from an extended read, so it didn't bake once repeating
+image.extension, exporter = 'MIRROR', types.SimpleNamespace(visible=(), requests=io.BytesIO())
+Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+assert [key[0] for _, key, *_ in exporter.placed] == [None], 'mirrored image bakes'
+baked, module['BAKE_TOLERANCE'] = render(), -1  # Every bake strays
+assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked mirror'
+image.extension, module['BAKE_TOLERANCE'] = 'REPEAT', tolerance
 # A repeating bake read below the corner it was planned at, on both backends as live renders it: a plane before the
 # edge, its UVs 1.37 lower, reads the power's bake of an image 1023 texels wide where the camera looks, at points that
 # wrap from below zero. NVIDIA's Vulkan driver took a negative dividend's remainder as if unsigned, shifting the read
