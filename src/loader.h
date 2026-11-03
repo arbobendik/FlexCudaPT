@@ -13,6 +13,14 @@
 #define CHECK(call) do { int error = (call); if (error) { \
     std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::exit(1); } } while (0)
 
+// Count items of size piped in by the extension into data. Its pipe ends only once the extension is gone, closed,
+// crashed or killed, when the renderer ends too, whatever it was reading, rather than go on with what never came: true
+// as it returns only with them all
+inline bool receive(void* data, size_t size, size_t count) {
+    if (std::fread(data, size, count, stdin) != count) std::exit(0);
+    return true;
+}
+
 inline size_t memory_used = 0, memory_peak = 0;
 
 inline CUdeviceptr allocate(size_t bytes, const void* data = nullptr) {
@@ -91,7 +99,7 @@ inline char2* loadPairing(int size) {
 
 // Count elements piped in by the extension into data, uploaded into array from first on
 template <typename T> void update(T* array, size_t first, size_t count, void* data) {
-    std::fread(data, sizeof(T), count, stdin);
+    receive(data, sizeof(T), count);
     CHECK(cuMemcpyHtoD((CUdeviceptr)(array + first), data, count * sizeof(T)));
 }
 
@@ -216,7 +224,7 @@ inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject*
     const unsigned form = shape >> 26 & 3, height = shape & 0xFFFFFF, sizes[] = {16, 4, 8, 8};
     const size_t row = width * sizes[form];
     std::vector<char> texels((row * height + 15) / 16 * 16); // As piped, in whole float4s
-    std::fread(texels.data(), 1, texels.size(), stdin);
+    receive(texels.data(), 1, texels.size());
     const decltype(CU_AD_FORMAT_FLOAT) formats[] = {CU_AD_FORMAT_FLOAT, CU_AD_FORMAT_UNSIGNED_INT8, CU_AD_FORMAT_HALF,
         CU_AD_FORMAT_UNSIGNED_INT16};
     const CUDA_ARRAY_DESCRIPTOR array{width, height, formats[form], 4};
@@ -265,7 +273,7 @@ struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; I
 template <typename T, typename F>
 std::vector<T> expand(const std::vector<Instance>& instances, size_t count, F corner) {
     std::vector<T> mesh(3 * count), all;
-    std::fread(mesh.data(), sizeof(T), mesh.size(), stdin);
+    receive(mesh.data(), sizeof(T), mesh.size());
     for (const Instance& instance : instances) for (unsigned c = 3 * instance.first; c < 3 * (instance.first +
         instance.count); ++c) all.push_back(instance.world ? mesh[c] : corner(instance, mesh[c]));
     return all;
@@ -305,10 +313,10 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     float3* const last = scene.vertices;
     const unsigned count = scene.count;
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
-    std::fread(&header, sizeof(header), 1, stdin);
+    receive(&header, sizeof(header), 1);
     const size_t meshes = header.triangles;
     std::vector<Instance> instances(header.instances);
-    std::fread(instances.data(), sizeof(Instance), instances.size(), stdin);
+    receive(instances.data(), sizeof(Instance), instances.size());
     const auto copy = [](const Instance&, auto value) { return value; };
     loaded.vertices = expand<float3>(instances, meshes, place), scene.vertices = upload(loaded.vertices);
     scene.normals = upload(expand<float3>(instances, meshes, turn));
@@ -319,8 +327,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.tangents = upload(expand<float4>(instances, meshes, copy));
     std::vector<float> passes(meshes); // Per triangle of the meshes its material's pass index, then its material
     std::vector<Material> table(meshes + 1); // and the world's
-    std::fread(passes.data(), sizeof(float), meshes, stdin);
-    std::fread(table.data(), sizeof(Material), meshes + 1, stdin);
+    receive(passes.data(), sizeof(float), meshes);
+    receive(table.data(), sizeof(Material), meshes + 1);
     std::vector<Info> infos;
     loaded.materials.clear();
     for (const Instance& instance : instances) for (unsigned t = instance.first; t < instance.first + instance.count;
@@ -329,18 +337,18 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.infos = upload(infos), scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
-    std::fread(loaded.ops.data(), sizeof(Op), header.ops, stdin); // The materials' programs, then the bakes', apart
+    receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
     scene.ops = (Op*)allocate(header.rows * sizeof(Op), loaded.ops.data());
     loaded.bakeOps = allocate((header.ops - header.rows) * sizeof(Op), loaded.ops.data() + header.rows);
     std::vector<float4> texels(header.texels + header.baked), only(header.only); // Those only bakes read apart
-    std::fread(texels.data(), sizeof(float4), header.texels, stdin);
-    std::fread(only.data(), sizeof(float4), header.only, stdin);
+    receive(texels.data(), sizeof(float4), header.texels);
+    receive(only.data(), sizeof(float4), header.only);
     scene.texels = (float4*)allocate(texels.size() * sizeof(float4), texels.data());
     scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
     loaded.bakes.resize(header.bakes);
-    std::fread(loaded.bakes.data(), sizeof(unsigned), header.bakes, stdin);
+    receive(loaded.bakes.data(), sizeof(unsigned), header.bakes);
     std::vector<unsigned> shapes(2 * header.images); // Each image a texture, found by its index
-    std::fread(shapes.data(), sizeof(unsigned), shapes.size(), stdin);
+    receive(shapes.data(), sizeof(unsigned), shapes.size());
     std::vector<CUtexObject> images(2 * header.images); // Each image's two textures
     for (unsigned k = 0; k < header.images; ++k) texture(shapes[2 * k], shapes[2 * k + 1], loaded, &images[2 * k]);
     scene.images = (CUtexObject*)allocate(images.size() * sizeof(CUtexObject), images.data());
@@ -361,21 +369,21 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
 // first of 2^32 - 1, which the materials of the programs take; then the bakes to run again
 inline void updateSteps(Scene& scene, Loaded& loaded) {
     unsigned count;
-    std::fread(&count, sizeof(count), 1, stdin);
+    receive(&count, sizeof(count), 1);
     update(scene.ops, 0, loaded.rows, loaded.ops.data());
-    std::fread(loaded.ops.data() + loaded.rows, sizeof(Op), count - loaded.rows, stdin);
+    receive(loaded.ops.data() + loaded.rows, sizeof(Op), count - loaded.rows);
     std::vector<float4> only; // Texels only bakes read, sent again for bakes to run again: first flagged in bit 31
-    for (unsigned table[2]; std::fread(table, sizeof(table), 1, stdin) && table[1];)
+    for (unsigned table[2]; receive(table, sizeof(table), 1) && table[1];)
         if (table[0] >> 31) only.resize(std::max<size_t>(only.size(), (table[0] & ~(1u << 31)) + table[1])),
-            std::fread(only.data() + (table[0] & ~(1u << 31)), sizeof(float4), table[1], stdin);
+            receive(only.data() + (table[0] & ~(1u << 31)), sizeof(float4), table[1]);
         else update(scene.texels, table[0], table[1], std::vector<float4>(table[1]).data());
     std::unordered_map<unsigned, float> hints;
-    for (std::pair<unsigned, float> hint; std::fread(&hint, sizeof(hint), 1, stdin) && hint.first != ~0u;)
+    for (std::pair<unsigned, float> hint; receive(&hint, sizeof(hint), 1) && hint.first != ~0u;)
         hints[hint.first] = hint.second;
     for (Material& material : loaded.materials) material.emitted = hints.at(material.program);
-    std::fread(&count, sizeof(count), 1, stdin);
+    receive(&count, sizeof(count), 1);
     loaded.rebakes.resize(count);
-    std::fread(loaded.rebakes.data(), sizeof(unsigned), count, stdin);
+    receive(loaded.rebakes.data(), sizeof(unsigned), count);
     if (count) // Those bakes' programs and texels for their pass alone, as a scene's
         loaded.bakeOps = allocate((loaded.ops.size() - loaded.rows) * sizeof(Op), loaded.ops.data() + loaded.rows),
         scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
@@ -391,10 +399,10 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previousVertices, (CUdeviceptr)scene.vertices, bytes));
     }
     unsigned ranges;
-    std::fread(&ranges, sizeof(ranges), 1, stdin);
+    receive(&ranges, sizeof(ranges), 1);
     for (unsigned r = 0; r < ranges; ++r) {
         struct { unsigned first, count; } range;
-        std::fread(&range, sizeof(range), 1, stdin);
+        receive(&range, sizeof(range), 1);
         std::vector<Info> scratch(range.count); // As large as any of the range's arrays piped in
         update(scene.vertices, 3 * range.first, 3 * range.count, &loaded.vertices[3 * range.first]);
         update(scene.normals, 3 * range.first, 3 * range.count, scratch.data());
