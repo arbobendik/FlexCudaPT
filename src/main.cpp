@@ -101,7 +101,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     OptixDenoiserSizes sizes;
     CUdeviceptr state, scratch, denoised, guides[2];
     bool history = false;
-    for (unsigned done = 0, launched, kind; std::fread(&kind, sizeof(kind), 1, stdin); std::fflush(stdout)) {
+    for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         if (kind != REQUEST) {
             const unsigned count = scene.count;
             kind == SCENE ? loadScene(context, scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
@@ -150,7 +150,7 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
             if (scene.count != count) view.width = 0;
             continue;
         }
-        std::fread(&request, sizeof(request), 1, stdin);
+        receive(&request, sizeof(request), 1);
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
             reused = length(next.origin - last.origin) <= request.distance
