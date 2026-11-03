@@ -272,6 +272,12 @@ hair.parametrization = 'ABSORPTION'
 sigma = numpy.array(hair.inputs['Absorption Coefficient'].default_value)
 x = hair.inputs['Radial Roughness'].default_value
 assert numpy.allclose(surface_of(hair)[1], numpy.exp(-numpy.sqrt(sigma) * fit(x))), 'hair by absorption'
+# A volume shader's Draine phase reads its α, an input named Alpha, as the phase's alone: the shader covers all of the
+# surface, as under Henyey-Greenstein, where main covered a quarter of it
+scatter = nodes.new('ShaderNodeVolumeScatter')
+henyey = repr(surface_of(scatter))
+scatter.phase, scatter.inputs['Alpha'].default_value = 'DRAINE', 0.25
+assert repr(surface_of(scatter)) == henyey, 'draine alpha covers nothing'
 pixels = render()
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
 assert green > 50 * max(red, blue), 'specular tint'
