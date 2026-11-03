@@ -153,9 +153,12 @@ class Viewport:  # Stands in for the engine instance Blender creates for a viewp
     engine = bpy.types.RenderEngine.bl_rna_get_subclass_py('FLEX')
     start = engine.start
     trace = engine.trace
+    request = engine.request
+    answer = engine.answer
     view_update = engine.view_update
     view_draw = engine.view_draw
     visible = ()
+    pending, texture, answered = (), None, 0
     shared = open(os.memfd_create('flex'), 'rb', 0)
     __init__ = engine.spawn
     def tag_redraw(self): self.redraw = True
@@ -186,8 +189,8 @@ with offscreen.bind():
     gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
     viewport.view_update(context, depsgraph)
     viewport.view_draw(context, depsgraph)
-    assert 0 < viewport.memory[0] <= viewport.memory[1], 'memory stats'
     while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, depsgraph)  # Until the sample limit
+    assert 0 < viewport.memory[0] <= viewport.memory[1], 'memory stats'
     drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
 assert numpy.allclose(drawn[:56, :, :3], pixels[:56], rtol=0.05, atol=0.01), 'viewport'
 # Light sampling passes through the cutout and emission it reaches is not added again: the cutout changes no light
