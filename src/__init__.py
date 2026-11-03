@@ -177,15 +177,23 @@ def texture(source, textures, texels):
         width, height = (len(pixels) // 4, 1) if ramp else image.size
         srgb = not (ramp or image.is_float or image.colorspace_settings.is_data)
         straight = not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data
-        levels = numpy.rint(pixels * 255).astype('u1')
-        alphas = numpy.bincount(levels[3::4], minlength=256)  # Colors associated by alpha, as Cycles keeps them, in
-        packed = not ramp and numpy.array_equal(levels * (numpy.float32(1) / numpy.float32(255)), pixels) and not (
-            straight and alphas[1:255].any())  # linear light: in RGBA8 exactly by alphas of 0 and 1 alone
+        levels = (pixels * 255 + numpy.float32(0.5)).astype('u1')  # Rounded: read only where they are k / 255 exactly
+        # Counts of the levels by pairs of channels, each pair a 16-bit index: blue and alpha's first, rows by alpha
+        pairs = levels.view('<u2')
+        blue = numpy.bincount(pairs[1::2], minlength=65536).reshape(256, 256)
+        alphas = blue.sum(1)
+        # Colors associated by alpha, as Cycles keeps them, in linear light: in RGBA8 exactly by alphas of 0 and 1
+        # alone, a byte image's texels being k / 255 exactly
+        packed = not ramp and (not image.is_float or numpy.array_equal(levels * (numpy.float32(1) / numpy.float32(
+            255)), pixels)) and not (straight and alphas[1:255].any())
         if packed:  # Its mean in linear light by the count of each level, decoding no texel
-            if straight and alphas[0]: levels.reshape(-1, 4)[levels[3::4] == 0, :3] = 0
+            if straight and alphas[0]:
+                levels.reshape(-1, 4)[levels[3::4] == 0, :3] = 0
+                blue[0, 0], blue[0, 1:] = blue[0].sum(), 0
+            red = numpy.bincount(pairs[0::2], minlength=65536).reshape(256, 256)  # Then red and green's, rows by green
             k = numpy.arange(256) / 255
-            mean = numpy.array([numpy.bincount(c, minlength=256) @ (decode(k) if srgb and i < 3 else k)
-                for i, c in enumerate(levels.reshape(-1, 4).T)]) / (len(levels) // 4)
+            mean = numpy.array([counts @ (decode(k) if srgb and i < 3 else k) for i, counts in
+                enumerate((red.sum(0), red.sum(1), blue.sum(0), alphas))]) / (len(levels) // 4)
         else:
             if srgb: pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
             if straight: pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]
