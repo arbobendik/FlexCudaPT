@@ -344,7 +344,10 @@ def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linea
             texels, filtered = texels_of(source, cache)
             x, y = (shaded(operands[0], uv, cache, memo)[:, :2] * texels.shape[1::-1] - 0.5).T
             i, j = numpy.floor(x).astype(int), numpy.floor(y).astype(int)
-            at = lambda k, n: k % n if getattr(source, 'extension', 'REPEAT') == 'REPEAT' else numpy.clip(k, 0, n - 1)
+            # Repeated, mirrored over the image and its reflection as the GPU reads it, or extended
+            extension = getattr(source, 'extension', 'REPEAT')
+            at = lambda k, n: k % n if extension == 'REPEAT' else numpy.minimum(k % (2 * n), 2 * n - 1 - k % (2 * n)) \
+                if extension == 'MIRROR' else numpy.clip(k, 0, n - 1)
             c = [filtered(texels[at(j + k // 2, texels.shape[0]), at(i + k % 2, texels.shape[1])]) for k in range(4)]
             x, y = (x - i)[:, None], (y - j)[:, None]
             value = (c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y
