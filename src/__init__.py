@@ -1092,18 +1092,20 @@ def resolve(socket, groups=()):
         sheen = get('Sheen Weight')
         sheen = ('SHEEN', get('Color')) if node.type == 'BSDF_SHEEN' else nonzero(sheen) and ('SHEEN', ('MULTIPLY',
             sheen, get('Sheen Tint', 1))) or 0
-        # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it
+        # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it. A volume
+        # shader's Alpha is its Draine phase's α, which covers nothing
+        alpha = 1 if hasattr(node, 'phase') else get('Alpha', 1)
         value = [get('Normal', ('NORMAL',)), albedo, metallic, roughness,
-            ('MULTIPLY', ('MULTIPLY', emissive, strength), get('Alpha', 1)), ('MULTIPLY', transparency, ('SUBTRACT', 1,
+            ('MULTIPLY', ('MULTIPLY', emissive, strength), alpha), ('MULTIPLY', transparency, ('SUBTRACT', 1,
             metallic)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ior, 1), ('SUBTRACT', 1, metallic))),
-            tint, level, get('Alpha', 1), absorption, density, scatter,
+            tint, level, alpha, absorption, density, scatter,
             ('TRANSLUCENT', get('Color')) if node.type == 'BSDF_TRANSLUCENT' else 0, sheen,
             get('Roughness' if node.type == 'BSDF_SHEEN' else 'Sheen Roughness', 0.5)]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if nonzero(weight):
             value.append([get('Coat Normal'), get('Coat Tint'), 0, get('Coat Roughness'), 0, 1, get('Coat IOR'), 1, 1,
-                ('MULTIPLY', weight, get('Alpha', 1))])
+                ('MULTIPLY', weight, alpha)])
     if hasattr(output, 'default_value') and animated(output): value = 'ANIMATED', value  # As of a value node
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
