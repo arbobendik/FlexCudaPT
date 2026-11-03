@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <sys/mman.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include "shaders.h"
 
@@ -127,7 +128,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
     bool reused = false;
     size_t pixels = 1;
-    float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
+    // Sums of two views, request k's in half k mod 2, as the add-on reads them: two requests are in flight
+    float4* sums = (float4*)mmap(nullptr, 2 * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
+    unsigned served = 0;
     loadView(scene, 1); // For the first view to free like any later one's
     scene.vertices = scene.previousVertices = (float3*)allocate(0); // For the first scene to keep or free
     // The reservoirs the last view starting over ended with and their duplication, its camera and the BVHs of the
@@ -145,8 +148,18 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         if (kind != REQUEST) {
             const unsigned count = scene.count;
-            kind == SCENE ? loadScene(context, scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
-                : updateSteps(scene, loaded);
+            if (kind == SCENE) { // Its parts in memory of Blender's, the pipe giving its place: read there, as its file
+                struct { unsigned long long size; char path[64]; } place;
+                receive(&place, sizeof(place), 1);
+                const int file = open(place.path, O_RDWR);
+                if (file < 0) return 0; // Gone: Blender freed the engine before its scene was read, its input ended
+                void* parts = mmap(nullptr, place.size, PROT_READ, MAP_PRIVATE, file, 0);
+                CHECK(parts == MAP_FAILED);
+                mapped = (const char*)parts + sizeof(kind), unread = place.size - sizeof(kind);
+                mappedFile = file, mappedBase = (const char*)parts, punched = 0;
+                loadScene(context, scene, loaded);
+                munmap(parts, place.size), close(file), mapped = nullptr;
+            } else kind == UPDATE ? updateScene(context, scene, loaded) : updateSteps(scene, loaded);
             Params next{};
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
             if (!pipeline || std::memcmp(&next, &params, sizeof(params))) { // Compiled for the first scene's steps,
@@ -194,6 +207,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             continue;
         }
         receive(&request, sizeof(request), 1);
+        const unsigned half = served++ % 2;
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
             reused = length(next.origin - last.origin) <= request.distance
@@ -205,10 +219,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     (void*)scene.temporal, (void*)scene.shifts, (void*)anchor})
                     release((CUdeviceptr)array);
                 loadView(scene, request.view.width * request.view.height);
-                CHECK(munmap(sums, pixels * sizeof(float4)));
+                CHECK(munmap(sums, 2 * pixels * sizeof(float4)));
                 pixels = request.view.width * request.view.height;
-                CHECK(ftruncate(shared, pixels * sizeof(float4)));
-                sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
+                CHECK(ftruncate(shared, 2 * pixels * sizeof(float4)));
+                sums = (float4*)mmap(nullptr, 2 * pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
                 CHECK(sums == MAP_FAILED);
                 anchor = (CUdeviceptr)zeros<char>(pixels * (sizeof(Reservoir) + sizeof(float)));
                 anchorCamera = request.view.camera;
@@ -314,8 +328,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.denoisedCamera = scene.camera;
             history = true;
         }
-        CHECK(cuMemcpyDtoH(sums, result, pixels * sizeof(float4)));
-        if (denoise) for (size_t i = 0; i < pixels; ++i) sums[i] = {sums[i].x * done, sums[i].y * done,
-            sums[i].z * done, float(done)};
+        float4* const out = sums + half * pixels;
+        CHECK(cuMemcpyDtoH(out, result, pixels * sizeof(float4)));
+        if (denoise) for (size_t i = 0; i < pixels; ++i) out[i] = {out[i].x * done, out[i].y * done,
+            out[i].z * done, float(done)};
     }
 }

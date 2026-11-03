@@ -10,6 +10,8 @@
 #include <cuda.h>
 #include <optix_stubs.h>
 #include <cstdio>
+#include <fcntl.h>
+#include <cstring>
 #include <cstdlib>
 #include <cmath>
 #define CHECK(call) do { int error = (call); if (error) { \
@@ -18,7 +20,21 @@
 // Count items of size piped in by the extension into data. Its pipe ends only once the extension is gone, closed,
 // crashed or killed, when the renderer ends too, whatever it was reading, rather than go on with what never came: true
 // as it returns only with them all
+inline const char* mapped = nullptr; // A scene's parts in Blender's memory, while it is read there, and what is left
+inline size_t unread = 0;
+inline int mappedFile = -1; // Its file and start, its pages punched out as they are read: none waits beside the copies
+inline const char* mappedBase = nullptr; // made of it
+inline size_t punched = 0;
 inline bool receive(void* data, size_t size, size_t count) {
+    if (mapped) {
+        if (size * count > unread) std::exit(0);
+        std::memcpy(data, mapped, size * count), mapped += size * count, unread -= size * count;
+        const size_t read = size_t(mapped - mappedBase) / 4096 * 4096;
+        if (read > punched) // Freed for every holder of the file
+            CHECK(fallocate(mappedFile, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, punched, read - punched));
+        punched = std::max(punched, read);
+        return true;
+    }
     if (std::fread(data, size, count, stdin) != count) std::exit(0);
     return true;
 }

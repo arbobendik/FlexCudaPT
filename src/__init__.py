@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time, types
+import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, select, struct, subprocess, time, types
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -1241,6 +1241,8 @@ class Flex(bpy.types.RenderEngine):
         self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
         # unit's place (first texel of tiles, key, texture, program's hint and steps, value); texels piped before bakes
         self.texture = None  # The viewport's view as last traced
+        self.pending = ()  # The sizes of the views asked for, until answered: two in flight, so it never idles
+        self.answered = 0  # Answers read, each request's in the half of the shared file of its number's parity
         self.memory = (0, 0)  # Renderer allocations: used and peak in MiB
         self.following = None  # The frame after the last one rendered, which reuses its reservoirs in an animation
         self.shared = open(os.memfd_create('flex'), 'rb', 0)  # In memory file the renderer leaves its sums in
@@ -1252,8 +1254,9 @@ class Flex(bpy.types.RenderEngine):
         self.device = device()  # That of the renderer, which the preference may change since
         process = subprocess.Popen((BINARY + '-vulkan' * (self.device == 'VULKAN'), str(self.shared.fileno()),
             str(os.getpid())),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),))
-        self.requests = process.stdin
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),), bufsize=0)  # Answers
+            # polled by select, none held in a buffer
+        self.requests = Pipe(process.stdin)
         self.answers = process.stdout
         process.stdin = process.stdout = None
 
@@ -1740,19 +1743,27 @@ class Flex(bpy.types.RenderEngine):
         # material of its emission, program, hidden flag, layer count, opaque flag and emission program (then the
         # world's); then the steps of 4 integers, the texels and the programs of the bakes;
         # then each image's width and height, RGBA8 in its bit 26, and its texels
-        self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
-            counts[1], sum(map(len, columns[0])), len(instances), counts[2]), *(part for first, count, world, values
-            in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,
-            dtype='f') for column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'),
-            materials[:, 1:].astype('I'))), numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'),
-            numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
-            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes))
+        def parts():  # Made as written, each column's arrays let go once it is, so no part waits beside them all
+            yield struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows, counts[1],
+                sum(map(len, columns[0])), len(instances), counts[2])
+            for first, count, world, values in instances: yield from (numpy.array((first, count, world), 'I'), values)
+            for column in columns:
+                yield numpy.concatenate(column, dtype='f')
+                column.clear()
+            yield from (numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
+                numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'), numpy.array([shape for _, shape in images],
+                'I'), *(entry for entry, _ in images), struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes)
+        self.requests.writelines(parts())
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
     # from the camera's matrix through its perspective projection under the settings; none launched if the view already
     # had its samples. A view other than the last starts over.
-    def trace(self, width, height, sampling, launches, settings, matrix, projection, camera=None, clip_end=None):
+    def trace(self, width, height, *view):  # The view's sums, once the renderer has traced the samples asked for
+        self.request(width, height, *view)
+        return self.answer(width, height)
+
+    def request(self, width, height, sampling, launches, settings, matrix, projection, camera=None, clip_end=None):
         right = matrix.col[0].xyz
         up = matrix.col[1].xyz
         back = matrix.col[2].xyz
@@ -1777,9 +1788,14 @@ class Flex(bpy.types.RenderEngine):
         self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
             *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
         self.requests.flush()
-        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
-        sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
-        return launched, numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
+
+    def answer(self, width, height):  # The renderer's answer to the last request: launches, memory, the view's sums
+        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))
+        self.requests.answered()
+        sums = mmap.mmap(self.shared.fileno(), 32 * width * height, access=mmap.ACCESS_READ)
+        half, self.answered = self.answered % 2, self.answered + 1
+        return launched, numpy.frombuffer(sums, 'f', 4 * width * height, 16 * width * height * half).reshape(-1,
+            width, 4)[::-1]
 
     # Shows the result after ever larger batches of samples, until it has them all or the render is cancelled
     def render(self, depsgraph):
@@ -1822,23 +1838,57 @@ class Flex(bpy.types.RenderEngine):
     def view_update(self, context, depsgraph):
         self.start(depsgraph)
 
-    def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
+    # Draws the viewport's view as last traced, never waiting on the renderer: asked for a few more samples, it answers
+    # in its time, loading, compiling or tracing meanwhile, and is asked again once it has, Blender's thread drawing on
+    def view_draw(self, context, depsgraph):
         region = context.region
         scene = depsgraph.scene
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
-        launched, sums = self.trace(region.width, region.height, sampling(scene, True), VIEWPORT_SAMPLES,
-            settings(scene, True, self.device), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
-            camera.evaluated_get(depsgraph) if camera else None, context.space_data.clip_end)
-        if launched:
-            pixels = (sums * (1 / sums[0, 0, 3])).ravel()
-            self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',
-                data=gpu.types.Buffer('FLOAT', len(pixels), pixels))
-            self.tag_redraw()
-        gpu.state.blend_set('ALPHA_PREMULT')
-        self.bind_display_space_shader(scene)
-        draw_texture_2d(self.texture, (0, 0), region.width, region.height)
-        self.unbind_display_space_shader()
-        gpu.state.blend_set('NONE')
+        size = region.width, region.height
+        def ask():
+            self.request(*size, sampling(scene, True), VIEWPORT_SAMPLES, settings(scene, True, self.device),
+                context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
+                camera.evaluated_get(depsgraph) if camera else None, context.space_data.clip_end)
+            self.pending += size,
+        if not self.pending: ask(), ask()  # Two in flight: the renderer starts the next as it answers one
+        elif select.select((self.answers,), (), (), 0)[0]:  # Answered: its view if of this size, and the next asked
+            asked, self.pending = self.pending[0], self.pending[1:]
+            launched, sums = self.answer(*asked)
+            if launched and asked == size:
+                pixels = (sums * (1 / sums[0, 0, 3])).ravel()
+                self.texture = gpu.types.GPUTexture(size, format='RGBA32F',
+                    data=gpu.types.Buffer('FLOAT', len(pixels), pixels))
+            if launched or asked != size: ask()
+        if self.pending: self.tag_redraw()
+        if self.texture:
+            gpu.state.blend_set('ALPHA_PREMULT')
+            self.bind_display_space_shader(scene)
+            draw_texture_2d(self.texture, (0, 0), region.width, region.height)
+            self.unbind_display_space_shader()
+            gpu.state.blend_set('NONE')
+
+class Pipe:  # The renderer's stdin; a scene goes to memory of its own, the pipe carrying its place, so Blender writes
+    # it at memory's speed, never waiting on the renderer to read: the renderer reads it there, as Blender's file. Each
+    # scene's memory is its own and is let go once a request sent after it is answered, as the renderer read it by then
+    def __init__(self, pipe): self.pipe, self.scenes, self.asked = pipe, [], 0
+    def write(self, data):
+        if data[:4] == struct.pack('<I', REQUEST): self.asked = len(self.scenes)
+        self.pipe.write(data)
+    def writelines(self, parts):
+        parts = iter(parts)
+        first = next(parts)
+        if first[:4] != struct.pack('<I', SCENE): return self.pipe.write(first), self.pipe.writelines(parts)
+        scene = open(os.memfd_create('flex-scene'), 'wb')
+        scene.write(first), scene.writelines(parts)
+        scene.flush()
+        self.scenes.append(scene)
+        self.pipe.write(struct.pack('<IQ64s', SCENE, scene.tell(), f'/proc/{os.getpid()}/fd/{scene.fileno()}'.encode()))
+        self.pipe.flush()
+    def flush(self): self.pipe.flush()
+    def answered(self):
+        for scene in self.scenes[:self.asked]: scene.close()
+        del self.scenes[:self.asked]
+        self.asked = 0
 
 class FlexPreferences(bpy.types.AddonPreferences):  # The API the renderer traces with
     bl_idname = __package__
