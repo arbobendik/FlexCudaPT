@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 #include <sys/mman.h>
 #include <unistd.h>
 #include "shaders.h"
@@ -16,7 +17,7 @@
 // Kinds of what the extension pipes in
 enum { SCENE, REQUEST, UPDATE, STEPS };
 
-int main(int, char** argv) { // Usage: renderer file < scenes and requests > an answer per request, sums in the file
+int main(int, char** argv) { // Usage: renderer file parent < scenes, requests > an answer per request, sums in the file
     // CUDA + OptiX contexts
     CUcontext cuda;
     OptixDeviceContext context;
@@ -29,6 +30,12 @@ int main(int, char** argv) { // Usage: renderer file < scenes and requests > an 
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
     if (!argv[1]) return 0; // Probe: whether this machine's device runs it
+    // Once the extension's process, its parent, is gone, closed, crashed or killed, the renderer ends with it within a
+    // tenth of a second, whatever it is doing
+    std::thread([parent = std::atoi(argv[2])] {
+        while (getppid() == parent) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::_Exit(0);
+    }).detach();
     const int shared = std::atoi(argv[1]);
     // Scenes keep the reuse textures; the arrays of the last one loaded
     Scene scene{.pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]),
