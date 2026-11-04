@@ -1,7 +1,7 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref, zlib
+import bpy, bmesh, bpy_extras.object_utils, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref, zlib
 from mathutils import Matrix
 
 SIZE = 64
@@ -1938,6 +1938,80 @@ instancing('nested', nested, 2, 5)
 instancing('hair', hair, 2, 4)
 instancing('vertex instanced', lambda seed: children('VERTS', seed), 2, 4)
 instancing('face instanced', lambda seed: children('FACES', seed), 2, 1)
+
+# Geometry nodes' instance attributes reach the Attribute node of type Instancer per instance, as Cycles reads them: a
+# color by each instance's index drives the emission of four planes, and of eight on two levels, where the inner level's
+# overrides the outer's; each plane's pixel holds its instance's color, on both backends
+def tinted(name, nested):
+    global scene
+    scene = new(name)
+    bpy.context.window.scene = scene
+    scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+    scene.camera = add(bpy.data.cameras.new(name), (0, 0, 5))  # Sees [-1.8, 1.8]^2: the nested reach 1.4
+    bsdf, seed = plane(f'{name} seed', 0, 0, 0.3), bpy.data.objects[f'{name} seed']
+    seed.hide_render, bsdf.inputs['Base Color'].default_value = True, (0, 0, 0, 1)
+    bsdf.inputs['Emission Strength'].default_value, read = 1, bsdf.id_data.nodes.new('ShaderNodeAttribute')
+    read.attribute_type, read.attribute_name = 'INSTANCER', 'tint'
+    bsdf.id_data.links.new(read.outputs['Color'], bsdf.inputs['Emission Color'])
+    tree = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+    host(f'{name} host').modifiers.new('instances', 'NODES').node_group = tree
+    for direction in ('INPUT', 'OUTPUT'):
+        tree.interface.new_socket('Geometry', in_out=direction, socket_type='NodeSocketGeometry')
+    def level(points, instance, scale):  # Instances on the points, tinted by their index times the scale
+        on, tint, color = (tree.nodes.new(kind) for kind in ('GeometryNodeInstanceOnPoints',
+            'GeometryNodeStoreNamedAttribute', 'FunctionNodeCombineColor'))
+        tree.links.new(points, on.inputs['Points']), tree.links.new(instance, on.inputs['Instance'])
+        tint.domain, tint.data_type, tint.inputs['Name'].default_value = 'INSTANCE', 'FLOAT_COLOR', 'tint'
+        for k, factor in enumerate(scale):
+            times = tree.nodes.new('ShaderNodeMath')
+            times.operation, times.inputs[1].default_value = 'MULTIPLY', factor
+            tree.links.new(tree.nodes.new('GeometryNodeInputIndex').outputs[0], times.inputs[0])
+            tree.links.new(times.outputs[0], color.inputs[k])
+        tree.links.new(on.outputs[0], tint.inputs['Geometry']), tree.links.new(color.outputs[0], tint.inputs['Value'])
+        return tint.outputs[0]
+    instance = info(tree, 'GeometryNodeObjectInfo', 'Object', seed)
+    if nested:  # On two points 0.4 apart, inside each outer instance
+        grid = tree.nodes.new('GeometryNodeMeshLine')
+        grid.inputs['Count'].default_value, grid.inputs['Offset'].default_value = 2, (0.4, 0, 0)
+        instance = level(grid.outputs[0], instance, (0.6, 0.1, 0.3))
+    tree.links.new(level(tree.nodes.new('NodeGroupInput').outputs[0], instance, (0.2, 0.3, 0.1)),
+        tree.nodes.new('NodeGroupOutput').inputs[0])
+    devices = bpy.context.preferences.addons[flex.__name__].preferences
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    placed = [(x.matrix_world.translation.copy(), x.persistent_id[1]) for x in depsgraph.object_instances
+        if x.is_instance]  # Each at its innermost level's index
+    assert len(placed) == (8 if nested else 4), name
+    for device in ('OPTIX', 'VULKAN'):
+        devices.device, pixels = device, render()
+        for location, index in placed:
+            x, y = (int(c * SIZE) for c in bpy_extras.object_utils.world_to_camera_view(scene, scene.camera,
+                location)[:2])
+            want = numpy.array((0.6, 0.1, 0.3) if nested else (0.2, 0.3, 0.1)) * index
+            assert numpy.allclose(pixels[y, x], want, atol=0.02), (name, device, index, pixels[y, x], want)
+    devices.device = 'OPTIX'
+tinted('tinted', False)
+tinted('nested tint', True)
+# Instances of the points Distribute Points on Faces makes, whose ids aren't their indices, each read their own: a tint
+# of each one's position reads as where it is
+scene = new('distributed')
+bpy.context.window.scene = scene
+plane('distributed seed', 0, 0, 0.05)
+tree = bpy.data.node_groups.new('distributed', 'GeometryNodeTree')
+host('distributed host').modifiers.new('instances', 'NODES').node_group = tree
+for direction in ('INPUT', 'OUTPUT'):
+    tree.interface.new_socket('Geometry', in_out=direction, socket_type='NodeSocketGeometry')
+spread, on, tint = (tree.nodes.new(kind) for kind in ('GeometryNodeDistributePointsOnFaces',
+    'GeometryNodeInstanceOnPoints', 'GeometryNodeStoreNamedAttribute'))
+tint.domain, tint.data_type, tint.inputs['Name'].default_value = 'INSTANCE', 'FLOAT_COLOR', 'tint'
+for a, b in ((tree.nodes.new('NodeGroupInput').outputs[0], spread.inputs['Mesh']), (spread.outputs['Points'],
+        on.inputs['Points']), (info(tree, 'GeometryNodeObjectInfo', 'Object', bpy.data.objects['distributed seed']),
+        on.inputs['Instance']), (on.outputs[0], tint.inputs['Geometry']), (tree.nodes.new('GeometryNodeInputPosition'
+        ).outputs[0], tint.inputs['Value']), (tint.outputs[0], tree.nodes.new('NodeGroupOutput').inputs[0])):
+    tree.links.new(a, b)
+module['IDS'].clear(), module['INSTANCER'].clear(), module['INSTANCER'].update(tint=0)
+read = [(flex.instancer(x)[0][:3], x.matrix_world.translation.copy()) for x in bpy.context.evaluated_depsgraph_get(
+    ).object_instances if x.is_instance and x.object.name == 'distributed seed']
+assert len(read) > 10 and all(numpy.allclose(tint, where, atol=1e-5) for tint, where in read), 'distributed tint'
 
 # The shadow terminator: a sphere of 16 segments, smooth, lit near its terminator by a sun and by a point light, renders
 # as one of 256 segments does there, not cut along its faces: of the pixels where the fine sphere reads 1-40% of its
