@@ -15,6 +15,11 @@
 #include <unistd.h>
 #include "shaders.h"
 #include <algorithm>
+#include <string>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/resource.h>
+#include <pwd.h>
 
 // Whether a scene's module, while it compiles, has the generic one stand in: OptiX's compile runs as tasks beside
 // frames; Vulkan compiles a pipeline whole, at once, so there each scene takes its own as before
@@ -161,6 +166,17 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     };
     // The generic module, every op compiled in: bound to no scene, compiled once per release by the warm-up Blender
     // starts, then found in OptiX's disk cache. Taken only if found there: this renderer compiles none of it
+    if (!std::strcmp(argv[1], "warm")) { // Blender's warm-up, at its start: the generic module into OptiX's disk cache,
+        const char* cache = std::getenv("OPTIX_CACHE_PATH"); // at the lowest priority, by one warm-up at a time, none
+        const std::string lock = (cache ? std::string(cache) : "/var/tmp/OptixCache_" // OptiX's own, by the user's name
+            + std::string(getpwuid(getuid())->pw_name)) + "/flex-warm.lock";
+        if (flock(open(lock.c_str(), O_CREAT | O_RDWR, 0644), LOCK_EX | LOCK_NB)) return 0; // if it is there already
+        CHECK(setpriority(PRIO_PROCESS, 0, 19));
+        Tier tier{.params = {{~0ull, ~0ull}}};
+        const OptixTask first = begin(tier);
+        if (!compiled(tier)) give(first), finish(tier);
+        return 0;
+    }
     Tier* generic = nullptr;
     if (TIERED) {
         Tier* tier = new Tier{.params = {{~0ull, ~0ull}}};
