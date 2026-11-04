@@ -1843,6 +1843,102 @@ for empty in empties:
     empty.hide_render = True
 assert numpy.array_equal(instanced, render()), 'instances as copies'
 
+# Blender's other instancing pipes a mesh once and renders exactly as copies of their own of its instances do: linked
+# duplicates; geometry nodes' Instance on Points of an object, of a collection and of geometry it makes, and of an
+# object on a host a collection instances; hair particles of an object; vertex and face instancing. The particles' and
+# Object Info's source is hidden, whose instances Blender's renders keep, and a vertex instancer's hidden child stays
+# hidden, as there; each case its triangles and instances, geometry nodes' host among them, its own mesh left empty
+def instancing(name, build, triangles, count, objects=False):  # Copies of the instances, or of the objects
+    global scene
+    scene = new(name)
+    bpy.context.window.scene = scene
+    scene.camera = add(bpy.data.cameras.new(name), (0, 0, 3))
+    plane(f'{name} seed', 0, 0, 0.3)
+    build(bpy.data.objects[f'{name} seed'])
+    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    Viewport.engine.start(exporter, depsgraph)
+    assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=10)[8:]) == (triangles, count), name
+    image = render()
+    copies = [(x.object.data.copy(), x.matrix_world.copy()) for x in depsgraph.object_instances
+        if x.object.type == 'MESH' and x.is_instance != objects]
+    for ob in scene.objects: ob.hide_render = True
+    placed = [(add(data, (0, 0, 0)), matrix) for data, matrix in copies]
+    for ob, matrix in placed: ob.matrix_world = matrix
+    bpy.context.view_layer.update()
+    copied = render()  # Exactly where an object holds the instance's matrix exactly, else within 1%, as turned below
+    exact = all(ob.matrix_world == matrix for ob, matrix in placed)
+    assert numpy.array_equal(image, copied) if exact else numpy.isclose(image.mean(), copied.mean(), rtol=0.01) \
+        and numpy.allclose(blocks(image), blocks(copied), atol=0.02), f'{name} as copies'
+def host(name):  # A plane of 2 of four vertices and one face
+    plane(name, 0, 0, 2)
+    return bpy.data.objects[name]
+def nodes(name, instance):  # Instance on Points at a host's vertices of what instance makes in the tree
+    tree, ob = bpy.data.node_groups.new(name, 'GeometryNodeTree'), host(name)
+    ob.modifiers.new('instances', 'NODES').node_group = tree
+    for direction in ('INPUT', 'OUTPUT'):
+        tree.interface.new_socket('Geometry', in_out=direction, socket_type='NodeSocketGeometry')
+    on = tree.nodes.new('GeometryNodeInstanceOnPoints')
+    tree.links.new(tree.nodes.new('NodeGroupInput').outputs[0], on.inputs['Points'])
+    tree.links.new(instance(tree), on.inputs['Instance'])
+    tree.links.new(on.outputs[0], tree.nodes.new('NodeGroupOutput').inputs[0])
+def info(tree, kind, field, value):  # An object's or a collection's geometry, as instances
+    node = tree.nodes.new(kind)
+    node.inputs[field].default_value = value
+    if 'As Instance' in node.inputs: node.inputs['As Instance'].default_value = True
+    return node.outputs['Geometry' if 'Geometry' in node.outputs else 'Instances']
+def ico(tree):
+    node = tree.nodes.new('GeometryNodeMeshIcoSphere')
+    node.inputs['Radius'].default_value, node.inputs['Subdivisions'].default_value = 0.15, 1
+    return node.outputs[0]
+def collected(seed):
+    group = bpy.data.collections.new('seeds')
+    scene.collection.objects.unlink(seed), group.objects.link(seed)
+    nodes('collected host', lambda tree: info(tree, 'GeometryNodeCollectionInfo', 'Collection', group))
+def nested(seed):  # On points of a host a collection instances
+    seed.hide_render, group = True, bpy.data.collections.new('hosts')
+    nodes('nested host', lambda tree: info(tree, 'GeometryNodeObjectInfo', 'Object', seed))
+    ob = bpy.data.objects['nested host']
+    scene.collection.objects.unlink(ob), group.objects.link(ob)
+    empty = bpy.data.objects.new('hosts', None)
+    empty.instance_type, empty.instance_collection = 'COLLECTION', group
+    scene.collection.objects.link(empty)
+def hair(seed):
+    seed.hide_render, emitter = True, host('hair emitter')
+    settings = emitter.modifiers.new('hair', 'PARTICLE_SYSTEM').particle_system.settings
+    settings.type, settings.count, settings.emit_from, settings.use_emit_random = 'HAIR', 4, 'VERT', False
+    settings.render_type, settings.instance_object, settings.particle_size = 'OBJECT', seed, 1
+    emitter.show_instancer_for_render = False
+def children(kind, seed):  # The seed instanced at the host's vertices or faces, beside a hidden child
+    ob = host(f'{kind} host')
+    seed.parent, ob.instance_type, ob.show_instancer_for_render = ob, kind, False
+    hidden = add(bpy.data.meshes.new(f'{kind} hidden'), (0, 0, 0))
+    hidden.parent, hidden.hide_render = ob, True
+instancing('linked', lambda seed: [add(seed.data, (x, 0, 0)) for x in (-0.6, 0.6)], 2, 3, True)
+# Objects linking one curve, one of them through an array, pipe each the mesh it evaluates to, as copies of it do
+scene = new('linked curves')
+bpy.context.window.scene = scene
+curve = bpy.data.curves.new('linked curve', 'CURVE')
+curve.bevel_depth, spline = 0.1, curve.splines.new('POLY')
+spline.points.add(1)
+spline.points[1].co = (1, 0, 0, 1)
+linking = [add(curve, (0, y, 0)) for y in (-0.5, 0.5)]
+linking[1].modifiers.new('array', 'ARRAY').count = 3
+def triangles():  # Of the scene piped
+    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+    Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+    return numpy.frombuffer(exporter.requests.getvalue(), 'I', count=9)[8]
+linked, linking[1].data = triangles(), curve.copy()
+assert linked == triangles(), 'linked curves'
+instancing('on points', lambda seed: (setattr(seed, 'hide_render', True), nodes('points host',
+    lambda tree: info(tree, 'GeometryNodeObjectInfo', 'Object', seed))), 2, 5)
+instancing('collected', collected, 2, 5)
+instancing('made', lambda seed: (setattr(seed, 'hide_render', True), nodes('made host', ico)), 20, 5)
+instancing('nested', nested, 2, 5)
+instancing('hair', hair, 2, 4)
+instancing('vertex instanced', lambda seed: children('VERTS', seed), 2, 4)
+instancing('face instanced', lambda seed: children('FACES', seed), 2, 1)
+
 # The shadow terminator: a sphere of 16 segments, smooth, lit near its terminator by a sun and by a point light, renders
 # as one of 256 segments does there, not cut along its faces: of the pixels where the fine sphere reads 1-40% of its
 # brightest, under 7% read under half of it, on both backends (main f8b1f30: 22.5% under the sun, 9.4% under the point)
