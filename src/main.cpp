@@ -76,7 +76,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
     OptixPipeline pipeline = nullptr; // That launches take: none until then
     // A module compiled for an op set, bound in its params, with its programs and pipeline once linked
-    struct Tier { Params params; OptixModule module; OptixProgramGroup groups[PASSES + 1]; OptixPipeline pipeline; };
+    // quick: compiled unoptimized, to stand in while the optimized module of its op set compiles
+    struct Tier {
+        Params params; OptixModule module; OptixProgramGroup groups[PASSES + 1]; OptixPipeline pipeline; bool quick;
+    };
     // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
     // traced in, which a view's first temporal pass reprojects into, then one per pass
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
@@ -120,7 +123,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     }).detach();
     const auto begin = [&](Tier& tier) { // Its module created: its compile's first task
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
-        const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
+        const OptixModuleCompileOptions options{.optLevel = tier.quick ? OPTIX_COMPILE_OPTIMIZATION_LEVEL_0
+            : OPTIX_COMPILE_OPTIMIZATION_DEFAULT, .debugLevel = tier.quick ? OPTIX_COMPILE_DEBUG_LEVEL_NONE
+            : OPTIX_COMPILE_DEBUG_LEVEL_DEFAULT, .boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
         CHECK(optixModuleCreateWithTasks(context, &options, &compile, (const char*)build_shaders_ptx,
             build_shaders_ptx_len, nullptr, nullptr, &tier.module, &first));
@@ -196,6 +201,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         else drop(tier);
     }
     Tier* special = nullptr; // The module of the scene's op set, launches taking it once compiled
+    Tier* interim = nullptr; // Its unoptimized one standing in, without a generic, until it is
     std::vector<Tier*> retiring; // Those of earlier op sets, compiling still or awaiting their end
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
     // number launched, memory used and peak in MiB, the sums left in the shared file if any were. A new view starts
@@ -225,9 +231,11 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     bool history = false;
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         // At a frame's start, every launch before it ended: the scene's module swapped in once compiled, its renders
-        // the generic's bit for bit; those of earlier op sets dropped once compiled
-        if (special && pipeline != special->pipeline && compiled(*special))
+        // the generic's bit for bit, the unoptimized one's to rounding; those of earlier op sets dropped once compiled
+        if (special && pipeline != special->pipeline && compiled(*special)) {
             linked(*special), use(*special), flock(busy, LOCK_UN);
+            if (interim) drop(interim), interim = nullptr;
+        }
         std::erase_if(retiring, [&](Tier* tier) { return compiled(*tier) && (drop(tier), true); });
         if (kind != REQUEST) {
             const unsigned count = scene.count;
@@ -244,10 +252,17 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     special = new Tier{.params = next};
                     for (OptixTask task : start(*special)) give(task);
                 }
-                if (!generic) finish(*special);
-                if (!compiled(*special)) linking.wait(); // Awaited only when it stands in
+                Tier* const last = std::exchange(interim, nullptr); // The last op set's: dropped once replaced
+                if (TIERED && !generic && !compiled(*special)) { // Its unoptimized module, quick to compile, stands
+                    interim = new Tier{.params = next, .quick = true}; // in: its tasks, given last, taken first
+                    for (OptixTask task : start(*interim)) give(task);
+                    finish(*interim), linked(*interim);
+                }
+                if (!generic && !interim) finish(*special);
+                if (!compiled(*special) && generic) linking.wait(); // Awaited only when it stands in
                 if (compiled(*special) && !special->pipeline) linked(*special);
-                use(compiled(*special) ? *special : *generic);
+                use(compiled(*special) ? *special : interim ? *interim : *generic);
+                if (last) drop(last);
                 flock(busy, compiled(*special) ? LOCK_UN : LOCK_SH); // Awaiting its own: the warm-up yields
             }
             for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
