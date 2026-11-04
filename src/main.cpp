@@ -73,34 +73,39 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } hit;
     OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit)),
         .hitgroupRecordStrideInBytes = sizeof(hit), .hitgroupRecordCount = 1};
+    // OptiX's compile tasks, taken by a worker on every core while any is given: the renderer's for its lifetime, never
+    // freed, as its workers wait on it to the end
+    struct Workers {
+        std::vector<OptixTask> tasks; std::mutex mutex; std::condition_variable changed; unsigned running;
+    };
+    Workers& workers = *new Workers{};
+    for (unsigned k = 0; k < std::max(1u, std::thread::hardware_concurrency()); ++k) std::thread([&workers] {
+        std::unique_lock lock(workers.mutex);
+        while (true) {
+            workers.changed.wait(lock, [&] { return !workers.tasks.empty(); });
+            const OptixTask task = workers.tasks.back();
+            workers.tasks.pop_back();
+            ++workers.running;
+            lock.unlock();
+            OptixTask more[16];
+            unsigned count = 0;
+            CHECK(optixTaskExecute(task, more, std::size(more), &count));
+            lock.lock();
+            workers.tasks.insert(workers.tasks.end(), more, more + count);
+            --workers.running;
+            workers.changed.notify_all();
+        }
+    }).detach();
     const auto specialize = [&] { // Module, programs and pipeline for params
         CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
-        // Compiled as OptiX's tasks, on every core: the module's functions compile apart
+        // Compiled as OptiX's tasks by the renderer's workers, the module's functions apart, awaited
         OptixTask first;
         CHECK(optixModuleCreateWithTasks(context, &moduleOptions, &compile, (const char*)build_shaders_ptx,
             build_shaders_ptx_len, nullptr, nullptr, &module, &first));
-        std::vector<OptixTask> tasks{first};
-        std::mutex mutex;
-        std::condition_variable changed;
-        unsigned running = 0;
-        std::vector<std::thread> pool(std::max(1u, std::thread::hardware_concurrency()));
-        for (std::thread& thread : pool) thread = std::thread([&] { // Each takes a task while any is left or running
-            std::unique_lock lock(mutex);
-            while (changed.wait(lock, [&] { return !tasks.empty() || !running; }), !tasks.empty()) {
-                const OptixTask task = tasks.back();
-                tasks.pop_back();
-                ++running;
-                lock.unlock();
-                OptixTask more[16];
-                unsigned count = 0;
-                CHECK(optixTaskExecute(task, more, std::size(more), &count));
-                lock.lock();
-                tasks.insert(tasks.end(), more, more + count);
-                --running;
-                changed.notify_all();
-            }
-        });
-        for (std::thread& thread : pool) thread.join();
+        std::unique_lock lock(workers.mutex);
+        workers.tasks.push_back(first);
+        workers.changed.notify_all();
+        workers.changed.wait(lock, [&] { return workers.tasks.empty() && !workers.running; });
         OptixModuleCompileState state;
         CHECK(optixModuleGetCompilationState(module, &state));
         CHECK(state != OPTIX_MODULE_COMPILE_STATE_COMPLETED);
