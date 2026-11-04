@@ -1412,11 +1412,21 @@ class Flex(bpy.types.RenderEngine):
             return row
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
         cuts = {}  # What each material of each object was cut over
+        members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
+            members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
-            # A curve's, text's, surface's or metaball's own entry: the mesh it evaluates to follows as an instance
-            if ob.hide_render or ob.type not in {'MESH', 'LIGHT'} \
+            # Hidden from renders as Blender's are: an object by its setting, though particles' and geometry nodes'
+            # instances of it are kept, nested in collection instances too, whose members it isn't; an instancer of
+            # particles, vertices or faces unless shown in renders; and the children a vertex or face instancer
+            # instances, but as its instances. A curve's, text's, surface's or metaball's own entry: the mesh it
+            # evaluates to follows as an instance
+            if ob.hide_render and not (instance.is_instance and instance.parent.instance_type not in ('VERTS', 'FACES')
+                and not (instance.parent.instance_type == 'COLLECTION' and ob.name in members(
+                instance.parent.instance_collection))) or not (instance.is_instance or ob.show_instancer_for_render) \
+                and (ob.particle_systems or ob.instance_type in ('VERTS', 'FACES')) or not instance.is_instance \
+                and ob.parent and ob.parent.instance_type in ('VERTS', 'FACES') or ob.type not in {'MESH', 'LIGHT'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
