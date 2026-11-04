@@ -8,6 +8,11 @@ constexpr int SLOTS = 32; // Values a program keeps for reuse
 extern "C" __constant__ Params params;
 constexpr float PI = 3.14159265f;
 constexpr float INV_PI = 0.3183098861837907f;
+#ifdef STANDIN
+#define SHADE_INLINE __noinline__
+#else
+#define SHADE_INLINE __forceinline__
+#endif
 __device__ float3 operator+(float3 a, float3 b) { return make_float3(a.x + b.x, a.y + b.y, a.z + b.z); }
 __device__ float3 operator-(float3 a, float3 b) { return make_float3(a.x - b.x, a.y - b.y, a.z - b.z); }
 __device__ float3 operator-(float3 a) { return make_float3(-a.x, -a.y, -a.z); }
@@ -509,7 +514,7 @@ __device__ bool used(unsigned code) {
 }
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
-__device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, float3 normal,
+__device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
     const Info& info, float material = 0) {
     float u, v;
