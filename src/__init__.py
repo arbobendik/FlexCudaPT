@@ -1432,8 +1432,10 @@ class Flex(bpy.types.RenderEngine):
                     rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
                 current.clear()
                 continue
-            key = ob.type != 'LIGHT' and not moved and (ob.data and ob.data.as_pointer(), ob.name, ob.visible_camera)
-            if key in entries:  # Another instance of an object exported: its mesh and materials piped once
+            key = ob.type != 'LIGHT' and not moved and (ob.data and ob.data.as_pointer(), ob.visible_camera,
+                tuple(slot.material for slot in ob.material_slots))
+            if key in entries:  # Another instance of a mesh, or another object linking it, with the same materials:
+                # its mesh and materials piped once
                 record(i, instance, ob, entries[key])
                 continue
             if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
