@@ -1419,7 +1419,8 @@ class Flex(bpy.types.RenderEngine):
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
-            if ob.hide_render or ob.type not in {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'LIGHT'} \
+            # A curve's, text's, surface's or metaball's own entry: the mesh it evaluates to follows as an instance
+            if ob.hide_render or ob.type not in {'MESH', 'LIGHT'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's

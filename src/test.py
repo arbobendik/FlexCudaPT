@@ -884,6 +884,20 @@ for i, item in enumerate(depsgraph.object_instances):
         assert all(numpy.isclose(orco, point, atol=1e-5).all(1).any() for point in generated), 'curve generated'
         item.object.to_mesh_clear()
 assert kinds == {'CURVE', 'FONT', 'SURFACE', 'META'}, 'curves made meshes'
+# They pipe the triangles Blender renders of them once: those of the meshes they evaluate to, beside which the depsgraph
+# lists themselves too
+counted = new('counted')
+bpy.context.window.scene = counted
+for ob in made: counted.collection.objects.link(ob)
+counting, rendered = bpy.context.evaluated_depsgraph_get(), 0
+for item in counting.object_instances:
+    if item.object.type == 'MESH':
+        rendered += len(item.object.to_mesh().loop_triangles)
+        item.object.to_mesh_clear()
+exporter.visible, exporter.requests = (), io.BytesIO()
+Viewport.engine.start(exporter, counting)
+assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=9)[8] == rendered > 0, 'curves piped once'
+bpy.context.window.scene = scene
 for ob in made: ob.hide_render = True
 
 # 8 bit sRGB images are filtered in linear light: a black and a white texel magnified read 0.5 halfway between them
