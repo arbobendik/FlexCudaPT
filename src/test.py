@@ -2175,3 +2175,17 @@ plane('lone', -0.5, 0, 0.5)
 pointed = render()
 bpy.data.objects['points'].hide_render = True
 assert numpy.array_equal(pointed, render()), 'no triangles, no geometry'
+
+# The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
+# a second, finding its lock held, exits at once; the module cached, a third exits at once too
+import subprocess, tempfile
+with tempfile.TemporaryDirectory() as cache:
+    warm = lambda: subprocess.Popen((flex.BINARY, 'warm', str(os.getpid())),
+        env={**os.environ, 'OPTIX_CACHE_PATH': cache})
+    first = warm()
+    time.sleep(1)
+    t = time.perf_counter()
+    assert warm().wait(30) == 0 and time.perf_counter() - t < 10, 'warm-up twice at once'
+    assert first.wait(900) == 0, 'warm-up'
+    t = time.perf_counter()
+    assert warm().wait(60) == 0 and time.perf_counter() - t < 10, 'warm-up of a cached module'
