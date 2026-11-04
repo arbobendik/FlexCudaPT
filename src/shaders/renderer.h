@@ -18,7 +18,7 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN };
+    TRANSLUCENT, SHEEN, INSTANCER };
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
@@ -47,7 +47,7 @@ struct BSDFMaterial {
 struct Material { float emitted; unsigned program, hidden, layers, opaque, emission; };
 // Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index, its material's
 // pass index and its random number, then its axes, which with its location transform it into the world
-struct Info { float location[3], color[4], index, material, random, axes[9]; };
+struct Info { float location[3], color[4], index, material, random, axes[9]; unsigned attributes; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of
 // their points, their power and the cone of their normals around w. A leaf holds triangle child of the instance, an
 // interior node is followed by its first child, child is its second.
@@ -81,7 +81,8 @@ struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, den
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle of the meshes, in their own space: three vertices, normals, generated points, points in their object,
-// UVs, colors and tangents, and its material's pass index. Per instance its entry, and their count. Per triangle of
+// UVs, colors and tangents, and its material's pass index. Per instance its entry, then the instancer attributes its
+// info names the first of, and their count. Per triangle of
 // the instances in the scene's order one material; the world's material last.
 // The light BVH from its root and per triangle the trail to its leaf, from the first bit: whether it takes the second
 // child.
@@ -94,7 +95,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // trails.
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated, *objects; float2* uvs;
-    float4 *colors, *tangents; Instance* instances; float* passes; unsigned instanceCount;
+    float4 *colors, *tangents; Instance* instances; float4* attributes; float* passes; unsigned instanceCount;
     Material* materials; LightNode* lights; unsigned long long* trails; Op* ops; float4* texels; unsigned count; Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
     unsigned frame; Camera previousCamera; Settings settings;
