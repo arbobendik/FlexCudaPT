@@ -89,7 +89,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
-    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color}
+    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, and sheen color and roughness, the last
 # three of which a program carries only marked
@@ -522,6 +522,37 @@ def fraction(value):
 
 def length(vector):
     return 'POWER', ('DOT_PRODUCT', vector, vector), 0.5
+
+# Instancer attributes the export reads, by name their index; the Attribute node's outputs of one: its color, vector,
+# factor and alpha, as Cycles reads them, of the float4 its instance's info names
+INSTANCER, IDS = {}, {}  # Of an instancer's levels by its name and their outer ids, its instances' rows by id
+def instanced(name, index):
+    k = 2 * INSTANCER[name]
+    return (('INSTANCER', k), ('INSTANCER', k), ('DOT_PRODUCT', ('INSTANCER', k), numpy.full(3, 1 / 3)),
+        ('INSTANCER', k + 1))[index]
+
+def instancer(instance):  # Its instancer attributes, float4 each: each level of geometry nodes' instances, from the
+    # outermost, an inner level's overriding an outer's, as Cycles finds the nearest; zeros where none has one
+    values, geometry = numpy.zeros((len(INSTANCER), 4), 'f'), instance.parent.evaluated_geometry()
+    level = instance.parent.name,
+    for i in reversed([i for i in instance.persistent_id[1:] if i != 0x7FFFFFFF]):  # Its mesh first, then outwards
+        points = geometry.instances_pointcloud()
+        if not points: break
+        if level not in IDS:  # Its ids, Blender's of instances of an id attribute, else their indices
+            ids = numpy.arange(len(points.points), dtype='i')
+            if 'id' in points.attributes: points.attributes['id'].data.foreach_get('value', ids)
+            IDS[level] = dict(zip(ids.tolist(), range(len(ids))))
+        level, i = (*level, i), IDS[level].get(i)
+        if i is None: break
+        for name, k in INSTANCER.items():
+            if name in points.attributes:
+                item = points.attributes[name].data[i]
+                v = next(getattr(item, key) for key in ('color', 'vector', 'value') if hasattr(item, key))
+                v = [*v] if hasattr(v, '__len__') else [float(v)] * 3
+                values[k] = (*(v + [0, 0])[:3], v[3] if len(v) > 3 else 1)
+        geometry = geometry.instance_references()[points.attributes['.reference_index'].data[i].value]
+        if not isinstance(geometry, bpy.types.GeometrySet): break
+    return values
 
 def normalize(vector):  # Zero for zero, as Blender's
     return 'DIVIDE', vector, length(vector)
@@ -994,7 +1025,8 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         inputs[2])),
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
-    'ATTRIBUTE': lambda node, inputs, index: (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
+    'ATTRIBUTE': lambda node, inputs, index: instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
+        else (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
         node.attribute_name in mesh.color_attributes for mesh in bpy.data.meshes) else resolve(node.outputs[index]),
     'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
@@ -1257,13 +1289,24 @@ class Flex(bpy.types.RenderEngine):
             matrix = instance.matrix_world
             instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
                 numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
-                ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()]), dtype='f')))
+                ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()],
+                numpy.array([attributed(instance)], 'u4').view('f')), dtype='f')))
             slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
+        # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
+        # without: its info names its first
+        IDS.clear()
+        INSTANCER.clear(), INSTANCER.update((name, k) for k, name in enumerate(sorted({node.attribute_name for tree in
+            trees if tree for node in tree.nodes if node.type == 'ATTRIBUTE' and node.attribute_type == 'INSTANCER'})))
+        attributes = [numpy.zeros(4 * len(INSTANCER), 'f')]
+        def attributed(instance):  # The first of its instancer attributes, the zeros' without
+            values = instance.is_instance and INSTANCER and instancer(instance).ravel()
+            return values is not False and len(values) and values.any() and (attributes.append(values)
+                or len(attributes) - 1) * len(INSTANCER) or 0
         derived = set()  # Images a Bump differentiates, kept floats
         baked, bakes, units, summaries, placed, again = [0], [], {}, {}, [], []  # Texels baked after those piped, each
         # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
@@ -1697,7 +1740,8 @@ class Flex(bpy.types.RenderEngine):
             in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,
             dtype='f') for column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'),
             materials[:, 1:].astype('I'))), numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'),
-            numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images)))
+            numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
+            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes))
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
