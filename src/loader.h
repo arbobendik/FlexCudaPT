@@ -408,6 +408,9 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     std::vector<CUtexObject> images(2 * header.images); // Each image's two textures
     for (unsigned k = 0; k < header.images; ++k) texture(shapes[2 * k], shapes[2 * k + 1], loaded, &images[2 * k]);
     scene.images = (CUtexObject*)allocate(images.size() * sizeof(CUtexObject), images.data());
+    unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
+    receive(&attributes, sizeof(unsigned), 1);
+    scene.attributes = load<float4>(attributes);
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
@@ -415,7 +418,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
-        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images};
+        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
@@ -479,7 +482,8 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         Instance& entry = loaded.instances[instance];
         if (range.count) {
             if (!entry.world) std::copy_n(rows, 12, entry.matrix), std::copy_n(rows + 12, 9, entry.adjugate);
-            entry.info = scratch[0];
+            const unsigned attributes = entry.info.attributes; // Its instancer attributes as last piped
+            entry.info = scratch[0], entry.info.attributes = attributes;
             CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[instance], &entry, sizeof(Instance)));
         }
     }
