@@ -18,14 +18,14 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN };
+    TRANSLUCENT, SHEEN, INSTANCER };
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
-struct Info { float location[3], color[4], index, material, random, axes[9]; };
+struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
 struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; uint key; };
 static const uint NONE = ~0u;
@@ -34,7 +34,8 @@ struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise
 static const int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
-    float2* uvs; float4* colors; float4* tangents; Instance* instances; float* passes; uint instanceCount;
+    float2* uvs; float4* colors; float4* tangents; Instance* instances; float4* attributes; float* passes;
+    uint instanceCount;
     SceneMaterial* materials; LightNode* lights; uint64_t* trails; Op* ops; uint4* texels; uint count; Camera camera;
     Reservoir* previous; Reservoir* initial; Reservoir* temporal; float* duplication; Shift* shifts; int8_t* pairing[3];
     uint frame; Camera previousCamera; Settings settings;
@@ -583,6 +584,11 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             stack[top - 1] = output == 0 ? float3(info.location[0], info.location[1], info.location[2]) : output == 1
                 ? float3(info.color[0], info.color[1], info.color[2]) : float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
+        } break;
+        CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
+            const int k = int(stack[top - 1].x);
+            const float4 v = scene.attributes[info.attributes + k / 2];
+            stack[top - 1] = k % 2 != 0 ? float3(1, 1, 1) * v.w : v.xyz;
         } break;
         CASE(NORMAL) stack[top++] = normal; break;
         CASE(POSITION) stack[top++] = at.position; break;

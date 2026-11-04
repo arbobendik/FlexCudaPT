@@ -561,6 +561,11 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned program, f
                 ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
+        CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
+            const int k = int(top[-1].x);
+            const float4 v = scene.attributes[info.attributes + k / 2];
+            top[-1] = k % 2 ? make_float3(1, 1, 1) * v.w : make_float3(v.x, v.y, v.z);
+        } break;
         CASE(NORMAL) *top++ = normal; break;
         CASE(POSITION) *top++ = position; break;
         CASE(SHIFT) // Pushes its own point's index before the height there
