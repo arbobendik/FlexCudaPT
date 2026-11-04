@@ -89,9 +89,15 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // freed, as its workers wait on it to the end
     struct Workers {
         std::vector<OptixTask> tasks; std::mutex mutex; std::condition_variable changed; unsigned running;
+        bool yielding; // The warm-up's: each task waits while a renderer awaits its own compile
     };
     Workers& workers = *new Workers{};
-    for (unsigned k = 0; k < std::max(1u, std::thread::hardware_concurrency()); ++k) std::thread([&workers] {
+    // OptiX's disk cache, by the user's name, where a renderer awaiting its own compile holds busy shared
+    const char* cacheDirectory = std::getenv("OPTIX_CACHE_PATH");
+    const std::string cache = cacheDirectory ? std::string(cacheDirectory)
+        : "/var/tmp/OptixCache_" + std::string(getpwuid(getuid())->pw_name);
+    const int busy = open((cache + "/flex-busy.lock").c_str(), O_CREAT | O_RDWR, 0644);
+    for (unsigned k = 0; k < std::max(1u, std::thread::hardware_concurrency()); ++k) std::thread([&workers, busy] {
         std::unique_lock lock(workers.mutex);
         while (true) {
             workers.changed.wait(lock, [&] { return !workers.tasks.empty(); });
@@ -99,6 +105,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             workers.tasks.pop_back();
             ++workers.running;
             lock.unlock();
+            while (workers.yielding && flock(busy, LOCK_EX | LOCK_NB))
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (workers.yielding) flock(busy, LOCK_UN);
             OptixTask more[16];
             unsigned count = 0;
             CHECK(optixTaskExecute(task, more, std::size(more), &count));
@@ -166,16 +175,16 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // The generic module, every op compiled in: bound to no scene, compiled once per release by the warm-up Blender
     // starts, then found in OptiX's disk cache. Taken only if found there: this renderer compiles none of it
     if (!std::strcmp(argv[1], "warm")) { // Blender's warm-up, at its start: the generic module into OptiX's disk cache,
-        const char* cache = std::getenv("OPTIX_CACHE_PATH"); // at the lowest priority, by one warm-up at a time, none
-        const std::string lock = (cache ? std::string(cache) : "/var/tmp/OptixCache_" // OptiX's own, by the user's name
-            + std::string(getpwuid(getuid())->pw_name)) + "/flex-warm.lock";
-        if (flock(open(lock.c_str(), O_CREAT | O_RDWR, 0644), LOCK_EX | LOCK_NB)) return 0; // if it is there already
+        // at the lowest priority, by one warm-up at a time, none if it is there already, yielding to renderers
+        if (flock(open((cache + "/flex-warm.lock").c_str(), O_CREAT | O_RDWR, 0644), LOCK_EX | LOCK_NB)) return 0;
         CHECK(setpriority(PRIO_PROCESS, 0, 19));
+        workers.yielding = true;
         Tier tier{.params = {{~0ull, ~0ull}}};
         const OptixTask first = begin(tier);
         if (!compiled(tier)) give(first), finish(tier);
         return 0;
     }
+    flock(busy, LOCK_SH); // From its start to its own compile: the warm-up yields
     Tier* generic = nullptr;
     if (TIERED) {
         Tier* tier = new Tier{.params = {{~0ull, ~0ull}}};
@@ -214,7 +223,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         // At a frame's start, every launch before it ended: the scene's module swapped in once compiled, its renders
         // the generic's bit for bit; those of earlier op sets dropped once compiled
-        if (special && pipeline != special->pipeline && compiled(*special)) linked(*special), use(*special);
+        if (special && pipeline != special->pipeline && compiled(*special))
+            linked(*special), use(*special), flock(busy, LOCK_UN);
         std::erase_if(retiring, [&](Tier* tier) { return compiled(*tier) && (drop(tier), true); });
         if (kind != REQUEST) {
             const unsigned count = scene.count;
@@ -235,6 +245,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (!compiled(*special) && !generic->pipeline) linked(*generic);
                 if (compiled(*special) && !special->pipeline) linked(*special);
                 use(compiled(*special) ? *special : *generic);
+                flock(busy, compiled(*special) ? LOCK_UN : LOCK_SH); // Awaiting its own: the warm-up yields
             }
             for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
                 const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
