@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <utility>
 #include <thread>
+#include <future>
 #include <mutex>
 #include <condition_variable>
 #include <vector>
@@ -186,10 +187,12 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     }
     flock(busy, LOCK_SH); // From its start to its own compile: the warm-up yields
     Tier* generic = nullptr;
+    std::future<void> linking; // The generic's programs and pipeline, linked beside the scene's export
     if (TIERED) {
         Tier* tier = new Tier{.params = {{~0ull, ~0ull}}};
         start(*tier);
-        if (compiled(*tier)) generic = tier; // Linked only when a scene's own isn't cached
+        if (compiled(*tier))
+            generic = tier, linking = std::async(std::launch::async, [&linked, tier] { linked(*tier); });
         else drop(tier);
     }
     Tier* special = nullptr; // The module of the scene's op set, launches taking it once compiled
@@ -242,7 +245,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     for (OptixTask task : start(*special)) give(task);
                 }
                 if (!generic) finish(*special);
-                if (!compiled(*special) && !generic->pipeline) linked(*generic);
+                if (!compiled(*special)) linking.wait(); // Awaited only when it stands in
                 if (compiled(*special) && !special->pipeline) linked(*special);
                 use(compiled(*special) ? *special : *generic);
                 flock(busy, compiled(*special) ? LOCK_UN : LOCK_SH); // Awaiting its own: the warm-up yields
