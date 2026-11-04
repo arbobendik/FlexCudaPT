@@ -13,6 +13,15 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "shaders.h"
+#include <algorithm>
+
+// Whether a scene's module, while it compiles, has the generic one stand in: OptiX's compile runs as tasks beside
+// frames; Vulkan compiles a pipeline whole, at once, so there each scene takes its own as before
+#ifdef VK_VERSION_1_0
+constexpr bool TIERED = false;
+#else
+constexpr bool TIERED = true;
+#endif
 
 // Kinds of what the extension pipes in
 enum { SCENE, REQUEST, UPDATE, STEPS };
@@ -51,19 +60,17 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         .traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
         .numPayloadValues = 7, // The triangle a ray skips, a layer and its gathering
         .pipelineLaunchParamsVariableName = "params"};
-    Params params{};
-    const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};
-    OptixModuleCompileOptions moduleOptions{.boundValues = &bound, .numBoundValues = 1};
+    Params params{}; // Those of the module launches take
     const CUdeviceptr launch = allocate(sizeof(params));
-    OptixModule module;
     // Raygen programs of a frame's passes, then the any-hit program skipping a triangle: rays are only traversed, so
     // none runs on a miss or a closest hit
     constexpr unsigned PASSES = std::size(PROGRAMS);
-    OptixProgramGroup groups[PASSES + 1];
     OptixProgramGroupOptions groupOptions{};
     // Link pipeline, no recursion
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
-    OptixPipeline pipeline = nullptr; // None until then
+    OptixPipeline pipeline = nullptr; // That launches take: none until then
+    // A module compiled for an op set, bound in its params, with its programs and pipeline once linked
+    struct Tier { Params params; OptixModule module; OptixProgramGroup groups[PASSES + 1]; OptixPipeline pipeline; };
     // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
     // traced in, which a view's first temporal pass reprojects into, then one per pass
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
@@ -96,31 +103,72 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             workers.changed.notify_all();
         }
     }).detach();
-    const auto specialize = [&] { // Module, programs and pipeline for params
-        CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
-        // Compiled as OptiX's tasks by the renderer's workers, the module's functions apart, awaited
+    const auto begin = [&](Tier& tier) { // Its module created: its compile's first task
+        const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
+        const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
-        CHECK(optixModuleCreateWithTasks(context, &moduleOptions, &compile, (const char*)build_shaders_ptx,
-            build_shaders_ptx_len, nullptr, nullptr, &module, &first));
-        std::unique_lock lock(workers.mutex);
-        workers.tasks.push_back(first);
-        workers.changed.notify_all();
-        workers.changed.wait(lock, [&] { return workers.tasks.empty() && !workers.running; });
+        CHECK(optixModuleCreateWithTasks(context, &options, &compile, (const char*)build_shaders_ptx,
+            build_shaders_ptx_len, nullptr, nullptr, &tier.module, &first));
+        return first;
+    };
+    const auto compiled = [&](const Tier& tier) { // OptiX's disk cache holding it, it is so at once
         OptixModuleCompileState state;
-        CHECK(optixModuleGetCompilationState(module, &state));
-        CHECK(state != OPTIX_MODULE_COMPILE_STATE_COMPLETED);
+        CHECK(optixModuleGetCompilationState(tier.module, &state));
+        return state == OPTIX_MODULE_COMPILE_STATE_COMPLETED;
+    };
+    const auto give = [&](OptixTask task) {
+        const std::lock_guard lock(workers.mutex);
+        workers.tasks.push_back(task);
+        workers.changed.notify_all();
+    };
+    const auto start = [&](Tier& tier) { // Its compile's first task run here: OptiX's cache holding the module, it is
+        OptixTask more[16]; // compiled then (in some 0.02 s), else the tasks it leaves follow
+        unsigned count = 0;
+        CHECK(optixTaskExecute(begin(tier), more, std::size(more), &count));
+        return std::vector<OptixTask>(more, more + count);
+    };
+    const auto finish = [&](const Tier& tier) {
+        std::unique_lock lock(workers.mutex);
+        workers.changed.wait(lock, [&] { return compiled(tier); });
+    };
+    const auto linked = [&](Tier& tier) { // Its programs and pipeline
         for (unsigned pass = 0; pass < PASSES; ++pass) {
-            OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN, .raygen = {module, PROGRAMS[pass]}};
-            CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &groups[pass]));
-            CHECK(optixSbtRecordPackHeader(groups[pass], &records[pass + 1]));
+            OptixProgramGroupDesc desc{.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN,
+                .raygen = {tier.module, PROGRAMS[pass]}};
+            CHECK(optixProgramGroupCreate(context, &desc, 1, &groupOptions, nullptr, nullptr, &tier.groups[pass]));
         }
         OptixProgramGroupDesc skip{.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
-            .hitgroup = {.moduleAH = module, .entryFunctionNameAH = "__anyhit__skip"}};
-        CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &groups[PASSES]));
-        CHECK(optixPipelineCreate(context, &compile, &link, groups, PASSES + 1, nullptr, nullptr, &pipeline));
-        CHECK(optixSbtRecordPackHeader(groups[PASSES], &hit));
+            .hitgroup = {.moduleAH = tier.module, .entryFunctionNameAH = "__anyhit__skip"}};
+        CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &tier.groups[PASSES]));
+        CHECK(optixPipelineCreate(context, &compile, &link, tier.groups, PASSES + 1, nullptr, nullptr, &tier.pipeline));
+    };
+    const auto use = [&](const Tier& tier) { // Launches take it from here on: its params and its programs' headers
+        params = tier.params, pipeline = tier.pipeline;
+        CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
+        for (unsigned pass = 0; pass < PASSES; ++pass)
+            CHECK(optixSbtRecordPackHeader(tier.groups[pass], &records[pass + 1]));
+        CHECK(optixSbtRecordPackHeader(tier.groups[PASSES], &hit));
         CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, &hit, sizeof(hit)));
     };
+    const auto drop = [&](Tier* tier) {
+        if (tier->pipeline) {
+            CHECK(optixPipelineDestroy(tier->pipeline));
+            for (OptixProgramGroup group : tier->groups) CHECK(optixProgramGroupDestroy(group));
+        }
+        CHECK(optixModuleDestroy(tier->module));
+        delete tier;
+    };
+    // The generic module, every op compiled in: bound to no scene, compiled once per release by the warm-up Blender
+    // starts, then found in OptiX's disk cache. Taken only if found there: this renderer compiles none of it
+    Tier* generic = nullptr;
+    if (TIERED) {
+        Tier* tier = new Tier{.params = {{~0ull, ~0ull}}};
+        start(*tier);
+        if (compiled(*tier)) generic = tier; // Linked only when a scene's own isn't cached
+        else drop(tier);
+    }
+    Tier* special = nullptr; // The module of the scene's op set, launches taking it once compiled
+    std::vector<Tier*> retiring; // Those of earlier op sets, compiling still or awaiting their end
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
     // number launched, memory used and peak in MiB, the sums left in the shared file if any were. A new view starts
     // over: it persists the last one if it has its size and settings and its camera did not jump, move farther than
@@ -148,20 +196,29 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     CUdeviceptr state, scratch, denoised, guides[2];
     bool history = false;
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
+        // At a frame's start, every launch before it ended: the scene's module swapped in once compiled, its renders
+        // the generic's bit for bit; those of earlier op sets dropped once compiled
+        if (special && pipeline != special->pipeline && compiled(*special)) linked(*special), use(*special);
+        std::erase_if(retiring, [&](Tier* tier) { return compiled(*tier) && (drop(tier), true); });
         if (kind != REQUEST) {
             const unsigned count = scene.count;
             kind == SCENE ? loadScene(context, scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
                 : updateSteps(scene, loaded);
             Params next{};
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
-            if (!pipeline || std::memcmp(&next, &params, sizeof(params))) { // Compiled for the first scene's steps,
-                if (pipeline) { // then anew for other steps, in place of the last
-                    CHECK(optixPipelineDestroy(pipeline));
-                    for (OptixProgramGroup group : groups) CHECK(optixProgramGroupDestroy(group));
-                    CHECK(optixModuleDestroy(module));
+            if (!special || std::memcmp(&next, &special->params, sizeof(next))) { // Another op set: its own module,
+                if (special) retiring.push_back(special); // one still compiling taken back, the generic standing in
+                const auto again = std::find_if(retiring.begin(), retiring.end(), // while it compiles, or without one
+                    [&](const Tier* tier) { return !std::memcmp(&tier->params, &next, sizeof(next)); }); // awaited
+                if (again != retiring.end()) special = *again, retiring.erase(again);
+                else { // Its compile's other tasks, unless OptiX's cache held it, given to the workers
+                    special = new Tier{.params = next};
+                    for (OptixTask task : start(*special)) give(task);
                 }
-                params = next;
-                specialize();
+                if (!generic) finish(*special);
+                if (!compiled(*special) && !generic->pipeline) linked(*generic);
+                if (compiled(*special) && !special->pipeline) linked(*special);
+                use(compiled(*special) ? *special : *generic);
             }
             for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
                 const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
