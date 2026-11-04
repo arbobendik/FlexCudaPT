@@ -1986,6 +1986,9 @@ def register():
     global runnable  # Started without a file, a renderer exits once its device is up, failing without one
     runnable = tuple(key for key, suffix in BACKENDS if not subprocess.run((BINARY + suffix,),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
+    if 'OPTIX' in runnable and not bpy.app.background:  # Interactive Blender warms OptiX's disk cache with the generic
+        subprocess.Popen((BINARY, 'warm', str(os.getpid())), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            start_new_session=True)  # module, once per release, a renderer of its own ending with Blender
     bpy.app.timers.register(reload, persistent=True)
     for name, prop in PROPERTIES.items(): setattr(bpy.types.Scene, name, prop)
     for cls in CLASSES: bpy.utils.register_class(cls)
