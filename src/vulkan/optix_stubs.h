@@ -5,12 +5,29 @@
 #include "cuda.h"
 #include "../shaders/renderer.h"
 #include <optix_types.h>
+#include <cstdio>
+#include <cstdint>
+#include <string>
+#include <vector>
+#include <pwd.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // What a launch pushes: the address of its record and its size
 struct Launch { CUdeviceptr record; unsigned width, height, depth; };
 constexpr unsigned WORKGROUP = 8; // Square, as renderer.slang's main runs, its threads in a row for launches one high
 
-struct OptixModule_t { VkShaderModule shader; Params params; };
+// A module: its shader, op mask and the pipeline cache its pipeline is made through, read from the cache file of this
+// release's SPIR-V, keyed by its hash
+struct OptixModule_t { VkShaderModule shader; Params params; VkPipelineCache cache; uint64_t key; };
+// One file, beside OptiX's disk cache, of one release's pipelines: the SPIR-V's FNV-1a hash, then the cache's data,
+// whose header the driver checks against its own and device. Another release's or driver's loads as no data
+inline std::string cacheFile() {
+    const char* cache = std::getenv("OPTIX_CACHE_PATH");
+    const std::string directory = cache ? cache : "/var/tmp/OptixCache_" + std::string(getpwuid(getuid())->pw_name);
+    mkdir(directory.c_str(), 0700);
+    return directory + "/flex-vulkan.bin";
+}
 struct OptixProgramGroup_t { OptixModule module; unsigned program; };
 struct OptixPipeline_t { VkPipelineLayout layout; VkPipeline pipeline; };
 
@@ -50,7 +67,23 @@ inline OptixResult optixModuleCreate(OptixDeviceContext, const OptixModuleCompil
     std::memcpy(code.data(), input, size);
     const VkShaderModuleCreateInfo info{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size,
         .pCode = code.data()};
-    *module = new OptixModule_t{.params = *(const Params*)options->boundValues[0].boundValuePtr}; // Its op mask
+    *module = new OptixModule_t{.params = *(const Params*)options->boundValues[0].boundValuePtr, // Its op mask
+        .key = 0xcbf29ce484222325ull};
+    for (size_t k = 0; k < size; ++k) // FNV-1a of the SPIR-V
+        (*module)->key = ((*module)->key ^ (unsigned char)input[k]) * 0x100000001b3ull;
+    std::vector<char> data;
+    if (FILE* file = std::fopen(cacheFile().c_str(), "rb")) {
+        uint64_t key = 0;
+        std::fseek(file, 0, SEEK_END);
+        data.resize(std::max(std::ftell(file) - long(sizeof(key)), 0l));
+        std::fseek(file, 0, SEEK_SET);
+        if (!std::fread(&key, sizeof(key), 1, file) || key != (*module)->key) data.clear();
+        data.resize(std::fread(data.data(), 1, data.size(), file));
+        std::fclose(file);
+    }
+    const VkPipelineCacheCreateInfo cache{.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+        .initialDataSize = data.size(), .pInitialData = data.data()};
+    vkCreatePipelineCache(vulkan.device, &cache, nullptr, &(*module)->cache);
     return vkCreateShaderModule(vulkan.device, &info, nullptr, &(*module)->shader) ? OPTIX_ERROR_INVALID_INPUT
         : OPTIX_SUCCESS;
 }
@@ -103,12 +136,27 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
         .module = groups[0]->module->shader, .pName = "main", .pSpecializationInfo = &specialization},
         .layout = (*pipeline)->layout};
-    return vkCreateComputePipelines(vulkan.device, VK_NULL_HANDLE, 1, &info, nullptr, &(*pipeline)->pipeline)
-        ? OPTIX_ERROR_PIPELINE_LINK_ERROR : OPTIX_SUCCESS;
+    const OptixModule module = groups[0]->module;
+    if (vkCreateComputePipelines(vulkan.device, module->cache, 1, &info, nullptr, &(*pipeline)->pipeline))
+        return OPTIX_ERROR_PIPELINE_LINK_ERROR;
+    // The cache saved whole after the key, through a file of its own renamed into place: two renderers saving at once
+    // leave one's whole, the other's pipeline coming again on its next save
+    size_t size = 0;
+    vkGetPipelineCacheData(vulkan.device, module->cache, &size, nullptr);
+    std::vector<char> data(size);
+    vkGetPipelineCacheData(vulkan.device, module->cache, &size, data.data());
+    const std::string file = cacheFile(), part = file + "." + std::to_string(getpid());
+    if (FILE* out = std::fopen(part.c_str(), "wb")) {
+        std::fwrite(&module->key, sizeof(module->key), 1, out), std::fwrite(data.data(), 1, size, out);
+        std::fclose(out);
+        std::rename(part.c_str(), file.c_str());
+    }
+    return OPTIX_SUCCESS;
 }
 
 inline OptixResult optixModuleDestroy(OptixModule module) {
     vkDestroyShaderModule(vulkan.device, module->shader, nullptr);
+    vkDestroyPipelineCache(vulkan.device, module->cache, nullptr);
     delete module;
     return OPTIX_SUCCESS;
 }
