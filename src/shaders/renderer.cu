@@ -23,7 +23,6 @@ __device__ float3 operator*(float3 a, float3 b) { return make_float3(a.x * b.x, 
 __device__ float3 operator*(float3 a, float s) { return make_float3(a.x * s, a.y * s, a.z * s); }
 __device__ float3 operator*(float s, float3 a) { return a * s; }
 __device__ float3 operator/(float3 a, float s) { return make_float3(a.x / s, a.y / s, a.z / s); }
-__device__ float3 xzy(float3 a) { return make_float3(a.x, a.z, a.y); }
 __device__ float3 mix(float3 a, float3 b, float t) { return a * (1 - t) + b * t; }
 __device__ float4 mix(float4 a, float4 b, float t) {
     return make_float4(a.x * (1 - t) + b.x * t, a.y * (1 - t) + b.y * t,
@@ -32,12 +31,6 @@ __device__ float4 mix(float4 a, float4 b, float t) {
 // -1, 0 or 1
 __device__ float sign(float x) { return (x > 0) - (x < 0); }
 __device__ float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-__device__ float3 reflect(float3 i, float3 n) { return i - n * (2 * dot(n, i)); }
-// Zero under total internal reflection
-__device__ float3 refract(float3 i, float3 n, float eta) {
-    const float k = 1 - eta * eta * (1 - dot(n, i) * dot(n, i));
-    return k < 0 ? make_float3(0, 0, 0) : i * eta - n * (eta * dot(n, i) + sqrtf(k));
-}
 __device__ float3 cross(float3 a, float3 b) {
     return make_float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 }
