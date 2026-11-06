@@ -20,7 +20,9 @@ struct Surface {
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
-struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; uint key; };
+// texspace: location and size of the mesh's texture space; majorant: its volume's largest extinction
+struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
+    uint key; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle, instance; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
