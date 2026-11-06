@@ -112,7 +112,11 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME};
     const auto supported = [&](VkPhysicalDevice device) {
         const auto properties = listed<VkExtensionProperties>(vkEnumerateDeviceExtensionProperties, device, nullptr);
-        return std::all_of(std::begin(extensions), std::end(extensions), [&](const char* name) {
+        VkPhysicalDeviceVulkan12Features halves{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceFeatures2 shorts{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &halves};
+        vkGetPhysicalDeviceFeatures2(device, &shorts); // 16 bit floats and integers, which its SPIR-V converts through
+        return shorts.features.shaderInt16 && halves.shaderFloat16
+            && std::all_of(std::begin(extensions), std::end(extensions), [&](const char* name) {
             return std::any_of(properties.begin(), properties.end(),
                 [&](const VkExtensionProperties& p) { return !std::strcmp(p.extensionName, name); });
         });
@@ -132,19 +136,20 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
     const float priority = 1;
     const VkDeviceQueueCreateInfo queue{.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = family,
         .queueCount = 1, .pQueuePriorities = &priority};
-    // What the renderer's SPIR-V declares: 8 and 64 bit integers, pointers of scalar layout, ray queries and an array
-    // of textures of a runtime size, partly bound, indexed per thread; a device without them fails here
+    // What the renderer's SPIR-V declares: 8, 16 and 64 bit integers, 16 bit floats, pointers of scalar layout, ray
+    // queries and an array of textures of a runtime size, partly bound, indexed per thread; a device without them fails
+    // here
     VkPhysicalDeviceRayQueryFeaturesKHR rayQuery{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
         .rayQuery = VK_TRUE};
     VkPhysicalDeviceAccelerationStructureFeaturesKHR bvh{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR, .pNext = &rayQuery,
         .accelerationStructure = VK_TRUE};
     VkPhysicalDeviceVulkan12Features vulkan12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        .pNext = &bvh, .storageBuffer8BitAccess = VK_TRUE, .shaderInt8 = VK_TRUE,
+        .pNext = &bvh, .storageBuffer8BitAccess = VK_TRUE, .shaderFloat16 = VK_TRUE, .shaderInt8 = VK_TRUE,
         .shaderSampledImageArrayNonUniformIndexing = VK_TRUE, .descriptorBindingPartiallyBound = VK_TRUE,
         .runtimeDescriptorArray = VK_TRUE, .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = VK_TRUE};
     VkPhysicalDeviceFeatures2 features{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vulkan12,
-        .features = {.shaderInt64 = VK_TRUE}};
+        .features = {.shaderInt64 = VK_TRUE, .shaderInt16 = VK_TRUE}};
     const VkDeviceCreateInfo info{.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
         .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue, .enabledExtensionCount = uint32_t(std::size(extensions)),
         .ppEnabledExtensionNames = extensions};
