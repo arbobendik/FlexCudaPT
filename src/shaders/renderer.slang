@@ -15,7 +15,7 @@ struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
@@ -732,7 +732,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
         used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[14]
         : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top > 18 ? stack[16].x : 0,
-        used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0));
+        used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
+        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0));
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1034,15 +1035,17 @@ bool encloses(Scene* scene, Surface surface, uint instance) {
     return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
 }
 // Coefficients of a varying medium at a point inside, by its material's volume there
-Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray) {
+Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray, out float3 glow) {
     const uint filled = owner(scene, material);
     const Instance instance = scene.instances[filled];
     const float3 o = transform(scene, p, 3, instance.info);
     const float3 low = float3(instance.texspace[0], instance.texspace[1], instance.texspace[2]);
     const float3 size = float3(instance.texspace[3], instance.texspace[4], instance.texspace[5]);
     const Point point = Point(0, 0, (o - low) / (2 * size) + 0.5f, o, float4(0), p, 0, 0, NONE, filled);
-    return volume(shade(scene, scene.materials[material].program, -direction,
-        float3x3(float3(1, 0, 0), float3(0, 1, 0), -direction), point, -direction, false, ray, instance.info));
+    const Surface surface = shade(scene, scene.materials[material].program, -direction,
+        float3x3(float3(1, 0, 0), float3(0, 1, 0), -direction), point, -direction, false, ray, instance.info);
+    glow = surface.glow;
+    return volume(surface);
 }
 // Spectral tracking under the majorant (Kutz et al. 2017), next real scattering, past distance for none
 // PDF(along) = majorant * exp(-majorant * along) => along -= log(1 - u) / majorant
@@ -1051,13 +1054,16 @@ Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray) 
 // null: weight *= (majorant - at.extinction) / majorant / P_null
 //    => weight * (majorant - at.extinction) / (majorant - mean)
 // passing: mean = 0, ratio tracking (Novak et al. 2014); absorbing alone: at.extinction - at.scatter
-float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction,
-    float distance, inout uint state, inout float3 weight, Ray ray, bool passing = false, bool absorbing = false) {
+// glowed += weight * glow / majorant at each tentative collision
+float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction, float distance,
+    inout uint state, inout float3 weight, inout float3 glowed, Ray ray, bool passing = false, bool absorbing = false) {
     const float majorant = scene.instances[owner(scene, material)].majorant;
     for (float along = 0;;) {
         along -= log(1 - random(state)) / majorant;
         if (!(along < distance)) return along;
-        const Medium at = inside(scene, material, origin + direction * along, direction, ray);
+        float3 glow;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray, glow);
+        glowed = glowed + weight * glow / majorant;
         const float mean = passing ? 0 : (at.scatter.x + at.scatter.y + at.scatter.z) / 3;
         if (random(state) * majorant < mean) {
             weight = weight * at.scatter / mean, medium = at;
@@ -1071,11 +1077,16 @@ float track(Scene* scene, inout Medium medium, uint material, float3 origin, flo
 // Varying: ratio tracking
 float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3 direction, float from, float to,
     inout uint state, Ray ray, bool absorbing = false) {
+    float3 glowed = float3(0, 0, 0);
+    return passing(scene, medium, material, origin, direction, from, to, state, ray, absorbing, glowed);
+}
+float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3 direction, float from, float to,
+    inout uint state, Ray ray, bool absorbing, inout float3 glowed) {
     if (!used(MEDIUM) || material == NONE)
         return exp(absorbing ? (medium.scatter - medium.extinction) * (to - from)
             : medium.extinction * (from - to));
     float3 passed = float3(1, 1, 1);
-    track(scene, medium, material, origin + direction * from, direction, to - from, state, passed, ray, true,
+    track(scene, medium, material, origin + direction * from, direction, to - from, state, passed, glowed, ray, true,
         absorbing);
     return passed;
 }
@@ -1249,8 +1260,9 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         Ray(true, false, LOBE_NONE, 0.0f, distance)));
     uint filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
     uint camera = stream(r.seed, STREAM_CAMERA);
+    float3 approach = float3(-0.f, -0.f, -0.f); // Its emission on the way, added to the first hit's: -0 adds none
     throughput = passing(scene, medium, filling, dom.x0, direction, 0, distance, camera,
-        Ray(true, false, LOBE_NONE, 0.0f, distance), true);
+        Ray(true, false, LOBE_NONE, 0.0f, distance), true, approach);
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (uint b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.instance, hit.triangle);
@@ -1291,7 +1303,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             // Primary ray footprint (Eq. 5) of the camera's hit
             // Primary ray footprint (Eq. 5)
             threshold = 0.0025132741228718345f / geometry_density;
-            seen = throughput * surface.emissive;
+            seen = throughput * surface.emissive + approach;
         }
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5)
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
@@ -1531,10 +1543,13 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         }
         prev.rough = prev.rough && !(sigma > 0);
         uint tracking = stream(r.seed, b + STREAM_MEDIUM);
-        float3 weight = float3(1, 1, 1);  // Of a varying medium's tentative collisions passed
+        // Of a varying medium's tentative collisions passed, and what it emits along the ray to the next
+        float3 weight = float3(1, 1, 1), glowed = float3(0, 0, 0);
         for (float along; hit.triangle != NONE && (along = varying ? track(scene, medium, filling, origin, direction,
-            distance, tracking, weight, Ray(false, false, prev.lobe, float(b), distance))
+            distance, tracking, weight, glowed, Ray(false, false, prev.lobe, float(b), distance))
             : -log(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
+            if (varying && !replay) seen = seen + throughput * glowed / density;
+            glowed = float3(0, 0, 0);
             b++;
             viewed = false;  // Scattered: no longer seen straight from the camera
             origin = origin + direction * along;
@@ -1600,6 +1615,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             break;
         }
         // Unscattered: T(distance) / P(along > distance) = exp((sigma - extinction) * distance)
+        if (varying && !replay) seen = seen + throughput * glowed / density;
         throughput = varying ? throughput * weight
             : throughput * exp((float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
