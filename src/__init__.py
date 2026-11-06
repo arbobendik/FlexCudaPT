@@ -1,5 +1,5 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, functools, gpu, math, mmap, numpy, os, struct, subprocess, time, types
+import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, time, types
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -12,6 +12,7 @@ SPREAD_ZERO = math.radians(5)  # An area light's spread of 0, a parallel beam no
 VIEWPORT_SAMPLES = 4  # Per redraw
 RENDER_SAMPLES = 64  # At most, per update of a final render
 SLOTS = 32  # Values a program keeps for reuse, as the shader's
+LEVELS = numpy.arange(256, dtype='u1')
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 MODIFIED = os.path.getmtime(__file__)
 def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
@@ -167,6 +168,15 @@ def table(node):  # Colors of a wavelength, ramp or curves node, RGB curves afte
 def decode(srgb):  # sRGB to linear
     return numpy.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
 
+def chunks(n):  # Slices over n values, whole texels, about one per thread
+    step = -(-n // os.cpu_count() // 16) * 16
+    return [slice(i, i + step) for i in range(0, n, step)]
+
+def counted(levels):  # Counts of each level by channel of RGBA8 texels, sorted in parts in threads
+    parts = pool.map(lambda s: [numpy.diff(numpy.sort(levels[s][c::4], kind='stable').searchsorted(LEVELS),
+        append=len(levels[s]) // 4) for c in range(4)], chunks(len(levels)))
+    return [sum(counts) for counts in zip(*parts)]
+
 # First texel, width, height, its top byte the extension and above it whether RGBA8 and, in bit 29, sRGB, and linear
 # mean of an image node's image or of a node's color table, added as linear floats at first use; those Blender reads as
 # k / 255 exactly as RGBA8, four texels to a float4, which the shader decodes to the same floats and from sRGB, before
@@ -184,11 +194,10 @@ def texture(source, textures, texels):
         width, height = (len(pixels) // 4, 1) if ramp else image.size
         srgb = not (ramp or image.is_float or image.colorspace_settings.is_data)
         straight = not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data
-        levels = (pixels * 255 + numpy.float32(0.5)).astype('u1')  # Rounded: read only where they are k / 255 exactly
-        # Counts of the levels by pairs of channels, each pair a 16-bit index: blue and alpha's first, rows by alpha
-        pairs = levels.view('<u2')
-        blue = numpy.bincount(pairs[1::2], minlength=65536).reshape(256, 256)
-        alphas = blue.sum(1)
+        levels = numpy.empty(len(pixels), 'u1')  # Rounded: read only where they are k / 255 exactly
+        list(pool.map(lambda s: numpy.add(pixels[s] * 255, numpy.float32(0.5), out=levels[s], casting='unsafe'),
+            chunks(len(pixels))))
+        red, green, blue, alphas = counted(levels)
         # Colors associated by alpha, as Cycles keeps them, in linear light: in RGBA8 exactly by alphas of 0 and 1
         # alone, a byte image's texels being k / 255 exactly
         packed = not ramp and (not image.is_float or numpy.array_equal(levels * (numpy.float32(1) / numpy.float32(
@@ -196,11 +205,10 @@ def texture(source, textures, texels):
         if packed:  # Its mean in linear light by the count of each level, decoding no texel
             if straight and alphas[0]:
                 levels.reshape(-1, 4)[levels[3::4] == 0, :3] = 0
-                blue[0, 0], blue[0, 1:] = blue[0].sum(), 0
-            red = numpy.bincount(pairs[0::2], minlength=65536).reshape(256, 256)  # Then red and green's, rows by green
+                red, green, blue, alphas = counted(levels)
             k = numpy.arange(256) / 255
             mean = numpy.array([counts @ (decode(k) if srgb and i < 3 else k) for i, counts in
-                enumerate((red.sum(0), red.sum(1), blue.sum(0), alphas))]) / (len(levels) // 4)
+                enumerate((red, green, blue, alphas))]) / (len(levels) // 4)
         else:
             if srgb: pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
             if straight: pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]
@@ -2031,6 +2039,8 @@ def reload():
 
 def register():
     for binary in (BINARY, BINARY + '-vulkan'): os.chmod(binary, 0o755)  # Extension installs drop the executable bit
+    global pool  # Images' per-texel work, in numpy calls freeing the GIL, until unregistered
+    pool = concurrent.futures.ThreadPoolExecutor(os.cpu_count())
     global runnable  # Started without a file, a renderer exits once its device is up, failing without one
     runnable = tuple(key for key, suffix in BACKENDS if not subprocess.run((BINARY + suffix,),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
@@ -2046,6 +2056,7 @@ def register():
     for handlers, handler in HANDLERS: handlers.append(handler)
 
 def unregister():
+    pool.shutdown()
     bpy.app.timers.unregister(reload)
     for handlers, handler in HANDLERS: handlers.remove(handler)
     for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.remove(Flex.bl_idname)
