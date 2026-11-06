@@ -1107,7 +1107,7 @@ Medium volume(Surface surface) {
         return float3(0, 0, 0);
     if (dot(normal, normal) == 0 && !(dot(face, shadow) * dot(face, toLight) > 0))
         return float3(0, 0, 0);
-    const float left = length(shadow) * (1 - 1e-4f);
+    const float left = shadowLength(shadow);
     float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[int(dot(face, toLight) > 0)];
@@ -1127,11 +1127,10 @@ Medium volume(Surface surface) {
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,
                 Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder), layer);
-            const float3 through = surface.ior == 1 ? straightThrough(toward, surface.normal, Material(surface.albedo,
-                float3(0), surface.roughness, surface.metallic, surface.transparency, 0, float3(0), float3(1), 1, float3(0),
+            transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
+                surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
                 float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
-                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0))) : float3(0, 0, 0);
-            transmitted = transmitted * (through * surface.coverage + float3(1, 1, 1) * (1 - surface.coverage));
+                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
             if (layer == 0 && surface.density > 0)
                 medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? NO_MEDIUM : volume(surface);
         }
