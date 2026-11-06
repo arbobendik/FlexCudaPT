@@ -980,12 +980,51 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
 }
 
 __device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y), expf(a.z)); }
-// Scattering and extinction coefficients of a homogeneous medium, none by default
+// Scattering and extinction coefficients of a medium, none by default
 struct Medium { float3 scatter, extinction; };
 // Of the volume filling the inside of a surface, behind its faces
 __device__ Medium volume(const Surface& surface) {
     return {surface.scatter * surface.density,
         (surface.scatter + make_float3(1, 1, 1) - surface.absorption) * surface.density};
+}
+// Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
+__device__ unsigned fills(const Scene& scene, unsigned instance, unsigned triangle) {
+    return used(MEDIUM) && scene.instances[instance].majorant > 0 ? key(scene, instance, triangle) : NONE;
+}
+// Whether a face bounds a volume: shaded dense, or always of a varying one
+__device__ bool encloses(const Scene& scene, const Surface& surface, unsigned instance) {
+    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
+}
+// Coefficients of a varying medium at a point inside, by its material's volume there
+__device__ Medium inside(const Scene& scene, unsigned material, float3 p, float3 direction, const Ray& ray) {
+    const unsigned filled = owner(scene, material);
+    const Instance& instance = scene.instances[filled];
+    const float* space = instance.texspace;
+    const float3 o = transform(scene, p, 3, instance.info);
+    const Point point{0, 0, make_float3((o.x - space[0]) / (2 * space[3]) + 0.5f, (o.y - space[1]) / (2 * space[4])
+        + 0.5f, (o.z - space[2]) / (2 * space[5]) + 0.5f), o, make_float4(0, 0, 0, 0), p, 0, 0, NONE, filled};
+    return volume(shade(scene, scene.materials[material].program, -direction,
+        makeMatrix<float, 3, 3>(make_float3(1, 0, 0), make_float3(0, 1, 0), -direction), point, -direction, false, ray,
+        instance.info));
+}
+// Spectral tracking under the majorant (Kutz et al. 2017), next real scattering, past distance for none
+// PDF(along) = majorant * exp(-majorant * along) => along -= log(1 - u) / majorant
+// P_scatter = mean / majorant, P_null = (majorant - mean) / majorant
+// scattered: weight *= at.scatter / majorant / P_scatter => weight * at.scatter / mean
+// null: weight *= (majorant - at.extinction) / majorant / P_null
+//    => weight * (majorant - at.extinction) / (majorant - mean)
+__device__ float track(const Scene& scene, Medium& medium, unsigned material, float3 origin, float3 direction,
+    float distance, unsigned& state, float3& weight, const Ray& ray) {
+    const float majorant = scene.instances[owner(scene, material)].majorant;
+    for (float along = 0;;) {
+        along -= logf(1 - random(state)) / majorant;
+        if (!(along < distance)) return along;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray);
+        const float mean = (at.scatter.x + at.scatter.y + at.scatter.z) / 3;
+        if (random(state) * majorant < mean)
+            return weight = weight * at.scatter / mean, medium = at, along;
+        weight = weight * (make_float3(1, 1, 1) * majorant - at.extinction) / (majorant - mean);
+    }
 }
 
 // Light sampling: a triangle picked by the light BVH, a uniform point on it
@@ -1119,6 +1158,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     Medium medium = held.triangle == NONE ? Medium{} : volume(shade(scene, held.instance, held.triangle, 0, 0,
         cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
         Ray{true, false, LOBE_NONE, 0.0f, distance}));
+    unsigned filling = NONE;
     throughput = exponential((medium.scatter - medium.extinction) * distance);
     // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
     const auto survives = [&](unsigned b) {
@@ -1156,9 +1196,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)};
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
-        if (surface.density > 0) {
-            sides[dot(geometry_n, face) < 0] = volume(surface);
-            if (dot(direction, face) > 0) sides[dot(geometry_n, face) > 0] = Medium{};
+        uint2 fillings = make_uint2(filling, filling);
+        if (encloses(scene, surface, hit.instance)) {
+            const bool back = dot(geometry_n, face) < 0, front = dot(geometry_n, face) > 0;
+            sides[back] = volume(surface), (back ? fillings.y : fillings.x) = fills(scene, hit.instance, hit.triangle);
+            if (dot(direction, face) > 0) sides[front] = Medium{}, (front ? fillings.y : fillings.x) = NONE;
         }
         // PDF_area = PDF_solid_angle * |cos_theta| / distance^2
         // => PDF_area / PDF_solid_angle = |dot(geometry_n, direction)| / distance^2
@@ -1377,7 +1419,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         const unsigned through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? key(scene, hit)
             : NONE;
         direction = dir;
-        if (!passes) medium = sides[dot(direction, geometry_n) > 0];
+        if (!passes)
+            medium = sides[dot(direction, geometry_n) > 0], filling = dot(direction, geometry_n) > 0 ? fillings.y
+                : fillings.x;
         if (!replay && !survives(b)) {
             break;
         }
@@ -1409,19 +1453,25 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Free flight by the mean scattering coefficient, scattering isotropically, p = 1 / (4 * PI)
         // along = -ln(1 - u) / sigma, PDF(along) = sigma * exp(-sigma * along), T(along) = exp(-extinction * along)
         // => throughput *= scatter * T(along) / PDF(along) = scatter * exp((sigma - extinction) * along) / sigma
-        const float sigma = (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
+        const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
+        const float sigma = varying ? scene.instances[owner(scene, filling)].majorant
+            : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
         if (reconnecting && sigma > 0) {
             return fail;
         }
         prev.rough = prev.rough && !(sigma > 0);
-        for (float along; hit.triangle != NONE
-            && (along = -logf(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
+        unsigned tracking = stream(r.seed, b + STREAM_MEDIUM);
+        float3 weight = make_float3(1, 1, 1);  // Of a varying medium's tentative collisions passed
+        for (float along; hit.triangle != NONE && (along = varying ? track(scene, medium, filling, origin, direction,
+            distance, tracking, weight, Ray{false, false, prev.lobe, float(b), distance})
+            : -logf(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
             b++;
             viewed = false;  // Scattered: no longer seen straight from the camera
             origin = origin + direction * along;
             width += spread * along, spread += PI;
-            throughput = throughput * medium.scatter * exponential((make_float3(1, 1, 1) * sigma - medium.extinction)
-                * along) / sigma;
+            throughput = varying ? throughput * weight : throughput * medium.scatter
+                * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * along) / sigma;
+            tracking = stream(r.seed, b + STREAM_MEDIUM), weight = make_float3(1, 1, 1);
             const Medium around[2] = {medium, medium};
             float3 light_dir;
             float light;
@@ -1476,7 +1526,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             break;
         }
         // Unscattered: T(distance) / P(along > distance) = exp((sigma - extinction) * distance)
-        throughput = throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
+        throughput = varying ? throughput * weight
+            : throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
         width += spread * distance;
     }
