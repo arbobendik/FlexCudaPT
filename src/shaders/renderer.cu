@@ -1278,7 +1278,9 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
                 make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter};
-        // Surfaces transmitting nothing face the ray, as in Cycles
+        // Surfaces transmitting nothing face the ray, as in Cycles; a strand's fiber passes light through it, as
+        // transmitting surfaces do, whatever its BSDF: no side of it is wrong to leave or sample light on
+        const bool strand = strands(scene, hit.instance);
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
@@ -1319,6 +1321,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Translucent, light sampled anywhere around, on the side the lifted start sees it; compiled out without it
         const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
         const float3 light_normal = surface.transparency > 0 && scene.materials[key(scene, hit)].layers == 1 || sided
+            || strand
             ? make_float3(0, 0, 0) : surface.normal;
         // The side light and bounces leave by: for surfaces transmitting nothing and seen from the shading normal's
         // side, the shading normal's, so a smooth normal is lit where it faces the light though its face doesn't
@@ -1439,8 +1442,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             // A translucent diffuse lobe past the shading normal refracts, as in FlexKernels' BSDF
             const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
-            if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
-                side_n)) {
+            if (!strand && wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE)
+                & across), dir, side_n)) {
                 return fail;
             }
         } else if (!arrived) {
@@ -1449,7 +1452,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // A direction the smooth normal sends to the wrong side of the face carries on at an unknown density:
             // through transmitting surfaces sampled again against the face normal, pretending the self reflection
             // faces along it, elsewhere mirrored across the face, keeping its lobe and weight
-            const bool wrong = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, side_n);
+            const bool wrong = !strand && wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction,
+                side_n);
             const bool fallback = wrong && surface.transparency > 0;
             if (fallback) {
                 const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, material,
