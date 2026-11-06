@@ -198,17 +198,20 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     }) ? OPTIX_ERROR_LAUNCH_FAILURE : OPTIX_SUCCESS;
 }
 
-// A build input as its level takes it: triangles at the bottom, instances of bottom levels on top
+// A build input as its level takes it: triangles at the bottom, or strands' segments as their bounds, which the shader
+// intersects, instances of bottom levels on top
 struct Geometry {
     VkAccelerationStructureGeometryKHR geometry;
     VkAccelerationStructureBuildGeometryInfoKHR info;
     uint32_t count;
-    bool top;
+    bool top, curves;
 };
 inline void describe(Geometry& geometry, const OptixBuildInput& input, const OptixAccelBuildOptions& options) {
     const OptixBuildInputTriangleArray& array = input.triangleArray;
     geometry.top = input.type == OPTIX_BUILD_INPUT_TYPE_INSTANCES;
-    geometry.count = geometry.top ? input.instanceArray.numInstances : array.numVertices / 3;
+    geometry.curves = input.type == OPTIX_BUILD_INPUT_TYPE_CURVES;
+    geometry.count = geometry.top ? input.instanceArray.numInstances : geometry.curves
+        ? input.curveArray.numPrimitives : array.numVertices / 3;
     geometry.geometry = geometry.top ? VkAccelerationStructureGeometryKHR{
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
         .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR, .geometry = {.instances = {
@@ -217,8 +220,13 @@ inline void describe(Geometry& geometry, const OptixBuildInput& input, const Opt
         .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR, .geometry = {.triangles = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
         .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
-        .vertexData = {.deviceAddress = array.vertexBuffers ? *array.vertexBuffers : 0},
+        .vertexData = {.deviceAddress = !geometry.curves && array.vertexBuffers ? *array.vertexBuffers : 0},
         .vertexStride = 3 * sizeof(float), .maxVertex = array.numVertices ? array.numVertices - 1 : 0, .indexType = VK_INDEX_TYPE_NONE_KHR}}};
+    // Curves read apart: the triangles' fields alias theirs in the input's union
+    if (geometry.curves) geometry.geometry = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_AABBS_KHR, .geometry = {.aabbs = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+        .stride = sizeof(VkAabbPositionsKHR)}}};
     geometry.info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
         .type = geometry.top ? VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR
         : VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
@@ -237,7 +245,8 @@ inline Layout layout(const Geometry& geometry) {
         &geometry.info, &geometry.count, &sizes);
     const VkDeviceSize instances = (sizes.accelerationStructureSize + 255) & ~VkDeviceSize(255);
     return {sizes.accelerationStructureSize, instances,
-        instances + (geometry.top ? geometry.count * sizeof(VkAccelerationStructureInstanceKHR) : 0),
+        instances + geometry.count * (geometry.top ? sizeof(VkAccelerationStructureInstanceKHR)
+        : geometry.curves ? sizeof(VkAabbPositionsKHR) : 0),
         std::max(sizes.buildScratchSize, sizes.updateScratchSize)};
 }
 
@@ -284,6 +293,22 @@ inline OptixResult optixAccelBuild(OptixDeviceContext, CUstream, const OptixAcce
         }
         cuMemcpyHtoD(output + bytes.instances, to.data(), to.size() * sizeof(VkAccelerationStructureInstanceKHR));
         geometry.geometry.geometry.instances.data.deviceAddress = output + bytes.instances;
+    }
+    if (geometry.curves) { // Each segment's bounds, of the spheres at its ends, put after the level
+        const OptixBuildInputCurveArray& array = inputs->curveArray;
+        std::vector<float> points(4 * array.numVertices);
+        std::vector<unsigned> segments(geometry.count);
+        std::vector<VkAabbPositionsKHR> bounds(geometry.count);
+        cuMemcpyDtoH(points.data(), *array.vertexBuffers, points.size() * sizeof(float));
+        cuMemcpyDtoH(segments.data(), array.indexBuffer, segments.size() * sizeof(unsigned));
+        for (uint32_t i = 0; i < geometry.count; ++i) {
+            const float *a = &points[4 * segments[i]], *b = a + 4;
+            bounds[i] = {std::min(a[0] - a[3], b[0] - b[3]), std::min(a[1] - a[3], b[1] - b[3]),
+                std::min(a[2] - a[3], b[2] - b[3]), std::max(a[0] + a[3], b[0] + b[3]),
+                std::max(a[1] + a[3], b[1] + b[3]), std::max(a[2] + a[3], b[2] + b[3])};
+        }
+        cuMemcpyHtoD(output + bytes.instances, bounds.data(), bounds.size() * sizeof(VkAabbPositionsKHR));
+        geometry.geometry.geometry.aabbs.data.deviceAddress = output + bytes.instances;
     }
     const VkAccelerationStructureBuildRangeInfoKHR range{.primitiveCount = geometry.count}, *ranges = &range;
     if (run([&](VkCommandBuffer commands) {

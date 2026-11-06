@@ -511,11 +511,9 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.owners = (unsigned*)allocate(owners.size() * sizeof(unsigned), owners.data());
     loaded.segments = segments.size();
     if (loaded.hair.output) release(loaded.hair.temp), release(loaded.hair.output), loaded.hair = {};
-#ifndef VK_VERSION_1_0 // Vulkan's shim builds none yet
     if (!segments.empty())
         loaded.hair.handle = buildStrands(context, scene.points, hair.points, scene.segments, segments.size(),
             loaded.hair.temp, loaded.hair.output);
-#endif
     scene.materials = upload(loaded.materials);
     std::vector<Instance> placed = instances; // The strands' instance last, of their segments, its key their first's
     if (loaded.hair.handle) {
