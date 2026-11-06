@@ -342,6 +342,87 @@ def summarize(expression, table, scales):
     table[id(expression)] = reads, affine, points, inputs, need
     return table[id(expression)]
 
+def channel(expression, k):  # Of an expression, its kth channel when constant whatever its parts that vary: a product
+    # with a constant zero there zero, sums of such and constants summed; None otherwise
+    if not isinstance(expression, tuple): return float(numpy.resize(expression, 3)[k])
+    name, *operands = expression
+    if name == 'MULTIPLY' and any(not isinstance(o, tuple) and numpy.resize(o, 3)[k] == 0 for o in operands): return 0.0
+    parts = [channel(o, k) for o in operands] if name in ('ADD', 'MULTIPLY') else [None]
+    return None if None in parts else sum(parts) if name == 'ADD' else parts[0] * parts[1]
+
+# Of an expression of a medium, the box its value lies in, per channel, the boxes of its point inputs given: by interval
+# arithmetic, each read within its texels whatever its point (a ramp's colors, a float image's, bytes' 0 to 1); None
+# where no rule bounds it
+def image_texels(image):  # Of an image read in a medium, texels its texels' values lie between: a float image's own,
+    # read in place, as its list of pixels runs to gigabytes, a byte image's 0 to 1; without an image, black
+    texels = numpy.zeros((1, 4)) if not image else numpy.array(((0,) * 4, (1,) * 4), 'd')
+    if image and image.is_float: image.pixels.foreach_get(texels := numpy.empty(len(image.pixels), 'f'))
+    return texels.reshape(-1, 4)
+def bounds(expression, boxes, memo):
+    if not isinstance(expression, tuple):
+        value = numpy.resize(numpy.asarray(expression, 'd'), 3)
+        return value, value
+    if id(expression) in memo: return memo[id(expression)]
+    name, *operands = expression
+    parts = [] if name in (*READS, 'UNASSOCIATE') or name in boxes else [bounds(o, boxes, memo)
+        for o in operands[1:3]] if name == 'NOISE' else [bounds(o, boxes, memo) for o in operands]  # A noise's range
+    # whatever its point
+    product = lambda a, b: (numpy.min(c := [x * y for x in a for y in b], 0), numpy.max(c, 0))
+    if None in parts: box = None
+    elif name in boxes: box = boxes[name]
+    elif name in READS and name != 'BAKED':
+        source = operands[-1]
+        if isinstance(source, ImageRead):  # Without an image, black
+            texels = image_texels(source.node.image)
+        else: texels = numpy.array(table(source), 'd')
+        texels = texels[:, 3:].repeat(3, 1) if name.startswith('ALPHA') else texels[:, :3]
+        box = texels.min(0), texels.max(0)
+    elif name == 'UNASSOCIATE':  # Its color over its alpha, both filtered by the same weights, none negative (linear's
+        # or B-splines'), a blend of the straight colors of texels not clear or 0 where all are, as divide() makes it;
+        # or, its alpha unread, as emit() takes it, its color associated, between 0 and those
+        texels = image_texels(operands[0][-1].node.image)
+        texels = numpy.concatenate((texels[texels[:, 3] > 0, :3], numpy.zeros((1, 3))))
+        box = texels.min(0), texels.max(0)
+    elif name == 'ADD': box = parts[0][0] + parts[1][0], parts[0][1] + parts[1][1]
+    elif name == 'SUBTRACT': box = parts[0][0] - parts[1][1], parts[0][1] - parts[1][0]
+    elif name == 'MULTIPLY': box = product(*parts)
+    elif name in ('MAXIMUM', 'MINIMUM'):
+        pick = numpy.maximum if name == 'MAXIMUM' else numpy.minimum
+        box = pick(parts[0][0], parts[1][0]), pick(parts[0][1], parts[1][1])
+    elif name == 'POWER': box = (parts[0][0] ** parts[1][0], parts[0][1] ** parts[1][0]) \
+        if (parts[0][0] >= 0).all() and (parts[1][0] == parts[1][1]).all() and (parts[1][0] >= 0).all() else None
+    elif name == 'NOISE':  # The renderer's: a blend of its corners' gradients by weights of sum 1, so within the
+        # largest a corner's gradient reaches (8 at 1D, 1 + 2 at 2D, 2 at 3D, 3 at 4D, offsets within 1) by its scale;
+        # normalized fractal Brownian motion within half of that about 0.5, unnormalized by its octaves' amplitudes
+        # summed; its dimensions a constant of vector(w, dimensions, 0) as noise() makes it
+        (_, params), (least, extra) = parts
+        dims = channel(operands[3], 1)
+        dims = int(dims) if dims is not None else None
+        kind = int(extra[2])
+        bound = (2, 1.985, 1.964, 2.503)[dims - 1] if dims in (1, 2, 3, 4) else None
+        roughness, octaves = max(params[1], 0), math.ceil(min(max(params[0], 0), 15)) + 1
+        amplitudes = sum(roughness ** k for k in range(octaves))
+        box = None if bound is None or least[2] != extra[2] or kind > 1 else tuple(numpy.full(3, v) for v in (
+            (0.5 - bound / 2, 0.5 + bound / 2) if kind == 0 else (-bound * amplitudes, bound * amplitudes)))
+    elif name == 'DOT_PRODUCT':
+        low, high = product(*parts)
+        box = numpy.full(3, low.sum()), numpy.full(3, high.sum())
+    else: box = None
+    memo[id(expression)] = box if box is None or numpy.isfinite(box).all() else None
+    return memo[id(expression)]
+
+# Of the volume of a material filling an instance, varying from point to point (any of its absorption, density and
+# scattering color not a constant): the largest extinction it reaches, (scatter + 1 - absorption) density as the
+# renderer makes it, inside the boxes its point inputs span, 0 for one not varying; for one no rule bounds, an error
+# naming the material, as the renderer tracks such a volume under that bound and no guess
+def medium(material, boxes):
+    absorption, density, scatter = (fold(part) for part in MEDIA.get(material, (0, 0, 0)))
+    if not any(isinstance(part, tuple) for part in (absorption, density, scatter)): return 0.0
+    box = bounds(('MULTIPLY', ('SUBTRACT', ('ADD', scatter, 1), absorption), density), boxes, {})
+    if box is None: raise ValueError(f"Flex: the volume of material '{material.name}' varies by steps no bound is "
+        'known for, so its density has no largest value to track it under')
+    return max(float(box[1].max()), 0.0)
+
 BAKE_TOLERANCE = 2 ** -9  # Most a bake over UV space strays from shading live: a fifth of its test's seed floor (0.011)
 
 def texels_of(source, cache):  # An image's or table's texels as the export holds them (read alone in an update,
@@ -1197,6 +1278,7 @@ def closed(ob, mesh):  # Whether the object is a closed mesh, each edge shared b
     return bool(numpy.all(numpy.bincount(edges, minlength=len(mesh.edges)) == 2))
 # Of the object whose material shade() resolves: whether it is closed, and whether its subsurface scattering asked
 SEALING = {'closed': True, 'asked': False}
+MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density and scattering color
 def sealed():
     SEALING['asked'] = True
     return SEALING['closed']
@@ -1208,6 +1290,7 @@ def shade(material, program):
     if not output: return [program(BLACK)]
     surface = resolve(output.inputs['Surface'])  # Its volume, or the medium its subsurface scattering fills
     volume = resolve(output.inputs['Volume'])[10:13] if output.inputs['Volume'].is_linked else surface[10:13]
+    MEDIA[material] = volume
     if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
         height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
@@ -1334,7 +1417,8 @@ class Flex(bpy.types.RenderEngine):
         materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
         # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
         # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
-        def record(i, instance, ob, entry, light=False):  # An instance exported, of the object's mesh entry
+        def record(i, instance, ob, entry, light=False, media=((0,) * 6, 0)):  # An instance exported, of the object's
+            # mesh entry, and of one filling a volume its texture space and largest extinction, 0 unless it varies
             # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
             random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
                 lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
@@ -1342,7 +1426,8 @@ class Flex(bpy.types.RenderEngine):
             instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
                 numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
                 ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()],
-                numpy.array([attributed(instance)], 'u4').view('f')), dtype='f')))
+                numpy.array([attributed(instance)], 'u4').view('f'), numpy.array((*media[0], media[1]), 'f')),
+                dtype='f')))
             slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
@@ -1511,6 +1596,7 @@ class Flex(bpy.types.RenderEngine):
             if SEALING['asked']: subsurface.add(material)
             return row
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
+        varying = set()  # Those whose volume varies, bounded inside where they are: moved, exported anew
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
@@ -1689,17 +1775,29 @@ class Flex(bpy.types.RenderEngine):
                 row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
             materials.append(table[index])
             if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
+            media = ((0,) * 6, 0)
+            if i in volumes:  # Its volumes' bound inside its points: in the world, its object and their generated
+                # points
+                inside = co.reshape(-1, 3).min(0), co.reshape(-1, 3).max(0)
+                spaced = [(k - numpy.array(rest.texspace_location)) / (2 * numpy.array(rest.texspace_size)) + 0.5
+                    for k in inside]
+                kinds = [medium(ob.material_slots[k].material, {'POSITION': (positions.reshape(-1, 3).min(0),
+                    positions.reshape(-1, 3).max(0)), 'OBJECT': inside, 'GENERATED': (numpy.minimum(*spaced),
+                    numpy.maximum(*spaced))}) for k in sorted(set(index.tolist())) if k < len(ob.material_slots)
+                    and ob.material_slots[k].material]
+                media = (*rest.texspace_location, *rest.texspace_size), max([0, *kinds])
+                if media[1]: varying.add(i)
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
-                and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'))
+                and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene and
         # its transform's rows and adjugate
         if moved:
-            if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
+            if varying or not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
             self.volumes.update(volumes)
             def info(k):  # Its object's info per triangle, as a scene's
-                values = numpy.tile(instances[k][3][21:], (len(columns[7][k + 1]), 1))
+                values = numpy.tile(instances[k][3][21:41], (len(columns[7][k + 1]), 1))  # Its info alone
                 values[:, 8] = columns[7][k + 1]
                 return values
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
