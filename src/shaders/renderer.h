@@ -56,6 +56,9 @@ struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, 
 // Per instance of a mesh: its first triangle and count, whether its mesh is in world space, its transform's rows, the
 // adjugate turning its normals, its object's info and its first triangle in the scene's order
 struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; unsigned key; };
+// Ops of scenes rarely: a module of any compiled from the extended PTX, the others from one without their code
+constexpr unsigned RARE[] = {CURVES};
+constexpr unsigned STRANDS = 2; // An instance's world flag of the strands' segments, in world space, not triangles
 // Point of a triangle of an instance at its barycentrics, triangle NONE for no point
 constexpr unsigned NONE = ~0u;
 struct Hit { unsigned triangle, instance; float2 uv; };

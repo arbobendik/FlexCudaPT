@@ -523,6 +523,14 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
+// Whether the scene has hair: in the extended PTX alone, that a scene without a rare op runs the PTX it ran before
+__device__ bool curved() {
+#ifdef EXTENDED
+    return used(CURVES);
+#else
+    return false;
+#endif
+}
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
 // incoming direction, on the back of its face or not, for the ray, of the info's object and the material's pass index;
@@ -758,6 +766,38 @@ __device__ Corners corners(const float3* vertices, const Instance& instance, uns
 __device__ Corners cornerNormals(const float3* normals, const Instance& instance, unsigned triangle) {
     return {normals + 3 * triangle, instance, true};
 }
+// Whether an instance is of the strands' segments; in modules of scenes with hair alone
+__device__ bool strands(const Scene& scene, unsigned instance) {
+    return curved() && scene.instances[instance].world == STRANDS;
+}
+// Of a unit vector its octahedral coordinates, 16 bits each, in a word, as a strand's hit keeps its surface's normal
+__device__ unsigned packNormal(float3 n) {
+    const float l1 = fabsf(n.x) + fabsf(n.y) + fabsf(n.z);
+    float x = n.x / l1, y = n.y / l1;
+    if (n.z < 0) { const float a = x; x = copysignf(1 - fabsf(y), a); y = copysignf(1 - fabsf(a), y); }
+    return unsigned(lrintf((x * 0.5f + 0.5f) * 65535)) | unsigned(lrintf((y * 0.5f + 0.5f) * 65535)) << 16;
+}
+__device__ float3 unpackNormal(unsigned word) {
+    float x = (word & 0xFFFF) / 65535.0f * 2 - 1, y = (word >> 16) / 65535.0f * 2 - 1;
+    const float z = 1 - fabsf(x) - fabsf(y), t = fmaxf(-z, 0);
+    x += x >= 0 ? -t : t, y += y >= 0 ? -t : t;
+    return normalize(make_float3(x, y, z));
+}
+// Of a strand's segment at its parameter u, where its swept sphere's surface faces the normal packed in a hit's second
+// coordinate: that point, the normal and the segment's direction
+struct Strand { float3 position, normal, tangent; };
+__device__ Strand strand(const Scene& scene, unsigned segment, float u, float packed) {
+    const float4 a = scene.points[scene.segments[segment]], b = scene.points[scene.segments[segment] + 1];
+    const float3 p = make_float3(a.x, a.y, a.z), q = make_float3(b.x, b.y, b.z);
+    const float3 n = unpackNormal(__float_as_uint(packed));
+    return {p + (q - p) * u + n * (a.w + (b.w - a.w) * u), n, normalize(q - p)};
+}
+// Of a strand's hit at a point, its parameter and the normal there, packed
+__device__ float2 strandHit(const Scene& scene, unsigned segment, float u, float3 position) {
+    const float4 a = scene.points[scene.segments[segment]], b = scene.points[scene.segments[segment] + 1];
+    const float3 axis = make_float3(a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, a.z + (b.z - a.z) * u);
+    return make_float2(u, __uint_as_float(packNormal(normalize(position - axis))));
+}
 // Instance of a triangle by its number in the scene's order: the last one numbered no higher, by bisection
 __device__ unsigned owner(const Scene& scene, unsigned number) {
     unsigned low = 0, high = scene.instanceCount;
@@ -769,8 +809,9 @@ __device__ unsigned owner(const Scene& scene, unsigned number) {
 }
 // Number in the scene's order of a triangle of an instance, which its material and trail and skipping it go by, and the
 // triangle of an instance a number names
-__device__ unsigned key(const Scene& scene, unsigned instance, unsigned triangle) {
-    return scene.instances[instance].key + triangle - scene.instances[instance].first;
+__device__ unsigned key(const Scene& scene, unsigned instance, unsigned triangle) { // A segment's, its strand's
+    return scene.instances[instance].key + (strands(scene, instance) ? scene.owners[triangle]
+        : triangle - scene.instances[instance].first);
 }
 __device__ unsigned key(const Scene& scene, Hit hit) { return key(scene, hit.instance, hit.triangle); }
 __device__ Hit owned(const Scene& scene, unsigned key) {
@@ -807,6 +848,17 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 // bumped by points along its edges as near as the ray's length makes a pixel's; inlined likewise
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
     float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
+    if (strands(scene, instance)) { // A strand's: at its surface, along its segment, of no UVs to bump or filter by
+        const Strand hair = strand(scene, triangle, s, t);
+        const Material& material = scene.materials[key(scene, instance, triangle)];
+        unsigned program = emission ? material.emission : material.program;
+        while (layer) layer -= scene.ops[program++].code == END;
+        Ray cone = ray;
+        cone.width = 0;
+        return shade(scene, program, normal, makeMatrix<float, 3, 3>(hair.tangent, cross(normal, hair.tangent), normal),
+            Point{0, 0, hair.position, hair.position, make_float4(0, 0, 0, 0), hair.position, s, t, NONE, instance},
+            -direction, false, cone, scene.instances[instance].info, 0);
+    }
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
     const float3* normals = scene.normals + 3 * triangle;
     const Info& object = scene.instances[instance].info;
@@ -896,6 +948,9 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
     distance = optixHitObjectGetRayTmax() - back;
     // Barycentrics from the first two attributes; optixHitObjectGetTriangleBarycentrics returns zeros here.
     const unsigned instance = optixHitObjectGetInstanceIndex(), triangle = optixHitObjectGetPrimitiveIndex();
+    if (strands(scene, instance)) // A segment's parameter is its first attribute
+        return {triangle, instance, strandHit(scene, triangle, __uint_as_float(optixHitObjectGetAttribute_0()),
+            origin + direction * distance)};
     return {scene.instances[instance].first + triangle, instance,
         make_float2(__uint_as_float(optixHitObjectGetAttribute_0()), __uint_as_float(optixHitObjectGetAttribute_1()))};
 }
@@ -913,6 +968,8 @@ __device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, fl
     optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), at * (1 + 4.76837158203125e-7f), 0.0f,
         255, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v, instance);
     if (index == NONE) return {NONE};
+    if (strands(scene, instance)) // Of a strand its segment in place of the second coordinate
+        return {v, instance, strandHit(scene, v, __uint_as_float(u), origin + direction * at)};
     return {scene.instances[instance].first + index - scene.instances[instance].key, instance,
         make_float2(__uint_as_float(u), __uint_as_float(v))};
 }
@@ -921,8 +978,11 @@ __device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, fl
 // it by distance, then number; gathering at the distance of payload 2, they skip every candidate, keeping the lowest
 // number there, its barycentrics and its instance in payloads 3 to 6. Triangles go by their numbers in the scene's
 // order, each instance's id its first's
-extern "C" __global__ void __anyhit__skip() {
-    const unsigned triangle = optixGetInstanceId() + optixGetPrimitiveIndex(), skip = optixGetPayload_0();
+struct HitData { const unsigned* owners; }; // A hit group's, as main.cpp's HitRecord: of the strands' their owners
+extern "C" __global__ void __anyhit__skip() { // A segment by its strand's number
+    const bool curve = curved() && optixGetPrimitiveType() == OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
+    const unsigned triangle = optixGetInstanceId() + (curve ? ((const HitData*)optixGetSbtDataPointer())->owners[
+        optixGetPrimitiveIndex()] : optixGetPrimitiveIndex()), skip = optixGetPayload_0();
     const float at = __uint_as_float(optixGetPayload_1());
     if (at == -INFINITY) {
         if (triangle == skip) optixIgnoreIntersection();
@@ -934,26 +994,35 @@ extern "C" __global__ void __anyhit__skip() {
     else if (gather != INFINITY) {
         if (t == gather && triangle < optixGetPayload_3())
             optixSetPayload_3(triangle), optixSetPayload_4(optixGetAttribute_0()),
-                optixSetPayload_5(optixGetAttribute_1()), optixSetPayload_6(optixGetInstanceIndex());
+                optixSetPayload_5(curve ? optixGetPrimitiveIndex() : optixGetAttribute_1()),
+                optixSetPayload_6(optixGetInstanceIndex());
         optixIgnoreIntersection();
     }
 }
 
-__device__ float3 hitPosition(const float3* vertices, const Instance* instances, Hit hit) { // Of those vertices
-    return corners(vertices, instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
+__device__ float3 hitPosition(const Scene& scene, const float3* vertices, Hit hit) { // Of those vertices
+    if (strands(scene, hit.instance)) return strand(scene, hit.triangle, hit.uv.x, hit.uv.y).position;
+    return corners(vertices, scene.instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
 }
 
 __device__ float3 faceNormal(const Scene& scene, unsigned instance, unsigned triangle) {
     return corners(scene.vertices, scene.instances[instance], triangle).face();
 }
 
+__device__ float3 faceNormal(const Scene& scene, Hit hit) { // A strand's, at the hit
+    if (strands(scene, hit.instance)) return strand(scene, hit.triangle, hit.uv.x, hit.uv.y).normal;
+    return faceNormal(scene, hit.instance, hit.triangle);
+}
+
 __device__ float3 smoothNormal(const Scene& scene, Hit hit) {
+    if (strands(scene, hit.instance)) return strand(scene, hit.triangle, hit.uv.x, hit.uv.y).normal;
     const Corners normals = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
 
 // Distance along the smooth normal rays leave a hit at position from, of its triangle, as FlexKernels shares it
 __device__ float geometryOffset(const Scene& scene, Hit hit, float3 face, float3 position) {
+    if (strands(scene, hit.instance)) return 0; // Rays leaving a strand skip it whole
     const Corners vertex = corners(scene.vertices, scene.instances[hit.instance], hit.triangle);
     const Corners normal = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return geometryOffset(vertex[0], vertex[1], vertex[2], normal[0], normal[1], normal[2], face,
@@ -1009,7 +1078,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
     } while (hit.triangle != NONE && scene.materials[key(scene, hit)].hidden);
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
-    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit,
+    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
         camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : across / length(plane)};
 }
 
@@ -1097,7 +1166,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
                 .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
                 .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && surface.density > 0)
-                medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? Medium{} : volume(surface);
+                medium = dot(faceNormal(scene, hit), toward) > 0 ? Medium{} : volume(surface);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return make_float3(0, 0, 0);
@@ -1182,7 +1251,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         return true;
     };
     for (unsigned b = 0u; ; b++) {
-        const float3 face = faceNormal(scene, hit.instance, hit.triangle);
+        const float3 face = faceNormal(scene, hit);
         const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance, width};
         Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
             direction, ray, layer);
@@ -1346,7 +1415,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         SampleBSDF lobe = SampleBSDF{};
         if (connect) {
             if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene.vertices, scene.instances, r.rc);
+                reconnection = hitPosition(scene, scene.vertices, r.rc);
                 dir = normalize(reconnection - lift(scene, origin,
                     surface.normal * sign(dot(reconnection - origin, side_n)), offset));
             }
@@ -1732,7 +1801,7 @@ extern "C" __global__ void __raygen__denoise() {
     const Camera& last = scene.denoisedCamera;
     const unsigned seen = dom.hit.triangle == NONE ? NONE : key(scene, dom.hit);
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
-        : hitPosition(scene.previousVertices, scene.instances, dom.hit);
+        : hitPosition(scene, scene.previousVertices, dom.hit);
     const float2 then = project(last, before, size);
     scene.flow[index] = project(scene.camera, dom.x1, size) - then;
     const int x = int(floorf(then.x)), y = int(floorf(then.y));

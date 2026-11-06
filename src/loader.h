@@ -401,7 +401,7 @@ inline unsigned long long buildInstances(OptixDeviceContext context, const std::
 // triangle's number in the scene's order: each mesh's BVH built or refit in its own, the instances' anew in top
 inline unsigned long long buildScene(OptixDeviceContext context, const float3* vertices,
     const std::vector<Instance>& instances, std::map<unsigned, Mesh>& meshes, OptixBuildOperation operation,
-    CUdeviceptr& top) {
+    CUdeviceptr& top, const Mesh& hair, unsigned key) {
     if (operation == OPTIX_BUILD_OPERATION_BUILD)
         for (auto& [first, mesh] : std::exchange(meshes, {})) release(mesh.temp), release(mesh.output);
     std::map<unsigned, unsigned> counts; // Of each mesh by first triangle its triangle count; a scene of no instance
@@ -417,6 +417,9 @@ inline unsigned long long buildScene(OptixDeviceContext context, const float3* v
         placed[i].instanceId = instances[i].key, placed[i].visibilityMask = 255;
         placed[i].traversableHandle = meshes.at(instances[i].first).handle;
     }
+    if (hair.handle) // The strands, in world space, last: their hit group the second, their id their first's number
+        placed.push_back({.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, .instanceId = key, .sbtOffset = 1,
+            .visibilityMask = 255, .traversableHandle = hair.handle});
     return buildInstances(context, placed, top);
 }
 
@@ -470,7 +473,6 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
             std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
     loaded.materials.push_back(table[meshes]);
-    scene.instances = upload(instances), scene.instanceCount = instances.size();
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
     receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
@@ -515,8 +517,14 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
             loaded.hair.temp, loaded.hair.output);
 #endif
     scene.materials = upload(loaded.materials);
+    std::vector<Instance> placed = instances; // The strands' instance last, of their segments, its key their first's
+    if (loaded.hair.handle) {
+        placed.push_back({.first = 0, .count = loaded.segments, .world = STRANDS, .key = scene.hair});
+        std::copy_n(IDENTITY_ROWS, 12, placed.back().matrix), std::copy_n(IDENTITY_ADJUGATE, 9, placed.back().adjugate);
+    }
+    scene.instances = upload(placed), scene.instanceCount = placed.size();
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
-        loaded.top);
+        loaded.top, loaded.hair, scene.hair);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (3 * meshes != corners) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
@@ -593,5 +601,5 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         }
     }
     scene.handle = buildScene(context, scene.vertices, loaded.instances, loaded.meshes, OPTIX_BUILD_OPERATION_UPDATE,
-        loaded.top);
+        loaded.top, loaded.hair, scene.hair);
 }
