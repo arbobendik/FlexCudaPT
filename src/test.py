@@ -1260,12 +1260,14 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     assert numpy.array_equal(rendered, shaded()), ('16-bit heights', preferences.device)
 preferences.device = device
 bpy.context.window.scene = scene
-# Mips: a plane emitting a checker of single texels, 1024 a side over 100 units, seen 10 degrees below the horizon
-# from a unit above at 4 samples. Its far rows, where a pixel spans tens of texels, read the level the ray's cone covers
-# and average to the checker's mean of 0.5 within 0.05 (their spread across pixels); read at level 0 they spread by 0.25
+# Mips: a diffuse plane of a checker of single texels, 1024 a side over 100 units, under a sky of one, seen 10 degrees
+# below the horizon from a unit above at 4 samples. Its far rows, where a pixel spans tens of texels, read its base
+# color at the level the ray's cone covers (emission reads level 0): they spread across pixels as the same plane of the
+# checker's mean of 0.5 does, by the sky's sampling, within a variance of 0.01 (0.002 measured), which read at level 0
+# they exceed by 0.048
 mips = new('mips')
 mips.flex_samples = 4
-mips.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+mips.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
 mesh = bpy.data.meshes.new('ground')
 bm = bmesh.new()
 bm.loops.layers.uv.new()
@@ -1274,20 +1276,27 @@ bm.to_mesh(mesh)
 mips.collection.objects.link(bpy.data.objects.new('ground', mesh))
 mesh.materials.append(bpy.data.materials.new('checker'))
 nodes, links = mesh.materials[0].node_tree.nodes, mesh.materials[0].node_tree.links
-glow, checker = nodes.new('ShaderNodeEmission'), nodes.new('ShaderNodeTexImage')
+diffuse, checker = nodes.new('ShaderNodeBsdfDiffuse'), nodes.new('ShaderNodeTexImage')
 checker.image = bpy.data.images.new('checker', 1024, 1024)
 checker.image.pixels.foreach_set(numpy.repeat(numpy.indices((1024, 1024)).sum(0) % 2, 4).clip(
     numpy.tile((0, 0, 0, 1), 1024 * 1024)).astype('f'))  # Opaque
-links.new(checker.outputs['Color'], glow.inputs['Color'])
-links.new(glow.outputs[0], nodes['Material Output'].inputs['Surface'])
+links.new(checker.outputs['Color'], diffuse.inputs['Color'])
+links.new(diffuse.outputs[0], nodes['Material Output'].inputs['Surface'])
 mips.camera = bpy.data.objects.new('mips camera', bpy.data.cameras.new('mips camera'))
 mips.collection.objects.link(mips.camera)
 mips.camera.location, mips.camera.rotation_euler, mips.camera.data.angle = (0, -50, 1), (math.radians(80), 0, 0), \
     math.pi / 2
-for preferences.device in ('OPTIX', 'VULKAN'):
+def far():  # Its far rows rendered
     bpy.ops.render.render(scene=mips.name, write_still=True)
-    far = numpy.array(bpy.data.images.load(mips.render.filepath).pixels).reshape(SIZE, SIZE, 4)[30:36, :, 0]
-    assert abs(far.mean() - 0.5) < 0.05 and far.std() < 0.05, ('mips', preferences.device, far.mean(), far.std())
+    return numpy.array(bpy.data.images.load(mips.render.filepath).pixels).reshape(SIZE, SIZE, 4)[30:36, :, 0]
+for preferences.device in ('OPTIX', 'VULKAN'):
+    checked = far()
+    links.remove(diffuse.inputs['Color'].links[0])
+    diffuse.inputs['Color'].default_value = (0.5, 0.5, 0.5, 1)
+    flat = far()
+    links.new(checker.outputs['Color'], diffuse.inputs['Color'])
+    assert abs(checked.mean() - flat.mean()) < 0.05 and checked.var() - flat.var() < 0.01, ('mips', preferences.device,
+        checked.mean(), flat.mean(), checked.var() - flat.var())
 preferences.device = device
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
