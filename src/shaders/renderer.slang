@@ -1101,15 +1101,19 @@ Medium volume(Surface surface) {
     if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
         return float3(0, 0, 0);
     float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = float3(1, 1, 1);
-    // Visibility along the segment from the offset start to the sampled point
-    const float3 shadow = toLight + origin - from, toward = normalize(shadow);
+    // Visibility along the segment from the offset start to the sampled point, its end lifted off the emitter toward
+    // the start as FlexKernels' shared segment has it
+    const Hit emitter = Hit(light, instance, float2(side * (1 - along), side * along));
+    const float3 shadow = toLight + origin - from, segment = shadow + shadowLift(smoothNormal(scene, emitter),
+        geometryOffset(scene, emitter, normalize(lightNormal), toLight + origin), from, toLight + origin),
+        toward = normalize(segment);
     if (dot(normal, normal) > 0 && !(dot(normal, shadow) > 0))  // As BSDF sampling sees it, from the lifted start
         return float3(0, 0, 0);
     if (dot(normal, normal) == 0 && !(dot(face, shadow) * dot(face, toLight) > 0))
         return float3(0, 0, 0);
-    const float left = shadowLength(shadow);
+    const float left = shadowLength(segment);
     float before = 0, at = 0, occluder;
-    direction = toward;
+    direction = normalize(shadow);
     Medium medium = sides[int(dot(face, toLight) > 0)];
     // Through each layer of occluders, by distance then index, passing rays straight through, where uncovered or tinted
     // by their transparency, entering the volumes of those it meets from the front and leaving them from the back
