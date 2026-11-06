@@ -1651,6 +1651,16 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     }
     return fail;
 }
+// In the stand-in, the walk a direct callable that the passes call: compiled once as one function of its own, where
+// OptiX would compile it into each pass calling it
+#ifdef STANDIN
+extern "C" __device__ Shift __direct_callable__walk(const Scene* scene, const Domain* dom, const Reservoir* r,
+    bool replay, float scale, Selection* sel, float3* seen) { return walk(*scene, *dom, *r, replay, scale, *sel, *seen); }
+#define WALK(scene, dom, r, replay, scale, sel, seen) \
+    optixDirectCall<Shift>(0, &(scene), &(dom), &(r), replay, scale, &(sel), &(seen))
+#else
+#define WALK walk
+#endif
 
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
 __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
@@ -1663,7 +1673,7 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
     if (dom.hit.triangle == NONE) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
-    return walk(scene, dom, r, true, 0.0f, sel, seen);
+    return WALK(scene, dom, r, true, 0.0f, sel, seen);
 }
 
 // Pixel coordinates a camera sees a position at
@@ -1819,7 +1829,7 @@ extern "C" __global__ void __raygen__initial() {
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
         float3 first;
         if (dom.hit.triangle != NONE) {
-            walk(scene, dom, r, false, 1.0f / scene.settings.paths, initial, first);
+            WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial, first);
         }
         seen = seen + (dom.hit.triangle == NONE
             ? environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0}) : first)

@@ -19,9 +19,9 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flex
 	src/shaders/flexkernels/slang-cuda-prelude.h $(OPTIX_PATH)/include/optix.h
 	mkdir -p build
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DSTANDIN -I$(OPTIX_PATH)/include $< -o build/standin.ptx
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DSTANDIN -rdc=true -I$(OPTIX_PATH)/include $< -o build/standin.ptx
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -I$(OPTIX_PATH)/include $< -o build/extended.ptx
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -DSTANDIN -I$(OPTIX_PATH)/include $< \
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -DSTANDIN -rdc=true -I$(OPTIX_PATH)/include $< \
 		-o build/extended_standin.ptx
 	xxd -i build/shaders.ptx > $@
 	xxd -i build/standin.ptx >> $@
