@@ -18,7 +18,7 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC };
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM }; // The last no program takes: a scene's varying media
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -1062,13 +1062,54 @@ float3 environment(Scene* scene, float3 direction, Ray ray) {
 // A light BVH node's emitters, as the shared light tree takes them
 LightBounds bounds(LightNode node) { return LightBounds(node.low, node.high, node.w, node.phi, node.cos_theta_o); }
 
-// Scattering and extinction coefficients of a homogeneous medium, none by default
+// Scattering and extinction coefficients of a homogeneous medium, none by default; of one varying from point to point,
+// those where it was entered, carried beside the key of its material, whose owner is the instance it fills, else NONE
 struct Medium { float3 scatter, extinction; };
 static const Medium NO_MEDIUM = {float3(0), float3(0)};
 // Of the volume filling the inside of a surface, behind its faces
 Medium volume(Surface surface) {
     return Medium(surface.scatter * surface.density,
         (surface.scatter + float3(1, 1, 1) - surface.absorption) * surface.density);
+}
+// Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
+uint fills(Scene* scene, uint instance, uint triangle) {
+    return used(MEDIUM) && scene.instances[instance].majorant > 0 ? key(scene, instance, triangle) : NONE;
+}
+// Whether a face of an instance bounds a volume: where it is shaded dense, or always of one varying, which may be clear
+// right at its faces and dense within
+bool encloses(Scene* scene, Surface surface, uint instance) {
+    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
+}
+// Of a varying medium, its coefficients at a point inside, seen along the direction, by its material's volume there: at
+// the point in its object, the instance's transform undone, and the generated point its mesh's texture space makes it
+Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray) {
+    const uint filled = owner(scene, material);
+    const Instance instance = scene.instances[filled];
+    const float3 o = transform(scene, p, 3, instance.info);
+    const float3 low = float3(instance.texspace[0], instance.texspace[1], instance.texspace[2]);
+    const float3 size = float3(instance.texspace[3], instance.texspace[4], instance.texspace[5]);
+    const Point point = Point(0, 0, (o - low) / (2 * size) + 0.5f, o, float4(0), p, 0, 0, NONE, filled);
+    return volume(shade(scene, scene.materials[material].program, -direction,
+        float3x3(float3(1, 0, 0), float3(0, 1, 0), -direction), point, -direction, false, ray, instance.info));
+}
+// Of a varying medium, the distance along a ray to its next real scattering, past distance for none, by delta tracking
+// under its majorant with weights per channel (Kutz et al. 2017's spectral tracking): each tentative collision scatters
+// by its scattering's mean over the majorant, the throughput weighed by its scattering over that mean, or passes
+// weighed by what of the majorant its extinction leaves over what passing has; the medium takes the scattering's point
+float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction,
+    float distance, inout uint state, inout float3 weight, Ray ray) {
+    const float majorant = scene.instances[owner(scene, material)].majorant;
+    for (float along = 0;;) {
+        along -= log(1 - random(state)) / majorant;
+        if (!(along < distance)) return along;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray);
+        const float mean = (at.scatter.x + at.scatter.y + at.scatter.z) / 3;
+        if (random(state) * majorant < mean) {
+            weight = weight * at.scatter / mean, medium = at;
+            return along;
+        }
+        weight = weight * (float3(1, 1, 1) * majorant - at.extinction) / (majorant - mean);
+    }
 }
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
@@ -1235,6 +1276,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
     Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0, 0,
         cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
         Ray(true, false, LOBE_NONE, 0.0f, distance)));
+    uint filling = NONE;
     throughput = exp((medium.scatter - medium.extinction) * distance);
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (uint b = 0u; ; b++) {
@@ -1266,9 +1308,11 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
-        if (surface.density > 0) {
-            sides[int(dot(geometry_n, face) < 0)] = volume(surface);
-            if (dot(direction, face) > 0) sides[int(dot(geometry_n, face) > 0)] = NO_MEDIUM;
+        uint2 fillings = uint2(filling, filling);
+        if (encloses(scene, surface, hit.instance)) {
+            const int back = int(dot(geometry_n, face) < 0), front = int(dot(geometry_n, face) > 0);
+            sides[back] = volume(surface), fillings[back] = fills(scene, hit.instance, hit.triangle);
+            if (dot(direction, face) > 0) sides[front] = NO_MEDIUM, fillings[front] = NONE;
         }
         const float geometry_density = geometryDensity(geometry_n, direction, distance);
         if (b == 0u) {
@@ -1485,7 +1529,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : offset);
         if (weighs) nee_start = leaving;
         origin = passes || through != NONE ? origin : leaving;
-        if (!passes) medium = sides[int(dot(direction, side_n) > 0)];
+        if (!passes)
+            medium = sides[int(dot(direction, side_n) > 0)], filling = fillings[int(dot(direction, side_n) > 0)];
         if (!replay && !survives(scene, r.seed, throughput, density, b)) {
             break;
         }
@@ -1518,19 +1563,25 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         }
         // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
         // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
-        const float sigma = (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
+        const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
+        const float sigma = varying ? scene.instances[owner(scene, filling)].majorant
+            : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
         if (reconnecting && sigma > 0) {
             return fail;
         }
         prev.rough = prev.rough && !(sigma > 0);
-        for (float along; hit.triangle != NONE
-            && (along = -log(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
+        uint tracking = stream(r.seed, b + STREAM_MEDIUM);
+        float3 weight = float3(1, 1, 1);  // Of a varying medium's tentative collisions passed
+        for (float along; hit.triangle != NONE && (along = varying ? track(scene, medium, filling, origin, direction,
+            distance, tracking, weight, Ray(false, false, prev.lobe, float(b), distance))
+            : -log(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
             b++;
             viewed = false;  // Scattered: no longer seen straight from the camera
             origin = origin + direction * along;
             width += spread * along, spread += PI;
-            throughput = throughput * medium.scatter * exp((float3(1, 1, 1) * sigma - medium.extinction)
-                * along) / sigma;
+            throughput = varying ? throughput * weight : throughput * medium.scatter
+                * exp((float3(1, 1, 1) * sigma - medium.extinction) * along) / sigma;
+            tracking = stream(r.seed, b + STREAM_MEDIUM), weight = float3(1, 1, 1);
             const Medium around[2] = {medium, medium};
             float3 light_dir;
             float light;
@@ -1587,7 +1638,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             break;
         }
         // Project ray origin to hit point, through the medium
-        throughput = throughput * exp((float3(1, 1, 1) * sigma - medium.extinction) * distance);
+        throughput = varying ? throughput * weight
+            : throughput * exp((float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
         width += spread * distance;
     }
