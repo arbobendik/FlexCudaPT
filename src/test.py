@@ -2193,6 +2193,47 @@ pointed = render()
 bpy.data.objects['points'].hide_render = True
 assert numpy.array_equal(pointed, render()), 'no triangles, no geometry'
 
+# Hair renders: a plane growing red particle hair as paths, 40 strands of 20 simple children each, and beside it a
+# curves object of 30 green strands, seen from above under the sky at 16 samples. On both backends each covers pixels
+# of its material's color; hidden, none
+scene = new('hair')
+bpy.context.window.scene = scene
+scene.flex_samples = 16
+scene.camera = add(bpy.data.cameras.new('hair'), (0, -1.2, 0.9), (math.radians(55), 0, 0))
+def colored(name, color):  # A material of the color
+    material = bpy.data.materials.new(name)
+    material.node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_value = (*color, 1)
+    return material
+ground, bm = bpy.data.meshes.new('hair ground'), bmesh.new()
+bmesh.ops.create_grid(bm, size=0.5)
+bm.to_mesh(ground)
+grown = add(ground, (0, 0, 0))
+ground.materials.append(colored('hair ground', (0.2, 0.2, 0.2)))
+ground.materials.append(colored('red hair', (0.9, 0.05, 0.05)))
+grown.modifiers.new('hair', 'PARTICLE_SYSTEM')
+settings = grown.particle_systems[0].settings
+settings.type, settings.count, settings.hair_length, settings.child_type = 'HAIR', 40, 0.4, 'SIMPLE'
+settings.child_percent = settings.rendered_child_count = 20
+settings.root_radius, settings.radius_scale, settings.material = 1, 0.02, 2
+curves = bpy.data.hair_curves.new('green hair')
+curves.add_curves([4] * 30)
+curves.points.foreach_set('position', [c for k in range(30) for z in range(4)
+    for c in ((k % 6) * 0.03, (k // 6) * 0.03, z * 0.1)])
+radius = curves.attributes.get('radius') or curves.attributes.new('radius', 'FLOAT', 'POINT')
+radius.data.foreach_set('value', [0.008] * 120)
+curves.materials.append(colored('green hair', (0.05, 0.9, 0.05)))
+add(curves, (0.3, 0, 0))
+hue = lambda pixels, k: int(((pixels[..., k] > 2 * pixels[..., (k + 1) % 3])
+    & (pixels[..., k] > 2 * pixels[..., (k + 2) % 3])).sum())  # Pixels of the hue of channel k
+for device in ('OPTIX', 'VULKAN'):
+    haired = render_on(device)
+    assert hue(haired, 0) > 1000 and hue(haired, 1) > 20, ('hair', device, hue(haired, 0), hue(haired, 1))
+grown.modifiers['hair'].show_render, bpy.data.objects['green hair'].hide_render = False, True
+for device in ('OPTIX', 'VULKAN'):
+    bare = render_on(device)
+    assert hue(bare, 0) == hue(bare, 1) == 0, ('hair hidden', device)
+preferences.device = 'OPTIX'
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
