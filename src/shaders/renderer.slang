@@ -899,6 +899,7 @@ static const uint STREAM_JITTER = 192u;
 static const uint STREAM_SELECT = 193u;
 static const uint STREAM_COVERAGE = 256u;
 static const uint STREAM_MEDIUM = 320u;
+static const uint STREAM_CAMERA = 384u;  // Of what the medium the camera is in absorbs to the first hit
 
 // Camera and primary hit of a pixel
 struct Domain {
@@ -1098,21 +1099,35 @@ Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray) 
 // Of a varying medium, the distance along a ray to its next real scattering, past distance for none, by delta tracking
 // under its majorant with weights per channel (Kutz et al. 2017's spectral tracking): each tentative collision scatters
 // by its scattering's mean over the majorant, the throughput weighed by its scattering over that mean, or passes
-// weighed by what of the majorant its extinction leaves over what passing has; the medium takes the scattering's point
+// weighed by what of the majorant its extinction leaves over what passing has; the medium takes the scattering's point;
+// passing alone, it scatters at none, its weight ratio tracking's (Novak et al. 2014), of what absorbs alone if so
 float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction,
-    float distance, inout uint state, inout float3 weight, Ray ray) {
+    float distance, inout uint state, inout float3 weight, Ray ray, bool passing = false, bool absorbing = false) {
     const float majorant = scene.instances[owner(scene, material)].majorant;
     for (float along = 0;;) {
         along -= log(1 - random(state)) / majorant;
         if (!(along < distance)) return along;
         const Medium at = inside(scene, material, origin + direction * along, direction, ray);
-        const float mean = (at.scatter.x + at.scatter.y + at.scatter.z) / 3;
+        const float mean = passing ? 0 : (at.scatter.x + at.scatter.y + at.scatter.z) / 3;
         if (random(state) * majorant < mean) {
             weight = weight * at.scatter / mean, medium = at;
             return along;
         }
-        weight = weight * (float3(1, 1, 1) * majorant - at.extinction) / (majorant - mean);
+        weight = weight * (float3(1, 1, 1) * majorant - at.extinction + (absorbing ? at.scatter : float3(0, 0, 0)))
+            / (majorant - mean);
     }
+}
+// Of a medium, the share of light passing it from one distance to another along a ray, of what it absorbs alone if so:
+// homogeneous by its exponential, varying by tracking it passing alone
+float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3 direction, float from, float to,
+    inout uint state, Ray ray, bool absorbing = false) {
+    if (!used(MEDIUM) || material == NONE)
+        return exp(absorbing ? (medium.scatter - medium.extinction) * (to - from)
+            : medium.extinction * (from - to));
+    float3 passed = float3(1, 1, 1);
+    track(scene, medium, material, origin + direction * from, direction, to - from, state, passed, ray, true,
+        absorbing);
+    return passed;
 }
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
@@ -1122,7 +1137,7 @@ float track(Scene* scene, inout Medium medium, uint material, float3 origin, flo
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
 [noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 shading, float offset,
-    float3 face, Medium sides[2], uint state, out float3 direction, out float density, Ray ray) {
+    float3 face, Medium sides[2], uint2 fillings, uint state, out float3 direction, out float density, Ray ray) {
     direction = float3(0, 0, 0);
     density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
@@ -1158,6 +1173,7 @@ float track(Scene* scene, inout Medium medium, uint material, float3 origin, flo
     float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[int(dot(face, toLight) > 0)];
+    uint filling = fillings[int(dot(face, toLight) > 0)];
     // Through each layer of occluders, by distance then index, passing rays straight through, where uncovered or tinted
     // by their transparency, entering the volumes of those it meets from the front and leaving them from the back
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
@@ -1169,7 +1185,7 @@ float track(Scene* scene, inout Medium medium, uint material, float3 origin, flo
         before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque != 0) return float3(0, 0, 0);  // Shading it would pass nothing
-        transmitted = transmitted * exp(medium.extinction * -occluder);
+        transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
         for (uint layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,
@@ -1178,14 +1194,17 @@ float track(Scene* scene, inout Medium medium, uint material, float3 origin, flo
                 surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
                 float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
                 : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
-            if (layer == 0 && surface.density > 0)
-                medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? NO_MEDIUM : volume(surface);
+            if (layer == 0 && encloses(scene, surface, hit.instance)) {
+                const bool leaves = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0;
+                medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                    hit.triangle);
+            }
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return float3(0, 0, 0);
     }
     density = solidAngle(probability, lightNormal, shadow);
-    return transmitted * exp(medium.extinction * (before - left))
+    return transmitted * passing(scene, medium, filling, from, toward, before, left, state, ray)
         * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight)), 0, true).emissive
         / density;
@@ -1276,11 +1295,13 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
     // instance, which absorbs on the way to the first hit; what it scatters out there it is taken to scatter back in
     const Hit held = scene.settings.medium == NONE ? Hit(NONE, NONE, float2(0, 0))
         : owned(scene, scene.settings.medium);
-    Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0, 0,
-        cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
+    Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0,
+        0, cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
         Ray(true, false, LOBE_NONE, 0.0f, distance)));
-    uint filling = NONE;
-    throughput = exp((medium.scatter - medium.extinction) * distance);
+    uint filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
+    uint camera = stream(r.seed, STREAM_CAMERA);
+    throughput = passing(scene, medium, filling, dom.x0, direction, 0, distance, camera,
+        Ray(true, false, LOBE_NONE, 0.0f, distance), true);
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (uint b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.instance, hit.triangle);
@@ -1372,7 +1393,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 float3 light_dir = float3(0.0f, 0.0f, 0.0f);
                 float light = 0.0f;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -1389,7 +1410,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift(throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i,
                     eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance, 1.0f) : fail;
@@ -1410,7 +1431,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i, eta_o,
                     stream(r.seed, b), light, b < scene.settings.bounces) * radiance : fail.f;
@@ -1588,9 +1609,12 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             const Medium around[2] = {medium, medium};
             float3 light_dir;
             float light;
-            const float3 f = !replay || b == stop ? throughput * sampleLight(scene, origin, float3(0, 0, 0),
-                direction, 0, direction, around, stream(r.seed, b + STREAM_NEE), light_dir, light,
-                Ray(false, false, prev.lobe, float(b), along))
+            // Light sampled in a varying medium shifts to no other pixel: its shadow ratio-tracked from their starts
+            // left test 3 1.1% dark at 4096 samples, as reuse of no shift reads it within 0.1%
+            const bool sampled = !replay || b == stop && !varying;
+            const float3 f = sampled ? throughput * sampleLight(scene, origin, float3(0, 0, 0),
+                direction, 0, direction, around, uint2(filling, filling), stream(r.seed, b + STREAM_NEE),
+                light_dir, light, Ray(false, false, prev.lobe, float(b), along))
                 * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
             if (replay && b == stop) {
                 return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift(f, 1.0f) : fail;
