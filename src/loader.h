@@ -245,8 +245,8 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 // Of the scene last loaded: its arrays besides the vertices, the meshes' vertices, the instances and materials its
 // light BVH is built from, the BVHs of its meshes by first triangle and the buffer of the BVH over its instances
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
-    std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
-    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows;
+    std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{}; Mesh hair{};
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows, segments;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures; };
 
 // Of an image's texels in its format, a level's of half its width and height, odd ones floored, each texel the mean of
@@ -354,6 +354,26 @@ inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr verti
     return handle;
 }
 
+// BVH over the strands' round linear segments, each from its first point to the next, of points in world space and
+// radius, built into temp and output allocated for it
+inline unsigned long long buildStrands(OptixDeviceContext context, const float4* points, unsigned count,
+    const unsigned* segments, unsigned segmentCount, CUdeviceptr& temp, CUdeviceptr& output) {
+    const CUdeviceptr vertices = (CUdeviceptr)points, radii = vertices + offsetof(float4, w);
+    OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_CURVES, .curveArray = {
+        .curveType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR, .numPrimitives = segmentCount, .vertexBuffers = &vertices,
+        .numVertices = count, .vertexStrideInBytes = sizeof(float4), .widthBuffers = &radii,
+        .widthStrideInBytes = sizeof(float4), .indexBuffer = (CUdeviceptr)segments,
+        .indexStrideInBytes = sizeof(unsigned), .flag = OPTIX_GEOMETRY_FLAG_NONE}};
+    OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
+    OptixAccelBufferSizes sizes{};
+    CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
+    temp = allocate(sizes.tempSizeInBytes), output = allocate(sizes.outputSizeInBytes);
+    unsigned long long handle;
+    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, sizes.tempSizeInBytes, output,
+        sizes.outputSizeInBytes, &handle, nullptr, 0));
+    return handle;
+}
+
 // BVH rays traverse, over instances of BVHs of triangles by their transforms, built into the buffer allocated for it
 // at its start, as Vulkan's levels start at multiples of 256, then the instances and its scratch, in place of the one it
 // held
@@ -381,7 +401,7 @@ inline unsigned long long buildInstances(OptixDeviceContext context, const std::
 // triangle's number in the scene's order: each mesh's BVH built or refit in its own, the instances' anew in top
 inline unsigned long long buildScene(OptixDeviceContext context, const float3* vertices,
     const std::vector<Instance>& instances, std::map<unsigned, Mesh>& meshes, OptixBuildOperation operation,
-    CUdeviceptr& top) {
+    CUdeviceptr& top, const Mesh& hair, unsigned key) {
     if (operation == OPTIX_BUILD_OPERATION_BUILD)
         for (auto& [first, mesh] : std::exchange(meshes, {})) release(mesh.temp), release(mesh.output);
     std::map<unsigned, unsigned> counts; // Of each mesh by first triangle its triangle count; a scene of no instance
@@ -397,6 +417,9 @@ inline unsigned long long buildScene(OptixDeviceContext context, const float3* v
         placed[i].instanceId = instances[i].key, placed[i].visibilityMask = 255;
         placed[i].traversableHandle = meshes.at(instances[i].first).handle;
     }
+    if (hair.handle) // The strands, in world space, last: their hit group the second, their id their first's number
+        placed.push_back({.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}, .instanceId = key, .sbtOffset = 1,
+            .visibilityMask = 255, .traversableHandle = hair.handle});
     return buildInstances(context, placed, top);
 }
 
@@ -450,8 +473,6 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
             std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
     loaded.materials.push_back(table[meshes]);
-    scene.instances = upload(instances), scene.instanceCount = instances.size();
-    scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
     receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
@@ -472,14 +493,58 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
     receive(&attributes, sizeof(unsigned), 1);
     scene.attributes = load<float4>(attributes);
+    struct { unsigned points, strands, rows; } hair; // Hair: its points, then per strand its first point, point
+    receive(&hair, sizeof(hair), 1); // count, row and root's UV, and the rows, the strands' materials after the world's
+    std::vector<float4> points;
+    scene.points = load<float4>(hair.points, points);
+    struct Strand { unsigned first, count, row; float u, v; };
+    std::vector<Strand> strands(hair.strands);
+    receive(strands.data(), sizeof(Strand), strands.size());
+    const std::vector<Material> rows = read<Material>(hair.rows);
+    std::vector<unsigned> segments, owners; // Per segment its first point and strand
+    std::vector<float> along(points.size()); // Per point its share of its strand's length from the root, the intercept
+    std::vector<float4> info(strands.size()); // Per strand its root's UV, length and a random number, as Hair Info's
+    scene.hair = loaded.materials.size();
+    for (unsigned k = 0; k < strands.size(); ++k) {
+        float length = 0;
+        for (unsigned p = strands[k].first + 1; p < strands[k].first + strands[k].count; ++p)
+            along[p] = length += sqrtf(powf(points[p].x - points[p - 1].x, 2) + powf(points[p].y - points[p - 1].y, 2)
+                + powf(points[p].z - points[p - 1].z, 2));
+        for (unsigned p = strands[k].first; p < strands[k].first + strands[k].count; ++p)
+            along[p] = length > 0 ? along[p] / length : 0;
+        unsigned h = k * 0x9E3779B9u; // Lowbias32 of its number
+        h ^= h >> 16, h *= 0x7FEB352Du, h ^= h >> 15, h *= 0x846CA68Bu, h ^= h >> 16;
+        info[k] = {strands[k].u, strands[k].v, length, (h >> 8) * 0x1p-24f};
+        loaded.materials.push_back(rows[strands[k].row]);
+        for (unsigned p = strands[k].first; p + 1 < strands[k].first + strands[k].count; ++p)
+            segments.push_back(p), owners.push_back(k);
+    }
+    scene.segments = (unsigned*)allocate(segments.size() * sizeof(unsigned), segments.data());
+    scene.owners = (unsigned*)allocate(owners.size() * sizeof(unsigned), owners.data());
+    scene.along = (float*)allocate(along.size() * sizeof(float), along.data());
+    scene.strands = (float4*)allocate(info.size() * sizeof(float4), info.data());
+    loaded.segments = segments.size();
+    if (loaded.hair.output) release(loaded.hair.temp), release(loaded.hair.output), loaded.hair = {};
+    if (!segments.empty())
+        loaded.hair.handle = buildStrands(context, scene.points, hair.points, scene.segments, segments.size(),
+            loaded.hair.temp, loaded.hair.output);
+    scene.materials = upload(loaded.materials);
+    std::vector<Instance> placed = instances; // The strands' instance last, of their segments, its key their first's
+    if (loaded.hair.handle) {
+        placed.push_back({.first = 0, .count = loaded.segments, .world = STRANDS, .key = scene.hair});
+        std::copy_n(IDENTITY_ROWS, 12, placed.back().matrix), std::copy_n(IDENTITY_ADJUGATE, 9, placed.back().adjugate);
+    }
+    scene.instances = upload(placed), scene.instanceCount = placed.size();
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
-        loaded.top);
+        loaded.top, loaded.hair, scene.hair);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (3 * meshes != corners) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
-        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes};
+        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
+        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, (CUdeviceptr)scene.owners, (CUdeviceptr)scene.along,
+        (CUdeviceptr)scene.strands};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
@@ -549,5 +614,5 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         }
     }
     scene.handle = buildScene(context, scene.vertices, loaded.instances, loaded.meshes, OPTIX_BUILD_OPERATION_UPDATE,
-        loaded.top);
+        loaded.top, loaded.hair, scene.hair);
 }

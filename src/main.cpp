@@ -79,7 +79,23 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // quick: from the stand-in PTX, its shading not inlined, quicker to compile, to stand in while the module of its
     // op set compiles
     struct Tier {
-        Params params; OptixModule module; OptixProgramGroup groups[PASSES + 1]; OptixPipeline pipeline; bool quick;
+        Params params; OptixModule module; OptixProgramGroup groups[PASSES + 2]; OptixPipeline pipeline; bool quick;
+    };
+    // Of a module whose op set traces hair: its strands' round linear segments too, and their built-in intersection
+    const auto curved = [](const Tier& tier) { return bool(tier.params.ops[CURVES >> 6] >> (CURVES & 63) & 1); };
+    // Of a module whose op set has a rare op: the extended PTX, compiled with the code those take; a module without
+    // keeps the PTX it had, whose arithmetic ptxas fuses by the code around it
+    const auto extended = [](const Tier& tier) {
+        bool any = false;
+        for (unsigned code : RARE) any |= tier.params.ops[code >> 6] >> (code & 63) & 1;
+        return any;
+    };
+    const auto options = [&](const Tier& tier) {
+        OptixPipelineCompileOptions options = compile;
+        if (curved(tier))
+            options.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE
+                | OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR;
+        return options;
     };
     // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
     // traced in, which a view's first temporal pass reprojects into, then one per pass
@@ -87,9 +103,12 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     static_assert(sizeof(Record) == RECORD_STRIDE, "The shaders step back to the anchor's record by RECORD_STRIDE");
     Record records[PASSES + 1]{};
     const CUdeviceptr table = allocate(sizeof(records));
-    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } hit;
-    OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit)),
-        .hitgroupRecordStrideInBytes = sizeof(hit), .hitgroupRecordCount = 1};
+    // The strands' own carries of each segment its strand, which its material and skipping it go by
+    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord {
+        char header[OPTIX_SBT_RECORD_HEADER_SIZE]; const unsigned* owners;
+    } hits[2]{};
+    OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hits)), // Triangles', then strands'
+        .hitgroupRecordStrideInBytes = sizeof(HitRecord), .hitgroupRecordCount = 1};
     // OptiX's compile tasks, taken by a worker on every core while any is given: the renderer's for its lifetime, never
     // freed, as its workers wait on it to the end
     struct Workers {
@@ -124,11 +143,15 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     }).detach();
     const auto begin = [&](Tier& tier) { // Its module created: its compile's first task
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
-        const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
+        const OptixModuleCompileOptions module{.boundValues = &bound, .numBoundValues = 1};
+        const OptixPipelineCompileOptions pipelined = options(tier);
         OptixTask first;
-        CHECK(optixModuleCreateWithTasks(context, &options, &compile, (const char*)(tier.quick ? build_standin_ptx
-            : build_shaders_ptx), tier.quick ? build_standin_ptx_len : build_shaders_ptx_len, nullptr, nullptr,
-            &tier.module, &first));
+        const unsigned char* ptx[2][2] = {{build_shaders_ptx, build_standin_ptx}, // Without a rare op the PTX it had
+            {build_extended_ptx, build_extended_standin_ptx}};
+        const unsigned lengths[2][2] = {{build_shaders_ptx_len, build_standin_ptx_len},
+            {build_extended_ptx_len, build_extended_standin_ptx_len}};
+        CHECK(optixModuleCreateWithTasks(context, &module, &pipelined, (const char*)ptx[extended(tier)][tier.quick],
+            lengths[extended(tier)][tier.quick], nullptr, nullptr, &tier.module, &first));
         return first;
     };
     const auto compiled = [&](const Tier& tier) { // OptiX's disk cache holding it, it is so at once
@@ -160,20 +183,32 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         OptixProgramGroupDesc skip{.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP,
             .hitgroup = {.moduleAH = tier.module, .entryFunctionNameAH = "__anyhit__skip"}};
         CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &tier.groups[PASSES]));
-        CHECK(optixPipelineCreate(context, &compile, &link, tier.groups, PASSES + 1, nullptr, nullptr, &tier.pipeline));
+        const OptixPipelineCompileOptions pipelined = options(tier);
+        if (curved(tier)) { // The strands' segments, intersected by OptiX's own program, skipped as triangles are
+            const OptixModuleCompileOptions module{};
+            const OptixBuiltinISOptions builtin{.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR};
+            skip.hitgroup.entryFunctionNameIS = nullptr;
+            CHECK(optixBuiltinISModuleGet(context, &module, &pipelined, &builtin, &skip.hitgroup.moduleIS));
+            CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr,
+                &tier.groups[PASSES + 1]));
+        }
+        CHECK(optixPipelineCreate(context, &pipelined, &link, tier.groups, PASSES + 1 + curved(tier), nullptr, nullptr,
+            &tier.pipeline));
     };
     const auto use = [&](const Tier& tier) { // Launches take it from here on: its params and its programs' headers
         params = tier.params, pipeline = tier.pipeline;
         CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
         for (unsigned pass = 0; pass < PASSES; ++pass)
             CHECK(optixSbtRecordPackHeader(tier.groups[pass], &records[pass + 1]));
-        CHECK(optixSbtRecordPackHeader(tier.groups[PASSES], &hit));
-        CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, &hit, sizeof(hit)));
+        sbt.hitgroupRecordCount = 1 + curved(tier);
+        for (unsigned k = 0; k < sbt.hitgroupRecordCount; ++k)
+            CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + k], &hits[k]));
+        CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, hits, sizeof(hits)));
     };
     const auto drop = [&](Tier* tier) {
         if (tier->pipeline) {
             CHECK(optixPipelineDestroy(tier->pipeline));
-            for (OptixProgramGroup group : tier->groups) CHECK(optixProgramGroupDestroy(group));
+            for (unsigned k = 0; k < PASSES + 1 + curved(*tier); ++k) CHECK(optixProgramGroupDestroy(tier->groups[k]));
         }
         CHECK(optixModuleDestroy(tier->module));
         delete tier;
@@ -243,6 +278,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 : updateSteps(scene, loaded);
             Params next{};
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
+            if (loaded.segments) next.ops[CURVES >> 6] |= 1ull << (CURVES & 63); // Hair: its strands traced
+            hits[1].owners = scene.owners;
+            CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, hits, sizeof(hits)));
             if (!special || std::memcmp(&next, &special->params, sizeof(next))) { // Another op set: its own module,
                 if (special) retiring.push_back(special); // one still compiling taken back, the generic standing in
                 const auto again = std::find_if(retiring.begin(), retiring.end(), // while it compiles, or without one
@@ -377,7 +415,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
             scene.anchorTrails = (unsigned long long*)copy((CUdeviceptr)scene.trails);
             scene.anchorHandle = buildScene(context, scene.anchorVertices, loaded.instances, anchorMeshes,
-                OPTIX_BUILD_OPERATION_BUILD, anchorTop);
+                OPTIX_BUILD_OPERATION_BUILD, anchorTop, loaded.hair, scene.hair);
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};

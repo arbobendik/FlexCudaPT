@@ -91,7 +91,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy}
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'HAIR_INFO': None, 'CURVES': None}  # Hair, which the renderer marks
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1067,6 +1067,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         inputs[2])),
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
+    'HAIR_INFO': lambda node, inputs, index: ('HAIR_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
         else (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
@@ -1514,9 +1515,70 @@ class Flex(bpy.types.RenderEngine):
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
+        points, strands, hairs, total = [numpy.empty((0, 4), 'f')], [], [], [0]  # Hair: points in world space, of
+        # their radius; per strand its first point, point count, row and root's UV; the rows; the points' count
+        def comb(ob, matrix):  # An object's strands: of its particle hair rendered as paths, and its curves
+            def row(material):  # Of the strands of a material, as a triangle's
+                SEALING['closed'] = False
+                if variant(material) not in rows:
+                    current.update(scales=None, made=[])
+                    rows[variant(material)] = shaded_row(material)
+                    current.clear()
+                shades = rows[variant(material)]
+                hairs.append((*shades[0][:2], not ob.visible_camera, len(shades), any(layer[2] for layer in shades),
+                    shades[0][3] if len(shades[0]) > 3 else shades[0][1]))
+                return len(hairs) - 1
+            def strand(path, radius, material, uv=(0, 0)):  # Its points, of their radius, in world space, and its
+                strands.append((total[0], len(path), material, *numpy.array(uv, 'f').view('I')))  # root's UV
+                points.append(numpy.column_stack((path, radius)).astype('f'))
+                total[0] += len(path)
+            slots = [slot.material for slot in ob.material_slots] or [None]
+            for system in ob.particle_systems if ob.type == 'MESH' else ():
+                hair = system.settings
+                modifier = next(m for m in ob.modifiers if m.type == 'PARTICLE_SYSTEM' and m.particle_system == system)
+                if hair.type != 'HAIR' or hair.render_type != 'PATH' or not (modifier.show_render  # As the depsgraph
+                        if depsgraph.mode == 'RENDER' else modifier.show_viewport): continue  # evaluates it
+                # As Cycles: children alone if any, but parents shown too; of the render's steps in a render
+                steps = 2 ** (hair.render_step if depsgraph.mode == 'RENDER' else hair.display_step) + 1
+                parents, children = len(system.particles), len(system.child_particles)
+                kept = [*(range(parents) if not children or hair.use_parent_particles else ()),
+                    *range(parents, parents + children)]
+                # Radius along the strand by its shape, as Cycles', half the thickness
+                f = (1 - numpy.linspace(0, 1, steps)) ** (1 + hair.shape if hair.shape < 0 else 1 / (1 - hair.shape)
+                    if hair.shape < 1 else numpy.inf)
+                radius = (hair.tip_radius + (hair.root_radius - hair.tip_radius) * f) * hair.radius_scale / 2
+                if hair.use_close_tip: radius[-1] = 0
+                material = row(slots[min(max(hair.material, 1), len(slots)) - 1])  # Its slot, from 1
+                uvs = len(ob.data.uv_layers)  # On the emitter's active UVs, a child's of its parent's root
+                for k in kept:
+                    strand([system.co_hair(ob, particle_no=k, step=s) for s in range(steps)], radius, material,
+                        uvs and system.uv_on_emitter(modifier, particle=system.particles[0], particle_no=k, uv_no=0)
+                        or (0, 0))
+            if ob.type == 'CURVES':  # Evaluated, its points by curve and their radius, by the curve's material
+                curves = ob.data
+                offsets, co = numpy.empty(len(curves.curves) + 1, 'i'), numpy.empty(3 * len(curves.points), 'f')
+                curves.curve_offset_data.foreach_get('value', offsets)
+                curves.points.foreach_get('position', co)
+                radius = numpy.full(len(curves.points), 0.005, 'f')  # Blender's default without the attribute
+                if 'radius' in curves.attributes: curves.attributes['radius'].data.foreach_get('value', radius)
+                index = numpy.zeros(len(curves.curves), 'i')
+                if 'material_index' in curves.attributes:
+                    curves.attributes['material_index'].data.foreach_get('value', index)
+                co = transformed(co, matrix).astype('f')
+                materials = [row(material) for material in slots]
+                roots = numpy.zeros((len(curves.curves), 2), 'f')  # On the surface it grows from
+                if 'surface_uv_coordinate' in curves.attributes:
+                    curves.attributes['surface_uv_coordinate'].data.foreach_get('vector', roots.ravel())
+                for c in range(len(curves.curves)):
+                    a, b = offsets[c], offsets[c + 1]
+                    strand(co[a:b], radius[a:b], materials[min(index[c], len(materials) - 1)], roots[c])
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
+            if (ob.type == 'CURVES' or ob.type == 'MESH' and ob.particle_systems) and not (ob.hide_render
+                    and not instance.is_instance):  # Its hair: anew when it moved
+                if moved and ob.name in moved: return self.start(setattr(self, 'visible', None) or depsgraph)
+                if not moved: comb(ob, instance.matrix_world)
             # Hidden from renders as Blender's are: an object by its setting, though particles' and geometry nodes'
             # instances of it are kept, nested in collection instances too, whose members it isn't; an instancer of
             # particles, vertices or faces unless shown in renders; and the children a vertex or face instancer
@@ -1795,14 +1857,19 @@ class Flex(bpy.types.RenderEngine):
         # 9 vertex, 9 normal, 9 generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a
         # material of its emission, program, hidden flag, layer count, opaque flag and emission program (then the
         # world's); then the steps of 4 integers, the texels and the programs of the bakes;
-        # then each image's width and height, RGBA8 in its bit 26, and its texels
+        # then each image's width and height, RGBA8 in its bit 26, and its texels; the instancer attributes; then of
+        # hair the point, strand and row counts, per point its world position and radius, per strand its first point,
+        # point count, row and root's UV, and the rows, as a triangle's material
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), *(part for first, count, world, values
             in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,
             dtype='f') for column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'),
             materials[:, 1:].astype('I'))), numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
-            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes))
+            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes,
+            struct.pack('<3I', total[0], len(strands), len(hairs)), numpy.concatenate(points),
+            numpy.array(strands, 'I'), numpy.hstack((numpy.array(hairs, 'f')[:, :1].view('I'),
+            numpy.array(hairs)[:, 1:].astype('I'))) if hairs else b''))
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
