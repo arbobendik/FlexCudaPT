@@ -1327,6 +1327,85 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
     assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber', preferences.device, seen)
 preferences.device = device
+# Light reaching a varying volume through it: the cube scattering all it meets, white, of density 1 + x along x, lit
+# by a sun along -x and seen straight down, once. A column at x scatters (1 - exp(-2 (1 + x))) of what reaches it
+# through 2 - (1 + x)^2 / 2 of optical depth on its way in from x = 1: the columns over [0.25, 0.75] and [-0.75, -0.25]
+# average to 4.2 to one, where light taken through the density at the point it scatters at, as the medium entered has
+# it, would give 1.5
+haze = new('haze')
+haze.flex_samples = 1024  # The bands within 2% at over 8 times their spread across rows
+haze.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+haze.flex_bounces, haze.camera = 1, bpy.data.objects.new('haze camera', bpy.data.cameras.new('haze camera'))
+haze.collection.objects.link(haze.camera)
+haze.camera.data.type, haze.camera.data.ortho_scale, haze.camera.location = 'ORTHO', 2, (0, 0, 3)
+haze.collection.objects.link(cube := bpy.data.objects.new('haze', mesh.copy()))
+cube.data.materials[0] = scatterer = mesh.materials[0].copy()
+scatterer.node_tree.nodes['Principled Volume'].inputs['Color'].default_value = (1, 1, 1, 1)
+scatterer.node_tree.links.new(scatterer.node_tree.nodes['Separate XYZ'].outputs['X'],
+    scatterer.node_tree.nodes['Math'].inputs[0])
+haze.collection.objects.link(sun := bpy.data.objects.new('haze sun', bpy.data.lights.new('haze sun', 'SUN')))
+sun.data.angle, sun.rotation_euler = 0, (0, math.pi / 2, 0)
+band = lambda low: numpy.mean([(1 - math.exp(-2 * (1 + v))) * math.exp((1 + v) ** 2 / 2 - 2)
+    for v in numpy.linspace(low, low + 0.5, 2000)])  # Of the columns over [low, low + 0.5]
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=haze.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(haze.render.filepath).pixels).reshape(SIZE, SIZE, 4)[8:-8, :, :3]
+    seen = seen.mean((0, 2))
+    ratio = seen[5 * SIZE // 8:7 * SIZE // 8].mean() / seen[SIZE // 8:3 * SIZE // 8].mean()
+    expected = band(0.25) / band(-0.75)
+    assert abs(ratio / expected - 1) < 0.02, ('light through a varying volume', preferences.device, ratio, expected)
+preferences.device = device
+# A volume of noise bounded by its noise's range: the scatterer of density 2 Fac of a noise over its generated points,
+# lit and seen as before, matches itself under a majorant 4 above, of density 2 (Fac + 2 x - 2 x), within 2% at 64
+# samples, where 0.3 of its majorant leaves it 6% bright
+noisy = new('noisy')
+noisy.flex_samples, noisy.flex_bounces, noisy.camera = 64, 1, haze.camera
+noisy.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+noisy.collection.objects.link(haze.camera)
+noisy.collection.objects.link(sun)
+noisy.collection.objects.link(cube := bpy.data.objects.new('noisy', mesh.copy()))
+cube.data.materials[0] = noise_fog = scatterer.copy()
+nodes, links = noise_fog.node_tree.nodes, noise_fog.node_tree.links
+noise, double, zero, padded = (nodes.new(kind) for kind in ('ShaderNodeTexNoise', *('ShaderNodeMath',) * 3))
+links.new(nodes['Texture Coordinate'].outputs['Generated'], noise.inputs['Vector'])
+links.new(noise.outputs['Fac'], nodes['Math'].inputs[0])
+double.operation, double.inputs[1].default_value, zero.operation, padded.operation = 'MULTIPLY', 2, 'SUBTRACT', 'ADD'
+links.new(nodes['Separate XYZ'].outputs['X'], double.inputs[0])
+links.new(double.outputs[0], zero.inputs[0]), links.new(double.outputs[0], zero.inputs[1])
+links.new(noise.outputs['Fac'], padded.inputs[0]), links.new(zero.outputs[0], padded.inputs[1])
+seen = {}
+for pad in (False, True):
+    if pad: links.new(padded.outputs[0], nodes['Math'].inputs[0])
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        bpy.ops.render.render(scene=noisy.name, write_still=True)
+        seen[pad, preferences.device] = numpy.array(bpy.data.images.load(noisy.render.filepath).pixels).reshape(
+            SIZE, SIZE, 4)[..., :3].mean()
+for preferences.device in ('OPTIX', 'VULKAN'):
+    ratio = seen[False, preferences.device] / seen[True, preferences.device]
+    assert abs(ratio - 1) < 0.02, ('volume of noise', preferences.device, ratio)
+preferences.device = device
+# A volume clear at a face bounds it all the same: the absorber of density 2 z over its generated points, clear at its
+# bottom face, over a white diffuse floor lit by a sun straight down and seen through it, passes exp(-2) each way, the
+# floor reading exp(-4) / pi; a ray taking the absorber past its clear face would gain by its density's negative there
+fog.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+floor = bpy.data.meshes.new('fog floor')
+bm = bmesh.new()
+bmesh.ops.create_grid(bm, size=3)
+bm.to_mesh(floor)
+fog.collection.objects.link(ob := bpy.data.objects.new('fog floor', floor))
+ob.location.z = -1.5
+floor.materials.append(white := bpy.data.materials.new('fog floor'))
+white.node_tree.nodes.remove(white.node_tree.nodes['Principled BSDF'])
+diffuse = white.node_tree.nodes.new('ShaderNodeBsdfDiffuse')
+diffuse.inputs['Color'].default_value = (1, 1, 1, 1)
+white.node_tree.links.new(diffuse.outputs[0], white.node_tree.nodes['Material Output'].inputs['Surface'])
+fog.collection.objects.link(sun := bpy.data.objects.new('fog sun', bpy.data.lights.new('fog sun', 'SUN')))
+sun.data.angle, sun.data.energy = 0, 1
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=fog.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen * math.pi / math.exp(-4) - 1) < 0.02, ('floor through a varying volume', preferences.device, seen)
+preferences.device = device
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
