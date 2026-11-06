@@ -91,7 +91,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy, 'CURVES': None}  # Of hair, which the renderer marks
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'HAIR_INFO': None, 'CURVES': None}  # Hair, which the renderer marks
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1067,6 +1067,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         inputs[2])),
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
+    'HAIR_INFO': lambda node, inputs, index: ('HAIR_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
         else (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
@@ -1515,7 +1516,7 @@ class Flex(bpy.types.RenderEngine):
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
         points, strands, hairs, total = [numpy.empty((0, 4), 'f')], [], [], [0]  # Hair: points in world space, of
-        # their radius; per strand its first point, point count and row; the rows; the points' count
+        # their radius; per strand its first point, point count, row and root's UV; the rows; the points' count
         def comb(ob, matrix):  # An object's strands: of its particle hair rendered as paths, and its curves
             def row(material):  # Of the strands of a material, as a triangle's
                 SEALING['closed'] = False
@@ -1527,8 +1528,8 @@ class Flex(bpy.types.RenderEngine):
                 hairs.append((*shades[0][:2], not ob.visible_camera, len(shades), any(layer[2] for layer in shades),
                     shades[0][3] if len(shades[0]) > 3 else shades[0][1]))
                 return len(hairs) - 1
-            def strand(path, radius, material):  # Its points, of their radius, in world space
-                strands.append((total[0], len(path), material))
+            def strand(path, radius, material, uv=(0, 0)):  # Its points, of their radius, in world space, and its
+                strands.append((total[0], len(path), material, *numpy.array(uv, 'f').view('I')))  # root's UV
                 points.append(numpy.column_stack((path, radius)).astype('f'))
                 total[0] += len(path)
             slots = [slot.material for slot in ob.material_slots] or [None]
@@ -1548,8 +1549,11 @@ class Flex(bpy.types.RenderEngine):
                 radius = (hair.tip_radius + (hair.root_radius - hair.tip_radius) * f) * hair.radius_scale / 2
                 if hair.use_close_tip: radius[-1] = 0
                 material = row(slots[min(max(hair.material, 1), len(slots)) - 1])  # Its slot, from 1
+                uvs = len(ob.data.uv_layers)  # On the emitter's active UVs, a child's of its parent's root
                 for k in kept:
-                    strand([system.co_hair(ob, particle_no=k, step=s) for s in range(steps)], radius, material)
+                    strand([system.co_hair(ob, particle_no=k, step=s) for s in range(steps)], radius, material,
+                        uvs and system.uv_on_emitter(modifier, particle=system.particles[0], particle_no=k, uv_no=0)
+                        or (0, 0))
             if ob.type == 'CURVES':  # Evaluated, its points by curve and their radius, by the curve's material
                 curves = ob.data
                 offsets, co = numpy.empty(len(curves.curves) + 1, 'i'), numpy.empty(3 * len(curves.points), 'f')
@@ -1562,9 +1566,12 @@ class Flex(bpy.types.RenderEngine):
                     curves.attributes['material_index'].data.foreach_get('value', index)
                 co = transformed(co, matrix).astype('f')
                 materials = [row(material) for material in slots]
+                roots = numpy.zeros((len(curves.curves), 2), 'f')  # On the surface it grows from
+                if 'surface_uv_coordinate' in curves.attributes:
+                    curves.attributes['surface_uv_coordinate'].data.foreach_get('vector', roots.ravel())
                 for c in range(len(curves.curves)):
                     a, b = offsets[c], offsets[c + 1]
-                    strand(co[a:b], radius[a:b], materials[min(index[c], len(materials) - 1)])
+                    strand(co[a:b], radius[a:b], materials[min(index[c], len(materials) - 1)], roots[c])
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -1852,7 +1859,7 @@ class Flex(bpy.types.RenderEngine):
         # world's); then the steps of 4 integers, the texels and the programs of the bakes;
         # then each image's width and height, RGBA8 in its bit 26, and its texels; the instancer attributes; then of
         # hair the point, strand and row counts, per point its world position and radius, per strand its first point,
-        # point count and row, and the rows, as a triangle's material
+        # point count, row and root's UV, and the rows, as a triangle's material
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), *(part for first, count, world, values
             in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,

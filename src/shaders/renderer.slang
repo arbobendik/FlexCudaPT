@@ -18,7 +18,7 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, CURVES };
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, HAIR_INFO, CURVES };
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -48,6 +48,7 @@ struct Scene {
     uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     uint64_t* images; // Of each image the materials read, its texture by its index
     float4* points; uint *segments, *owners; uint hair; // Hair, as renderer.h's
+    float* along; float4* strands;
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -595,6 +596,19 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 ? float3(info.color[0], info.color[1], info.color[2]) : float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
+        CASE(HAIR_INFO) { // Of a strand: being one, its intercept, length, thickness, tangent normal or random number
+            const int output = int(stack[top - 1].x);
+            float3 value = float3(0, 0, 0);
+            if (used(CURVES) && point.triangle != NONE && scene.instances[point.instance].world == STRANDS) {
+                const uint first = scene.segments[point.triangle];
+                const float4 a = scene.points[first], b = scene.points[first + 1];
+                const float4 strand = scene.strands[scene.owners[point.triangle]];
+                const float intercept = lerp(scene.along[first], scene.along[first + 1], point.s);
+                value = output == 4 ? float3(0, 0, 1) : float3(1, 1, 1) * (output == 0 ? 1 : output == 1 ? intercept
+                    : output == 2 ? strand.z : output == 3 ? 2 * lerp(a.w, b.w, point.s) : strand.w);
+            }
+            stack[top - 1] = value;
+        } break;
         CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
             const int k = int(stack[top - 1].x);
             const float4 v = scene.attributes[info.attributes + k / 2];
@@ -877,8 +891,8 @@ Point at(Scene* scene, uint instance, uint triangle, float s, float t) {
         vertex.at(s, t), s, t, triangle, instance);
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
-Point shifted(Scene* scene, Point point, Ray ray, int axis) {
-    if (point.triangle == NONE) return point;
+Point shifted(Scene* scene, Point point, Ray ray, int axis) { // Not a strand's
+    if (point.triangle == NONE || used(CURVES) && scene.instances[point.instance].world == STRANDS) return point;
     const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
     const float step = 1e-4f * max(ray.length, 1e-3f);
     return at(scene, point.instance, point.triangle,
@@ -891,13 +905,15 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
     uint layer = 0, bool emission = false) {
     if (strands(scene, instance)) { // A strand's: at its surface, along its segment, of no UVs to bump or filter by
         const Strand hair = strand(scene, triangle, s, t);
+        const float4 root = scene.strands[scene.owners[triangle]];
         const SceneMaterial material = scene.materials[key(scene, instance, triangle)];
         uint program = emission ? material.emission : material.program;
         while (layer != 0) layer -= uint(scene.ops[program++].code == END);
         Ray cone = ray;
         cone.width = 0;
         return shade(scene, program, normal, float3x3(hair.tangent, cross(normal, hair.tangent), normal),
-            Point(0, 0, hair.position, hair.position, float4(0, 0, 0, 0), hair.position, s, t, NONE, instance),
+            Point(root.x, root.y, hair.position, hair.position, float4(0, 0, 0, 0), hair.position, s, t, triangle,
+            instance),
             -direction, false, cone, scene.instances[instance].info, 0);
     }
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
@@ -1950,7 +1966,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 656; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 672; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 

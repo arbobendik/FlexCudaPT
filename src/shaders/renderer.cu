@@ -577,6 +577,21 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                 ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
+#ifdef EXTENDED // In the extended PTX alone, as its case would move the other cases' code otherwise
+        CASE(HAIR_INFO) { // Of a strand: being one, its intercept, length, thickness, tangent normal or random number
+            const int output = int(top[-1].x);
+            float3 value = make_float3(0, 0, 0);
+            if (curved() && point.triangle != NONE && scene.instances[point.instance].world == STRANDS) {
+                const unsigned first = scene.segments[point.triangle];
+                const float4 a = scene.points[first], b = scene.points[first + 1];
+                const float4 strand = scene.strands[scene.owners[point.triangle]];
+                const float intercept = scene.along[first] + (scene.along[first + 1] - scene.along[first]) * point.s;
+                value = output == 4 ? make_float3(0, 0, 1) : make_float3(1, 1, 1) * (output == 0 ? 1 : output == 1
+                    ? intercept : output == 2 ? strand.z : output == 3 ? 2 * (a.w + (b.w - a.w) * point.s) : strand.w);
+            }
+            top[-1] = value;
+        } break;
+#endif
         CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
             const int k = int(top[-1].x);
             const float4 v = scene.attributes[info.attributes + k / 2];
@@ -836,8 +851,8 @@ __device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, fl
         vertex.at(s, t), s, t, triangle, instance};
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
-__device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis) {
-    if (point.triangle == NONE) return point;
+__device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis) { // Not a strand's
+    if (point.triangle == NONE || curved() && scene.instances[point.instance].world == STRANDS) return point;
     const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
     const float step = 1e-4f * fmaxf(ray.length, 1e-3f);
     return at(scene, point.instance, point.triangle,
@@ -850,13 +865,15 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
     float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
     if (strands(scene, instance)) { // A strand's: at its surface, along its segment, of no UVs to bump or filter by
         const Strand hair = strand(scene, triangle, s, t);
+        const float4 root = scene.strands[scene.owners[triangle]];
         const Material& material = scene.materials[key(scene, instance, triangle)];
         unsigned program = emission ? material.emission : material.program;
         while (layer) layer -= scene.ops[program++].code == END;
         Ray cone = ray;
         cone.width = 0;
         return shade(scene, program, normal, makeMatrix<float, 3, 3>(hair.tangent, cross(normal, hair.tangent), normal),
-            Point{0, 0, hair.position, hair.position, make_float4(0, 0, 0, 0), hair.position, s, t, NONE, instance},
+            Point{root.x, root.y, hair.position, hair.position, make_float4(0, 0, 0, 0), hair.position, s, t, triangle,
+            instance},
             -direction, false, cone, scene.instances[instance].info, 0);
     }
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);

@@ -494,21 +494,35 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     receive(&attributes, sizeof(unsigned), 1);
     scene.attributes = load<float4>(attributes);
     struct { unsigned points, strands, rows; } hair; // Hair: its points, then per strand its first point, point
-    receive(&hair, sizeof(hair), 1); // count and row, and the rows, the strands' materials after the world's
-    scene.points = load<float4>(hair.points);
-    struct Strand { unsigned first, count, row; };
+    receive(&hair, sizeof(hair), 1); // count, row and root's UV, and the rows, the strands' materials after the world's
+    std::vector<float4> points;
+    scene.points = load<float4>(hair.points, points);
+    struct Strand { unsigned first, count, row; float u, v; };
     std::vector<Strand> strands(hair.strands);
     receive(strands.data(), sizeof(Strand), strands.size());
     const std::vector<Material> rows = read<Material>(hair.rows);
     std::vector<unsigned> segments, owners; // Per segment its first point and strand
+    std::vector<float> along(points.size()); // Per point its share of its strand's length from the root, the intercept
+    std::vector<float4> info(strands.size()); // Per strand its root's UV, length and a random number, as Hair Info's
     scene.hair = loaded.materials.size();
     for (unsigned k = 0; k < strands.size(); ++k) {
+        float length = 0;
+        for (unsigned p = strands[k].first + 1; p < strands[k].first + strands[k].count; ++p)
+            along[p] = length += sqrtf(powf(points[p].x - points[p - 1].x, 2) + powf(points[p].y - points[p - 1].y, 2)
+                + powf(points[p].z - points[p - 1].z, 2));
+        for (unsigned p = strands[k].first; p < strands[k].first + strands[k].count; ++p)
+            along[p] = length > 0 ? along[p] / length : 0;
+        unsigned h = k * 0x9E3779B9u; // Lowbias32 of its number
+        h ^= h >> 16, h *= 0x7FEB352Du, h ^= h >> 15, h *= 0x846CA68Bu, h ^= h >> 16;
+        info[k] = {strands[k].u, strands[k].v, length, (h >> 8) * 0x1p-24f};
         loaded.materials.push_back(rows[strands[k].row]);
         for (unsigned p = strands[k].first; p + 1 < strands[k].first + strands[k].count; ++p)
             segments.push_back(p), owners.push_back(k);
     }
     scene.segments = (unsigned*)allocate(segments.size() * sizeof(unsigned), segments.data());
     scene.owners = (unsigned*)allocate(owners.size() * sizeof(unsigned), owners.data());
+    scene.along = (float*)allocate(along.size() * sizeof(float), along.data());
+    scene.strands = (float4*)allocate(info.size() * sizeof(float4), info.data());
     loaded.segments = segments.size();
     if (loaded.hair.output) release(loaded.hair.temp), release(loaded.hair.output), loaded.hair = {};
     if (!segments.empty())
@@ -529,7 +543,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
         (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
-        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, (CUdeviceptr)scene.owners};
+        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, (CUdeviceptr)scene.owners, (CUdeviceptr)scene.along,
+        (CUdeviceptr)scene.strands};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
