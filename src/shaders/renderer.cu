@@ -1070,7 +1070,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
         return make_float3(0, 0, 0);
     if (dot(normal, normal) == 0 && !(dot(face, shadow) * dot(face, toLight) > 0))
         return make_float3(0, 0, 0);
-    const float left = length(shadow) * (1 - 1e-4f);
+    const float left = shadowLength(shadow);
     float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[dot(face, toLight) > 0];
@@ -1090,12 +1090,12 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,
                 Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
-            const float3 through = surface.ior == 1 ? straightThrough(toward, surface.normal, BSDFMaterial{
+            transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
                 .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
-                .transmission = surface.transparency, .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
+                .transmission = surface.transparency, .ior = surface.ior,
+                .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
                 .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}) : make_float3(0, 0, 0);
-            transmitted = transmitted * (through * surface.coverage + make_float3(1, 1, 1) * (1 - surface.coverage));
+                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && surface.density > 0)
                 medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? Medium{} : volume(surface);
         }
