@@ -245,7 +245,7 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 // Of the scene last loaded: its arrays besides the vertices, the meshes' vertices, the instances and materials its
 // light BVH is built from, the BVHs of its meshes by first triangle and the buffer of the BVH over its instances
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
-    std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
+    std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{}; Mesh hair{};
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows, segments;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures; };
 
@@ -351,6 +351,26 @@ inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr verti
     unsigned long long handle;
     CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, scratch, output, sizes.outputSizeInBytes, &handle,
         nullptr, 0));
+    return handle;
+}
+
+// BVH over the strands' round linear segments, each from its first point to the next, of points in world space and
+// radius, built into temp and output allocated for it
+inline unsigned long long buildStrands(OptixDeviceContext context, const float4* points, unsigned count,
+    const unsigned* segments, unsigned segmentCount, CUdeviceptr& temp, CUdeviceptr& output) {
+    const CUdeviceptr vertices = (CUdeviceptr)points, radii = vertices + offsetof(float4, w);
+    OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_CURVES, .curveArray = {
+        .curveType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR, .numPrimitives = segmentCount, .vertexBuffers = &vertices,
+        .numVertices = count, .vertexStrideInBytes = sizeof(float4), .widthBuffers = &radii,
+        .widthStrideInBytes = sizeof(float4), .indexBuffer = (CUdeviceptr)segments,
+        .indexStrideInBytes = sizeof(unsigned), .flag = OPTIX_GEOMETRY_FLAG_NONE}};
+    OptixAccelBuildOptions build{.operation = OPTIX_BUILD_OPERATION_BUILD};
+    OptixAccelBufferSizes sizes{};
+    CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
+    temp = allocate(sizes.tempSizeInBytes), output = allocate(sizes.outputSizeInBytes);
+    unsigned long long handle;
+    CHECK(optixAccelBuild(context, nullptr, &build, &input, 1, temp, sizes.tempSizeInBytes, output,
+        sizes.outputSizeInBytes, &handle, nullptr, 0));
     return handle;
 }
 
@@ -488,6 +508,12 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.segments = (unsigned*)allocate(segments.size() * sizeof(unsigned), segments.data());
     scene.owners = (unsigned*)allocate(owners.size() * sizeof(unsigned), owners.data());
     loaded.segments = segments.size();
+    if (loaded.hair.output) release(loaded.hair.temp), release(loaded.hair.output), loaded.hair = {};
+#ifndef VK_VERSION_1_0 // Vulkan's shim builds none yet
+    if (!segments.empty())
+        loaded.hair.handle = buildStrands(context, scene.points, hair.points, scene.segments, segments.size(),
+            loaded.hair.temp, loaded.hair.output);
+#endif
     scene.materials = upload(loaded.materials);
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top);

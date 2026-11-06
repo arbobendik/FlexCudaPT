@@ -120,6 +120,13 @@ inline OptixResult optixProgramGroupCreate(OptixDeviceContext, const OptixProgra
     return OPTIX_SUCCESS;
 }
 
+// No built-in intersection: Vulkan intersects the strands' segments in its shader
+inline OptixResult optixBuiltinISModuleGet(OptixDeviceContext, const OptixModuleCompileOptions*,
+    const OptixPipelineCompileOptions*, const OptixBuiltinISOptions*, OptixModule* module) {
+    *module = nullptr;
+    return OPTIX_SUCCESS;
+}
+
 inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCompileOptions*,
     const OptixPipelineLinkOptions*, const OptixProgramGroup* groups, unsigned, char*, size_t*,
     OptixPipeline* pipeline) {
