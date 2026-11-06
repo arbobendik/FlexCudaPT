@@ -416,16 +416,20 @@ def bounds(expression, boxes, memo):
     return memo[id(expression)]
 
 # Of the volume of a material filling an instance, varying from point to point (any of its absorption, density and
-# scattering color not a constant): the largest extinction it reaches, (scatter + 1 - absorption) density as the
-# renderer makes it, inside the boxes its point inputs span, 0 for one not varying; for one no rule bounds, an error
-# naming the material, as the renderer tracks such a volume under that bound and no guess
+# scattering color not a constant) or emitting, which the renderer gathers tracking it: the largest extinction it
+# reaches, (scatter + 1 - absorption) density as the renderer makes it, inside the boxes its point inputs span, 0 for
+# one neither; for one no rule bounds, an error naming the material, as the renderer tracks such a volume under that
+# bound and no guess; of one emitting, at least as many collisions across its points as GLOW_COLLISIONS, as each
+# gathers its emission
+GLOW_COLLISIONS = 4
 def medium(material, boxes):
-    absorption, density, scatter = (fold(part) for part in MEDIA.get(material, (0, 0, 0)))
-    if not any(isinstance(part, tuple) for part in (absorption, density, scatter)): return 0.0
+    absorption, density, scatter, glow = (fold(part) for part in MEDIA.get(material, (0, 0, 0, 0)))
+    if not any(isinstance(part, tuple) for part in (absorption, density, scatter)) and not nonzero(glow): return 0.0
     box = bounds(('MULTIPLY', ('SUBTRACT', ('ADD', scatter, 1), absorption), density), boxes, {})
     if box is None: raise ValueError(f"Flex: the volume of material '{material.name}' varies by steps no bound is "
         'known for, so its density has no largest value to track it under')
-    return max(float(box[1].max()), 0.0)
+    least = GLOW_COLLISIONS / numpy.linalg.norm(boxes['POSITION'][1] - boxes['POSITION'][0]) if nonzero(glow) else 0
+    return max(float(box[1].max()), least, 0.0)
 
 BAKE_TOLERANCE = 2 ** -9  # Most a bake over UV space strays from shading live: a fifth of its test's seed floor (0.011)
 
@@ -1224,6 +1228,16 @@ def resolve(socket, groups=()):
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
+        # In a volume it emits per unit length by its emission and by a black body's radiance at its temperature,
+        # STEFAN_BOLTZMANN T^4 / PI, linear in its intensity, by BLACKBODY_UNIT, colored by blackbody(); neither by its
+        # density, none at 0 K or below; on a surface nothing
+        if node.type == 'PRINCIPLED_VOLUME' and SIDE['volume']:
+            emissive, strength, t = get('Emission Color'), get('Emission Strength'), ('MAXIMUM', 0, get('Temperature'))
+            if nonzero(intensity := get('Blackbody Intensity')):
+                radiance = 'MULTIPLY', STEFAN_BOLTZMANN * BLACKBODY_UNIT / math.pi, ('POWER', t, 4)
+                emissive = 'ADD', ('MULTIPLY', emissive, strength), ('MULTIPLY', ('MULTIPLY', get('Blackbody Tint'),
+                    blackbody(t)), ('MULTIPLY', intensity, radiance))
+                strength = 1
         # Subsurface scattering as the medium its share transmitted enters: of mean free path the radius by the scale
         # per channel, the color's albedo by Chiang et al.'s inversion, whose slab reflects that color; on closed meshes
         # alone, as an open one, a leaf, would fill the space behind it, and keeps its diffuse
@@ -1282,7 +1296,10 @@ def closed(ob, mesh):  # Whether the object is a closed mesh, each edge shared b
     return bool(numpy.all(numpy.bincount(edges, minlength=len(mesh.edges)) == 2))
 # Of the object whose material shade() resolves: whether it is closed, and whether its subsurface scattering asked
 SEALING = {'closed': True, 'asked': False}
-MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density and scattering color
+STEFAN_BOLTZMANN = 5.670374419e-8  # W / (m^2 K^4), CODATA 2018
+BLACKBODY_UNIT = 1e-6  # Blender's unit scale of a volume's Blackbody Intensity 1
+MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
+SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
     SEALING['asked'] = True
     return SEALING['closed']
@@ -1293,8 +1310,11 @@ def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
     surface = resolve(output.inputs['Surface'])  # Its volume, or the medium its subsurface scattering fills
-    volume = resolve(output.inputs['Volume'])[10:13] if output.inputs['Volume'].is_linked else surface[10:13]
-    MEDIA[material] = volume
+    SIDE['volume'] = True
+    filled = resolve(output.inputs['Volume']) if output.inputs['Volume'].is_linked else None
+    SIDE['volume'] = False
+    volume, glow = (filled[10:13], filled[4]) if filled else (surface[10:13], 0)
+    MEDIA[material] = *volume, glow
     if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
         height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
@@ -1310,8 +1330,9 @@ def shade(material, program):
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
     # The base layer transmits the surface's translucent color diffusely and carries its sheen and anisotropy, a coat
-    # over it none
-    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0))] for layer in layers]
+    # over it none; each filled by its volume's emission
+    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow]
+        for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1563,6 +1584,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run main's programs, the
             # shader compiling them out
+            if len(surface) == 20 and not nonzero(surface[19]): surface = surface[:19]  # Its volume's emission too
             if len(surface) == 19 and not marks(surface[16], 'ANISOTROPIC'): surface = surface[:16]
             if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
