@@ -1318,6 +1318,42 @@ for preferences.device in ('OPTIX', 'VULKAN'):
         checked.mean(), flat.mean(), checked.var() - flat.var())
 preferences.device = device
 
+# A volume varying from point to point: a pure absorber of density 2 at the top of its generated points and 0 at their
+# bottom, seen straight down through its depth of 2 against a white sky, passes exp(-2) by its density's integral, where
+# the density where it is entered held along the ray would pass exp(-4)
+fog = new('fog')
+fog.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+mesh = bpy.data.meshes.new('fog')
+bm = bmesh.new()
+bmesh.ops.create_cube(bm, size=2)
+bm.to_mesh(mesh)
+fog.collection.objects.link(bpy.data.objects.new('fog', mesh))
+mesh.materials.append(bpy.data.materials.new('absorber'))
+nodes, links = mesh.materials[0].node_tree.nodes, mesh.materials[0].node_tree.links
+nodes.remove(nodes['Principled BSDF'])
+absorber, depth, double = (nodes.new(kind) for kind in ('ShaderNodeVolumePrincipled', 'ShaderNodeSeparateXYZ',
+    'ShaderNodeMath'))
+absorber.inputs['Color'].default_value, double.operation, double.inputs[1].default_value = (0, 0, 0, 1), 'MULTIPLY', 2
+links.new(nodes.new('ShaderNodeTexCoord').outputs['Generated'], depth.inputs[0])
+links.new(depth.outputs['Z'], double.inputs[0])
+links.new(double.outputs[0], absorber.inputs['Density'])
+links.new(absorber.outputs[0], nodes['Material Output'].inputs['Volume'])
+fog.camera = bpy.data.objects.new('fog camera', bpy.data.cameras.new('fog camera'))
+fog.collection.objects.link(fog.camera)
+fog.camera.data.type, fog.camera.data.ortho_scale, fog.camera.location = 'ORTHO', 1, (0, 0, 3)
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=fog.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber', preferences.device, seen)
+preferences.device = device
+# The absorber under a modifier making vertices of its own, its generated points those of its evaluated mesh, exports:
+# its texture space read while that mesh lives, which the export frees before bounding the volume
+shown = bpy.context.window.scene
+opened('subdivided fog').collection.objects.link(smooth := bpy.data.objects.new('subdivided fog', mesh))
+smooth.modifiers.new('subdivision', 'SUBSURF')
+assert len(exported().varying) == 1, 'subdivided varying volume'
+bpy.context.window.scene = shown
+
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
 # silhouette, integrated numerically
