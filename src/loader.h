@@ -246,7 +246,7 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 // light BVH is built from, the BVHs of its meshes by first triangle and the buffer of the BVH over its instances
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
     std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
-    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows;
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows, segments;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures; };
 
 // Of an image's texels in its format, a level's of half its width and height, odd ones floored, each texel the mean of
@@ -451,7 +451,6 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     }
     loaded.materials.push_back(table[meshes]);
     scene.instances = upload(instances), scene.instanceCount = instances.size();
-    scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
     receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
@@ -472,6 +471,24 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
     receive(&attributes, sizeof(unsigned), 1);
     scene.attributes = load<float4>(attributes);
+    struct { unsigned points, strands, rows; } hair; // Hair: its points, then per strand its first point, point
+    receive(&hair, sizeof(hair), 1); // count and row, and the rows, the strands' materials after the world's
+    scene.points = load<float4>(hair.points);
+    struct Strand { unsigned first, count, row; };
+    std::vector<Strand> strands(hair.strands);
+    receive(strands.data(), sizeof(Strand), strands.size());
+    const std::vector<Material> rows = read<Material>(hair.rows);
+    std::vector<unsigned> segments, owners; // Per segment its first point and strand
+    scene.hair = loaded.materials.size();
+    for (unsigned k = 0; k < strands.size(); ++k) {
+        loaded.materials.push_back(rows[strands[k].row]);
+        for (unsigned p = strands[k].first; p + 1 < strands[k].first + strands[k].count; ++p)
+            segments.push_back(p), owners.push_back(k);
+    }
+    scene.segments = (unsigned*)allocate(segments.size() * sizeof(unsigned), segments.data());
+    scene.owners = (unsigned*)allocate(owners.size() * sizeof(unsigned), owners.data());
+    loaded.segments = segments.size();
+    scene.materials = upload(loaded.materials);
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
@@ -479,7 +496,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
-        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes};
+        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
+        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, (CUdeviceptr)scene.owners};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only

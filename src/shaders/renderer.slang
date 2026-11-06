@@ -46,6 +46,7 @@ struct Scene {
     uint64_t* anchorTrails;
     uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     uint64_t* images; // Of each image the materials read, its texture by its index
+    float4* points; uint *segments, *owners; uint hair; // Hair, as renderer.h's
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -1862,7 +1863,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 624; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 656; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
