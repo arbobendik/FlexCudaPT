@@ -171,6 +171,10 @@ inline OptixResult optixPipelineDestroy(OptixPipeline pipeline) {
     return OPTIX_SUCCESS;
 }
 
+// The stand-in's stack sizes: none here, as Vulkan has no stand-in
+inline OptixResult optixProgramGroupGetStackSize(OptixProgramGroup, OptixStackSizes*, OptixPipeline) { return OPTIX_SUCCESS; }
+inline OptixResult optixPipelineSetStackSize(OptixPipeline, unsigned, unsigned, unsigned, unsigned) { return OPTIX_SUCCESS; }
+
 inline OptixResult optixSbtRecordPackHeader(OptixProgramGroup group, void* header) {
     std::memset(header, 0, OPTIX_SBT_RECORD_HEADER_SIZE);
     *(unsigned*)header = group->program;
