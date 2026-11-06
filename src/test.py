@@ -24,6 +24,10 @@ scene = new('test')
 scene.render.use_border = True
 scene.render.border_max_y = 0.875  # Leaves the top eighth unrendered
 
+def opened(name):  # A new scene, the window's
+    bpy.context.window.scene = made = new(name)
+    return made
+
 def add(data, location, rotation=(0, 0, 0)):
     ob = bpy.data.objects.new(data.name, data)
     ob.location, ob.rotation_euler = location, rotation
@@ -161,6 +165,11 @@ class Viewport:  # Stands in for the engine instance Blender creates for a viewp
     def tag_redraw(self): self.redraw = True
     def bind_display_space_shader(self, scene): pass
     def unbind_display_space_shader(self): pass
+
+def exported(depsgraph=None):  # An exporter stand-in, the scene piped into its requests from the depsgraph
+    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
+    Viewport.engine.start(exporter, depsgraph or bpy.context.evaluated_depsgraph_get())
+    return exporter
 
 # EEVEE's specular shader resolves to a surface of its base color with a dielectric's specular reflection, not black
 specular = bpy.data.materials.new('specular').node_tree
@@ -808,8 +817,7 @@ coordinates.object = reference
 tree.links.new(coordinates.outputs['Object'], emission.inputs['Color'])
 bpy.context.view_layer.update()
 depsgraph = bpy.context.evaluated_depsgraph_get()
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, depsgraph)
+exporter = exported(depsgraph)
 reference.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
@@ -886,8 +894,7 @@ for i, item in enumerate(depsgraph.object_instances):
 assert kinds == {'CURVE', 'FONT', 'SURFACE', 'META'}, 'curves made meshes'
 # They pipe the triangles Blender renders of them once: those of the meshes they evaluate to, beside which the depsgraph
 # lists themselves too
-counted = new('counted')
-bpy.context.window.scene = counted
+counted = opened('counted')
 for ob in made: counted.collection.objects.link(ob)
 counting, rendered = bpy.context.evaluated_depsgraph_get(), 0
 for item in counting.object_instances:
@@ -951,20 +958,17 @@ links.new(noise.outputs['Color'], product.inputs[6]), links.new(steps.outputs['C
 links.new(product.outputs[2], edge.inputs['Emission Color'])
 steps.image.alpha_mode = 'CHANNEL_PACKED'
 uvs.foreach_set('uv', uv)
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())  # Exporting anew, not updating values
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()  # Exporting anew, not updating values
 assert exporter.placed and not any('steps' in str(key) for _, key, *_ in exporter.placed), 'image reads stay live'
 # A procedural specular tint bakes inside its mark, which stays live for the shader to keep the tint
 links.new(noise.outputs['Color'], edge.inputs['Specular Tint'])
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 assert exporter.placed and not any('SPECULAR' in str(key) for _, key, *_ in exporter.placed), 'specular mark live'
 # So does a procedural translucent color, which stays live for the shader to transmit it
 through = edge.id_data.nodes.new('ShaderNodeBsdfTranslucent')
 output = edge.id_data.nodes['Material Output'].inputs['Surface']
 links.new(noise.outputs['Color'], through.inputs['Color']), links.new(through.outputs[0], output)
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 assert exporter.placed and not any('TRANSLUCENT' in str(key) for _, key, *_ in exporter.placed), 'translucent mark live'
 links.new(edge.outputs[0], output)
 links.remove(edge.inputs['Specular Tint'].links[0])
@@ -1015,8 +1019,7 @@ for smooth in (False, True):
         for axis in (0, 1): texels[..., :3] = sum(numpy.roll(texels[..., :3], k, axis) for k in range(16)) / 16
         texels[..., :3] = (texels[..., :3] - texels[..., :3].min()) / numpy.ptp(texels[..., :3])
     detail.pixels.foreach_set(texels.ravel())
-    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-    Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+    exporter = exported()
     assert [key[0] for _, key, *_ in exporter.placed] == ([None] if smooth else []), 'uv bakes within tolerance'
 baked, tolerance, module['BAKE_TOLERANCE'] = render(), module['BAKE_TOLERANCE'], -1  # Every bake strays
 assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked uv'
@@ -1067,8 +1070,7 @@ ramp = power.nodes.new('ShaderNodeValToRGB')
 ramp.color_ramp.elements[0].color, ramp.color_ramp.elements[1].color = (0.1, 0.2, 0.9, 1), (1, 0.6, 0.1, 1)
 power.links.new(exponent.outputs[0], ramp.inputs['Fac'])
 power.links.new(ramp.outputs['Color'], power.nodes['Principled BSDF'].inputs['Emission Color'])
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 assert [key[0] for _, key, *_ in exporter.placed] == [None], 'ramps bake'
 baked, module['BAKE_TOLERANCE'] = render(), -1  # Every bake strays
 assert numpy.percentile(numpy.abs(render() - baked).max(-1), 99) < 0.0018, 'baked ramp'
@@ -1080,8 +1082,7 @@ assert (live := resident()) - alone > 3.9, ('bake inputs freed', alone, live)
 power.links.remove(power.nodes['Principled BSDF'].inputs['Base Color'].links[0])
 # A value of the baked power edited after its bake bakes it again: the update of steps runs the bake again and pipes the
 # image only it reads anew, 4 MiB flagged in bit 31 for the renderer's bake pass alone
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, depsgraph := bpy.context.evaluated_depsgraph_get())
+exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
 exponent.inputs[1].default_value, exporter.requests = 2, io.BytesIO()
 material.update_tag()  # Its value edited, as Blender's editors tag it, and the scene evaluated with it
 depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -1101,8 +1102,7 @@ assert not exporter.placed, 'an image scaled bakes nothing'
 # A trivial tree, its image read at the UV into Transmission, which the export makes math of the image, bakes nothing
 power.links.new(power.nodes['Texture Coordinate'].outputs['UV'], image.inputs['Vector'])
 power.links.new(image.outputs['Color'], power.nodes['Principled BSDF'].inputs['Transmission Weight'])
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 assert not exporter.placed, 'trivial trees bake nothing'
 # Light Falloff's linear output, smoothed, emits as its strength by the ray's length, by the length squared over itself
 # plus the smoothing, built of Light Path's ray length and math; a material's displacement by bump alone bends its
@@ -1421,8 +1421,7 @@ for device in ('OPTIX', 'VULKAN'):
 # irradiance Cycles' conventions give there, within 3% where above a tenth of the peak and under 1% of the peak where
 # none is due. A point of 500 W, unnormalized at exposure 1 and 3000 K too; a spot of 60 degrees blended 0.3; a disk of
 # size 1, spread 30 degrees too; a sun of 3 W/m^2 turned 30 degrees; on both backends
-scene = new('lights')
-bpy.context.window.scene = scene
+scene = opened('lights')
 scene.flex_samples = 1024  # The spread's narrow beam within 2% of its truth at the ring around its peak
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
 scene.camera = add(bpy.data.cameras.new('lights'), (0, 0, 10))
@@ -1492,16 +1491,14 @@ for device in ('OPTIX', 'VULKAN'):
 
 # A mesh renders with the UV map marked for rendering, as in Cycles, not the one selected for editing: a plane's render
 # map of a quarter everywhere is the one it exports
-scene = new('render uv')
-bpy.context.window.scene = scene
+scene = opened('render uv')
 scene.camera = add(bpy.data.cameras.new('render uv'), (0, 0, 2))
 plane('render uv', 0, 0)
 mesh = bpy.data.meshes['render uv']
 quarter = mesh.uv_layers.new(name='render')
 quarter.uv.foreach_set('vector', [0.25] * 2 * len(mesh.loops))
 quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The grid's own UVs selected
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 piped = exporter.requests.getvalue()
 header = numpy.frombuffer(piped, 'I', count=11)  # Mesh triangles, after the instances and four columns before UVs
 assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 176 * header[9] + 36 * 4 * header[8])
@@ -1510,8 +1507,7 @@ assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 1
 # A chain of mixes, each multiplying the last into itself at a factor of a half, which keeps it in both of the mix's
 # terms, shares the first one's expression 2^20 times: folding, keying and summarizing each shared part once, and
 # emitting its steps by keys hashed once, its export takes linear time, not exponential
-scene = new('chain')
-bpy.context.window.scene = scene
+scene = opened('chain')
 scene.camera = add(bpy.data.cameras.new('chain'), (0, 0, 2))
 chain = plane('chain', 0, 0)
 last = chain.id_data.nodes.new('ShaderNodeTexNoise').outputs['Color']
@@ -1546,8 +1542,7 @@ assert time.perf_counter() - start < 1, 'shared points once'
 # Classroom's schoolDesk_wood rebuilt: one image three times under mappings and curves, mixed by the object's random
 # number, overlaid with a color attribute and bumping its diffuse shader by the mix. It keeps 37 values for reuse but
 # never more than 6 at once, so its slots are taken again as their last loads pass, and it exports and renders
-scene = new('slots')
-bpy.context.window.scene = scene
+scene = opened('slots')
 scene.camera = add(bpy.data.cameras.new('slots'), (0, 0, 2))
 desk = plane('desk', 0, 0)
 tree, mesh = desk.id_data, bpy.data.objects['desk'].data
@@ -1724,8 +1719,7 @@ assert numpy.isfinite(pixels).all() and numpy.isclose(pixels.mean(), albedo, rto
 # every frame, two objects' moves, a material's value, then a deformation, a light's change and objects removed and
 # added. The user's persistent data reads as it was, during the job too, so saved files never hold Flex's; the engine
 # is let go once a job is done or cancelled; and a user's own persistent data stays on
-scene = new('frames')
-bpy.context.window.scene = scene
+scene = opened('frames')
 scene.camera = add(bpy.data.cameras.new('frames'), (0, 0, 2))
 scene.flex_samples, scene.flex_restir, scene.flex_denoise = 16, False, False  # No reservoirs carried between frames
 scene.frame_start, scene.frame_end = 1, 2
@@ -1801,8 +1795,7 @@ scene.render.use_persistent_data = False
 
 # An orthographic view projects in parallel: two unit squares, one 3 units further, cover alike (64 / 3)^2 pixels in a
 # final render through an ORTHO camera and in an orthographic viewport, which as in modeling sees behind its pivot too
-scene = new('ortho')
-bpy.context.window.scene = scene
+scene = opened('ortho')
 scene.camera = add(bpy.data.cameras.new('ortho'), (0, 0, 2))
 scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 3
 for name, location, size in (('near', (-0.6, 0, 0), 1), ('far', (0.6, 0, -3), 1), ('behind', (0, 0.9, 3), 0.4)):
@@ -1901,8 +1894,7 @@ preferences.device = 'OPTIX'  # The default again, for the tests below
 # Instances of one mesh pipe its arrays once: a collection instanced three times, one of them turned and stretched,
 # exports one mesh and three instances, and renders exactly as three copies of their own of it do, which the renderer
 # traces alike
-scene = new('instances')
-bpy.context.window.scene = scene
+scene = opened('instances')
 scene.camera = add(bpy.data.cameras.new('instances'), (0, 0, 2))
 plane('shared', 0, 0, 0.4)
 shared, ob = bpy.data.collections.new('shared'), bpy.data.objects['shared']
@@ -1912,8 +1904,7 @@ for empty, x in zip(empties, (-0.5, 0, 0.5)):
     empty.instance_type, empty.instance_collection, empty.location = 'COLLECTION', shared, (x, 0, 0)
     scene.collection.objects.link(empty)
 empties[2].rotation_euler, empties[2].scale = (0.3, 0.2, 0.5), (1, 1.5, 1)
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 header = numpy.frombuffer(exporter.requests.getvalue(), 'I', count=10)
 assert header[0] == flex.SCENE and (header[1], header[8], header[9]) == (6, 2, 3), 'mesh piped once'
 instanced = render()
@@ -1924,8 +1915,7 @@ baking.inputs['Base Color'].default_value, baking.inputs['Emission Strength'].de
 noise = baking.id_data.nodes.new('ShaderNodeTexNoise')
 noise.inputs['Scale'].default_value = 50
 baking.id_data.links.new(noise.outputs['Color'], baking.inputs['Emission Color'])
-exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+exporter = exported()
 baked = render()[:20]
 for empty in empties: empty.hide_render = True
 alone = render()[:20]
@@ -1946,14 +1936,11 @@ assert numpy.array_equal(instanced, render()), 'instances as copies'
 # hidden, as there; each case its triangles and instances, geometry nodes' host among them, its own mesh left empty
 def instancing(name, build, triangles, count, objects=False):  # Copies of the instances, or of the objects
     global scene
-    scene = new(name)
-    bpy.context.window.scene = scene
+    scene = opened(name)
     scene.camera = add(bpy.data.cameras.new(name), (0, 0, 3))
     plane(f'{name} seed', 0, 0, 0.3)
     build(bpy.data.objects[f'{name} seed'])
-    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    Viewport.engine.start(exporter, depsgraph)
+    exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
     assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=10)[8:]) == (triangles, count), name
     image = render()
     copies = [(x.object.data.copy(), x.matrix_world.copy()) for x in depsgraph.object_instances
@@ -2012,8 +1999,7 @@ def children(kind, seed):  # The seed instanced at the host's vertices or faces,
     hidden.parent, hidden.hide_render = ob, True
 instancing('linked', lambda seed: [add(seed.data, (x, 0, 0)) for x in (-0.6, 0.6)], 2, 3, True)
 # Objects linking one curve, one of them through an array, pipe each the mesh it evaluates to, as copies of it do
-scene = new('linked curves')
-bpy.context.window.scene = scene
+scene = opened('linked curves')
 curve = bpy.data.curves.new('linked curve', 'CURVE')
 curve.bevel_depth, spline = 0.1, curve.splines.new('POLY')
 spline.points.add(1)
@@ -2021,8 +2007,7 @@ spline.points[1].co = (1, 0, 0, 1)
 linking = [add(curve, (0, y, 0)) for y in (-0.5, 0.5)]
 linking[1].modifiers.new('array', 'ARRAY').count = 3
 def triangles():  # Of the scene piped
-    exporter = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-    Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
+    exporter = exported()
     return numpy.frombuffer(exporter.requests.getvalue(), 'I', count=9)[8]
 linked, linking[1].data = triangles(), curve.copy()
 assert linked == triangles(), 'linked curves'
@@ -2040,8 +2025,7 @@ instancing('face instanced', lambda seed: children('FACES', seed), 2, 1)
 # overrides the outer's; each plane's pixel holds its instance's color, on both backends
 def tinted(name, nested):
     global scene
-    scene = new(name)
-    bpy.context.window.scene = scene
+    scene = opened(name)
     scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
     scene.camera = add(bpy.data.cameras.new(name), (0, 0, 5))  # Sees [-1.8, 1.8]^2: the nested reach 1.4
     bsdf, seed = plane(f'{name} seed', 0, 0, 0.3), bpy.data.objects[f'{name} seed']
@@ -2089,8 +2073,7 @@ tinted('tinted', False)
 tinted('nested tint', True)
 # Instances of the points Distribute Points on Faces makes, whose ids aren't their indices, each read their own: a tint
 # of each one's position reads as where it is
-scene = new('distributed')
-bpy.context.window.scene = scene
+scene = opened('distributed')
 plane('distributed seed', 0, 0, 0.05)
 tree = bpy.data.node_groups.new('distributed', 'GeometryNodeTree')
 host('distributed host').modifiers.new('instances', 'NODES').node_group = tree
@@ -2112,8 +2095,7 @@ assert len(read) > 10 and all(numpy.allclose(tint, where, atol=1e-5) for tint, w
 # The shadow terminator: a sphere of 16 segments, smooth, lit near its terminator by a sun and by a point light, renders
 # as one of 256 segments does there, not cut along its faces: of the pixels where the fine sphere reads 1-40% of its
 # brightest, under 7% read under half of it, on both backends (main f8b1f30: 22.5% under the sun, 9.4% under the point)
-scene = new('terminator')
-bpy.context.window.scene = scene
+scene = opened('terminator')
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
 scene.camera = add(bpy.data.cameras.new('terminator'), (0, -4, 0), (math.pi / 2, 0, 0))
 spheres = {}
@@ -2171,8 +2153,7 @@ devices.device = 'OPTIX'
 # Rays reach a mesh in its own space through its instance's transform, its normals turned by the adjugate: a smooth
 # sphere turned and stretched unevenly under the sun shades as a copy of it with the transform applied to its mesh does,
 # on both backends
-scene = new('turned')
-bpy.context.window.scene = scene
+scene = opened('turned')
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
 scene.camera = add(bpy.data.cameras.new('turned view'), (0, 0, 4))
 add(bpy.data.lights.new('turned sun', 'SUN'), (0, 0, 5), (0.5, 0.3, 0)).data.energy = math.pi
@@ -2202,8 +2183,7 @@ preferences.device = 'OPTIX'
 
 # An object of no triangles adds none: a mesh of points alone, linked before a plane and placed apart from it, leaves
 # the render the plane's alone
-scene = new('none')
-bpy.context.window.scene = scene
+scene = opened('none')
 scene.camera = add(bpy.data.cameras.new('none'), (0, 0, 2))
 points = bpy.data.meshes.new('points')
 points.from_pydata([(0, 0, 0), (0.1, 0, 0), (0, 0.1, 0)], [], [])
