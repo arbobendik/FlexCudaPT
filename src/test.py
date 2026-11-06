@@ -1432,6 +1432,88 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
     assert abs(seen * math.pi / math.exp(-4) - 1) < 0.02, ('floor through a varying volume', preferences.device, seen)
 preferences.device = device
+# A camera inside a varying volume: in the absorber at its center, seeing straight down a white sky from its near
+# plane at depth c, passes exp(-(1 - c)^2 / 2) of what its density, 1 - s at depth s, takes on the way out
+inside = new('inside')
+inside.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+inside.collection.objects.link(bpy.data.objects.new('inside', mesh))
+inside.camera = bpy.data.objects.new('inside camera', bpy.data.cameras.new('inside camera'))
+inside.collection.objects.link(inside.camera)
+inside.camera.data.type, inside.camera.data.ortho_scale, inside.camera.data.clip_start = 'ORTHO', 1, 0.01
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=inside.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(inside.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / math.exp(-0.99 ** 2 / 2) - 1) < 0.01, ('camera inside a varying volume', preferences.device, seen)
+preferences.device = device
+# A Principled Volume's blackbody emits per unit length a black body's radiance at its temperature, its exitance
+# 5.670374419e-8 T^4 over PI, by its intensity at Blender's unit scale of 1e-6, colored by its blackbody color: at
+# intensity 2 and 1500 K 0.18275 times that color; at 0 K nothing, never negative
+radiant = bpy.data.materials.new('blackbody').node_tree
+radiator = radiant.nodes.new('ShaderNodeVolumePrincipled')
+radiant.links.new(radiator.outputs[0], radiant.nodes['Material Output'].inputs['Volume'])
+radiator.inputs['Blackbody Intensity'].default_value = 2
+for temperature in (1500, 0):
+    radiator.inputs['Temperature'].default_value = temperature
+    flex.SIDE['volume'] = True
+    glow = flex.fold(flex.resolve(radiant.nodes['Material Output'].inputs['Volume']))[4]
+    flex.SIDE['volume'] = False
+    radiance = 2 * 5.670374419e-8 * temperature ** 4 * 1e-6 / math.pi * flex.fold(flex.blackbody(temperature))
+    assert numpy.allclose(glow, radiance, rtol=1e-6, atol=0), ('blackbody radiance', temperature, glow, radiance)
+# A volume emitting 0.5 per unit length, unscaled by its density, absorbing by the density 2 z over its
+# generated points or by 1, seen straight down against a black world, glows by the integral of its emission times its
+# transmittance along its depth of 2: 0.3200 and 0.4323, where its emission dropped would leave it black
+glow = new('emitting volume')
+glow.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+glow.collection.objects.link(cube := bpy.data.objects.new('emitting volume', mesh.copy()))
+cube.data.materials[0] = glowing = mesh.materials[0].copy()
+emitter = glowing.node_tree.nodes['Principled Volume']
+emitter.inputs['Emission Strength'].default_value, emitter.inputs['Emission Color'].default_value = 0.5, (1, 1, 1, 1)
+glow.camera = fog.camera
+glow.collection.objects.link(fog.camera)
+depth = numpy.linspace(0, 2, 200001)
+for optical, density in ((2 * depth - depth * depth / 2, None), (depth, 1)):
+    if density: glowing.node_tree.links.remove(emitter.inputs['Density'].links[0])
+    if density: emitter.inputs['Density'].default_value = density
+    expected = numpy.trapezoid(0.5 * numpy.exp(-optical), depth)
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        bpy.ops.render.render(scene=glow.name, write_still=True)
+        seen = numpy.array(bpy.data.images.load(glow.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+        assert abs(seen / expected - 1) < 0.01, ('emitting volume', density, preferences.device, seen, expected)
+preferences.device = device
+# A camera inside the emitting volume, now of density 1, at its center seeing straight down from its near plane at depth
+# 0.01: glows by 0.5 (1 - exp(-0.99)) on its way out, where its own medium's emission dropped would leave it black
+lit = new('emitting inside')
+lit.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+lit.collection.objects.link(bpy.data.objects.new('emitting inside', cube.data))
+lit.camera = inside.camera
+lit.collection.objects.link(inside.camera)
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=lit.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(lit.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / (0.5 * (1 - math.exp(-0.99))) - 1) < 0.01, ('camera inside an emitting volume',
+        preferences.device, seen)
+preferences.device = device
+# The absorber of density read from an image of straight alpha, its alpha unread: its colors associated, 0.5 and 0.75
+# of white and of three quarters at alphas 0.5 and 1 across x, under its straight colors' bound of 1, seen through its
+# depth of 2 at 1024 samples against a white sky again, the floor and sun gone, its halves passing exp(-1) and
+# exp(-1.5), within 0.7% over 4 seeds
+fog.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+for gone in (ob, sun): fog.collection.objects.unlink(gone)
+nodes, links = mesh.materials[0].node_tree.nodes, mesh.materials[0].node_tree.links  # The absorber's again
+straight = bpy.data.images.new('straight', 2, 1, alpha=True, float_buffer=True)
+straight.pixels.foreach_set((1, 1, 1, 0.5, 0.75, 0.75, 0.75, 1))
+fog.flex_samples = 1024
+reader = nodes.new('ShaderNodeTexImage')
+reader.image, reader.interpolation, straight.alpha_mode = straight, 'Closest', 'STRAIGHT'
+links.new(nodes['Texture Coordinate'].outputs['Generated'], reader.inputs['Vector'])
+links.new(reader.outputs['Color'], absorber.inputs['Density'])
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=fog.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean((0, 2))
+    halves = seen[:SIZE // 2].mean(), seen[SIZE // 2:].mean()
+    assert numpy.allclose(halves, numpy.exp((-1, -1.5)), rtol=0.02), ('straight image in a volume', preferences.device,
+        halves)
+preferences.device = device
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
