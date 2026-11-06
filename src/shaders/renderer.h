@@ -32,7 +32,7 @@ struct Params { unsigned long long ops[2]; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
 // will read, the color of Blender's Translucent BSDF, the color and roughness of its sheen, and its anisotropy, the
