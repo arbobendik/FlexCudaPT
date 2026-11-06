@@ -91,7 +91,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy}
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None}  # The last a step past every program's end, of a
+# scene whose media vary from point to point, so the renderer tracks those it fills alone
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1366,6 +1367,7 @@ class Flex(bpy.types.RenderEngine):
         super().__init__(*args, **kwargs)
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
+        self.varying = set()  # Of those, the ones whose volume varies: their bounds, made where they are, made anew
         self.volumes = {}  # Of each instance exported filling a volume, by its index: its triangles' BVH in the world and
         # its first triangle of a material filling it
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
@@ -1852,8 +1854,10 @@ class Flex(bpy.types.RenderEngine):
         bakes, again = [k + rows for k in bakes], [k + rows for k in again]  # The bakes' steps after the materials'
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
+        ops += [([*OPS].index('MEDIUM'), 0, 0, 0)] * bool(varying)
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
-            if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures keep their shape
+            if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures
+                # keep their shape, and no volume varies, whose bounds a value changed may move
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
@@ -1884,7 +1888,7 @@ class Flex(bpy.types.RenderEngine):
         self.shape = shape
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
-        self.volumes = volumes
+        self.volumes, self.varying = volumes, varying
         self.cuts, self.placed, self.piped = cuts, placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
