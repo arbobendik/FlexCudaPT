@@ -1051,7 +1051,7 @@ Medium volume(Surface surface) {
     float3 from = origin, transmitted = float3(1, 1, 1);
     // Visibility along the segment to the sampled point
     const float3 toward = normalize(toLight);
-    const float left = length(toLight) * (1 - 1e-4f);
+    const float left = shadowLength(toLight);
     float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[int(dot(face, toLight) > 0)];
@@ -1069,11 +1069,10 @@ Medium volume(Surface surface) {
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,
                 Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder), layer);
-            const float3 through = surface.ior == 1 ? straightThrough(Material(surface.albedo,
-                float3(0), surface.roughness, surface.metallic, surface.transparency, 0, float3(0), float3(1), 1, float3(0),
+            transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
+                surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
                 float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
-                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0))) : float3(0, 0, 0);
-            transmitted = transmitted * (through * surface.coverage + float3(1, 1, 1) * (1 - surface.coverage));
+                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
             if (layer == 0 && surface.density > 0)
                 medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? NO_MEDIUM : volume(surface);
         }
