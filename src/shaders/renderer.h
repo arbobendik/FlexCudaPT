@@ -55,7 +55,10 @@ struct Info { float location[3], color[4], index, material, random, axes[9]; uns
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, instance; bool leaf; };
 // Per instance of a mesh: its first triangle and count, whether its mesh is in world space, its transform's rows, the
 // adjugate turning its normals, its object's info and its first triangle in the scene's order
-struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; unsigned key; };
+// Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
+// generated point, and the largest extinction its volume reaches, 0 unless it varies from point to point
+struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
+    unsigned key; };
 // Point of a triangle of an instance at its barycentrics, triangle NONE for no point
 constexpr unsigned NONE = ~0u;
 struct Hit { unsigned triangle, instance; float2 uv; };
