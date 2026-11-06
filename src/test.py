@@ -927,8 +927,8 @@ exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
 def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
     header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
-    first, count = numpy.frombuffer(piped, 'I', count=2, offset=44 + 176 * k)
-    return numpy.frombuffer(piped, 'f', count=9 * count, offset=44 + 176 * header[9] + 36 * (2 * header[8]
+    first, count = numpy.frombuffer(piped, 'I', count=2, offset=44 + 204 * k)
+    return numpy.frombuffer(piped, 'f', count=9 * count, offset=44 + 204 * header[9] + 36 * (2 * header[8]
         + first)).reshape(-1, 3)
 generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
     if item.object.original == twisted))
@@ -1579,7 +1579,7 @@ quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The gr
 exporter = exported()
 piped = exporter.requests.getvalue()
 header = numpy.frombuffer(piped, 'I', count=11)  # Mesh triangles, after the instances and four columns before UVs
-assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 176 * header[9] + 36 * 4 * header[8])
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 204 * header[9] + 36 * 4 * header[8])
     == 0.25), 'render uv map'
 
 # A chain of mixes, each multiplying the last into itself at a factor of a half, which keeps it in both of the mix's

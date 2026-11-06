@@ -28,7 +28,10 @@ struct Surface {
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
-struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; uint key; };
+// Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
+// generated point, and the largest extinction its volume reaches, 0 unless it varies from point to point
+struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
+    uint key; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle, instance; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
