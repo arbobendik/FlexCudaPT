@@ -346,6 +346,12 @@ scatter = nodes.new('ShaderNodeVolumeScatter')
 henyey = repr(surface_of(scatter))
 scatter.phase, scatter.inputs['Alpha'].default_value = 'DRAINE', 0.25
 assert repr(surface_of(scatter)) == henyey, 'draine alpha covers nothing'
+# A coat mixed or added with a shader without one keeps its coat, of its weight halved, which main dropped
+coated = nodes.new('ShaderNodeBsdfPrincipled')
+coated.inputs['Coat Weight'].default_value = 0.5
+for shader in (nodes.new('ShaderNodeMixShader'), nodes.new('ShaderNodeAddShader')):
+    links.new(diffuse.outputs[0], shader.inputs[-2]), links.new(coated.outputs[0], shader.inputs[-1])
+    assert numpy.allclose(surface_of(shader)[19][9], 0.25), ('coat mixed', shader.type)
 pixels = render()
 red, green, blue = pixels[18:46, 2:30].mean((0, 1))
 assert green > 50 * max(red, blue), 'specular tint'
