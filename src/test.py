@@ -2068,6 +2068,38 @@ gc.collect()
 assert scene.render.use_persistent_data and engines[0](), 'user persistent data kept'
 scene.render.use_persistent_data = False
 
+# An animation's frame reusing the last frame's reservoirs reuses them against the scene they were traced in, its mean
+# within 1% of the same frame rendered alone at 256 samples: after a cube moved, reusing them at 192 samples, the
+# instances' transforms as they were; after the visible cube switched, a scene of as many triangles numbered anew, not
+# reusing them, where reusing them against the new triangles left the whole frame 4% bright
+scene = opened('reused')
+scene.camera = add(bpy.data.cameras.new('reused'), (0, -4, 3), (0.93, 0, 0))
+scene.flex_samples, scene.flex_reuse_samples, scene.flex_reuse, scene.flex_denoise = 256, 192, True, False
+scene.frame_start, scene.frame_end = 1, 2
+shown = shape('shown', lambda bm: bmesh.ops.create_cube(bm, size=1), (0.8, 0, 0.5))  # Linked before the floor, the
+floor = shape('reused floor', lambda bm: bmesh.ops.create_grid(bm, size=3), (0, 0, 0))  # cube after it
+hidden = shape('hidden', lambda bm: bmesh.ops.create_cube(bm, size=1), (-0.8, 0, 0.5))
+for bsdf, color in ((shown, (0.8, 0.1, 0.1, 1)), (floor, (0.8, 0.8, 0.8, 1)), (hidden, (0.8, 0.1, 0.1, 1))):
+    bsdf.inputs['Base Color'].default_value, bsdf.inputs['Roughness'].default_value = color, 1
+sun = add(bpy.data.lights.new('reused sun', 'SUN'), (0, 0, 0), (0.8, 0, 0.6))
+sun.data.angle, sun.data.energy = 0.05, 3
+counts, trace = [], flex.Flex.trace  # The samples each trace of the frames has
+flex.Flex.trace = lambda self, *args: (traced := trace(self, *args), counts.append(int(traced[1][0, 0, 3])))[0]
+for kept, animate in ((True, lambda: (setattr(bpy.data.objects['shown'], 'hide_render', True), keys(
+        bpy.data.objects['hidden'], 'location', (-0.8, 0, 0.5), (0.8, 0, 0.5)))), (False, lambda: (keys(
+        bpy.data.objects['shown'], 'hide_render', True, False), keys(bpy.data.objects['hidden'], 'hide_render', False,
+        True)))):
+    for animated in bpy.data.objects: animated.animation_data_clear()
+    animate()
+    counts[:] = []
+    bpy.ops.render.render(animation=True, scene=scene.name)
+    frame = numpy.array(bpy.data.images.load(scene.render.frame_path(frame=2)).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+    assert counts[-1] == (192 if kept else 256), ('reused frame', kept, counts)
+    scene.frame_set(2)
+    alone = render()
+    assert abs(frame.mean() / alone.mean() - 1) < 0.01, ('reused frame as alone', kept, frame.mean(), alone.mean())
+flex.Flex.trace = trace
+
 # An orthographic view projects in parallel: two unit squares, one 3 units further, cover alike (64 / 3)^2 pixels in a
 # final render through an ORTHO camera and in an orthographic viewport, which as in modeling sees behind its pivot too
 scene = opened('ortho')
