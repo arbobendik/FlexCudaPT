@@ -264,11 +264,10 @@ READ_COSTS = {'IMAGE_LINEAR': 5, 'IMAGE_CUBIC': 17}  # Texel fetches of the read
 # Largest change of an expression of math on the point inputs per unit of one of them, as its derivative halfway along
 # all, the noises in it held (their frequencies count of their own); infinite unless it's a function of the inputs
 def jacobian(expression, input, around=0.5):
-    def at(e, value, memo):  # The expression at the value, each shared part once and shared still, as fold() takes it
-        if isinstance(e, tuple) and id(e) not in memo: memo[id(e)] = value if e == (input,) else numpy.full(3, 0.5) \
-            if len(e) == 1 and e[0] in POINTS or e[0] == 'NOISE' else (e[0], *(at(part, value, memo) for part in e[1:]))
-        return memo[id(e)] if isinstance(e, tuple) else e
-    values = [fold(at(expression, numpy.full(3, around) + 1e-3 * step, {})) for step in (*numpy.eye(3), numpy.zeros(3))]
+    at = lambda value: lambda e: value if e == (input,) else numpy.full(3, 0.5) if len(e) == 1 and e[0] in POINTS \
+        or e[0] == 'NOISE' else None  # The expression at the value, as fold() takes it
+    values = [fold(mapped(expression, at(numpy.full(3, around) + 1e-3 * step), {}))
+        for step in (*numpy.eye(3), numpy.zeros(3))]
     if any(isinstance(value, tuple) for value in values): return math.inf
     return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
 
@@ -418,13 +417,15 @@ def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone:
                 numpy.r_[span, 1], size, repeat)  # Repeating, at the first object's corner, as it was baked there
     cache[key] = None
 
-def moved_to(expression, point, memo, leaf='UV'):  # The expression, or a surface, with its UV (or another leaf) at the
-    if isinstance(expression, list): return [moved_to(part, point, memo, leaf) for part in expression]  # point, each
-    if not isinstance(expression, tuple): return expression  # shared part once
-    if expression[0] == leaf: return point
-    if id(expression) not in memo: memo[id(expression)] = expression[0], *(moved_to(part, point, memo, leaf)
-        for part in expression[1:])
+def mapped(expression, change, memo):  # The expression, or a surface, its parts changed where change gives a value
+    if isinstance(expression, list): return [mapped(part, change, memo) for part in expression]  # (not None), each
+    if not isinstance(expression, tuple): return expression  # shared part once and shared still
+    if id(expression) not in memo: memo[id(expression)] = changed if (changed := change(expression)) is not None \
+        else (expression[0], *(mapped(part, change, memo) for part in expression[1:]))
     return memo[id(expression)]
+
+def moved_to(expression, point, memo, leaf='UV'):  # The expression, or a surface, with its UV (or another leaf) at the
+    return mapped(expression, lambda e: point if e[0] == leaf else None, memo)  # point
 
 def alpha_reads(expression, seen=None):  # Image samples whose alpha contributes to the resolved surface, each part
     seen = set() if seen is None else seen  # shared entered once
@@ -522,13 +523,8 @@ def folded(expression, memo):
     return name, *operands
 
 def unanimated(value, memo=None):  # The expression with its animated values, which its cut keeps from bakes, as
-    # constants
-    memo = {} if memo is None else memo
-    if isinstance(value, list): return [unanimated(part, memo) for part in value]
-    if not isinstance(value, tuple): return value
-    if id(value) not in memo: memo[id(value)] = unanimated(value[1], memo) if value[0] == 'ANIMATED' else (
-        value[0], *(unanimated(part, memo) for part in value[1:]))
-    return memo[id(value)]
+    memo = {} if memo is None else memo  # constants
+    return mapped(value, lambda e: unanimated(e[1], memo) if e[0] == 'ANIMATED' else None, memo)
 
 def nonzero(value):  # Whether a value resolved is an expression or a constant not zero, its animated ones as constants
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
@@ -824,13 +820,15 @@ def offset(seed, dimensions):
     shifts = [100 + 100 * hashed(bits(seed), *[bits(axis)] * (dimensions > 1)) for axis in range(dimensions)]
     return numpy.array((shifts + [0, 0])[:3]), shifts[3] if dimensions == 4 else 0
 
+def point_of(node, value, default=('GENERATED',)):  # A texture node's point: its vector input's value where linked
+    return value if node.inputs[0].is_linked else default
+
 # Of a noise texture node of 1D to 4D points, at the generated point without a vector, as Cycles': its fractal, the
 # type of which the renderer numbers, at the point distorted by signed noise, for its color also at two offsets
 def noise(node, inputs, index):
     get, dimensions = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get, \
         int(node.noise_dimensions[0])
-    point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
-    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point, get('W', 0))
+    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point_of(node, get('Vector')), get('W', 0))
     kind = 'UNNORMALIZED' if node.noise_type == 'FBM' and not node.normalize else node.noise_type
     kind = ('FBM', 'UNNORMALIZED', 'MULTIFRACTAL', 'HETERO_TERRAIN', 'HYBRID_MULTIFRACTAL',
         'RIDGED_MULTIFRACTAL').index(kind)
@@ -856,8 +854,7 @@ def white_noise(node, inputs, index):
 def voronoi(node, inputs, index):
     get = dict(zip((socket.name for socket in node.inputs if socket.enabled), inputs)).get
     dimensions = int(node.voronoi_dimensions[0])
-    point = get('Vector') if get('Vector') is not None and node.inputs['Vector'].is_linked else ('GENERATED',)
-    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point, get('W', 0))
+    point, w = (vector(get('W'), 0, 0), 0) if dimensions == 1 else (point_of(node, get('Vector')), get('W', 0))
     metric = 0 if dimensions == 1 else ('EUCLIDEAN', 'MANHATTAN', 'CHEBYCHEV', 'MINKOWSKI').index(node.distance)
     feature = ('F1', 'F2', 'SMOOTH_F1', 'DISTANCE_TO_EDGE', 'N_SPHERE_RADIUS').index(node.feature)
     farthest = ('POWER', dimensions, ('DIVIDE', 1, get('Exponent'))) if metric == 3 else (dimensions ** 0.5,
@@ -871,19 +868,18 @@ def voronoi(node, inputs, index):
     return ('DIVIDE', value, get('Scale')) if output > 1 else value
 
 def magic(node, inputs, index):  # Of a magic texture node at the generated point without a vector, as Cycles'
-    color = 'MAGIC', inputs[0] if node.inputs[0].is_linked else ('GENERATED',), vector(inputs[1], node.turbulence_depth,
-        inputs[2])
+    color = 'MAGIC', point_of(node, inputs[0]), vector(inputs[1], node.turbulence_depth, inputs[2])
     return ('DOT_PRODUCT', color, numpy.full(3, 1 / 3)) if index else color
 
 def brick(node, inputs, index):  # Of a brick texture node at the generated point without a vector, as Cycles'
     p, color1, color2, mortar, scale, size, smooth, bias, width, height = inputs
-    f = 'BRICK', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), vector(size, smooth, bias), \
+    f = 'BRICK', ('MULTIPLY', point_of(node, p), scale), vector(size, smooth, bias), \
         vector(width, height, node.offset), numpy.array((node.offset_frequency, node.squash, node.squash_frequency))
     tint, factor = ('DOT_PRODUCT', f, numpy.eye(3)[0]), ('DOT_PRODUCT', f, numpy.eye(3)[1])
     return factor if index else mix(mix(color1, color2, tint), mortar, factor)
 
 def gradient(node, inputs, index):  # Of a gradient texture node at the generated point without a vector, as Cycles'
-    p = inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+    p = point_of(node, inputs[0])
     x, y = ('DOT_PRODUCT', p, numpy.eye(3)[0]), ('DOT_PRODUCT', p, numpy.eye(3)[1])
     r = 'MAXIMUM', ('SUBTRACT', 0.999999, length(p)), 0
     return clamp({'LINEAR': x, 'QUADRATIC': ('MULTIPLY', ('MAXIMUM', x, 0), ('MAXIMUM', x, 0)),
@@ -894,13 +890,13 @@ def gradient(node, inputs, index):  # Of a gradient texture node at the generate
 
 def checker(node, inputs, index):  # Of a checker texture node at the generated point without a vector, as Cycles'
     p, color1, color2, scale = inputs
-    p = 'MULTIPLY', ('ADD', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), 1e-6), 0.999999
+    p = 'MULTIPLY', ('ADD', ('MULTIPLY', point_of(node, p), scale), 1e-6), 0.999999
     factor = absolute(('MODULO', ('DOT_PRODUCT', ('FLOOR', p), numpy.ones(3)), 2))  # Whether the floors' sum is odd
     return factor if index else mix(color2, color1, factor)
 
 def wave(node, inputs, index):  # Of a wave texture node at the generated point without a vector, as Cycles'
     p, scale, distortion, detail, detail_scale, roughness, phase = inputs
-    p = 'MULTIPLY', ('ADD', ('MULTIPLY', p if node.inputs[0].is_linked else ('GENERATED',), scale), 1e-6), 0.999999
+    p = 'MULTIPLY', ('ADD', ('MULTIPLY', point_of(node, p), scale), 1e-6), 0.999999
     if node.wave_type == 'BANDS': n = 'DOT_PRODUCT', p, numpy.eye(3)['XYZ'.index(node.bands_direction)] * 20 \
         if node.bands_direction != 'DIAGONAL' else numpy.full(3, 10)
     else: n = 'MULTIPLY', length(('MULTIPLY', p, numpy.ones(3) - numpy.eye(3)['XYZ'.index(node.rings_direction)]
@@ -997,10 +993,10 @@ def normal_map(node, inputs, index):
 # ignores its alpha, which is one then, or holds data.
 def image(node, inputs, index):
     if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
-    source = ImageRead(node, inputs[0] if node.inputs[0].is_linked else ('UV',))
-    point = inputs[0] if node.inputs[0].is_linked else ('UV',)
+    source = ImageRead(node, point_of(node, inputs[0], ('UV',)))
+    point = point_of(node, inputs[0], ('UV',))
     if node.type == 'TEX_ENVIRONMENT':
-        point = node.projection, inputs[0] if node.inputs[0].is_linked else ('GENERATED',)
+        point = node.projection, point_of(node, inputs[0])
     elif node.projection in ('SPHERE', 'TUBE'):  # Around the center of the unit cube
         x, y, z = (('DOT_PRODUCT', ('SUBTRACT', ('MULTIPLY', point, 2), 1), axis) for axis in numpy.eye(3))
         around = ('ADD', 0.5, ('DIVIDE', ('ARCTAN2', x, y), -2 * math.pi)), ('ADD', ('MULTIPLY', z, 0.5), 0.5)
