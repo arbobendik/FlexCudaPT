@@ -20,8 +20,13 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flex
 	mkdir -p build
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DSTANDIN -I$(OPTIX_PATH)/include $< -o build/standin.ptx
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -I$(OPTIX_PATH)/include $< -o build/extended.ptx
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -DSTANDIN -I$(OPTIX_PATH)/include $< \
+		-o build/extended_standin.ptx
 	xxd -i build/shaders.ptx > $@
 	xxd -i build/standin.ptx >> $@
+	xxd -i build/extended.ptx >> $@
+	xxd -i build/extended_standin.ptx >> $@
 
 # The same host on Vulkan, which src/vulkan stands in for CUDA and OptiX on
 build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulkan/cuda.h src/vulkan/optix_stubs.h \
@@ -36,6 +41,9 @@ build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/sh
 	xxd -i -n build_shaders_ptx build/vulkan/shaders.spv > $@
 	printf '#define build_standin_ptx build_shaders_ptx\n' >> $@ # Its own stand-in: Vulkan has no inlining to undo
 	printf '#define build_standin_ptx_len build_shaders_ptx_len\n' >> $@
+	printf '#define build_extended_ptx build_shaders_ptx\n#define build_extended_ptx_len build_shaders_ptx_len\n' >> $@
+	printf '#define build_extended_standin_ptx build_shaders_ptx\n' >> $@
+	printf '#define build_extended_standin_ptx_len build_shaders_ptx_len\n' >> $@
 
 $(SLANGC):
 	mkdir -p $(SLANG_PATH)

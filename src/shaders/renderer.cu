@@ -521,6 +521,9 @@ struct Point {
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
 // Whether the scene's programs take the step: bound at compile time, OptiX compiles out the cases of steps they do not
 __device__ bool used(unsigned code) {
+#ifndef EXTENDED // Nor varying media, in a PTX compiled without their code
+    if (code == MEDIUM) return false;
+#endif
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
 #define CASE(code) case code: if (!used(code)) break;
