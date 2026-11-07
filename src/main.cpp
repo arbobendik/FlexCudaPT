@@ -216,7 +216,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     }
     flock(busy, LOCK_SH); // From its start to its own compile: the warm-up yields
     Tier* generic = nullptr;
-    std::future<void> linking; // The generic's programs and pipeline, linked beside the scene's export
+    std::future<void> linking; // The generic's programs and pipeline, linked beside the scene's export, or a module's
+    // compiled at once, beside its scene's load
     if (TIERED) {
         Tier* tier = new Tier{.params = {{~0ull, ~0ull}}, .quick = true};
         start(*tier);
@@ -272,6 +273,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
             const bool another = !special || std::memcmp(&next, &special->params, sizeof(next));
             Tier* last = nullptr; // The last op set's stand-in: dropped once replaced
+            bool early = false; // Its module compiled at once, as Vulkan's: its pipeline linked as the rest loads
             if (another) { // Another op set: its own module, one still compiling taken back, the generic standing in
                 if (special) retiring.push_back(special); // as it compiles, or without one awaited
                 const auto again = std::find_if(retiring.begin(), retiring.end(),
@@ -281,6 +283,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 last = std::exchange(interim, nullptr);
                 if (TIERED && !generic && !compiled(*special)) // Its module from the stand-in PTX, quicker, stands in:
                     interim = new Tier{.params = next, .quick = true}, give(begin(*interim)); // its tasks taken first
+                if ((early = compiled(*special) && !special->pipeline))
+                    linking = std::async(std::launch::async, [&linked, tier = special] { linked(*tier); });
             }
             if (kind == SCENE) loadScene(context, scene, loaded); // The rest of a scene, as those compile
             if (another) {
@@ -294,7 +298,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (interim && compiled(*special)) retiring.push_back(std::exchange(interim, nullptr)); // Not needed
                 if (interim) finish(*interim), linked(*interim);
                 if (!generic && !interim) finish(*special);
-                if (!compiled(*special) && generic) linking.wait(); // Awaited only when it stands in
+                if (early || (!compiled(*special) && generic)) linking.wait(); // Linked early, or standing in
                 if (compiled(*special) && !special->pipeline) linked(*special);
                 use(compiled(*special) ? *special : interim ? *interim : *generic);
                 if (last) drop(last);
