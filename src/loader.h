@@ -238,7 +238,7 @@ struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; s
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
-};
+    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header; }; // Its counts
 
 // Of an image's texels in its format, a level's of half its width and height, odd ones floored, each texel the mean of
 // the 2 x 2 it covers in linear light: floats as they are, halves rounded back, RGBA8 and 16-bit UNORM rounded to their
@@ -404,11 +404,12 @@ constexpr float IDENTITY_ROWS[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
 constexpr float IDENTITY_ADJUGATE[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
 // Scene piped in by the extension into scene, in place of the one of arrays: triangle, step, texel, baked texel, bake,
-// mesh triangle, instance and image counts, the meshes' arrays, the instances, then the steps, the texels, the
-// programs of its bakes, which the bake pass fills the baked texels after those piped with, and each image's float4
-// count and its texels. The meshes keep their own space, those of instances in world space untransformed. The vertices
-// last denoised stay the previous ones while the meshes' triangle count does, others are freed.
-inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
+// mesh triangle, instance and image counts and the steps, which its module compiles from as the rest loads; then the
+// meshes' arrays, the instances, the texels, the programs of its bakes, which the bake pass fills the baked texels
+// after those piped with, and each image's float4 count and its texels. The meshes keep their own space, those of
+// instances in world space untransformed. The vertices last denoised stay the previous ones while the meshes' triangle
+// count does, others are freed.
+inline void loadSteps(Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
     for (auto [object, filtering, data, bytes] : loaded.textures) {
         CHECK(cuTexObjectDestroy(object));
@@ -417,10 +418,17 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         memory_used -= bytes;
     }
     loaded.textures.clear();
+    auto& header = loaded.header;
+    receive(&header, sizeof(header), 1);
+    loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
+    receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
+    scene.ops = (Op*)allocate(header.rows * sizeof(Op), loaded.ops.data());
+    loaded.bakeOps = allocate((header.ops - header.rows) * sizeof(Op), loaded.ops.data() + header.rows);
+}
+inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
+    const auto& header = loaded.header;
     float3* const last = scene.vertices;
     const size_t corners = loaded.vertices.size();
-    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
-    receive(&header, sizeof(header), 1);
     const size_t meshes = header.triangles;
     std::vector<Instance>& instances = loaded.instances; // Each piped without its first number in the scene's order
     instances.resize(header.instances);
@@ -444,10 +452,6 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.instances = upload(instances), scene.instanceCount = instances.size();
     scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
-    loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
-    receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
-    scene.ops = (Op*)allocate(header.rows * sizeof(Op), loaded.ops.data());
-    loaded.bakeOps = allocate((header.ops - header.rows) * sizeof(Op), loaded.ops.data() + header.rows);
     std::vector<float4> texels(header.texels + header.baked), only(header.only); // Those only bakes read apart
     receive(texels.data(), sizeof(float4), header.texels);
     receive(only.data(), sizeof(float4), header.only);
