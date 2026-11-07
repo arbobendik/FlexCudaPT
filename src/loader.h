@@ -515,7 +515,7 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         const auto instance = std::upper_bound(loaded.instances.begin(), loaded.instances.end(), range.first,
             [](unsigned key, const Instance& instance) { return key < instance.key; }) - loaded.instances.begin() - 1;
         const unsigned first = loaded.instances[instance].first; // Of the instance's mesh, in place
-        std::vector<Info> scratch(range.count); // As large as any of the range's arrays piped in, then its info
+        std::vector<Info> scratch(range.count); // As large as any of the range's arrays piped in
         update(scene.vertices, 3 * first, 3 * range.count, &loaded.vertices[3 * first]);
         update(scene.normals, 3 * first, 3 * range.count, scratch.data());
         update(scene.generated, 3 * first, 3 * range.count, scratch.data());
@@ -523,17 +523,16 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         update(scene.uvs, 3 * first, 3 * range.count, scratch.data());
         update(scene.colors, 3 * first, 3 * range.count, scratch.data());
         update(scene.tangents, 3 * first, 3 * range.count, scratch.data());
-        receive(scratch.data(), sizeof(Info), range.count); // Its instance's info per triangle, with
-        std::vector<float> passes(range.count); // the triangle's pass index
-        for (unsigned t = 0; t < range.count; ++t) passes[t] = scratch[t].material;
-        CHECK(cuMemcpyHtoD((CUdeviceptr)(scene.passes + first), passes.data(), range.count * sizeof(float)));
+        update(scene.passes, first, range.count, scratch.data());
+        Info info; // Its object's info
+        receive(&info, sizeof(Info), 1);
         float rows[21]; // Its transform's rows and adjugate, of no use to a mesh in world space
         receive(rows, sizeof(float), 21);
         Instance& entry = loaded.instances[instance];
         if (range.count) {
             if (!entry.world) std::copy_n(rows, 12, entry.matrix), std::copy_n(rows + 12, 9, entry.adjugate);
             const unsigned attributes = entry.info.attributes; // Its instancer attributes as last piped
-            entry.info = scratch[0], entry.info.attributes = attributes;
+            entry.info = info, entry.info.attributes = attributes;
             CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[instance], &entry, sizeof(Instance)));
         }
     }
