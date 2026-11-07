@@ -1451,6 +1451,9 @@ static __device__ float3  neeLobes_0(float3  in_dir_9, float3  dir_0, float3  n_
             _S410 = i_12;
         }
         bool _S411 = _S410 == 0U;
+        if(_S411)
+        {
+        }
         bool _S412;
         if(_S411)
         {
