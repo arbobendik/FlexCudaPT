@@ -1183,6 +1183,9 @@ __device__ __forceinline__ float3  neeBSDF(float3  in_dir_6, float3  dir_0, floa
             break;
         }
         bool _S346 = lobe_4 == 0U;
+        if(_S346)
+        {
+        }
         bool _S347;
         if(_S346)
         {
