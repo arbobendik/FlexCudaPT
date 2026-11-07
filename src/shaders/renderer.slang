@@ -603,6 +603,13 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 ? float3(info.color[0], info.color[1], info.color[2]) : float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
+        CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
+            const bool strand = scene.instances[point.instance].world == STRANDS; // root, or random
+            const float4 root = strand ? scene.strands[scene.segments[2 * point.triangle + 1]] : float4(0, 0, 0, 0);
+            const float output = stack[top - 1].x;
+            stack[top - 1] = float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
+                ? (point.s + scene.segments[2 * point.triangle] - asuint(root.x)) / (asuint(root.y) - 1) : 0);
+        } break;
         CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
             const int k = int(stack[top - 1].x);
             const float4 v = scene.attributes[info.attributes + k / 2];
@@ -840,8 +847,16 @@ Point at(Scene* scene, uint instance, uint triangle, float s, float t) {
         vertex.at(s, t), s, t, triangle, instance);
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
+// Of a strand's segment at its axis parameter and its normal's polar angles, as hit: its point and normal, in its object
+float3 strandPoint(Scene* scene, uint segment, float2 uv, out float3 n) {
+    const uint code = asuint(uv.y), p = scene.segments[2 * segment];
+    const float theta = (code >> 16) * (PI / 65535), phi = ((code & 65535) / 65535.0f - 0.5f) * (2 * PI);
+    const float4 a = scene.points[p], b = scene.points[p + 1];
+    n = float3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+    return a.xyz + (b.xyz - a.xyz) * uv.x + n * (a.w + (b.w - a.w) * uv.x);
+}
 Point shifted(Scene* scene, Point point, Ray ray, int axis) {
-    if (point.triangle == NONE) return point;
+    if (point.triangle == NONE || used(CURVES) && scene.instances[point.instance].world == STRANDS) return point;
     const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
     const float step = 1e-4f * max(ray.length, 1e-3f);
     return at(scene, point.instance, point.triangle,
@@ -852,6 +867,18 @@ Point shifted(Scene* scene, Point point, Ray ray, int axis) {
 // bumped by points along its edges as near as the ray's length makes a pixel's
 Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray,
     uint layer = 0, bool emission = false) {
+    if (used(CURVES) && scene.instances[instance].world == STRANDS) { // A strand's segment, its frame along its axis
+        float3 n; // and normal
+        const float3 o = strandPoint(scene, triangle, float2(s, t), n);
+        const uint p = scene.segments[2 * triangle];
+        const float3 along = normalize(scene.points[p + 1].xyz - scene.points[p].xyz);
+        uint program = emission ? scene.materials[key(scene, instance, triangle)].emission
+            : scene.materials[key(scene, instance, triangle)].program;
+        while (layer != 0) layer -= uint(scene.ops[program++].code == END);
+        return shade(scene, program, normal, float3x3(along, cross(n, along), n), Point(0, 0, float3(0, 0, 0), o,
+            float4(0, 0, 0, 0), place(scene.instances[instance], o), s, t, triangle, instance), -direction, false, ray,
+            scene.instances[instance].info);
+    }
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
     float3* normals = scene.normals + 3 * triangle;
     const Info object = scene.instances[instance].info;
@@ -1046,21 +1073,34 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
 bool pastLayer(float t, uint triangle, float at, uint after) { return t > at || (t == at && triangle > after); }
 
 
-float3 hitPosition(float3* vertices, Instance* instances, Hit hit) { // Of those vertices
-    return corners(vertices, instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
+float3 hitPosition(Scene* scene, float3* vertices, Hit hit) { // Of those vertices
+    float3 n;
+    if (used(CURVES) && scene.instances[hit.instance].world == STRANDS)
+        return place(scene.instances[hit.instance], strandPoint(scene, hit.triangle, hit.uv, n));
+    return corners(vertices, scene.instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
 }
 
 float3 faceNormal(Scene* scene, uint instance, uint triangle) {
     return corners(scene.vertices, scene.instances[instance], triangle).face();
 }
 
+// Of a hit, a strand's as smooth
+float3 faceNormal(Scene* scene, Hit hit) {
+    float3 n;
+    if (used(CURVES) && scene.instances[hit.instance].world == STRANDS)
+        return strandPoint(scene, hit.triangle, hit.uv, n), turn(scene.instances[hit.instance], n);
+    return faceNormal(scene, hit.instance, hit.triangle);
+}
+
 float3 smoothNormal(Scene* scene, Hit hit) {
+    if (used(CURVES) && scene.instances[hit.instance].world == STRANDS) return faceNormal(scene, hit);
     const Corners normals = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
 
 // Distance along the smooth normal rays leave a hit at position from, of its triangle, as FlexKernels shares it
 float geometryOffset(Scene* scene, Hit hit, float3 face, float3 position) {
+    if (used(CURVES) && scene.instances[hit.instance].world == STRANDS) return 0; // Rays leaving it skip its segments
     const Corners vertex = corners(scene.vertices, scene.instances[hit.instance], hit.triangle);
     const Corners normal = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return geometryOffset(vertex[0], vertex[1], vertex[2], normal[0], normal[1], normal[2], face,
@@ -1120,7 +1160,7 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
     }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
-    return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit),
+    return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit),
         hit, camera.lens.ortho != 0 ? across : 0, camera.lens.ortho != 0 ? 0 : across / length(plane));
 }
 
@@ -1277,7 +1317,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
                 float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
                 : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0;
+                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
                 medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
@@ -1388,7 +1428,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         Ray(true, false, LOBE_NONE, 0.0f, distance), true, approach);
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (uint b = 0u; ; b++) {
-        const float3 face = faceNormal(scene, hit.instance, hit.triangle);
+        const float3 face = faceNormal(scene, hit);
         const Ray ray = Ray(b == 0u, false, b != 0 ? prev.lobe : LOBE_NONE, float(b), distance, width);
         Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
             direction, ray,
@@ -1400,7 +1440,9 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             surface = Surface(surface.normal, float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
                 float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter, float3(0, 0, 0),
                 float3(0, 0, 0), 0.5f, 0, 0, float3(0, 0, 0));
-        // Surfaces transmitting nothing face the ray, as in Cycles
+        // Surfaces transmitting nothing face the ray, as in Cycles; a strand's fiber passes light through it, as
+        // transmitting surfaces do: no side of it is wrong to leave or sample light on
+        const bool strand = used(CURVES) && scene.instances[hit.instance].world == STRANDS;
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
@@ -1441,6 +1483,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         // Translucent, light sampled anywhere around, on the side the lifted start sees it; compiled out without it
         const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
         const float3 light_normal = surface.transparency > 0 && scene.materials[key(scene, hit)].layers == 1 || sided
+            || strand
             ? float3(0, 0, 0) : surface.normal;
         // The side light and bounces leave by: for surfaces transmitting nothing and seen from the shading normal's
         // side, the shading normal's, so a smooth normal is lit where it faces the light though its face doesn't
@@ -1542,14 +1585,15 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         SampleBSDF lobe = SampleBSDF();
         if (connect) {
             if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene.vertices, scene.instances, hitOf(r.rc));
+                reconnection = hitPosition(scene, scene.vertices, hitOf(r.rc));
                 dir = normalize(reconnection - lift(scene, origin,
                     surface.normal * sign(dot(reconnection - origin, side_n)), offset));
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             // A translucent diffuse lobe past the shading normal refracts, as in FlexKernels' BSDF
             const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
-            if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
+            if (!strand && wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE)
+                & across), dir,
                 side_n)) {
                 return fail;
             }
@@ -1559,7 +1603,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             // A direction the smooth normal sends to the wrong side of the face carries on at an unknown density:
             // through transmitting surfaces sampled again against the face normal, pretending the self reflection
             // faces along it, elsewhere mirrored across the face, keeping its lobe and weight
-            const bool wrong = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, side_n);
+            const bool wrong = !strand && wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction,
+                side_n);
             const bool fallback = wrong && surface.transparency > 0;
             if (fallback) {
                 const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, material,
@@ -1941,7 +1986,7 @@ void denoise(uint3 p, uint3 size, Scene* scene) {
     const Camera last = scene.denoisedCamera;
     const uint seen = dom.hit.triangle == NONE ? NONE : key(scene, dom.hit);
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
-        : hitPosition(scene.previousVertices, scene.instances, dom.hit);
+        : hitPosition(scene, scene.previousVertices, dom.hit);
     const float2 then = project(last, before, size);
     scene.flow[index] = project(scene.camera, dom.x1, size) - then;
     const int x = int(floor(then.x)), y = int(floor(then.y));
