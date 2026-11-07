@@ -537,8 +537,11 @@ def constant(expression, seen=None):  # Whether it is constant before products o
             and all(constant(part, seen) for part in expression[1:])
     return seen[id(expression)]
 
+def coated(a, b):  # Two surfaces, one without a coat given the other's of weight 0, so a coat mixes in by its weight
+    return [[*x, [*y[19][:9], 0]] if len(x) < len(y) == 20 else x for x, y in ((a, b), (b, a))]
+
 def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
-    if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(a, b)]
+    if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(*coated(a, b))]
     return 'ADD', ('MULTIPLY', a, ('SUBTRACT', 1, factor)), ('MULTIPLY', b, factor)
 
 def clamp(value):
@@ -1048,7 +1051,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
     'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, *range(15, 20))
         else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
-        for attribute, (a, b) in enumerate(zip(*inputs))],
+        for attribute, (a, b) in enumerate(zip(*coated(*inputs)))],
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
         else COMPOSITES[node.operation](*inputs) if node.operation in COMPOSITES else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
