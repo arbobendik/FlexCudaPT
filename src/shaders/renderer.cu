@@ -1126,6 +1126,13 @@ __device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, floa
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - start) : 0;
 }
 
+// Of a generated path's contribution: resampled into sel under ReSTIR, otherwise only summed, as offer sums it
+__device__ void resample(const Scene& scene, Selection& sel, const Reservoir& candidate, float3 weight) {
+    if (scene.settings.restir) return offer(&sel, candidate, weight);
+    const float grey = rgb_to_greyscale(weight);
+    if (grey > 0.0f && grey < 3.00000000549775576e+38f) sel.color = sel.color + weight;
+}
+
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
 // vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
 // dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
@@ -1312,7 +1319,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             // Emission seen directly carries no randomness to resample, shading adds it
             if (b > 0u) {
                 const Reservoir candidate = !chain_found && footprint ? here : chain;
-                offer(&sel, withEnd(candidate, END_EMIT, b, throughput * emitted),
+                resample(scene, sel, withEnd(candidate, END_EMIT, b, throughput * emitted),
                     throughput * emitted * scale / density);
             }
             if (nee) {
@@ -1334,7 +1341,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                     // Forced reconnection to the light vertex (Sec. 6.2.3)
                     candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
                 }
-                offer(&sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
+                resample(scene, sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
             }
         }
         // Replaying, x_k-1 connects to the reconnection vertex and x_k leaves along the stored direction with the stored lobes
@@ -1421,7 +1428,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             throughput = throughput * make_float3(fmaxf(lobe.throughput.x, 0.0f), fmaxf(lobe.throughput.y, 0.0f),
                 fmaxf(lobe.throughput.z, 0.0f));
         }
-        if (!replay && !chain_found && footprint && inverse_footprint) {
+        if (!replay && scene.settings.restir && !chain_found && footprint && inverse_footprint) {
             chain = here;
             chain.path |= lobe_index << PATH_LOBE | (nee ? 1u : 0u) << PATH_NEE;
             chain.jac *= lobe.pdf;
@@ -1494,7 +1501,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 } else {
                     candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
                 }
-                offer(&sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
+                resample(scene, sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
                 if (!survives(b)) {
                     return fail;
                 }
@@ -1527,7 +1534,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 candidate.jac = prev.pdf;
                 candidate.dir = direction;
             }
-            offer(&sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
+            resample(scene, sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
             break;
         }
         // Project ray origin to hit point, through the medium
@@ -1711,7 +1718,7 @@ extern "C" __global__ void __raygen__initial() {
             ? environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0}) : first)
             / scene.settings.paths;
     }
-    scene.initial[index] = finalize(initial, 1.0f);
+    if (scene.settings.restir) scene.initial[index] = finalize(initial, 1.0f);
     const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
     float4& sum = scene.accumulation[index];
     sum = make_float4(sum.x + radiance.x, sum.y + radiance.y, sum.z + radiance.z, sum.w + 1);
