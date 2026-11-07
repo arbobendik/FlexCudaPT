@@ -383,6 +383,7 @@ inline unsigned long long buildInstances(OptixDeviceContext context, const std::
 }
 // BVH rays traverse over the instances of the meshes of vertices by their transforms, each instance's id its first
 // triangle's number in the scene's order: each mesh's BVH built or refit in its own, the instances' anew in top
+inline unsigned meshKey(const Instance& instance) { return instance.first | (instance.world == STRANDS) << 31; }
 inline unsigned long long buildScene(OptixDeviceContext context, const float3* vertices,
     const std::vector<Instance>& instances, std::map<unsigned, Mesh>& meshes, OptixBuildOperation operation,
     CUdeviceptr& top, const Loaded& loaded) {
@@ -390,19 +391,22 @@ inline unsigned long long buildScene(OptixDeviceContext context, const float3* v
         for (auto& [first, mesh] : std::exchange(meshes, {})) release(mesh.temp), release(mesh.output);
     std::map<unsigned, unsigned> counts; // Of each mesh by first triangle its triangle count, of strands by first
     for (const Instance& instance : instances) // segment flagged in bit 31; a scene of no instance traces one of no
-        counts[instance.first | (instance.world == STRANDS) << 31] = instance.count; // triangles
+        counts[meshKey(instance)] = instance.count; // triangles
     if (instances.empty()) counts[0] = 0;
     for (auto [key, count] : counts) { // Strands by their segments' bounds
         const unsigned first = key & ~(1u << 31);
-        meshes[key].handle = buildBVH(context, key >> 31 ? loaded.bounds + first * sizeof(OptixAabb)
-            : (CUdeviceptr)(vertices + 3 * first), count, operation, meshes[key].temp, meshes[key].output, key >> 31);
+        const bool strands = key >> 31;
+        Mesh& mesh = meshes[key];
+        mesh.handle = buildBVH(context, strands ? loaded.bounds + first * sizeof(OptixAabb)
+            : (CUdeviceptr)(vertices + 3 * first), count, operation, mesh.temp, mesh.output, strands);
     }
     std::vector<OptixInstance> placed(std::max<size_t>(instances.size(), 1), {.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0,
         0, 1, 0}, .visibilityMask = 255, .traversableHandle = meshes.begin()->second.handle});
     for (size_t i = 0; i < instances.size(); ++i) {
         std::copy_n(instances[i].matrix, 12, placed[i].transform);
         placed[i].instanceId = instances[i].key, placed[i].visibilityMask = 255;
-        placed[i].traversableHandle = meshes.at(instances[i].first | (instances[i].world == STRANDS) << 31).handle;
+        placed[i].sbtOffset = instances[i].world == STRANDS; // Strands by their own hit group
+        placed[i].traversableHandle = meshes.at(meshKey(instances[i])).handle;
     }
     return buildInstances(context, placed, top);
 }
