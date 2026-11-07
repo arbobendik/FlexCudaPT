@@ -1493,15 +1493,7 @@ __device__ float facingSign(float transmission_0, float3  face_0, float3  direct
     {
         _S423 = (dot_0(face_0, direction_0)) < 0.0f;
     }
-    float _S424;
-    if(_S423)
-    {
-        _S424 = 1.0f;
-    }
-    else
-    {
-        _S424 = -1.0f;
-    }
+    float _S424 = _slang_select(_S423, 1.0f,-1.0f);
     return _S424;
 }
 
