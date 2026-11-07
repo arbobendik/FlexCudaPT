@@ -82,7 +82,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // quick: from the stand-in PTX, its shading not inlined, quicker to compile, to stand in while the module of its
     // op set compiles
     struct Tier {
-        Params params; OptixModule module; OptixProgramGroup groups[PASSES + 2]; OptixPipeline pipeline; bool quick;
+        Params params; OptixModule module; OptixProgramGroup groups[PASSES + 3]; OptixPipeline pipeline; bool quick;
     };
     // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
     // traced in, which a view's first temporal pass reprojects into, then one per pass
@@ -90,11 +90,15 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     static_assert(sizeof(Record) == RECORD_STRIDE, "The shaders step back to the anchor's record by RECORD_STRIDE");
     Record records[PASSES + 1]{};
     const CUdeviceptr table = allocate(sizeof(records));
-    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } hit;
-    HitRecord walk; // The stand-in's walk
+    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HitRecord { // The triangles', then the strands' with what their
+        char header[OPTIX_SBT_RECORD_HEADER_SIZE]; const Instance* instances; const unsigned* segments; // programs read
+        const float4* points;
+    } hit[2]{};
+    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } walk; // The walk's
     OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit)),
-        .hitgroupRecordStrideInBytes = sizeof(hit), .hitgroupRecordCount = 1, .callablesRecordBase = allocate(sizeof(walk)),
-        .callablesRecordStrideInBytes = sizeof(walk), .callablesRecordCount = 1};
+        .hitgroupRecordStrideInBytes = sizeof(HitRecord), .hitgroupRecordCount = 2,
+        .callablesRecordBase = allocate(sizeof(walk)), .callablesRecordStrideInBytes = sizeof(walk),
+        .callablesRecordCount = 1};
     // OptiX's compile tasks, taken by a worker on every core while any is given: the renderer's for its lifetime, never
     // freed, as its workers wait on it to the end
     struct Workers {
@@ -174,9 +178,15 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             .callables = {.moduleDC = tier.module, .entryFunctionNameDC = "__direct_callable__walk"}};
         CHECK(optixProgramGroupCreate(context, &callable, 1, &groupOptions, nullptr, nullptr,
             &tier.groups[PASSES + 1]));
-        CHECK(optixPipelineCreate(context, &compile, &link, tier.groups, PASSES + 2, nullptr, nullptr, &tier.pipeline));
+        const bool strands = tier.params.ops[CURVES >> 6] >> (CURVES & 63) & 1; // Their segments intersected as well
+        skip.hitgroup.moduleIS = tier.module, skip.hitgroup.entryFunctionNameIS = "__intersection__strand";
+        if (strands) CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr,
+            &tier.groups[PASSES + 2]));
+        CHECK(optixPipelineCreate(context, &compile, &link, tier.groups, PASSES + 2 + strands, nullptr, nullptr,
+            &tier.pipeline));
         OptixStackSizes sizes{}; // The walk's stack beside the passes', which OptiX's default leaves out
-        for (OptixProgramGroup group : tier.groups) CHECK(optixUtilAccumulateStackSizes(group, &sizes, tier.pipeline));
+        for (unsigned k = 0; k < PASSES + 2 + strands; ++k)
+            CHECK(optixUtilAccumulateStackSizes(tier.groups[k], &sizes, tier.pipeline));
         unsigned traversal, state, continuation;
         CHECK(optixUtilComputeStackSizes(&sizes, 1, 0, 1, &traversal, &state, &continuation));
         CHECK(optixPipelineSetStackSize(tier.pipeline, traversal, state, continuation, 2));
@@ -186,15 +196,16 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
         for (unsigned pass = 0; pass < PASSES; ++pass)
             CHECK(optixSbtRecordPackHeader(tier.groups[pass], &records[pass + 1]));
-        CHECK(optixSbtRecordPackHeader(tier.groups[PASSES], &hit));
-        CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, &hit, sizeof(hit)));
+        for (unsigned k = 0; k < 1 + (tier.params.ops[CURVES >> 6] >> (CURVES & 63) & 1); ++k)
+            CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 2 * k], &hit[k]));
+        CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, hit, sizeof(hit)));
         CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 1], &walk));
         CHECK(cuMemcpyHtoD(sbt.callablesRecordBase, &walk, sizeof(walk)));
     };
     const auto drop = [&](Tier* tier) {
         if (tier->pipeline) {
             CHECK(optixPipelineDestroy(tier->pipeline));
-            for (OptixProgramGroup group : tier->groups) CHECK(optixProgramGroupDestroy(group));
+            for (OptixProgramGroup group : tier->groups) if (group) CHECK(optixProgramGroupDestroy(group));
         }
         CHECK(optixModuleDestroy(tier->module));
         delete tier;
@@ -284,6 +295,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     linking = std::async(std::launch::async, [&linked, tier = special] { linked(*tier); });
             }
             if (kind == SCENE) loadScene(context, scene, loaded); // The rest of a scene, as those compile
+            hit[1].instances = scene.instances, hit[1].segments = scene.segments, hit[1].points = scene.points;
+            CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, hit, sizeof(hit))); // The strands' program reads them, loaded
             if (another) {
                 std::unique_lock lock(workers.mutex); // Until its first task ran, which OptiX's cache holding it compiles
                 workers.changed.wait(lock, [&] { // in some 0.02 s, else in some 2 s, beside the stand-in's
