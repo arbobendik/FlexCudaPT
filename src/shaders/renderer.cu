@@ -523,6 +523,9 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
+#ifndef EXTENDED // Nor varying media, in a PTX compiled without their code
+#define used(code) (code != MEDIUM && used(code))
+#endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
 // incoming direction, on the back of its face or not, for the ray, of the info's object and the material's pass index;
