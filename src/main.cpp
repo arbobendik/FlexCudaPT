@@ -228,6 +228,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     Camera anchorCamera{};
     scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
     scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
+    // Its instances as then, which a view's first temporal pass reads: a scene since only of instances moved keeps it
+    Instance* anchorInstances = (Instance*)allocate(0);
+    bool stale = false; // Whether the scene changed since otherwise: a new scene, steps or a mesh deformed
     // Of a denoised view's state and scratch, besides its denoised means and the internal guides of the frame last
     // denoised and the next; whether those hold one of its sequence
     OptixDenoiserSizes sizes;
@@ -302,12 +305,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.lights = lights, scene.trails = trails;
             view.camera = {};
             if (scene.count != count) view.width = 0;
+            stale |= kind != UPDATE || std::exchange(loaded.deformed, false);
             continue;
         }
         receive(&request, sizeof(request), 1);
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
-            reused = length(next.origin - last.origin) <= request.distance
+            reused = !stale && length(next.origin - last.origin) <= request.distance
                 && dot(next.z, last.z) >= request.cosine * length(next.z) * length(last.z)
                 && !std::memcmp(&next.lens, &last.lens, sizeof(Lens));
             if (!reused || std::memcmp(&view, &request.view, offsetof(View, camera))) {
@@ -326,12 +330,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 anchorCamera = request.view.camera;
                 if (!request.view.settings.restir) { // Without ReSTIR no anchor's scene, as before the first view
                     for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
-                        (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTop}) release(array);
+                        (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTop,
+                        (CUdeviceptr)anchorInstances}) release(array);
                     for (auto& [first, mesh] : std::exchange(anchorMeshes, {}))
                         release(mesh.temp), release(mesh.output);
                     scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
                     scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
-                    anchorTop = allocate(0), scene.anchorHandle = 0;
+                    anchorTop = allocate(0), scene.anchorHandle = 0, anchorInstances = (Instance*)allocate(0);
                 }
                 if (view.settings.denoise) for (CUdeviceptr array : {state, scratch, denoised, guides[0], guides[1],
                     (CUdeviceptr)scene.mean, (CUdeviceptr)scene.flow, (CUdeviceptr)scene.trust,
@@ -374,7 +379,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             Scene& anchored = records[0].data;
             anchored.handle = scene.anchorHandle, anchored.vertices = scene.anchorVertices;
             anchored.normals = scene.anchorNormals, anchored.lights = scene.anchorLights;
-            anchored.trails = scene.anchorTrails;
+            anchored.trails = scene.anchorTrails, anchored.instances = anchorInstances;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
                 sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
@@ -385,8 +390,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         if (!reused && launched && done == samples && view.settings.restir) {
             CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * (sizeof(Reservoir) + sizeof(float))));
             for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
-                (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails})
+                (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, (CUdeviceptr)anchorInstances})
                 release(array);
+            anchorInstances = (Instance*)copy((CUdeviceptr)scene.instances), stale = false;
             scene.anchorVertices = (float3*)copy((CUdeviceptr)scene.vertices);
             scene.anchorNormals = (float3*)copy((CUdeviceptr)scene.normals);
             scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
