@@ -577,7 +577,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
 #ifdef EXTENDED
         CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
             const bool strand = STRAND(scene, point.instance); // root, or random
-            const float4 root = strand ? scene.strands[scene.segments[2 * point.triangle + 1]] : make_float4(0, 0, 0, 0);
+            const float4 root = strand ? scene.strands[3 * scene.segments[2 * point.triangle + 1]] : make_float4(0, 0, 0, 0);
             const float output = top[-1].x;
             top[-1] = make_float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
                 ? (point.s + scene.segments[2 * point.triangle] - __float_as_uint(root.x)) / (__float_as_uint(root.y) - 1)
@@ -846,9 +846,12 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
         const Instance& placed = scene.instances[instance];
         float3 n, along;
         const float3 o = strandPoint(scene, triangle, make_float2(s, t), n, along);
-        return shade(scene, program, normal, makeMatrix<float, 3, 3>(along, cross(n, along), n), Point{0, 0,
-            make_float3(0, 0, 0), o, make_float4(0, 0, 0, 0), place(placed, o), s, t, triangle, instance}, -direction,
-            false, ray, placed.info);
+        const float4* root = scene.strands + 3 * scene.segments[2 * triangle + 1]; // Its UV and color, and generated
+        const float* space = placed.texspace; // point by its emitter's texture space
+        return shade(scene, program, normal, makeMatrix<float, 3, 3>(along, cross(n, along), n), Point{root[1].x,
+            root[1].y, make_float3((o.x - space[0]) / (2 * space[3]) + 0.5f, (o.y - space[1]) / (2 * space[4]) + 0.5f,
+            (o.z - space[2]) / (2 * space[5]) + 0.5f), o, root[2], place(placed, o), s, t, triangle, instance},
+            -direction, false, ray, placed.info);
     }
 #endif
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);

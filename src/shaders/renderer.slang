@@ -52,7 +52,7 @@ struct Scene {
     uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     uint64_t* images; // Of each image the materials read, its texture by its index
     float4* points; uint* segments; // Strands: their points and radius, per segment its first point and strand,
-    float4* strands; // per strand its first point and point count and its random number
+    float4* strands; // per strand its first point, point count and random number, its root's UV and color
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -605,7 +605,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         } break;
         CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
             const bool strand = scene.instances[point.instance].world == STRANDS; // root, or random
-            const float4 root = strand ? scene.strands[scene.segments[2 * point.triangle + 1]] : float4(0, 0, 0, 0);
+            const float4 root = strand ? scene.strands[3 * scene.segments[2 * point.triangle + 1]] : float4(0, 0, 0, 0);
             const float output = stack[top - 1].x;
             stack[top - 1] = float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
                 ? (point.s + scene.segments[2 * point.triangle] - asuint(root.x)) / (asuint(root.y) - 1) : 0);
@@ -875,9 +875,13 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
         uint program = emission ? scene.materials[key(scene, instance, triangle)].emission
             : scene.materials[key(scene, instance, triangle)].program;
         while (layer != 0) layer -= uint(scene.ops[program++].code == END);
-        return shade(scene, program, normal, float3x3(along, cross(n, along), n), Point(0, 0, float3(0, 0, 0), o,
-            float4(0, 0, 0, 0), place(scene.instances[instance], o), s, t, triangle, instance), -direction, false, ray,
-            scene.instances[instance].info);
+        float4* root = scene.strands + 3 * scene.segments[2 * triangle + 1]; // Its UV and color, and generated point
+        const Instance placed = scene.instances[instance]; // by its emitter's texture space
+        const float3 low = float3(placed.texspace[0], placed.texspace[1], placed.texspace[2]);
+        const float3 size = float3(placed.texspace[3], placed.texspace[4], placed.texspace[5]);
+        return shade(scene, program, normal, float3x3(along, cross(n, along), n), Point(root[1].x, root[1].y,
+            (o - low) / (2 * size) + 0.5f, o, root[2], place(placed, o), s, t, triangle, instance), -direction, false,
+            ray, placed.info);
     }
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
     float3* normals = scene.normals + 3 * triangle;

@@ -1142,7 +1142,8 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
     'HAIR_INFO': lambda node, inputs, index: ('HAIR_INFO', index),
-    'ATTRIBUTE': lambda node, inputs, index: instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
+    'ATTRIBUTE': lambda node, inputs, index: ('UV',) if node.attribute_name == 'surface_uv_coordinate' and index < 2
+        else instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
         else (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
         node.attribute_name in mesh.color_attributes for mesh in bpy.data.meshes) else resolve(node.outputs[index]),
@@ -1613,9 +1614,9 @@ class Flex(bpy.types.RenderEngine):
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
-        points, segments, hairs, bounds, roots = [numpy.empty((0, 4), 'f')], [], [], [], []  # Strands: their points
-        # in their object's space and radius; per segment its first point and strand, material and bounds; per strand its
-        # first point, point count and random number
+        points, segments, hairs, bounds, roots, spaces = [numpy.empty((0, 4), 'f')], [], [], [], [], {}  # Strands:
+        # their points in their object's space and radius; per segment its first point and strand, material and bounds;
+        # per strand its first point, point count, random number, root's UV and color; per object its texture space
         tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for
             layer in row), row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])  # Per slot a material
         pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
@@ -1628,9 +1629,9 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots] or [None]]
             current.clear()
             if shaded or (key := ('STRANDS', ob.name)) in entries:  # Its rows alone, or its strands piped once
-                return shaded or record(~i, instance, ob, entries[key])
-            paths, counts, index = [], [], []  # Per path or object its points and radius, per strand its count and
-            # material's slot
+                return shaded or record(~i, instance, ob, entries[key], media=spaces[key])
+            paths, counts, index, uvs, colors = [], [], [], [], []  # Per path or object its points and radius, per
+            # strand its count, material's slot, and at its root the UV and color of the surface it grows from
             for system, modifier in pathed(ob):  # As evaluated
                 settings = system.settings
                 # Of the render's steps in a render, children alone if any, but parents shown too
@@ -1648,6 +1649,11 @@ class Flex(bpy.types.RenderEngine):
                     paths.append(numpy.column_stack((transformed(co[:n], ob.matrix_world.inverted()), radius(n))))
                     counts.append(n)
                     index.append(settings.material - 1)
+                    particle = system.particles[min(k, parents - 1)]  # A child's by its number, its parent iterated past
+                    uvs.append(system.uv_on_emitter(modifier, particle=particle, particle_no=k, uv_no=next((n for n, layer
+                        in enumerate(ob.data.uv_layers) if layer.active_render), 0)) if ob.data.uv_layers else (0, 0))
+                    colors.append((*system.mcol_on_emitter(modifier, particle=particle, particle_no=k, vcol_no=max(
+                        ob.data.color_attributes.render_color_index, 0)), 1) if ob.data.color_attributes else (0,) * 4)
             if ob.type == 'CURVES' and len(ob.data.curves):  # Its points by curve and their radius (Blender's default
                 # without), its own space
                 curves, offsets = ob.data, numpy.empty(len(ob.data.curves) + 1, 'i')
@@ -1658,6 +1664,12 @@ class Flex(bpy.types.RenderEngine):
                 paths.append(numpy.column_stack((read('position', 3 * len(curves.points), 0).reshape(-1, 3),
                     read('radius', len(curves.points), 0.005)))), counts.append(numpy.diff(offsets))
                 index.append(read('material_index', len(curves.curves), 0, 'i'))
+                uvs.append(read('surface_uv_coordinate', 2 * len(curves.curves), 0).reshape(-1, 2))
+                layer = curves.color_attributes[curves.color_attributes.render_color_index] \
+                    if curves.color_attributes else None  # Of its curve, or its root's
+                color = numpy.zeros(4 * len(curves.points if layer and layer.domain == 'POINT' else curves.curves), 'f')
+                if layer: layer.data.foreach_get('color', color)
+                colors.append(color.reshape(-1, 4)[offsets[:-1] if layer and layer.domain == 'POINT' else slice(None)])
             count = numpy.hstack([[], *counts]).astype('I')  # Per strand its points
             strand = numpy.repeat(numpy.arange(len(count), dtype='I'), count)
             p = numpy.concatenate([numpy.empty((0, 4)), *paths], dtype='f')
@@ -1668,11 +1680,17 @@ class Flex(bpy.types.RenderEngine):
             segments.append(numpy.column_stack((segment + sum(map(len, points)), strand[segment]
                 + sum(map(len, hairs)))))
             bounds.append(numpy.hstack(box))
-            roots.append(numpy.column_stack((numpy.cumsum(count) - count + sum(map(len, points)), count,
-                numpy.random.default_rng(0).random(len(count), 'f').view('I'))).astype('I'))
+            roots.append(numpy.column_stack(((numpy.cumsum(count) - count + sum(map(len, points))).astype('I').view(
+                'f'), count.view('f'), numpy.random.default_rng(0).random(len(count), 'f'), numpy.zeros(len(count)),
+                numpy.vstack([numpy.empty((0, 2)), *uvs]), numpy.zeros((len(count), 2)), numpy.vstack([
+                numpy.empty((0, 4)), *colors]))).astype('f'))
+            low, high = (p[:, :3].min(0), p[:, :3].max(0)) if ob.type == 'CURVES' and len(p) else (numpy.array(
+                ob.data.texspace_location) - ob.data.texspace_size, numpy.array(ob.data.texspace_location)
+                + ob.data.texspace_size) if ob.type == 'MESH' else (numpy.zeros(3), numpy.ones(3))
+            spaces[key] = ((*(low + high) / 2, *(high - low) / 2), 0)  # Its generated points' texture space
             points.append(p)
             hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
-            record(~i, instance, ob, entries[key])  # Apart from its emitter's mesh
+            record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -1971,17 +1989,16 @@ class Flex(bpy.types.RenderEngine):
         # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
         # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); of strands
         # the point and segment counts, per point its position and radius, per segment its first point and strand and
-        # its bounds, per strand its first point, point count and random number, and per segment its strand's
-        # material; then the texels and the programs of the bakes; then each image's width and height, RGBA8 in its bit
-        # 26, and its texels
+        # its bounds, per strand its first point, point count, random number, root's UV and color, and per segment its
+        # strand's material; then the texels and the programs of the bakes; then each image's width and height, RGBA8
+        # in its bit 26, and its texels
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
             *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
             values)), *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             struct.pack('<3I', sum(map(len, points)), sum(map(len, segments)), sum(map(len, hairs))), *points,
-            *segments, *bounds, *(
-            numpy.hstack((root, numpy.zeros((len(root), 1), 'I'))) for root in roots), *(
+            *segments, *bounds, *roots, *(
             table[segment[:, 1]] for rows in [numpy.concatenate((numpy.empty((0, 6)), *hairs), dtype='f')] for table in [
             numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
             *texels, numpy.array(bakes, 'I'),
