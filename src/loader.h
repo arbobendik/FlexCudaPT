@@ -448,10 +448,10 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.passes = upload(read<float>(meshes)); // Per triangle of the meshes its material's pass index, then its
     const std::vector<Material> table = read<Material>(meshes + 1); // material and the world's
     struct { unsigned points, segments, strands; } hair; // Strands: their points, per segment its first point and
-    receive(&hair, sizeof(hair), 1); // strand and its bounds, per strand its first point, count and random, per segment
+    receive(&hair, sizeof(hair), 1); // strand and its bounds, per strand its first point, count and random, its root's
     scene.points = upload(read<float4>(hair.points)), scene.segments = upload(read<unsigned>(2 * hair.segments));
-    loaded.bounds = (CUdeviceptr)upload(read<OptixAabb>(hair.segments)); // its material
-    scene.strands = upload(read<float4>(hair.strands));
+    loaded.bounds = (CUdeviceptr)upload(read<OptixAabb>(hair.segments)); // UV and color, per segment its material
+    scene.strands = upload(read<float4>(3 * hair.strands));
     const std::vector<Material> strands = read<Material>(hair.segments);
     loaded.materials.clear();
     for (Instance& instance : instances) {
