@@ -31,6 +31,7 @@ struct Info { float location[3], color[4], index, material, random, axes[9]; uin
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
 // Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
 // generated point, and the largest extinction its volume reaches, 0 unless it varies from point to point
+static const uint STRANDS = 2; // An instance's world flag of strands, in its object's space
 struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
     uint key; };
 static const uint NONE = ~0u;
@@ -559,8 +560,8 @@ struct Point {
 [vk::constant_id(0)] const uint64_t OPS0 = 0xFFFFFFFFFFFFFFFFull;
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
-#ifndef EXTENDED // Nor varying media, in a SPIR-V compiled without their code
-#define used(code) (code != MEDIUM && used(code))
+#ifndef EXTENDED // Nor varying media and strands, in a SPIR-V compiled without their code
+#define used(code) (code != MEDIUM && code != CURVES && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
@@ -928,6 +929,57 @@ uint extractBits(uint path, uint offset, uint count) {
 uint4 rcOf(Hit hit) { return uint4(hit.triangle, asuint(hit.uv), hit.instance); }
 Hit hitOf(uint4 rc) { return Hit(rc.x, rc.w, asfloat(rc.yz)); }
 
+// Nearest hit before t past lo of a ray in an object's space and a segment of its strands, between points a and b:
+// Roth's union of their spheres and the cone tangent to both, every root of each taken (Roth 1982, Max 1990); its axis
+// parameter and its normal's polar angles, in 16 bits each
+bool strand(float3 o, float3 d, float4 a, float4 b, float lo, inout float t, inout float2 uv) {
+    const float3 axis = b.xyz - a.xyz, w = normalize(axis);
+    const float s = dot(a.xyz + axis * 0.5f - o, d) / dot(d, d); // Measured from beside the segment, where float
+    o = o + d * s, lo -= s, t -= s; // resolves a thin strand's silhouette; its distance then from the ray's origin
+    const float length2 = dot(axis, axis), k = (a.w - b.w) / sqrt(length2), c = sqrt(max(1 - k * k, 0.0f)), t0 = t;
+    float3 n = float3(0);
+    for (int end = 0; end < 2; ++end) { // Each sphere
+        const float3 center = end == 1 ? b.xyz : a.xyz, oc = o - center;
+        const float r = end == 1 ? b.w : a.w, q = dot(oc, d), h = q * q - dot(d, d) * (dot(oc, oc) - r * r);
+        for (float sign = -1; sign <= 1; sign += 2) {
+            const float root = (-q + sign * sqrt(h)) / dot(d, d);
+            if (h >= 0 && root > lo && root < t) t = root, n = (o + d * root - center) / r;
+        }
+    }
+    const float3 oa = o - a.xyz, dp = d - w * dot(d, w), op = oa - w * dot(oa, w); // The cone, where the radius at
+    const float m = k / max(c, 1e-6f), r0 = a.w / max(c, 1e-6f) - dot(oa, w) * m; // height y along the axis is r0 - y m
+    const float qa = dot(dp, dp) - dot(d, w) * dot(d, w) * m * m, qb = dot(op, dp) + r0 * dot(d, w) * m;
+    const float h = qb * qb - qa * (dot(op, op) - r0 * r0);
+    for (float sign = -1; sign <= 1; sign += 2) {
+        const float root = (-qb + sign * sqrt(h)) / qa, y = dot(oa + d * root, w);
+        if (h >= 0 && c > 0 && root > lo && root < t && y >= a.w * k && y <= sqrt(length2) + b.w * k && r0 - root
+            * dot(d, w) * m >= 0) t = root, n = normalize(oa + d * root - w * y) * c + w * k; // Between its circles
+    }
+    if (!(t < t0)) { t += s; return false; }
+    uv = float2(clamp(dot(o + d * t - a.xyz, axis) / length2, 0.0f, 1.0f), asfloat(uint(acos(clamp(n.z, -1.0f, 1.0f))
+        / PI * 65535.0f + 0.5f) << 16 | uint((atan2(n.y, n.x) / (2 * PI) + 0.5f) * 65535.0f + 0.5f)));
+    t += s;
+    return true;
+}
+// Whether a segment of an instance's strands, of the given number, lies apart from the segment numbered other: not
+// next to it in its strand, which rays leaving it and the layers past it skip, as OptiX's any-hit program does
+bool apart(Scene* scene, uint instance, uint number, uint other) {
+    Instance* placed = &scene.instances[instance];
+    const uint at = placed.first + number - placed.key, then = placed.first + other - placed.key;
+    return placed.world != STRANDS || other - placed.key >= placed.count || scene.segments[2 * then + 1]
+        != scene.segments[2 * at + 1] || scene.segments[2 * then] - scene.segments[2 * at] + 1 > 2;
+}
+// Distance of a ray query's candidate: a triangle's, or a strand's segment's where met before t, its uv then as OptiX
+// reports it; -1 for a segment missed or next to the one numbered skip in its strand
+float candidate(Scene* scene, inout RayQuery<RAY_FLAG_NONE> query, uint skip, float t, inout float2 uv) {
+    const uint instance = query.CandidateInstanceIndex(), primitive = query.CandidatePrimitiveIndex();
+    if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) return query.CandidateTriangleRayT();
+    const uint point = scene.segments[2 * (scene.instances[instance].first + primitive)];
+    return used(CURVES) && apart(scene, instance, scene.instances[instance].key + primitive, skip) && strand(
+        query.CandidateObjectRayOrigin(), query.CandidateObjectRayDirection(), scene.points[point],
+        scene.points[point + 1], query.RayTMin(), t, uv) ? t : -1;
+}
+
 // Nearest hit of a ray within far and its distance, NONE on a miss
 // Of a ray leaving the skipped triangle, if any, from where it hit it, as Cycles skips it, starting back by the
 // distance it otherwise starts after to keep triangles there; a ray then passing a triangle hit there skips none
@@ -938,14 +990,19 @@ Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout flo
     query.TraceRayInline(RaytracingAccelerationStructure(scene.handle),
         skip == NONE ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE, 255,
         RayDesc(origin - direction * back, 1e-4f - back, direction, far + back));
-    while (query.Proceed())
-        if (scene.instances[query.CandidateInstanceIndex()].key + query.CandidatePrimitiveIndex() != skip)
-            query.CommitNonOpaqueTriangleHit();
-    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return Hit(NONE, NONE, float2(0, 0));
+    float2 uv = float2(0, 0);
+    while (query.Proceed()) {
+        const float t = candidate(scene, query, skip, query.CommittedStatus() == COMMITTED_NOTHING ? far + back
+            : query.CommittedRayT(), uv);
+        if (t >= 0 && scene.instances[query.CandidateInstanceIndex()].key + query.CandidatePrimitiveIndex() != skip)
+            if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) query.CommitNonOpaqueTriangleHit();
+            else query.CommitProceduralPrimitiveHit(t);
+    }
+    if (query.CommittedStatus() == COMMITTED_NOTHING) return Hit(NONE, NONE, float2(0, 0));
     distance = query.CommittedRayT() - back;
     const uint instance = query.CommittedInstanceIndex();
     return Hit(scene.instances[instance].first + query.CommittedPrimitiveIndex(), instance,
-        query.CommittedTriangleBarycentrics());
+        query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? query.CommittedTriangleBarycentrics() : uv);
 }
 
 // Next layer along the ray from origin within far past the triangle after at distance at, by distance, then index, so
@@ -956,10 +1013,16 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
         RayDesc(origin, at * (1 - 4.76837158203125e-7f), direction, far));
-    while (query.Proceed()) if (pastLayer(query.CandidateTriangleRayT(),
-        scene.instances[query.CandidateInstanceIndex()].key + query.CandidatePrimitiveIndex(), at, after))
-        query.CommitNonOpaqueTriangleHit();
-    if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return Hit(NONE, NONE, float2(0, 0));
+    float2 uv = float2(0, 0);
+    while (query.Proceed()) {
+        const float t = candidate(scene, query, after, query.CommittedStatus() == COMMITTED_NOTHING ? far
+            : query.CommittedRayT(), uv);
+        if (t >= 0 && pastLayer(t, scene.instances[query.CandidateInstanceIndex()].key
+            + query.CandidatePrimitiveIndex(), at, after))
+            if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) query.CommitNonOpaqueTriangleHit();
+            else query.CommitProceduralPrimitiveHit(t);
+    }
+    if (query.CommittedStatus() == COMMITTED_NOTHING) return Hit(NONE, NONE, float2(0, 0));
     const float t = query.CommittedRayT();
     Hit hit = Hit(NONE, NONE, float2(0, 0));
     RayQuery<RAY_FLAG_NONE> gather;
@@ -969,9 +1032,10 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
     while (gather.Proceed()) {
         const uint instance = gather.CandidateInstanceIndex();
         const uint number = scene.instances[instance].key + gather.CandidatePrimitiveIndex();
-        if (gather.CandidateTriangleRayT() == t && number < lowest && pastLayer(t, number, at, after))
+        if (candidate(scene, gather, after, t * (1 + 4.76837158203125e-7f), uv) == t && number < lowest
+            && pastLayer(t, number, at, after))
             lowest = number, hit = Hit(scene.instances[instance].first + gather.CandidatePrimitiveIndex(), instance,
-                gather.CandidateTriangleBarycentrics());
+                gather.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE ? gather.CandidateTriangleBarycentrics() : uv);
     }
     at = t;
     return hit;
@@ -1230,6 +1294,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 // Density in solid angle of light sampling from origin picking point on triangle, down the trail to its leaf
 // (pbrt-v4's BVHLightSampler::PMF)
 float lightPdf(Scene* scene, float3 origin, float3 normal, float3 start, uint instance, uint triangle, float3 point) {
+    if (used(CURVES) && scene.instances[instance].world == STRANDS) return 0; // Strands, which no light sampling picks
     float probability = 1;
     uint node = 0;
     for (uint64_t trail = scene.trails[key(scene, instance, triangle)]; scene.lights[node].leaf == 0; trail >>= 1) {
