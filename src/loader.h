@@ -64,13 +64,13 @@ template <typename T> T* zeros(size_t count) {
 }
 
 // Per pixel arrays of a view
-inline void loadView(Scene& scene, size_t pixels) {
+inline void loadView(Scene& scene, size_t pixels, size_t reservoirs) {
     scene.accumulation = zeros<float4>(pixels);
-    scene.previous = (Reservoir*)zeros<char>(pixels * (sizeof(Reservoir) + sizeof(float)));
-    scene.initial = zeros<Reservoir>(pixels);
-    scene.temporal = zeros<Reservoir>(pixels);
-    scene.duplication = (float*)(scene.previous + pixels); // After the reservoirs, as the anchor keeps them
-    scene.shifts = zeros<Shift>(3 * pixels);
+    scene.previous = (Reservoir*)zeros<char>(reservoirs * (sizeof(Reservoir) + sizeof(float)));
+    scene.initial = zeros<Reservoir>(reservoirs);
+    scene.temporal = zeros<Reservoir>(reservoirs);
+    scene.duplication = (float*)(scene.previous + reservoirs); // After the reservoirs, as the anchor keeps them
+    scene.shifts = zeros<Shift>(3 * reservoirs);
 }
 
 // Gaussian standard deviation with the mean distance of a 30 pixel uniform disk (Sec. 7)
