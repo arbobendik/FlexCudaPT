@@ -1240,6 +1240,9 @@ __device__ __forceinline__ float3  neeBSDF(float3  in_dir_6, float3  dir_0, floa
             _S369 = i_10;
         }
         bool _S370 = _S369 == 0U;
+        if(_S370)
+        {
+        }
         bool _S371;
         if(_S370)
         {
