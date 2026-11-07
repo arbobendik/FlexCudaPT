@@ -15,7 +15,6 @@
 #include <optix_stubs.h>
 #include <cstdio>
 #include <cstdlib>
-#include <cmath>
 #define CHECK(call) do { int error = (call); if (error) { \
     std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::exit(1); } } while (0)
 
@@ -103,16 +102,6 @@ inline char2* loadPairing(int size) {
     return (char2*)allocate(deltas.size() * sizeof(char2), deltas.data());
 }
 
-// Array piped in by the extension into data, uploaded to the GPU.
-template <typename T> T* load(size_t count, std::vector<T>& data) {
-    data.resize(count);
-    receive(data.data(), sizeof(T), count);
-    return (T*)allocate(count * sizeof(T), data.data());
-}
-template <typename T> T* load(size_t count) {
-    std::vector<T> data;
-    return load(count, data);
-}
 // Count elements piped in by the extension into data, uploaded into array from first on
 template <typename T> void update(T* array, size_t first, size_t count, void* data) {
     receive(data, sizeof(T), count);
@@ -471,7 +460,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.images = (CUtexObject*)allocate(images.size() * sizeof(CUtexObject), images.data());
     unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
     receive(&attributes, sizeof(unsigned), 1);
-    scene.attributes = load<float4>(attributes);
+    scene.attributes = upload(read<float4>(attributes));
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top);
     if (last != scene.previousVertices) release((CUdeviceptr)last);

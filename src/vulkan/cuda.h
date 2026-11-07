@@ -25,7 +25,6 @@ enum { CU_AD_FORMAT_UNSIGNED_INT8 = 0x01, CU_AD_FORMAT_UNSIGNED_INT16 = 0x02, CU
     CU_TR_ADDRESS_MODE_CLAMP = 1, CU_TR_ADDRESS_MODE_MIRROR = 2, CU_TR_ADDRESS_MODE_BORDER = 3,
     CU_TR_FILTER_MODE_POINT = 0, CU_TR_FILTER_MODE_LINEAR = 1, CU_TRSF_READ_AS_INTEGER = 1,
     CU_TRSF_NORMALIZED_COORDINATES = 2, CU_TRSF_SRGB = 0x10 };
-struct CUDA_ARRAY_DESCRIPTOR { size_t Width, Height; int Format; unsigned NumChannels; };
 struct CUDA_ARRAY3D_DESCRIPTOR { size_t Width, Height, Depth; int Format; unsigned NumChannels, Flags; };
 struct CUDA_MEMCPY2D { int srcMemoryType; const void* srcHost; size_t srcPitch; int dstMemoryType; CUarray dstArray;
     size_t WidthInBytes, Height; };
@@ -338,11 +337,6 @@ inline CUresult cuMipmappedArrayCreate(CUmipmappedArray* array, const CUDA_ARRAY
     view.format = desc->Format == CU_AD_FORMAT_FLOAT ? VK_FORMAT_R32G32B32A32_SFLOAT : info.format;
     view.subresourceRange.levelCount = levels;
     return vkCreateImageView(vulkan.device, &view, nullptr, &(*array)->filtered);
-}
-
-inline CUresult cuArrayCreate(CUarray* array, const CUDA_ARRAY_DESCRIPTOR* desc) {
-    const CUDA_ARRAY3D_DESCRIPTOR chain{desc->Width, desc->Height, 0, desc->Format, desc->NumChannels, 0};
-    return cuMipmappedArrayCreate(array, &chain, 1);
 }
 
 // A chain's level, its first the chain itself
