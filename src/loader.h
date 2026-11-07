@@ -17,13 +17,13 @@
 #include <cstdlib>
 #include <cmath>
 #define CHECK(call) do { int error = (call); if (error) { \
-    std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::exit(1); } } while (0)
+    std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::_Exit(1); } } while (0)
 
 // Count items of size piped in by the extension into data. Its pipe ends only once the extension is gone, closed,
 // crashed or killed, when the renderer ends too, whatever it was reading, rather than go on with what never came: true
-// as it returns only with them all
+// as it returns only with them all. Ended without exit handlers: those of OptiX unload its compiler under its threads
 inline bool receive(void* data, size_t size, size_t count) {
-    if (std::fread(data, size, count, stdin) != count) std::exit(0);
+    if (std::fread(data, size, count, stdin) != count) std::_Exit(0);
     return true;
 }
 
