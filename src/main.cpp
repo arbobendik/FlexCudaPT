@@ -266,19 +266,24 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         std::erase_if(retiring, [&](Tier* tier) { return compiled(*tier) && (drop(tier), true); });
         if (kind != REQUEST) {
             const unsigned count = scene.count;
-            kind == SCENE ? loadScene(context, scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
+            kind == SCENE ? loadSteps(scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
                 : updateSteps(scene, loaded);
             Params next{};
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
-            if (!special || std::memcmp(&next, &special->params, sizeof(next))) { // Another op set: its own module,
-                if (special) retiring.push_back(special); // one still compiling taken back, the generic standing in
-                const auto again = std::find_if(retiring.begin(), retiring.end(), // as it compiles, or without one awaited
+            const bool another = !special || std::memcmp(&next, &special->params, sizeof(next));
+            Tier* last = nullptr; // The last op set's stand-in: dropped once replaced
+            if (another) { // Another op set: its own module, one still compiling taken back, the generic standing in
+                if (special) retiring.push_back(special); // as it compiles, or without one awaited
+                const auto again = std::find_if(retiring.begin(), retiring.end(),
                     [&](const Tier* tier) { return !tier->quick && !std::memcmp(&tier->params, &next, sizeof(next)); });
                 if (again != retiring.end()) special = *again, retiring.erase(again);
                 else special = new Tier{.params = next}, give(begin(*special)); // Its compile, to the workers
-                Tier* const last = std::exchange(interim, nullptr); // The last op set's: dropped once replaced
+                last = std::exchange(interim, nullptr);
                 if (TIERED && !generic && !compiled(*special)) // Its module from the stand-in PTX, quicker, stands in:
                     interim = new Tier{.params = next, .quick = true}, give(begin(*interim)); // its tasks taken first
+            }
+            if (kind == SCENE) loadScene(context, scene, loaded); // The rest of a scene, as those compile
+            if (another) {
                 std::unique_lock lock(workers.mutex); // Until its first task ran, which OptiX's cache holding it compiles
                 workers.changed.wait(lock, [&] { // in some 0.02 s, else in some 2 s, beside the stand-in's
                     OptixModuleCompileState state;
