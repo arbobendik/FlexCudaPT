@@ -991,11 +991,6 @@ float geometryOffset(Scene* scene, Hit hit, float3 face, float3 position) {
     return geometryOffset(vertex[0], vertex[1], vertex[2], normal[0], normal[1], normal[2], face,
         float3(1 - hit.uv.x - hit.uv.y, hit.uv.x, hit.uv.y), position);
 }
-// Point offset along the unit normal from origin, or origin where rays from there would skip what lies in between
-float3 lift(Scene* scene, float3 origin, float3 normal, float offset) {
-    float distance = 0;
-    return traverse(scene, origin, normal, offset, distance).triangle == NONE ? origin + normal * offset : origin;
-}
 
 // Whether a direction leaves a face to the other side than reflecting or refracting the incoming direction does
 bool wrongSide(float3 in_dir, bool refracted, float3 out_dir, float3 face) {
@@ -1069,12 +1064,12 @@ Medium volume(Surface surface) {
 }
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
-// the start lifted along shading on its side of the face, through the medium on that side, of sides behind and in front
+// the start moved along lift on its side of the face, through the medium on that side, of sides behind and in front
 // of face, and those its shadow ray enters; without a normal, only where the lifted start sees it on that side too,
 // as no direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
-[noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 shading, float offset,
+[noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 lift, float offset,
     float3 face, Medium sides[2], uint state, out float3 direction, out float density, Ray ray) {
     direction = float3(0, 0, 0);
     density = 0;
@@ -1100,7 +1095,7 @@ Medium volume(Surface surface) {
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
     if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
         return float3(0, 0, 0);
-    float3 from = lift(scene, origin, shading * sign(dot(face, toLight)), offset), transmitted = float3(1, 1, 1);
+    float3 from = origin + lift * sign(dot(face, toLight)) * offset, transmitted = float3(1, 1, 1);
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
     if (dot(normal, normal) > 0 && !(dot(normal, shadow) > 0))  // As BSDF sampling sees it, from the lifted start
@@ -1253,6 +1248,9 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             used(SHEEN) ? surface.sheen_roughness : 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0,
             used(ANISOTROPIC) ? surface.anisotropic_rotation : 0, used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0));
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
+        // Starts leave by the offset's height along the face normal: along a tilted shading normal they would slide
+        // sideways past walls meeting the face
+        const float3 lift = geometry_n * dot(geometry_n, surface.normal);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
         if (surface.density > 0) {
@@ -1313,7 +1311,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             if (k == end && end_type == END_NEE) {
                 float3 light_dir = float3(0.0f, 0.0f, 0.0f);
                 float light = 0.0f;
-                const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
+                const float3 radiance = nee ? sampleLight(scene, origin, light_normal, lift, offset, side_n,
                     sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
@@ -1330,7 +1328,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 // random numbers pick again (unit Jacobian)
                 float3 light_dir;
                 float light;
-                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
+                const float3 radiance = sampleLight(scene, origin, light_normal, lift, offset, side_n,
                     sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift(throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i,
@@ -1351,7 +1349,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             if (nee) {
                 float3 light_dir;
                 float light;
-                const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
+                const float3 radiance = sampleLight(scene, origin, light_normal, lift, offset, side_n,
                     sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i, eta_o,
@@ -1380,8 +1378,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         if (connect) {
             if (rc == RC_SURFACE) {
                 reconnection = hitPosition(scene.vertices, scene.instances, hitOf(r.rc));
-                dir = normalize(reconnection - lift(scene, origin,
-                    surface.normal * sign(dot(reconnection - origin, side_n)), offset));
+                dir = normalize(reconnection - (origin
+                    + lift * sign(dot(reconnection - origin, side_n)) * offset));
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             // A translucent diffuse lobe past the shading normal refracts, as in FlexKernels' BSDF
@@ -1469,8 +1467,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             : NONE;
         direction = dir;
         // Off the side it leaves through, where light sampling toward it starts as well
-        const float3 leaving = lift(scene, origin, surface.normal * sign(dot(direction, side_n)),
-            lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : offset);
+        const float3 leaving = origin + lift * sign(dot(direction, side_n))
+            * (lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : offset);
         if (weighs) nee_start = leaving;
         origin = passes || through != NONE ? origin : leaving;
         if (!passes) medium = sides[int(dot(direction, side_n) > 0)];
