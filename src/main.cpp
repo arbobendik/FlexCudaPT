@@ -213,9 +213,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     struct View { unsigned width, height; Settings settings; Camera camera; } view{};
     struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
     bool reused = false;
-    size_t pixels = 1;
+    size_t pixels = 1, reservoirs = 1; // The view's pixels, and of them those with reservoirs: one without ReSTIR
     float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
-    loadView(scene, 1); // For the first view to free like any later one's
+    loadView(scene, 1, 1); // For the first view to free like any later one's
     scene.vertices = scene.previousVertices = (float3*)allocate(0); // For the first scene to keep or free
     // The reservoirs the last view starting over ended with and their duplication, its camera and the BVHs of the
     // meshes of the scene it was traced in and over its instances
@@ -311,14 +311,24 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
                     (void*)scene.temporal, (void*)scene.shifts, (void*)anchor})
                     release((CUdeviceptr)array);
-                loadView(scene, request.view.width * request.view.height);
                 CHECK(munmap(sums, pixels * sizeof(float4)));
                 pixels = request.view.width * request.view.height;
+                reservoirs = request.view.settings.restir ? pixels : 1;
+                loadView(scene, pixels, reservoirs);
                 CHECK(ftruncate(shared, pixels * sizeof(float4)));
                 sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
                 CHECK(sums == MAP_FAILED);
-                anchor = (CUdeviceptr)zeros<char>(pixels * (sizeof(Reservoir) + sizeof(float)));
+                anchor = (CUdeviceptr)zeros<char>(reservoirs * (sizeof(Reservoir) + sizeof(float)));
                 anchorCamera = request.view.camera;
+                if (!request.view.settings.restir) { // Without ReSTIR no anchor's scene, as before the first view
+                    for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
+                        (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTop}) release(array);
+                    for (auto& [first, mesh] : std::exchange(anchorMeshes, {}))
+                        release(mesh.temp), release(mesh.output);
+                    scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
+                    scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
+                    anchorTop = allocate(0), scene.anchorHandle = 0;
+                }
                 if (view.settings.denoise) for (CUdeviceptr array : {state, scratch, denoised, guides[0], guides[1],
                     (CUdeviceptr)scene.mean, (CUdeviceptr)scene.flow, (CUdeviceptr)scene.trust,
                     (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen}) release(array);
@@ -337,7 +347,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                         sizes.withoutOverlapScratchSizeInBytes));
                 }
             } else {
-                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previous, anchor, pixels * (sizeof(Reservoir) + sizeof(float))));
+                CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previous, anchor,
+                    reservoirs * (sizeof(Reservoir) + sizeof(float))));
                 scene.previousCamera = anchorCamera;
             }
             view = request.view;
@@ -367,7 +378,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             }
             scene.previousCamera = scene.camera;
         }
-        if (!reused && launched && done == samples) {
+        if (!reused && launched && done == samples && view.settings.restir) {
             CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * (sizeof(Reservoir) + sizeof(float))));
             for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
                 (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails})
