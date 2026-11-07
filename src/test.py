@@ -1009,6 +1009,19 @@ bpy.context.view_layer.update()
 Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
     object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=bpy.data.objects['edge'])]))
 assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.UPDATE, 'motion bakes nothing'
+# A value edited, its linked duplicate beside it, steps go anew: the duplicate's rows are the plane's, as exported,
+# where main gave it a row of its own and exported anew
+twin, material = bpy.data.objects['edge'].copy(), bpy.data.objects['edge'].active_material
+scene.collection.objects.link(twin), bpy.context.view_layer.update()
+exporter = exported()
+exporter.start, exporter.requests = lambda depsgraph: Viewport.engine.start(exporter, depsgraph), io.BytesIO()
+edge.inputs['Roughness'].default_value += 0.1
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=bpy.context.evaluated_depsgraph_get().object_instances, updates=[types.SimpleNamespace(id=material,
+    is_updated_geometry=False, is_updated_transform=False)]))
+assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.STEPS, 'linked duplicate updates steps'
+edge.inputs['Roughness'].default_value -= 0.1
+bpy.data.objects.remove(twin)
 bpy.data.objects['edge'].location.x, scene.flex_samples, scene.camera.data.angle = 0, 256, 0.03
 baked, uvs = render(), bpy.data.meshes['edge'].uv_layers.active.data
 uv = numpy.zeros(2 * len(uvs), 'f')
