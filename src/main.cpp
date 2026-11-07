@@ -272,19 +272,22 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
             if (!special || std::memcmp(&next, &special->params, sizeof(next))) { // Another op set: its own module,
                 if (special) retiring.push_back(special); // one still compiling taken back, the generic standing in
-                const auto again = std::find_if(retiring.begin(), retiring.end(), // while it compiles, or without one
-                    [&](const Tier* tier) { return !std::memcmp(&tier->params, &next, sizeof(next)); }); // awaited
+                const auto again = std::find_if(retiring.begin(), retiring.end(), // as it compiles, or without one awaited
+                    [&](const Tier* tier) { return !tier->quick && !std::memcmp(&tier->params, &next, sizeof(next)); });
                 if (again != retiring.end()) special = *again, retiring.erase(again);
-                else { // Its compile's other tasks, unless OptiX's cache held it, given to the workers
-                    special = new Tier{.params = next};
-                    for (OptixTask task : start(*special)) give(task);
-                }
+                else special = new Tier{.params = next}, give(begin(*special)); // Its compile, to the workers
                 Tier* const last = std::exchange(interim, nullptr); // The last op set's: dropped once replaced
-                if (TIERED && !generic && !compiled(*special)) { // Its module from the stand-in PTX, quicker, stands
-                    interim = new Tier{.params = next, .quick = true}; // in: its tasks, given last, taken first
-                    for (OptixTask task : start(*interim)) give(task);
-                    finish(*interim), linked(*interim);
-                }
+                if (TIERED && !generic && !compiled(*special)) // Its module from the stand-in PTX, quicker, stands in:
+                    interim = new Tier{.params = next, .quick = true}, give(begin(*interim)); // its tasks taken first
+                std::unique_lock lock(workers.mutex); // Until its first task ran, which OptiX's cache holding it compiles
+                workers.changed.wait(lock, [&] { // in some 0.02 s, else in some 2 s, beside the stand-in's
+                    OptixModuleCompileState state;
+                    CHECK(optixModuleGetCompilationState(special->module, &state));
+                    return state != OPTIX_MODULE_COMPILE_STATE_NOT_STARTED;
+                });
+                lock.unlock();
+                if (interim && compiled(*special)) retiring.push_back(std::exchange(interim, nullptr)); // Not needed
+                if (interim) finish(*interim), linked(*interim);
                 if (!generic && !interim) finish(*special);
                 if (!compiled(*special) && generic) linking.wait(); // Awaited only when it stands in
                 if (compiled(*special) && !special->pipeline) linked(*special);
