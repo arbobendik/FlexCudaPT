@@ -1896,17 +1896,18 @@ class Flex(bpy.types.RenderEngine):
         self.cuts, self.placed, self.piped = cuts, placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
-        # the texels only bakes read, mesh triangle, instance and image counts; per instance its mesh's first triangle,
-        # count and whether in world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes
-        # 9 vertex, 9 normal, 9 generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a
-        # material of its emission, program, hidden flag, layer count, opaque flag and emission program (then the
-        # world's); then the steps of 4 integers, the texels and the programs of the bakes;
-        # then each image's width and height, RGBA8 in its bit 26, and its texels
+        # the texels only bakes read, mesh triangle, instance and image counts; the steps of 4 integers, first, as the
+        # renderer compiles from them while the rest loads; per instance its mesh's first triangle, count and whether in
+        # world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9 vertex, 9 normal, 9
+        # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
+        # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); then the
+        # texels and the programs of the bakes; then each image's width and height, RGBA8 in its bit 26, and its texels
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
-            counts[1], sum(map(len, columns[0])), len(instances), counts[2]), *(part for first, count, world, values
-            in instances for part in (numpy.array((first, count, world), 'I'), values)), *(numpy.concatenate(column,
-            dtype='f') for column in columns), numpy.hstack((materials[:, :1].astype('f').view('I'),
-            materials[:, 1:].astype('I'))), numpy.array(ops, 'I'), *texels, numpy.array(bakes, 'I'),
+            counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
+            *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
+            values)), *(numpy.concatenate(column, dtype='f') for column in columns),
+            numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))), *texels,
+            numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes))
 
