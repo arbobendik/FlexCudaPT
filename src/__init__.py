@@ -1641,15 +1641,14 @@ class Flex(bpy.types.RenderEngine):
             if ob.type == 'LIGHT':
                 area = sum(face.calc_area() for face in bm.faces if not face.material_index)
                 # Sun irradiance, else watts, by the exposure; unless normalized, by Cycles' area of the light as well:
-                # a sphere's, 4 of a point; a sun's of its angle, 1 of a parallel one; the area light's. Blender before
-                # 4.5 has neither, nor temperature
-                radiance = light.energy * 2 ** getattr(light, 'exposure', 0) \
+                # a sphere's, 4 of a point; a sun's of its angle, 1 of a parallel one; the area light's
+                radiance = light.energy * 2 ** light.exposure \
                     * (SUN_DISTANCE ** 2 if light.type == 'SUN' else 1 / math.pi) / area
-                if not getattr(light, 'normalize', True):
+                if not light.normalize:
                     radiance *= area if light.type == 'AREA' else (math.pi * math.sin(light.angle / 2) ** 2 or 1) \
                         if light.type == 'SUN' else 4 * math.pi * light.shadow_soft_size ** 2 or 4
                 emission = radiance * numpy.array(light.color) \
-                    * (numpy.array(light.temperature_color) if getattr(light, 'use_temperature', False) else 1)
+                    * (numpy.array(light.temperature_color) if light.use_temperature else 1)
                 shaped = 1
                 # Spot cone and area spread on the direction emitted, as Cycles'; the lights pass, shading no ray, takes
                 # the unshaped power, a bound for the cone and exact for the spread, whose mean over the hemisphere is 1
@@ -1941,7 +1940,7 @@ class DATA_PT_flex_light(bpy.types.Panel):  # A light's settings the engine read
         for name in ('color', 'use_temperature', 'temperature', 'energy', 'exposure', 'normalize', *{'POINT':
                 ('shadow_soft_size',), 'SPOT': ('shadow_soft_size', 'spot_size', 'spot_blend'), 'SUN': ('angle',),
                 'AREA': ('shape', 'size', 'size_y', 'spread')}[light.type]):
-            if (name != 'size_y' or light.shape in {'RECTANGLE', 'ELLIPSE'}) and name in light.bl_rna.properties \
+            if (name != 'size_y' or light.shape in {'RECTANGLE', 'ELLIPSE'}) \
                 and (name != 'temperature' or light.use_temperature): self.layout.prop(light, name)
 
 class OBJECT_PT_flex_visibility(bpy.types.Panel):  # An object's visibility the engine reads
