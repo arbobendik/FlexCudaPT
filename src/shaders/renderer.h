@@ -18,7 +18,7 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC };
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM }; // The last no program takes: a scene's varying media
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
@@ -32,7 +32,7 @@ struct Params { unsigned long long ops[2]; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
 // will read, the color of Blender's Translucent BSDF, the color and roughness of its sheen, and its anisotropy, the
@@ -55,7 +55,10 @@ struct Info { float location[3], color[4], index, material, random, axes[9]; uns
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, instance; bool leaf; };
 // Per instance of a mesh: its first triangle and count, whether its mesh is in world space, its transform's rows, the
 // adjugate turning its normals, its object's info and its first triangle in the scene's order
-struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; unsigned key; };
+// Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
+// generated point, and the largest extinction its volume reaches, 0 unless it varies from point to point
+struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
+    unsigned key; };
 // Point of a triangle of an instance at its barycentrics, triangle NONE for no point
 constexpr unsigned NONE = ~0u;
 struct Hit { unsigned triangle, instance; float2 uv; };

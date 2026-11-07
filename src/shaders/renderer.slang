@@ -18,17 +18,20 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC };
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM }; // The last no program takes: a scene's varying media
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
-struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; uint key; };
+// Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
+// generated point, and the largest extinction its volume reaches, 0 unless it varies from point to point
+struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
+    uint key; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle, instance; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
@@ -756,7 +759,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
         used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[14]
         : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top > 18 ? stack[16].x : 0,
-        used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0));
+        used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
+        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0));
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -893,6 +897,7 @@ static const uint STREAM_JITTER = 192u;
 static const uint STREAM_SELECT = 193u;
 static const uint STREAM_COVERAGE = 256u;
 static const uint STREAM_MEDIUM = 320u;
+static const uint STREAM_CAMERA = 384u;  // Of what the medium the camera is in absorbs to the first hit
 
 // Camera and primary hit of a pixel
 struct Domain {
@@ -1059,13 +1064,79 @@ float3 environment(Scene* scene, float3 direction, Ray ray) {
 // A light BVH node's emitters, as the shared light tree takes them
 LightBounds bounds(LightNode node) { return LightBounds(node.low, node.high, node.w, node.phi, node.cos_theta_o); }
 
-// Scattering and extinction coefficients of a homogeneous medium, none by default
+// Scattering and extinction coefficients of a homogeneous medium, none by default; of one varying from point to point,
+// those where it was entered, carried beside the key of its material, whose owner is the instance it fills, else NONE
 struct Medium { float3 scatter, extinction; };
 static const Medium NO_MEDIUM = {float3(0), float3(0)};
 // Of the volume filling the inside of a surface, behind its faces
 Medium volume(Surface surface) {
     return Medium(surface.scatter * surface.density,
         (surface.scatter + float3(1, 1, 1) - surface.absorption) * surface.density);
+}
+// Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
+uint fills(Scene* scene, uint instance, uint triangle) {
+    return used(MEDIUM) && scene.instances[instance].majorant > 0 ? key(scene, instance, triangle) : NONE;
+}
+// Whether a face of an instance bounds a volume: where it is shaded dense, or always of one varying, which may be clear
+// right at its faces and dense within
+bool encloses(Scene* scene, Surface surface, uint instance) {
+    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
+}
+// Of a varying medium, its coefficients at a point inside, seen along the direction, by its material's volume there: at
+// the point in its object, the instance's transform undone, and the generated point its mesh's texture space makes it
+Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray, out float3 glow) {
+    const uint filled = owner(scene, material);
+    const Instance instance = scene.instances[filled];
+    const float3 o = transform(scene, p, 3, instance.info);
+    const float3 low = float3(instance.texspace[0], instance.texspace[1], instance.texspace[2]);
+    const float3 size = float3(instance.texspace[3], instance.texspace[4], instance.texspace[5]);
+    const Point point = Point(0, 0, (o - low) / (2 * size) + 0.5f, o, float4(0), p, 0, 0, NONE, filled);
+    const Surface surface = shade(scene, scene.materials[material].program, -direction,
+        float3x3(float3(1, 0, 0), float3(0, 1, 0), -direction), point, -direction, false, ray, instance.info);
+    glow = surface.glow;
+    return volume(surface);
+}
+// Of a varying medium, the distance along a ray to its next real scattering, past distance for none, by delta tracking
+// under its majorant with weights per channel (Kutz et al. 2017's spectral tracking): each tentative collision scatters
+// by its scattering's mean over the majorant, the throughput weighed by its scattering over that mean, or passes
+// weighed by what of the majorant its extinction leaves over what passing has; the medium takes the scattering's point;
+// passing alone, it scatters at none, its weight ratio tracking's (Novak et al. 2014), of what absorbs alone if so.
+// Each tentative collision gathers its emission over the majorant by the weight reaching it, which estimates the
+// transmittance there as ratio tracking does: glowed, what the medium emits along the ray up to the distance returned
+float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction, float distance,
+    inout uint state, inout float3 weight, inout float3 glowed, Ray ray, bool passing = false, bool absorbing = false) {
+    const float majorant = scene.instances[owner(scene, material)].majorant;
+    for (float along = 0;;) {
+        along -= log(1 - random(state)) / majorant;
+        if (!(along < distance)) return along;
+        float3 glow;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray, glow);
+        glowed = glowed + weight * glow / majorant;
+        const float mean = passing ? 0 : (at.scatter.x + at.scatter.y + at.scatter.z) / 3;
+        if (random(state) * majorant < mean) {
+            weight = weight * at.scatter / mean, medium = at;
+            return along;
+        }
+        weight = weight * (float3(1, 1, 1) * majorant - at.extinction + (absorbing ? at.scatter : float3(0, 0, 0)))
+            / (majorant - mean);
+    }
+}
+// Of a medium, the share of light passing it from one distance to another along a ray, of what it absorbs alone if so:
+// homogeneous by its exponential, varying by tracking it passing alone; glowed, if given, gathers its emission
+float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3 direction, float from, float to,
+    inout uint state, Ray ray, bool absorbing = false) {
+    float3 glowed = float3(0, 0, 0);
+    return passing(scene, medium, material, origin, direction, from, to, state, ray, absorbing, glowed);
+}
+float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3 direction, float from, float to,
+    inout uint state, Ray ray, bool absorbing, inout float3 glowed) {
+    if (!used(MEDIUM) || material == NONE)
+        return exp(absorbing ? (medium.scatter - medium.extinction) * (to - from)
+            : medium.extinction * (from - to));
+    float3 passed = float3(1, 1, 1);
+    track(scene, medium, material, origin + direction * from, direction, to - from, state, passed, glowed, ray, true,
+        absorbing);
+    return passed;
 }
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
@@ -1075,7 +1146,7 @@ Medium volume(Surface surface) {
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
 [noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 shading, float offset,
-    float3 face, Medium sides[2], uint state, out float3 direction, out float density, Ray ray) {
+    float3 face, Medium sides[2], uint2 fillings, uint state, out float3 direction, out float density, Ray ray) {
     direction = float3(0, 0, 0);
     density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
@@ -1111,6 +1182,7 @@ Medium volume(Surface surface) {
     float before = 0, at = 0, occluder;
     direction = toward;
     Medium medium = sides[int(dot(face, toLight) > 0)];
+    uint filling = fillings[int(dot(face, toLight) > 0)];
     // Through each layer of occluders, by distance then index, passing rays straight through, where uncovered or tinted
     // by their transparency, entering the volumes of those it meets from the front and leaving them from the back
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
@@ -1122,7 +1194,7 @@ Medium volume(Surface surface) {
         before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque != 0) return float3(0, 0, 0);  // Shading it would pass nothing
-        transmitted = transmitted * exp(medium.extinction * -occluder);
+        transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
         for (uint layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,
@@ -1131,14 +1203,17 @@ Medium volume(Surface surface) {
                 surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
                 float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
                 : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
-            if (layer == 0 && surface.density > 0)
-                medium = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0 ? NO_MEDIUM : volume(surface);
+            if (layer == 0 && encloses(scene, surface, hit.instance)) {
+                const bool leaves = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0;
+                medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                    hit.triangle);
+            }
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return float3(0, 0, 0);
     }
     density = solidAngle(probability, lightNormal, shadow);
-    return transmitted * exp(medium.extinction * (before - left))
+    return transmitted * passing(scene, medium, filling, from, toward, before, left, state, ray)
         * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight)), 0, true).emissive
         / density;
@@ -1222,10 +1297,14 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
     // instance, which absorbs on the way to the first hit; what it scatters out there it is taken to scatter back in
     const Hit held = scene.settings.medium == NONE ? Hit(NONE, NONE, float2(0, 0))
         : owned(scene, scene.settings.medium);
-    Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0, 0,
-        cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
+    Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0,
+        0, cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
         Ray(true, false, LOBE_NONE, 0.0f, distance)));
-    throughput = exp((medium.scatter - medium.extinction) * distance);
+    uint filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
+    uint camera = stream(r.seed, STREAM_CAMERA);
+    float3 approach = float3(-0.f, -0.f, -0.f); // Its emission on the way, added to the first hit's: -0 adds none
+    throughput = passing(scene, medium, filling, dom.x0, direction, 0, distance, camera,
+        Ray(true, false, LOBE_NONE, 0.0f, distance), true, approach);
     for (uint b = 0u; ; b++) {
         const float3 face = faceNormal(scene, hit.instance, hit.triangle);
         const Ray ray = Ray(b == 0u, false, b != 0 ? prev.lobe : LOBE_NONE, float(b), distance, width);
@@ -1255,15 +1334,17 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         const float offset = geometryOffset(scene, hit, geometry_n, origin);
         // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
         Medium sides[2] = {medium, medium};
-        if (surface.density > 0) {
-            sides[int(dot(geometry_n, face) < 0)] = volume(surface);
-            if (dot(direction, face) > 0) sides[int(dot(geometry_n, face) > 0)] = NO_MEDIUM;
+        uint2 fillings = uint2(filling, filling);
+        if (encloses(scene, surface, hit.instance)) {
+            const int back = int(dot(geometry_n, face) < 0), front = int(dot(geometry_n, face) > 0);
+            sides[back] = volume(surface), fillings[back] = fills(scene, hit.instance, hit.triangle);
+            if (dot(direction, face) > 0) sides[front] = NO_MEDIUM, fillings[front] = NONE;
         }
         const float geometry_density = geometryDensity(geometry_n, direction, distance);
         if (b == 0u) {
             // Primary ray footprint (Eq. 5)
             threshold = footprintThreshold(geometry_density);
-            seen = throughput * surface.emissive;
+            seen = throughput * surface.emissive + approach;
         }
         // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
         const bool footprint = withinFootprint(!passed, prev.rough, prev.pdf, geometry_density, threshold);
@@ -1314,7 +1395,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 float3 light_dir = float3(0.0f, 0.0f, 0.0f);
                 float light = 0.0f;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -1331,7 +1412,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift(throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i,
                     eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance, 1.0f) : fail;
@@ -1352,7 +1433,7 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
                 float3 light_dir;
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, surface.normal, offset, side_n,
-                    sides, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i, eta_o,
                     stream(r.seed, b), light, b < scene.settings.bounces) * radiance : fail.f;
@@ -1473,7 +1554,8 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : offset);
         if (weighs) nee_start = leaving;
         origin = passes || through != NONE ? origin : leaving;
-        if (!passes) medium = sides[int(dot(direction, side_n) > 0)];
+        if (!passes)
+            medium = sides[int(dot(direction, side_n) > 0)], filling = fillings[int(dot(direction, side_n) > 0)];
         if (!replay && !survives(scene, r.seed, throughput, density, b)) {
             break;
         }
@@ -1499,24 +1581,37 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
         }
         // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
         // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
-        const float sigma = (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
+        const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
+        const float sigma = varying ? scene.instances[owner(scene, filling)].majorant
+            : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
         if (reconnecting && sigma > 0) {
             return fail;
         }
         prev.rough = prev.rough && !(sigma > 0);
-        for (float along; hit.triangle != NONE
-            && (along = -log(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
+        uint tracking = stream(r.seed, b + STREAM_MEDIUM);
+        // Of a varying medium's tentative collisions passed, and what it emits along the ray to the next, which the
+        // pixel adds as it does what its first hit emits, neither resampled
+        float3 weight = float3(1, 1, 1), glowed = float3(0, 0, 0);
+        for (float along; hit.triangle != NONE && (along = varying ? track(scene, medium, filling, origin, direction,
+            distance, tracking, weight, glowed, Ray(false, false, prev.lobe, float(b), distance))
+            : -log(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
+            if (varying && !replay) seen = seen + throughput * glowed / density;
+            glowed = float3(0, 0, 0);
             b++;
             origin = origin + direction * along;
             width += spread * along, spread += PI;
-            throughput = throughput * medium.scatter * exp((float3(1, 1, 1) * sigma - medium.extinction)
-                * along) / sigma;
+            throughput = varying ? throughput * weight : throughput * medium.scatter
+                * exp((float3(1, 1, 1) * sigma - medium.extinction) * along) / sigma;
+            tracking = stream(r.seed, b + STREAM_MEDIUM), weight = float3(1, 1, 1);
             const Medium around[2] = {medium, medium};
             float3 light_dir;
             float light;
-            const float3 f = !replay || b == stop ? throughput * sampleLight(scene, origin, float3(0, 0, 0),
-                direction, 0, direction, around, stream(r.seed, b + STREAM_NEE), light_dir, light,
-                Ray(false, false, prev.lobe, float(b), along))
+            // Light sampled in a varying medium shifts to no other pixel: its shadow ratio-tracked from their starts
+            // left test 3 1.1% dark at 4096 samples, as reuse of no shift reads it within 0.1%
+            const bool sampled = !replay || b == stop && !varying;
+            const float3 f = sampled ? throughput * sampleLight(scene, origin, float3(0, 0, 0),
+                direction, 0, direction, around, uint2(filling, filling), stream(r.seed, b + STREAM_NEE),
+                light_dir, light, Ray(false, false, prev.lobe, float(b), along))
                 * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
             if (replay && b == stop) {
                 return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift(f, 1.0f) : fail;
@@ -1567,7 +1662,9 @@ bool survives(Scene* scene, uint seed, float3 throughput, inout float density, u
             break;
         }
         // Project ray origin to hit point, through the medium
-        throughput = throughput * exp((float3(1, 1, 1) * sigma - medium.extinction) * distance);
+        if (varying && !replay) seen = seen + throughput * glowed / density;
+        throughput = varying ? throughput * weight
+            : throughput * exp((float3(1, 1, 1) * sigma - medium.extinction) * distance);
         origin = origin + direction * distance;
         width += spread * distance;
     }

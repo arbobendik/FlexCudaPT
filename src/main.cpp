@@ -126,9 +126,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
         const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
-        CHECK(optixModuleCreateWithTasks(context, &options, &compile, (const char*)(tier.quick ? build_standin_ptx
-            : build_shaders_ptx), tier.quick ? build_standin_ptx_len : build_shaders_ptx_len, nullptr, nullptr,
-            &tier.module, &first));
+        const bool rare = tier.params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 1; // Varying media: the extended PTX alone
+        const unsigned char* ptx[2][2] = {{build_shaders_ptx, build_standin_ptx}, {build_extended_ptx,
+            build_extended_standin_ptx}};
+        const unsigned lengths[2][2] = {{build_shaders_ptx_len, build_standin_ptx_len}, {build_extended_ptx_len,
+            build_extended_standin_ptx_len}};
+        CHECK(optixModuleCreateWithTasks(context, &options, &compile, (const char*)ptx[rare][tier.quick],
+            lengths[rare][tier.quick], nullptr, nullptr, &tier.module, &first));
         return first;
     };
     const auto compiled = [&](const Tier& tier) { // OptiX's disk cache holding it, it is so at once

@@ -91,7 +91,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy}
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None}  # The last a step past every program's end, of a
+# scene whose media vary from point to point, so the renderer tracks those it fills alone
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -341,6 +342,91 @@ def summarize(expression, table, scales):
             ** octaves * along())
     table[id(expression)] = reads, affine, points, inputs, need
     return table[id(expression)]
+
+def channel(expression, k):  # Of an expression, its kth channel when constant whatever its parts that vary: a product
+    # with a constant zero there zero, sums of such and constants summed; None otherwise
+    if not isinstance(expression, tuple): return float(numpy.resize(expression, 3)[k])
+    name, *operands = expression
+    if name == 'MULTIPLY' and any(not isinstance(o, tuple) and numpy.resize(o, 3)[k] == 0 for o in operands): return 0.0
+    parts = [channel(o, k) for o in operands] if name in ('ADD', 'MULTIPLY') else [None]
+    return None if None in parts else sum(parts) if name == 'ADD' else parts[0] * parts[1]
+
+# Of an expression of a medium, the box its value lies in, per channel, the boxes of its point inputs given: by interval
+# arithmetic, each read within its texels whatever its point (a ramp's colors, a float image's, bytes' 0 to 1); None
+# where no rule bounds it
+def image_texels(image):  # Of an image read in a medium, texels its texels' values lie between: a float image's own,
+    # read in place, as its list of pixels runs to gigabytes, a byte image's 0 to 1; without an image, black
+    texels = numpy.zeros((1, 4)) if not image else numpy.array(((0,) * 4, (1,) * 4), 'd')
+    if image and image.is_float: image.pixels.foreach_get(texels := numpy.empty(len(image.pixels), 'f'))
+    return texels.reshape(-1, 4)
+def bounds(expression, boxes, memo):
+    if not isinstance(expression, tuple):
+        value = numpy.resize(numpy.asarray(expression, 'd'), 3)
+        return value, value
+    if id(expression) in memo: return memo[id(expression)]
+    name, *operands = expression
+    parts = [] if name in (*READS, 'UNASSOCIATE') or name in boxes else [bounds(o, boxes, memo)
+        for o in operands[1:3]] if name == 'NOISE' else [bounds(o, boxes, memo) for o in operands]  # A noise's range
+    # whatever its point
+    product = lambda a, b: (numpy.min(c := [x * y for x in a for y in b], 0), numpy.max(c, 0))
+    if None in parts: box = None
+    elif name in boxes: box = boxes[name]
+    elif name in READS and name != 'BAKED':
+        source = operands[-1]
+        if isinstance(source, ImageRead):  # Without an image, black
+            texels = image_texels(source.node.image)
+        else: texels = numpy.array(table(source), 'd')
+        texels = texels[:, 3:].repeat(3, 1) if name.startswith('ALPHA') else texels[:, :3]
+        box = texels.min(0), texels.max(0)
+    elif name == 'UNASSOCIATE':  # Its color over its alpha, both filtered by the same weights, none negative (linear's
+        # or B-splines'), a blend of the straight colors of texels not clear or 0 where all are, as divide() makes it;
+        # or, its alpha unread, as emit() takes it, its color associated, between 0 and those
+        texels = image_texels(operands[0][-1].node.image)
+        texels = numpy.concatenate((texels[texels[:, 3] > 0, :3], numpy.zeros((1, 3))))
+        box = texels.min(0), texels.max(0)
+    elif name == 'ADD': box = parts[0][0] + parts[1][0], parts[0][1] + parts[1][1]
+    elif name == 'SUBTRACT': box = parts[0][0] - parts[1][1], parts[0][1] - parts[1][0]
+    elif name == 'MULTIPLY': box = product(*parts)
+    elif name in ('MAXIMUM', 'MINIMUM'):
+        pick = numpy.maximum if name == 'MAXIMUM' else numpy.minimum
+        box = pick(parts[0][0], parts[1][0]), pick(parts[0][1], parts[1][1])
+    elif name == 'POWER': box = (parts[0][0] ** parts[1][0], parts[0][1] ** parts[1][0]) \
+        if (parts[0][0] >= 0).all() and (parts[1][0] == parts[1][1]).all() and (parts[1][0] >= 0).all() else None
+    elif name == 'NOISE':  # The renderer's: a blend of its corners' gradients by weights of sum 1, so within the
+        # largest a corner's gradient reaches (8 at 1D, 1 + 2 at 2D, 2 at 3D, 3 at 4D, offsets within 1) by its scale;
+        # normalized fractal Brownian motion within half of that about 0.5, unnormalized by its octaves' amplitudes
+        # summed; its dimensions a constant of vector(w, dimensions, 0) as noise() makes it
+        (_, params), (least, extra) = parts
+        dims = channel(operands[3], 1)
+        dims = int(dims) if dims is not None else None
+        kind = int(extra[2])
+        bound = (2, 1.985, 1.964, 2.503)[dims - 1] if dims in (1, 2, 3, 4) else None
+        roughness, octaves = max(params[1], 0), math.ceil(min(max(params[0], 0), 15)) + 1
+        amplitudes = sum(roughness ** k for k in range(octaves))
+        box = None if bound is None or least[2] != extra[2] or kind > 1 else tuple(numpy.full(3, v) for v in (
+            (0.5 - bound / 2, 0.5 + bound / 2) if kind == 0 else (-bound * amplitudes, bound * amplitudes)))
+    elif name == 'DOT_PRODUCT':
+        low, high = product(*parts)
+        box = numpy.full(3, low.sum()), numpy.full(3, high.sum())
+    else: box = None
+    memo[id(expression)] = box if box is None or numpy.isfinite(box).all() else None
+    return memo[id(expression)]
+
+# Of the volume of a material filling an instance, varying from point to point (any of its absorption, density and
+# scattering color not a constant) or emitting, which the renderer gathers tracking it: the largest extinction it
+# reaches, (scatter + 1 - absorption) density as the renderer makes it, inside the boxes its point inputs span, 0 for
+# one neither; for one no rule bounds, an error naming the material, as the renderer tracks such a volume under that
+# bound and no guess; of one emitting, at least as many collisions across its points as GLOW_COLLISIONS, as each
+# gathers its emission
+GLOW_COLLISIONS = 4
+def medium(material, boxes):
+    absorption, density, scatter, glow = (fold(part) for part in MEDIA.get(material, (0, 0, 0, 0)))
+    if not any(isinstance(part, tuple) for part in (absorption, density, scatter)) and not nonzero(glow): return 0.0
+    box = bounds(('MULTIPLY', ('SUBTRACT', ('ADD', scatter, 1), absorption), density), boxes, {})
+    if box is None: raise ValueError(f"Flex: the volume of material '{material.name}' varies by steps no bound is "
+        'known for, so its density has no largest value to track it under')
+    least = GLOW_COLLISIONS / numpy.linalg.norm(boxes['POSITION'][1] - boxes['POSITION'][0]) if nonzero(glow) else 0
+    return max(float(box[1].max()), least, 0.0)
 
 BAKE_TOLERANCE = 2 ** -9  # Most a bake over UV space strays from shading live: a fifth of its test's seed floor (0.011)
 
@@ -1139,6 +1225,15 @@ def resolve(socket, groups=()):
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
+        # In a volume it emits per unit length by its emission and, its intensity above zero, as a blackbody by
+        # Stefan-Boltzmann's law, neither by its density, as Cycles' svm_node_principled_volume; on a surface nothing
+        if node.type == 'PRINCIPLED_VOLUME' and SIDE['volume']:
+            emissive, strength, t = get('Emission Color'), get('Emission Strength'), ('MAXIMUM', 0, get('Temperature'))
+            if nonzero(intensity := get('Blackbody Intensity')):
+                fourth = 'ADD', 1, ('MULTIPLY', intensity, ('SUBTRACT', ('POWER', t, 4), 1))
+                emissive = 'ADD', ('MULTIPLY', emissive, strength), ('MULTIPLY', ('MULTIPLY', get('Blackbody Tint'),
+                    blackbody(t)), ('MULTIPLY', 5.670373e-14 / math.pi, fourth))
+                strength = 1
         # Subsurface scattering as the medium its share transmitted enters: of mean free path the radius by the scale
         # per channel, the color's albedo by Chiang et al.'s inversion, whose slab reflects that color; on closed meshes
         # alone, as an open one, a leaf, would fill the space behind it, and keeps its diffuse
@@ -1197,6 +1292,8 @@ def closed(ob, mesh):  # Whether the object is a closed mesh, each edge shared b
     return bool(numpy.all(numpy.bincount(edges, minlength=len(mesh.edges)) == 2))
 # Of the object whose material shade() resolves: whether it is closed, and whether its subsurface scattering asked
 SEALING = {'closed': True, 'asked': False}
+MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
+SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
     SEALING['asked'] = True
     return SEALING['closed']
@@ -1207,7 +1304,11 @@ def shade(material, program):
     output = material.node_tree.get_output_node('CYCLES')
     if not output: return [program(BLACK)]
     surface = resolve(output.inputs['Surface'])  # Its volume, or the medium its subsurface scattering fills
-    volume = resolve(output.inputs['Volume'])[10:13] if output.inputs['Volume'].is_linked else surface[10:13]
+    SIDE['volume'] = True
+    filled = resolve(output.inputs['Volume']) if output.inputs['Volume'].is_linked else None
+    SIDE['volume'] = False
+    volume, glow = (filled[10:13], filled[4]) if filled else (surface[10:13], 0)
+    MEDIA[material] = *volume, glow
     if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
         height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
@@ -1223,8 +1324,9 @@ def shade(material, program):
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
     # The base layer transmits the surface's translucent color diffusely and carries its sheen and anisotropy, a coat
-    # over it none
-    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0))] for layer in layers]
+    # over it none; each filled by its volume's emission
+    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow]
+        for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1283,6 +1385,7 @@ class Flex(bpy.types.RenderEngine):
         super().__init__(*args, **kwargs)
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
+        self.varying = set()  # Of those, the ones whose volume varies: their bounds, made where they are, made anew
         self.volumes = {}  # Of each instance exported filling a volume, by its index: its triangles' BVH in the world and
         # its first triangle of a material filling it
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
@@ -1334,7 +1437,8 @@ class Flex(bpy.types.RenderEngine):
         materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
         # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
         # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
-        def record(i, instance, ob, entry, light=False):  # An instance exported, of the object's mesh entry
+        def record(i, instance, ob, entry, light=False, media=((0,) * 6, 0)):  # An instance exported, of the object's
+            # mesh entry, and of one filling a volume its texture space and largest extinction, 0 unless it varies
             # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
             random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
                 lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
@@ -1342,7 +1446,8 @@ class Flex(bpy.types.RenderEngine):
             instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
                 numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
                 ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()],
-                numpy.array([attributed(instance)], 'u4').view('f')), dtype='f')))
+                numpy.array([attributed(instance)], 'u4').view('f'), numpy.array((*media[0], media[1]), 'f')),
+                dtype='f')))
             slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
@@ -1473,6 +1578,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run main's programs, the
             # shader compiling them out
+            if len(surface) == 20 and not nonzero(surface[19]): surface = surface[:19]  # Its volume's emission too
             if len(surface) == 19 and not marks(surface[16], 'ANISOTROPIC'): surface = surface[:16]
             if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
@@ -1511,6 +1617,7 @@ class Flex(bpy.types.RenderEngine):
             if SEALING['asked']: subsurface.add(material)
             return row
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
+        varying = set()  # Those whose volume varies, bounded inside where they are: moved, exported anew
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
@@ -1689,17 +1796,29 @@ class Flex(bpy.types.RenderEngine):
                 row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
             materials.append(table[index])
             if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
+            media = ((0,) * 6, 0)
+            if i in volumes:  # Its volumes' bound inside its points: in the world, its object and their generated
+                # points
+                inside = co.reshape(-1, 3).min(0), co.reshape(-1, 3).max(0)
+                spaced = [(k - numpy.array(rest.texspace_location)) / (2 * numpy.array(rest.texspace_size)) + 0.5
+                    for k in inside]
+                kinds = [medium(ob.material_slots[k].material, {'POSITION': (positions.reshape(-1, 3).min(0),
+                    positions.reshape(-1, 3).max(0)), 'OBJECT': inside, 'GENERATED': (numpy.minimum(*spaced),
+                    numpy.maximum(*spaced))}) for k in sorted(set(index.tolist())) if k < len(ob.material_slots)
+                    and ob.material_slots[k].material]
+                media = (*rest.texspace_location, *rest.texspace_size), max([0, *kinds])
+                if media[1]: varying.add(i)
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
-                and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'))
+                and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene and
         # its transform's rows and adjugate
         if moved:
-            if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
+            if varying or not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
             self.volumes.update(volumes)
             def info(k):  # Its object's info per triangle, as a scene's
-                values = numpy.tile(instances[k][3][21:], (len(columns[7][k + 1]), 1))
+                values = numpy.tile(instances[k][3][21:41], (len(columns[7][k + 1]), 1))  # Its info alone
                 values[:, 8] = columns[7][k + 1]
                 return values
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
@@ -1754,8 +1873,10 @@ class Flex(bpy.types.RenderEngine):
         bakes, again = [k + rows for k in bakes], [k + rows for k in again]  # The bakes' steps after the materials'
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
+        ops += [([*OPS].index('MEDIUM'), 0, 0, 0)] * bool(varying)
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
-            if shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures keep their shape
+            if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures
+                # keep their shape, and no volume varies, whose bounds a value changed may move
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
@@ -1786,7 +1907,7 @@ class Flex(bpy.types.RenderEngine):
         self.shape = shape
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
-        self.volumes = volumes
+        self.volumes, self.varying = volumes, varying
         self.cuts, self.placed, self.piped = cuts, placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and

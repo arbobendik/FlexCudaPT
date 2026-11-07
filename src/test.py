@@ -862,8 +862,8 @@ exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
 def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
     header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
-    first, count = numpy.frombuffer(piped, 'I', count=2, offset=44 + 176 * k)
-    return numpy.frombuffer(piped, 'f', count=9 * count, offset=44 + 176 * header[9] + 36 * (2 * header[8]
+    first, count = numpy.frombuffer(piped, 'I', count=2, offset=44 + 204 * k)
+    return numpy.frombuffer(piped, 'f', count=9 * count, offset=44 + 204 * header[9] + 36 * (2 * header[8]
         + first)).reshape(-1, 3)
 generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
     if item.object.original == twisted))
@@ -1299,6 +1299,182 @@ for preferences.device in ('OPTIX', 'VULKAN'):
         checked.mean(), flat.mean(), checked.var() - flat.var())
 preferences.device = device
 
+# A volume varying from point to point: a pure absorber of density 2 at the top of its generated points and 0 at their
+# bottom, seen straight down through its depth of 2 against a white sky, passes exp(-2) by its density's integral, where
+# the density where it is entered held along the ray would pass exp(-4)
+fog = new('fog')
+fog.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+mesh = bpy.data.meshes.new('fog')
+bm = bmesh.new()
+bmesh.ops.create_cube(bm, size=2)
+bm.to_mesh(mesh)
+fog.collection.objects.link(bpy.data.objects.new('fog', mesh))
+mesh.materials.append(bpy.data.materials.new('absorber'))
+nodes, links = mesh.materials[0].node_tree.nodes, mesh.materials[0].node_tree.links
+nodes.remove(nodes['Principled BSDF'])
+absorber, depth, double = (nodes.new(kind) for kind in ('ShaderNodeVolumePrincipled', 'ShaderNodeSeparateXYZ',
+    'ShaderNodeMath'))
+absorber.inputs['Color'].default_value, double.operation, double.inputs[1].default_value = (0, 0, 0, 1), 'MULTIPLY', 2
+links.new(nodes.new('ShaderNodeTexCoord').outputs['Generated'], depth.inputs[0])
+links.new(depth.outputs['Z'], double.inputs[0])
+links.new(double.outputs[0], absorber.inputs['Density'])
+links.new(absorber.outputs[0], nodes['Material Output'].inputs['Volume'])
+fog.camera = bpy.data.objects.new('fog camera', bpy.data.cameras.new('fog camera'))
+fog.collection.objects.link(fog.camera)
+fog.camera.data.type, fog.camera.data.ortho_scale, fog.camera.location = 'ORTHO', 1, (0, 0, 3)
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=fog.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber', preferences.device, seen)
+preferences.device = device
+# Light reaching a varying volume through it: the cube scattering all it meets, white, of density 1 + x along x, lit
+# by a sun along -x and seen straight down, once. A column at x scatters (1 - exp(-2 (1 + x))) of what reaches it
+# through 2 - (1 + x)^2 / 2 of optical depth on its way in from x = 1: the columns over [0.25, 0.75] and [-0.75, -0.25]
+# average to 4.2 to one, where light taken through the density at the point it scatters at, as the medium entered has
+# it, would give 1.5
+haze = new('haze')
+haze.flex_samples = 1024  # The bands within 2% at over 8 times their spread across rows
+haze.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+haze.flex_bounces, haze.camera = 1, bpy.data.objects.new('haze camera', bpy.data.cameras.new('haze camera'))
+haze.collection.objects.link(haze.camera)
+haze.camera.data.type, haze.camera.data.ortho_scale, haze.camera.location = 'ORTHO', 2, (0, 0, 3)
+haze.collection.objects.link(cube := bpy.data.objects.new('haze', mesh.copy()))
+cube.data.materials[0] = scatterer = mesh.materials[0].copy()
+scatterer.node_tree.nodes['Principled Volume'].inputs['Color'].default_value = (1, 1, 1, 1)
+scatterer.node_tree.links.new(scatterer.node_tree.nodes['Separate XYZ'].outputs['X'],
+    scatterer.node_tree.nodes['Math'].inputs[0])
+haze.collection.objects.link(sun := bpy.data.objects.new('haze sun', bpy.data.lights.new('haze sun', 'SUN')))
+sun.data.angle, sun.rotation_euler = 0, (0, math.pi / 2, 0)
+band = lambda low: numpy.mean([(1 - math.exp(-2 * (1 + v))) * math.exp((1 + v) ** 2 / 2 - 2)
+    for v in numpy.linspace(low, low + 0.5, 2000)])  # Of the columns over [low, low + 0.5]
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=haze.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(haze.render.filepath).pixels).reshape(SIZE, SIZE, 4)[8:-8, :, :3]
+    seen = seen.mean((0, 2))
+    ratio = seen[5 * SIZE // 8:7 * SIZE // 8].mean() / seen[SIZE // 8:3 * SIZE // 8].mean()
+    expected = band(0.25) / band(-0.75)
+    assert abs(ratio / expected - 1) < 0.02, ('light through a varying volume', preferences.device, ratio, expected)
+preferences.device = device
+# A volume of noise bounded by its noise's range: the scatterer of density 2 Fac of a noise over its generated points,
+# lit and seen as before, matches itself under a majorant 4 above, of density 2 (Fac + 2 x - 2 x), within 2% at 64
+# samples, where 0.3 of its majorant leaves it 6% bright
+noisy = new('noisy')
+noisy.flex_samples, noisy.flex_bounces, noisy.camera = 64, 1, haze.camera
+noisy.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+noisy.collection.objects.link(haze.camera)
+noisy.collection.objects.link(sun)
+noisy.collection.objects.link(cube := bpy.data.objects.new('noisy', mesh.copy()))
+cube.data.materials[0] = noise_fog = scatterer.copy()
+nodes, links = noise_fog.node_tree.nodes, noise_fog.node_tree.links
+noise, double, zero, padded = (nodes.new(kind) for kind in ('ShaderNodeTexNoise', *('ShaderNodeMath',) * 3))
+links.new(nodes['Texture Coordinate'].outputs['Generated'], noise.inputs['Vector'])
+links.new(noise.outputs['Fac'], nodes['Math'].inputs[0])
+double.operation, double.inputs[1].default_value, zero.operation, padded.operation = 'MULTIPLY', 2, 'SUBTRACT', 'ADD'
+links.new(nodes['Separate XYZ'].outputs['X'], double.inputs[0])
+links.new(double.outputs[0], zero.inputs[0]), links.new(double.outputs[0], zero.inputs[1])
+links.new(noise.outputs['Fac'], padded.inputs[0]), links.new(zero.outputs[0], padded.inputs[1])
+seen = {}
+for pad in (False, True):
+    if pad: links.new(padded.outputs[0], nodes['Math'].inputs[0])
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        bpy.ops.render.render(scene=noisy.name, write_still=True)
+        seen[pad, preferences.device] = numpy.array(bpy.data.images.load(noisy.render.filepath).pixels).reshape(
+            SIZE, SIZE, 4)[..., :3].mean()
+for preferences.device in ('OPTIX', 'VULKAN'):
+    ratio = seen[False, preferences.device] / seen[True, preferences.device]
+    assert abs(ratio - 1) < 0.02, ('volume of noise', preferences.device, ratio)
+preferences.device = device
+# A volume clear at a face bounds it all the same: the absorber of density 2 z over its generated points, clear at its
+# bottom face, over a white diffuse floor lit by a sun straight down and seen through it, passes exp(-2) each way, the
+# floor reading exp(-4) / pi; a ray taking the absorber past its clear face would gain by its density's negative there
+fog.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+floor = bpy.data.meshes.new('fog floor')
+bm = bmesh.new()
+bmesh.ops.create_grid(bm, size=3)
+bm.to_mesh(floor)
+fog.collection.objects.link(ob := bpy.data.objects.new('fog floor', floor))
+ob.location.z = -1.5
+floor.materials.append(white := bpy.data.materials.new('fog floor'))
+white.node_tree.nodes.remove(white.node_tree.nodes['Principled BSDF'])
+diffuse = white.node_tree.nodes.new('ShaderNodeBsdfDiffuse')
+diffuse.inputs['Color'].default_value = (1, 1, 1, 1)
+white.node_tree.links.new(diffuse.outputs[0], white.node_tree.nodes['Material Output'].inputs['Surface'])
+fog.collection.objects.link(sun := bpy.data.objects.new('fog sun', bpy.data.lights.new('fog sun', 'SUN')))
+sun.data.angle, sun.data.energy = 0, 1
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=fog.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen * math.pi / math.exp(-4) - 1) < 0.02, ('floor through a varying volume', preferences.device, seen)
+preferences.device = device
+# A camera inside a varying volume: in the absorber at its center, seeing straight down a white sky from its near
+# plane at depth c, passes exp(-(1 - c)^2 / 2) of what its density, 1 - s at depth s, takes on the way out
+inside = new('inside')
+inside.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+inside.collection.objects.link(bpy.data.objects.new('inside', mesh))
+inside.camera = bpy.data.objects.new('inside camera', bpy.data.cameras.new('inside camera'))
+inside.collection.objects.link(inside.camera)
+inside.camera.data.type, inside.camera.data.ortho_scale, inside.camera.data.clip_start = 'ORTHO', 1, 0.01
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=inside.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(inside.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / math.exp(-0.99 ** 2 / 2) - 1) < 0.01, ('camera inside a varying volume', preferences.device, seen)
+preferences.device = device
+# A volume emitting 0.5 per unit length, unscaled by its density as Cycles', absorbing by the density 2 z over its
+# generated points or by 1, seen straight down against a black world, glows by the integral of its emission times its
+# transmittance along its depth of 2: 0.3200 and 0.4323, where its emission dropped would leave it black
+glow = new('emitting volume')
+glow.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+glow.collection.objects.link(cube := bpy.data.objects.new('emitting volume', mesh.copy()))
+cube.data.materials[0] = glowing = mesh.materials[0].copy()
+emitter = glowing.node_tree.nodes['Principled Volume']
+emitter.inputs['Emission Strength'].default_value, emitter.inputs['Emission Color'].default_value = 0.5, (1, 1, 1, 1)
+glow.camera = fog.camera
+glow.collection.objects.link(fog.camera)
+depth = numpy.linspace(0, 2, 200001)
+for optical, density in ((2 * depth - depth * depth / 2, None), (depth, 1)):
+    if density: glowing.node_tree.links.remove(emitter.inputs['Density'].links[0])
+    if density: emitter.inputs['Density'].default_value = density
+    expected = numpy.trapezoid(0.5 * numpy.exp(-optical), depth)
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        bpy.ops.render.render(scene=glow.name, write_still=True)
+        seen = numpy.array(bpy.data.images.load(glow.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+        assert abs(seen / expected - 1) < 0.01, ('emitting volume', density, preferences.device, seen, expected)
+preferences.device = device
+# A camera inside the emitting volume, now of density 1, at its center seeing straight down from its near plane at depth
+# 0.01: glows by 0.5 (1 - exp(-0.99)) on its way out, where its own medium's emission dropped would leave it black
+lit = new('emitting inside')
+lit.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+lit.collection.objects.link(bpy.data.objects.new('emitting inside', cube.data))
+lit.camera = inside.camera
+lit.collection.objects.link(inside.camera)
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=lit.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(lit.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / (0.5 * (1 - math.exp(-0.99))) - 1) < 0.01, ('camera inside an emitting volume',
+        preferences.device, seen)
+preferences.device = device
+# The absorber of density read from an image of straight alpha, its alpha unread: its colors associated, 0.5 and 0.75
+# of white and of three quarters at alphas 0.5 and 1 across x, under its straight colors' bound of 1, seen through its
+# depth of 2 at 1024 samples against a white sky again, the floor and sun gone, its halves passing exp(-1) and
+# exp(-1.5), within 0.7% over 4 seeds
+fog.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+for gone in (ob, sun): fog.collection.objects.unlink(gone)
+nodes, links = mesh.materials[0].node_tree.nodes, mesh.materials[0].node_tree.links  # The absorber's again
+straight = bpy.data.images.new('straight', 2, 1, alpha=True, float_buffer=True)
+straight.pixels.foreach_set((1, 1, 1, 0.5, 0.75, 0.75, 0.75, 1))
+fog.flex_samples = 1024
+reader = nodes.new('ShaderNodeTexImage')
+reader.image, reader.interpolation, straight.alpha_mode = straight, 'Closest', 'STRAIGHT'
+links.new(nodes['Texture Coordinate'].outputs['Generated'], reader.inputs['Vector'])
+links.new(reader.outputs['Color'], absorber.inputs['Density'])
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=fog.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean((0, 2))
+    halves = seen[:SIZE // 2].mean(), seen[SIZE // 2:].mean()
+    assert numpy.allclose(halves, numpy.exp((-1, -1.5)), rtol=0.02), ('straight image in a volume', preferences.device,
+        halves)
+preferences.device = device
+
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
 # holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
 # silhouette, integrated numerically
@@ -1501,7 +1677,7 @@ quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The gr
 exporter = exported()
 piped = exporter.requests.getvalue()
 header = numpy.frombuffer(piped, 'I', count=11)  # Mesh triangles, after the instances and four columns before UVs
-assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 176 * header[9] + 36 * 4 * header[8])
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 204 * header[9] + 36 * 4 * header[8])
     == 0.25), 'render uv map'
 
 # A chain of mixes, each multiplying the last into itself at a factor of a half, which keeps it in both of the mix's
