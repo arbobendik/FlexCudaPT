@@ -1690,20 +1690,16 @@ class Flex(bpy.types.RenderEngine):
             if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'))
-        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene and
-        # its transform's rows and adjugate
+        # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene, its
+        # object's info and its transform's rows and adjugate
         if moved:
             if not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
                 self.visible = None
                 return self.start(depsgraph)
             self.volumes.update(volumes)
-            def info(k):  # Its object's info per triangle, as a scene's
-                values = numpy.tile(instances[k][3][21:], (len(columns[7][k + 1]), 1))
-                values[:, 8] = columns[7][k + 1]
-                return values
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
-                *(column[k + 1].astype('f') for column in columns[:7]), info(k).astype('f'),
+                *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:].astype('f'),
                 instances[k][3][:21].astype('f')))))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
