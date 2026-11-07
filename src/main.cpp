@@ -77,8 +77,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     OptixPipelineLinkOptions link{.maxTraceDepth = 1};
     OptixPipeline pipeline = nullptr; // That launches take: none until then
     // A module compiled for an op set, bound in its params, with its programs and pipeline once linked
-    // quick: from the stand-in PTX, its shading not inlined and its walk a direct callable, the last of its programs,
-    // quicker to compile, to stand in while the module of its op set compiles
+    // quick: from the stand-in PTX, its shading not inlined, quicker to compile, to stand in while the module of its
+    // op set compiles
     struct Tier {
         Params params; OptixModule module; OptixProgramGroup groups[PASSES + 2]; OptixPipeline pipeline; bool quick;
     };
@@ -169,18 +169,14 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         CHECK(optixProgramGroupCreate(context, &skip, 1, &groupOptions, nullptr, nullptr, &tier.groups[PASSES]));
         OptixProgramGroupDesc callable{.kind = OPTIX_PROGRAM_GROUP_KIND_CALLABLES,
             .callables = {.moduleDC = tier.module, .entryFunctionNameDC = "__direct_callable__walk"}};
-        if (tier.quick)
-            CHECK(optixProgramGroupCreate(context, &callable, 1, &groupOptions, nullptr, nullptr, &tier.groups[PASSES + 1]));
-        CHECK(optixPipelineCreate(context, &compile, &link, tier.groups, PASSES + 1 + tier.quick, nullptr, nullptr,
-            &tier.pipeline));
-        if (tier.quick) { // The walk's stack beside the passes', which OptiX's default leaves out
-            OptixStackSizes sizes{};
-            for (unsigned k = 0; k < PASSES + 2; ++k)
-                CHECK(optixUtilAccumulateStackSizes(tier.groups[k], &sizes, tier.pipeline));
-            unsigned traversal, state, continuation;
-            CHECK(optixUtilComputeStackSizes(&sizes, 1, 0, 1, &traversal, &state, &continuation));
-            CHECK(optixPipelineSetStackSize(tier.pipeline, traversal, state, continuation, 2));
-        }
+        CHECK(optixProgramGroupCreate(context, &callable, 1, &groupOptions, nullptr, nullptr,
+            &tier.groups[PASSES + 1]));
+        CHECK(optixPipelineCreate(context, &compile, &link, tier.groups, PASSES + 2, nullptr, nullptr, &tier.pipeline));
+        OptixStackSizes sizes{}; // The walk's stack beside the passes', which OptiX's default leaves out
+        for (OptixProgramGroup group : tier.groups) CHECK(optixUtilAccumulateStackSizes(group, &sizes, tier.pipeline));
+        unsigned traversal, state, continuation;
+        CHECK(optixUtilComputeStackSizes(&sizes, 1, 0, 1, &traversal, &state, &continuation));
+        CHECK(optixPipelineSetStackSize(tier.pipeline, traversal, state, continuation, 2));
     };
     const auto use = [&](const Tier& tier) { // Launches take it from here on: its params and its programs' headers
         params = tier.params, pipeline = tier.pipeline;
@@ -189,15 +185,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             CHECK(optixSbtRecordPackHeader(tier.groups[pass], &records[pass + 1]));
         CHECK(optixSbtRecordPackHeader(tier.groups[PASSES], &hit));
         CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, &hit, sizeof(hit)));
-        if (tier.quick) {
-            CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 1], &walk));
-            CHECK(cuMemcpyHtoD(sbt.callablesRecordBase, &walk, sizeof(walk)));
-        }
+        CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 1], &walk));
+        CHECK(cuMemcpyHtoD(sbt.callablesRecordBase, &walk, sizeof(walk)));
     };
     const auto drop = [&](Tier* tier) {
         if (tier->pipeline) {
             CHECK(optixPipelineDestroy(tier->pipeline));
-            for (unsigned k = 0; k < PASSES + 1 + tier->quick; ++k) CHECK(optixProgramGroupDestroy(tier->groups[k]));
+            for (OptixProgramGroup group : tier->groups) CHECK(optixProgramGroupDestroy(group));
         }
         CHECK(optixModuleDestroy(tier->module));
         delete tier;
