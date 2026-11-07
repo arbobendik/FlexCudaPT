@@ -522,8 +522,11 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
-#ifndef EXTENDED // Nor varying media, in a PTX compiled without their code
-#define used(code) (code != MEDIUM && used(code))
+#ifdef EXTENDED // Whether an instance holds strands, which only this PTX compiles
+#define STRAND(scene, i) (scene.instances[i].world == STRANDS)
+#else // Nor varying media and strands, in a PTX compiled without their code
+#define used(code) (code != MEDIUM && code != CURVES && used(code))
+#define STRAND(scene, i) false
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
@@ -921,12 +924,64 @@ __device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, fl
         make_float2(__uint_as_float(u), __uint_as_float(v))};
 }
 
+#ifdef EXTENDED
+// Of the strands' hit group, as main.cpp's record: the scene's instances, segments and points
+struct HitData { const Instance* instances; const unsigned* segments; const float4* points; };
+// Nearest hit before t past lo of a ray in an object's space and a segment of its strands, between points a and b:
+// Roth's union of their spheres and the cone tangent to both, every root of each taken (Roth 1982, Max 1990); its axis
+// parameter and its normal's polar angles, in 16 bits each
+__device__ bool strand(float3 o, float3 d, float4 a, float4 b, float lo, float& t, float2& uv) {
+    const float3 e = make_float3(a.x, a.y, a.z), axis = make_float3(b.x, b.y, b.z) - e, w = normalize(axis);
+    const float s = dot(e + axis * 0.5f - o, d) / dot(d, d); // Measured from beside the segment, where float
+    o = o + d * s, lo -= s, t -= s; // resolves a thin strand's silhouette; its distance then from the ray's origin
+    const float length2 = dot(axis, axis), k = (a.w - b.w) / sqrtf(length2), c = sqrtf(fmaxf(1 - k * k, 0.0f)), t0 = t;
+    float3 n;
+    for (int end = 0; end < 2; ++end) { // Each sphere
+        const float3 center = end ? make_float3(b.x, b.y, b.z) : e, oc = o - center;
+        const float r = end ? b.w : a.w, q = dot(oc, d), h = q * q - dot(d, d) * (dot(oc, oc) - r * r);
+        for (float sign : {-1.0f, 1.0f}) if (const float root = (-q + sign * sqrtf(h)) / dot(d, d); h >= 0 && root > lo
+            && root < t) t = root, n = (o + d * root - center) / r;
+    }
+    const float3 oa = o - e, dp = d - w * dot(d, w), op = oa - w * dot(oa, w); // The cone, where the radius at height y
+    const float m = k / fmaxf(c, 1e-6f), r0 = a.w / fmaxf(c, 1e-6f) - dot(oa, w) * m; // along the axis is r0 - y m
+    const float qa = dot(dp, dp) - dot(d, w) * dot(d, w) * m * m, qb = dot(op, dp) + r0 * dot(d, w) * m;
+    const float h = qb * qb - qa * (dot(op, op) - r0 * r0);
+    for (float sign : {-1.0f, 1.0f}) if (const float root = (-qb + sign * sqrtf(h)) / qa, y = dot(oa + d * root, w);
+        h >= 0 && c > 0 && root > lo && root < t && y >= a.w * k && y <= sqrtf(length2) + b.w * k && r0 - root
+        * dot(d, w) * m >= 0) t = root, n = normalize(oa + d * root - w * y) * c + w * k; // Between its tangent circles
+    if (!(t < t0)) { t += s; return false; }
+    uv = make_float2(fminf(fmaxf(dot(o + d * t - e, axis) / length2, 0.0f), 1.0f), __uint_as_float(unsigned(acosf(
+        fminf(fmaxf(n.z, -1.0f), 1.0f)) / PI * 65535.0f + 0.5f) << 16 | unsigned((atan2f(n.y, n.x) / (2 * PI) + 0.5f)
+        * 65535.0f + 0.5f)));
+    t += s;
+    return true;
+}
+extern "C" __global__ void __intersection__strand() {
+    const HitData& data = *(const HitData*)optixGetSbtDataPointer();
+    const unsigned segment = data.instances[optixGetInstanceIndex()].first + optixGetPrimitiveIndex();
+    const unsigned point = data.segments[2 * segment];
+    float t = optixGetRayTmax();
+    float2 uv;
+    if (strand(optixGetObjectRayOrigin(), optixGetObjectRayDirection(), data.points[point], data.points[point + 1],
+        optixGetRayTmin(), t, uv)) optixReportIntersection(t, 0, __float_as_uint(uv.x), __float_as_uint(uv.y));
+}
+#endif
 // Rays skip the triangle of payload 0. Rays past a layer, of it at the distance of payload 1, skip the triangles before
 // it by distance, then number; gathering at the distance of payload 2, they skip every candidate, keeping the lowest
 // number there, its barycentrics and its instance in payloads 3 to 6. Triangles go by their numbers in the scene's
-// order, each instance's id its first's
+// order, each instance's id its first's; a strand's segment also skips the segments next to it in its strand
 extern "C" __global__ void __anyhit__skip() {
     const unsigned triangle = optixGetInstanceId() + optixGetPrimitiveIndex(), skip = optixGetPayload_0();
+#ifdef EXTENDED
+    if (optixGetPrimitiveType() == OPTIX_PRIMITIVE_TYPE_CUSTOM) {
+        const HitData& data = *(const HitData*)optixGetSbtDataPointer();
+        const Instance& instance = data.instances[optixGetInstanceIndex()];
+        const unsigned* at = data.segments + 2 * (instance.first + optixGetPrimitiveIndex());
+        const unsigned other = skip - instance.key;
+        if (other < instance.count && data.segments[2 * (instance.first + other) + 1] == at[1]
+            && data.segments[2 * (instance.first + other)] - at[0] + 1 <= 2) optixIgnoreIntersection();
+    }
+#endif
     const float at = __uint_as_float(optixGetPayload_1());
     if (at == -INFINITY) {
         if (triangle == skip) optixIgnoreIntersection();
@@ -1187,6 +1242,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
 // (pbrt-v4's BVHLightSampler::PMF)
 __device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, float3 start, unsigned instance,
     unsigned triangle, float3 point) {
+    if (STRAND(scene, instance)) return 0; // Strands, which no light sampling picks
     float probability = 1;
     unsigned node = 0;
     unsigned long long trail = scene.trails[key(scene, instance, triangle)];
