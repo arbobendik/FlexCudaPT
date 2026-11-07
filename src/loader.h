@@ -236,7 +236,9 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
     std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows;
-    std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures; };
+    std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
+    bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
+};
 
 // Of an image's texels in its format, a level's of half its width and height, odd ones floored, each texel the mean of
 // the 2 x 2 it covers in linear light: floats as they are, halves rounded back, RGBA8 and 16-bit UNORM rounded to their
@@ -516,7 +518,10 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
             [](unsigned key, const Instance& instance) { return key < instance.key; }) - loaded.instances.begin() - 1;
         const unsigned first = loaded.instances[instance].first; // Of the instance's mesh, in place
         std::vector<Info> scratch(range.count); // As large as any of the range's arrays piped in
+        const std::vector<float3> last(&loaded.vertices[3 * first], &loaded.vertices[3 * (first + range.count)]);
         update(scene.vertices, 3 * first, 3 * range.count, &loaded.vertices[3 * first]);
+        loaded.deformed |= !loaded.instances[instance].world && !std::equal(last.begin(), last.end(),
+            &loaded.vertices[3 * first], [](float3 a, float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; });
         update(scene.normals, 3 * first, 3 * range.count, scratch.data());
         update(scene.generated, 3 * first, 3 * range.count, scratch.data());
         update(scene.objects, 3 * first, 3 * range.count, scratch.data());
