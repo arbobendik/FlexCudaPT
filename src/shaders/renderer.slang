@@ -529,6 +529,9 @@ struct Point {
 [vk::constant_id(0)] const uint64_t OPS0 = 0xFFFFFFFFFFFFFFFFull;
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
+#ifndef EXTENDED // Nor varying media
+#define used(code) (code != MEDIUM && used(code))
+#endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
 [noinline] Surface shade(Scene* scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming,

@@ -503,6 +503,9 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
+#ifndef EXTENDED // Nor varying media
+#define used(code) (code != MEDIUM && used(code))
+#endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
 __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
