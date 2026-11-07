@@ -1574,14 +1574,11 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     }
     return fail;
 }
-#ifdef STANDIN
+// The walk as a direct callable that the passes call
 extern "C" __device__ Shift __direct_callable__walk(const Scene* scene, const Domain* dom, const Reservoir* r,
     bool replay, float scale, Selection* sel, float3* seen) { return walk(*scene, *dom, *r, replay, scale, *sel, *seen); }
 #define WALK(scene, dom, r, replay, scale, sel, seen) \
     optixDirectCall<Shift>(0, &(scene), &(dom), &(r), replay, scale, &(sel), &(seen))
-#else
-#define WALK walk
-#endif
 
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
 __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
