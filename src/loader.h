@@ -392,6 +392,7 @@ inline unsigned long long buildScene(OptixDeviceContext context, const float3* v
     for (size_t i = 0; i < instances.size(); ++i) {
         std::copy_n(instances[i].matrix, 12, placed[i].transform);
         placed[i].instanceId = instances[i].key, placed[i].visibilityMask = 255;
+        placed[i].sbtOffset = instances[i].world == STRANDS; // Strands by their own hit group
         placed[i].traversableHandle = meshes.at(instances[i].first | (instances[i].world == STRANDS) << 31).handle;
     }
     return buildInstances(context, placed, top);
