@@ -1534,9 +1534,10 @@ class Flex(bpy.types.RenderEngine):
                 continue
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
                 SEALING['closed'] = closed(ob, ob.data)
-                for slot in ob.material_slots:
-                    if variant(slot.material) in rows or (slot.material, ob.name) in rows: continue
-                    current.update(self.cuts.get((slot.material, ob.name), {'scales': None}), made=[])
+                for slot in ob.material_slots:  # Of those the last export cut, not its linked duplicates'
+                    if variant(slot.material) in rows or (slot.material, ob.name) in rows \
+                        or (slot.material, ob.name) not in self.cuts: continue
+                    current.update(self.cuts[(slot.material, ob.name)], made=[])
                     row = shaded_row(slot.material)
                     rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
                 current.clear()
