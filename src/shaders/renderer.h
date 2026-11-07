@@ -112,5 +112,5 @@ struct Scene {
     float4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     unsigned long long* images; // Of each image the materials read, its texture by its index
     float4* points; unsigned* segments; // Strands: their points and radius, per segment its first point and strand,
-    float4* strands; // per strand its first point and point count and its random number
+    float4* strands; // per strand its first point, point count and random number, its root's UV and color
 };
