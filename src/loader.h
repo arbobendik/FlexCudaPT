@@ -338,6 +338,72 @@ inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject*
     loaded.textures.emplace_back(objects[0], objects[1], chain, bytes);
 }
 
+// Chiang's far field of hair, per lobe p (R, TT, TRT, the rest) the product of a longitudinal term M_p in the light's
+// angle and an azimuthal one N_p in its azimuth about the fiber, at the viewer's sine so, averaged over the offset h
+// across the fiber: M_p's integral over each of the rows of FK's hairRow, uniform in asinh of the light's angle from
+// lobe p's cone (tilted by alpha times -2, 1, 4, 0) over its width (w times 1, 1/2, 2, 2, the first times r0), by
+// 4-point Gauss-Legendre; N_p's over each of np columns of the azimuth, for each absorption sigma, the lobes' centres
+// over 64 h per column histogrammed and convolved with the trimmed logistic of scale s integrated over the column, the
+// rest uniform. v is the lobes' variance (w its width), v0 that of R's alone, eta the index. Into rows (4 per row) and
+// columns (4 per column and sigma)
+inline void bakeHair(double so, double v, double v0, double r0, double s, double alpha, double eta, unsigned nt,
+    unsigned np, const std::vector<double>& sigmas, double* rows, double* columns) {
+    const double pi = M_PI, to = std::asin(so), vs[4] = {v0, v / 4, 4 * v, 4 * v}, tilts[4] = {-2, 1, 4, 0};
+    const double w = std::max(std::sqrt(v) / 2, 1e-5), widths[4] = {w * r0, w / 2, 2 * w, 2 * w};
+    const double gx[4] = {-0.8611363116, -0.3399810436, 0.3399810436, 0.8611363116},
+        gw[4] = {0.3478548451, 0.6521451549, 0.6521451549, 0.3478548451};
+    const auto logI0 = [](double x) { x = std::abs(x); return x < 500 ? std::log(std::cyl_bessel_i(0.0, x))
+        : x - std::log(2 * M_PI * x) / 2 + std::log1p(1 / (8 * x) + 9 / (128 * x * x)); };
+    for (int p = 0; p < 4; ++p) {
+        const double cone = tilts[p] * alpha - to, a = std::asinh(pi / widths[p]);
+        for (unsigned i = 0; i < nt; ++i) {
+            double m = 0;
+            for (int g = 0; g < 4; ++g) {
+                const double u = (i + 0.5 + gx[g] / 2) * 2 / nt - 1, ti = cone + widths[p] * std::sinh(u * a);
+                if (std::abs(ti) >= pi / 2) continue;
+                const double tilted = to - tilts[p] * alpha, log_m = -std::sin(ti) * std::sin(tilted) / vs[p]
+                    + logI0(std::cos(ti) * std::cos(tilted) / vs[p]) - std::log(vs[p]) - 1 / vs[p]
+                    - std::log1p(-std::exp(-2 / vs[p]));
+                m += gw[g] / 2 * std::exp(log_m) * std::cos(ti) * widths[p] * std::cosh(u * a) * a * 2 / nt;
+            }
+            rows[4 * i + p] = m;
+        }
+    }
+    const double d = 2 * pi / np, st = so / eta, ct = std::sqrt(1 - st * st), trim = 1 - 2 / (1 + std::exp(pi / s));
+    const long nh = long(np) * 64;
+    const int reach = std::min(int(np / 2), int(std::ceil(20 * s / d)) + 1);
+    const auto logistic = [&](double x) { return 1 / (1 + std::exp(-x / s)); };
+    std::vector<double> histogram(3 * np);
+    for (size_t k = 0; k < sigmas.size(); ++k) {
+        std::fill(histogram.begin(), histogram.end(), 0.0);
+        double rest = 0;
+        for (long n = 0; n < nh; ++n) {
+            const double h = -1 + (n + 0.5) * 2 / nh, go = std::asin(h), gt = std::asin(h * std::cos(to) / eta / ct);
+            const double c = std::cos(to) * std::cos(go), s2 = (1 - c * c) / (eta * eta);
+            const double t = s2 >= 1 ? 0 : std::sqrt(1 - s2), rs = (c - eta * t) / (c + eta * t),
+                rp = (eta * c - t) / (eta * c + t), f = s2 >= 1 ? 1 : (rs * rs + rp * rp) / 2;
+            const double through = std::exp(-sigmas[k] * 2 * std::cos(gt) / ct), a1 = (1 - f) * (1 - f) * through,
+                a2 = a1 * through * f, energy[3] = {f, a1, a2};
+            rest += a2 > 0 ? a2 * through * f / (1 - through * f) / nh : 0;
+            for (int p = 0; p < 3; ++p) {
+                double centre = 2 * p * gt - 2 * go + p * pi;
+                centre -= 2 * pi * std::floor((centre + pi) / (2 * pi));
+                histogram[p * np + std::min(np - 1, unsigned((centre + pi) / d))] += energy[p] / nh;
+            }
+        }
+        double* into = columns + 4 * np * k;
+        for (unsigned j = 0; j < np; ++j) {
+            for (int p = 0; p < 3; ++p) {
+                double m = 0; // Each centre uniform in its column: the logistic over one column's box of another
+                for (int q = -reach; q <= reach; ++q) m += histogram[p * np + (j - q + np) % np] * (logistic((q + 1) * d)
+                    - logistic((q - 1) * d)) / 2 / trim;
+                into[4 * j + p] = m;
+            }
+            into[4 * j + 3] = rest / np;
+        }
+    }
+}
+
 // Refittable BVH over count triangles of vertices, or segments of strands by their bounds, built into temp and output
 // allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
