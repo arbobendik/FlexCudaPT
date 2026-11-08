@@ -18,13 +18,13 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO }; // MEDIUM and CURVES no program takes: a
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR }; // MEDIUM and CURVES no program takes: a
 // scene's varying media and strands
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent, glow;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow; float hair;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
@@ -53,6 +53,7 @@ struct Scene {
     uint64_t* images; // Of each image the materials read, its texture by its index
     float4* points; uint* segments; // Strands: their points and radius, per segment its first point and strand,
     float4* strands; // per strand its first point, point count and random number, its root's UV and color
+    float4* hairs; // Per level of a hair table, as renderer.h's
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -562,7 +563,7 @@ struct Point {
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
 #ifndef EXTENDED // Nor varying media and strands, in a SPIR-V compiled without their code
-#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && used(code))
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
@@ -581,6 +582,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(TRANSLUCENT) break;
         CASE(SHEEN) break;
         CASE(ANISOTROPIC) break;
+        CASE(HAIR) break;
         CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
         CASE(GENERATED) stack[top++] = at.generated; break;
         CASE(OBJECT) stack[top++] = at.object; break;
@@ -774,7 +776,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[14]
         : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top > 18 ? stack[16].x : 0,
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
-        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0));
+        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20].x : 0);
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {

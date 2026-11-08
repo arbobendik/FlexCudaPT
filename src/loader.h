@@ -12,6 +12,7 @@
 #include <thread>
 #include <future>
 #include <atomic>
+#include <future>
 #include <cmath>
 #include <cuda.h>
 #include <optix_stubs.h>
@@ -245,10 +246,12 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
 struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 // Of the scene last loaded: its arrays besides the vertices, the meshes' vertices, the instances and materials its
 // light BVH is built from, the BVHs of its meshes by first triangle and the buffer of the BVH over its instances
+struct HairTable;
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
     std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps, bounds; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
+    std::vector<HairTable> tables; std::vector<float4> hairs; std::future<void> baking; // Hair tables, as they bake
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header; }; // Its counts
 
@@ -549,6 +552,31 @@ inline void loadSteps(Scene& scene, Loaded& loaded) {
     receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
     scene.ops = (Op*)allocate(header.rows * sizeof(Op), loaded.ops.data());
     loaded.bakeOps = allocate((header.ops - header.rows) * sizeof(Op), loaded.ops.data() + header.rows);
+    // Then the hair tables, of their roughness, radial roughness, offset, coat, IOR, Random Roughness, level count and
+    // lobe weights: per level, at the midpoint in its random number of its bin uniform in the square root, its record
+    // and its tables at 16 absorptions uniform in u = e^(-2 sigma), baked as the rest loads and the module compiles
+    unsigned tables;
+    receive(&tables, sizeof(unsigned), 1);
+    std::vector<float> entries(11 * tables);
+    receive(entries.data(), sizeof(float), entries.size());
+    loaded.tables.clear(), loaded.hairs.clear();
+    for (const float* e = entries.data(); e < entries.data() + entries.size(); e += 11)
+        for (unsigned k = 0; k < unsigned(e[6]); ++k) {
+            const double f = 1 + 2 * ((k * k + (k + 1) * (k + 1)) / 512.0 - 0.5) * e[5], coat = std::max(1.0 - e[3], 1e-3),
+                r = std::max(e[1] * f, 0.001), s = (0.265 * r + 1.194 * r * r + 5.372 * std::pow(r, 22)) * std::sqrt(M_PI / 8);
+            const auto variance = [](double r) { r = std::max(r, 0.001); return std::pow(0.726 * r + 0.812 * r * r + 3.7
+                * std::pow(r, 20), 2); };
+            const unsigned no = e[0] >= 0.05 ? 32 : e[0] >= 0.02 || e[1] >= 0.02 ? 64 : 128;
+            loaded.hairs.insert(loaded.hairs.end(), {{float(std::max(std::sqrt(variance(e[0] * f)) / 2, 1e-5)),
+                float(coat), e[2], float(header.images + 2 * loaded.tables.size())}, {float(no), float(4 * no),
+                float(8 * no), 16}, {e[7], e[8], e[9], e[10]}});
+            loaded.tables.push_back({variance(e[0] * f), variance(e[0] * f * coat), coat, s, e[2], e[4], no});
+        }
+    loaded.baking = std::async(std::launch::async, [&tables = loaded.tables] {
+        std::vector<double> sigmas(16);
+        for (int q = 0; q < 16; ++q) sigmas[q] = q ? -std::log(q / 15.0) / 2 : INFINITY;
+        hairTables(tables, sigmas);
+    });
 }
 inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) {
     const auto& header = loaded.header;
@@ -594,19 +622,28 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     receive(shapes.data(), sizeof(unsigned), shapes.size());
     std::vector<CUtexObject> images(2 * header.images); // Each image's two textures
     for (unsigned k = 0; k < header.images; ++k) texture(shapes[2 * k], shapes[2 * k + 1], loaded, &images[2 * k]);
-    scene.images = (CUtexObject*)allocate(images.size() * sizeof(CUtexObject), images.data());
     unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
     receive(&attributes, sizeof(unsigned), 1);
     scene.attributes = upload(read<float4>(attributes));
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top, loaded);
+    loaded.baking.wait(); // The hair tables baked as the rest loaded: each level's rows' and columns' images after them
+    for (const HairTable& t : loaded.tables) {
+        images.resize(images.size() + 4);
+        texture(4 * t.no + 1, t.no | 1u << 24, loaded, &images[images.size() - 4], t.rows.data());
+        texture(8 * t.no + 2, 16 * t.no | 1u << 24, loaded, &images[images.size() - 2], t.columns.data());
+    }
+    loaded.tables.clear();
+    scene.hairs = upload(loaded.hairs);
+    scene.images = (CUtexObject*)allocate(images.size() * sizeof(CUtexObject), images.data());
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (3 * meshes != corners) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
         (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
-        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds, (CUdeviceptr)scene.strands};
+        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds, (CUdeviceptr)scene.strands,
+        (CUdeviceptr)scene.hairs};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
