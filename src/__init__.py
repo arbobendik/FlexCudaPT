@@ -1391,7 +1391,7 @@ class Flex(bpy.types.RenderEngine):
     def spawn(self):
         self.device = device()  # That of the renderer, which the preference may change since
         process = subprocess.Popen((BINARY + '-vulkan' * (self.device == 'VULKAN'), str(self.shared.fileno()),
-            str(os.getpid())),
+            str(os.getpid())) + ('headless',) * bpy.app.background,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),))
         self.requests = process.stdin
         self.answers = process.stdout
