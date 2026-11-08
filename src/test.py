@@ -1463,7 +1463,7 @@ glowing.materials.append(hot := bpy.data.materials.new('black body'))
 emitting, heated = (hot.node_tree.nodes.new(kind) for kind in ('ShaderNodeEmission', 'ShaderNodeBlackbody'))
 hot.node_tree.links.new(heated.outputs[0], emitting.inputs['Color'])
 hot.node_tree.links.new(emitting.outputs[0], hot.node_tree.nodes['Material Output'].inputs['Surface'])
-body.collection.objects.link(bpy.data.objects.new('black body', glowing))
+body.collection.objects.link(portal := bpy.data.objects.new('black body', glowing))
 for temperature in (4000, 6500, 20000):
     heated.inputs['Temperature'].default_value = temperature
     kim = -3.0258469e9 / temperature ** 3 + 2.1070379e6 / temperature ** 2 + 0.2226347e3 / temperature + 0.240390
@@ -1474,6 +1474,21 @@ for temperature in (4000, 6500, 20000):
         xyz = numpy.array(Color(seen.mean((0, 1))).from_scene_linear_to_xyz_d65())
         assert numpy.allclose((*xyz[:2] / xyz.sum(), xyz[1]), locus, atol=3e-4), ('black body', temperature,
             preferences.device, xyz)
+preferences.device = device
+# An Environment Texture without a vector reads along its position from the world's origin, as in the world along the
+# ray: an emitter at (-2, -2, 2.83) seen straight down reads the texel at u 0.875, v 0.75 of a 4 x 2 image, where its
+# generated point, a direction of the +x+y+z octant, read u 0.25 to 0.5
+body.camera.location = -2, -2, 4.83
+portal.location = -2, -2, 2.83
+texels = numpy.array([(k / 8, 1 - k / 8, (k % 3) / 2, 1) for k in range(8)], 'f')
+(sky := bpy.data.images.new('sky texels', 4, 2, float_buffer=True)).pixels.foreach_set(texels.ravel())
+looked = hot.node_tree.nodes.new('ShaderNodeTexEnvironment')
+looked.image, looked.interpolation = sky, 'Closest'
+hot.node_tree.links.new(looked.outputs[0], emitting.inputs['Color'])
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=body.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(body.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean((0, 1))
+    assert numpy.allclose(seen, texels[4 + 3, :3], atol=1e-3), ('environment by position', preferences.device, seen)
 preferences.device = device
 bpy.context.window.scene = shown
 # A Principled Volume's blackbody emits per unit length that color times a black body's radiance at its temperature,
