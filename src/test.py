@@ -2402,11 +2402,14 @@ def nested(seed):  # On points of a host a collection instances
     empty = bpy.data.objects.new('hosts', None)
     empty.instance_type, empty.instance_collection = 'COLLECTION', group
     scene.collection.objects.link(empty)
-def hair(seed):
-    seed.hide_render, emitter = True, host('hair emitter')
+def hair(seed, grouped=False):  # Of the seed, or of a collection of it, which no strands of the emitter's come from
+    seed.hide_render, emitter = not grouped, host('hair collection emitter' if grouped else 'hair emitter')
     settings = emitter.modifiers.new('hair', 'PARTICLE_SYSTEM').particle_system.settings
     settings.type, settings.count, settings.emit_from, settings.use_emit_random = 'HAIR', 4, 'VERT', False
     settings.render_type, settings.instance_object, settings.particle_size = 'OBJECT', seed, 1
+    if grouped:
+        settings.render_type, settings.instance_collection = 'COLLECTION', bpy.data.collections.new('hair seeds')
+        scene.collection.objects.unlink(seed), settings.instance_collection.objects.link(seed)
     emitter.show_instancer_for_render = False
 def children(kind, seed):  # The seed instanced at the host's vertices or faces, beside a hidden child
     ob = host(f'{kind} host')
@@ -2433,6 +2436,7 @@ instancing('collected', collected, 2, 5)
 instancing('made', lambda seed: (setattr(seed, 'hide_render', True), nodes('made host', ico)), 20, 5)
 instancing('nested', nested, 2, 5)
 instancing('hair', hair, 2, 4)
+instancing('hair collection', lambda seed: hair(seed, True), 2, 4)
 instancing('vertex instanced', lambda seed: children('VERTS', seed), 2, 4)
 instancing('face instanced', lambda seed: children('FACES', seed), 2, 1)
 
@@ -2608,6 +2612,49 @@ plane('lone', -0.5, 0, 0.5)
 pointed = render()
 bpy.data.objects['points'].hide_render = True
 assert numpy.array_equal(pointed, render()), 'no triangles, no geometry'
+
+# Strands: a plane growing red particle hair as paths, 40 strands of 20 simple children each, and beside it a curves
+# object of 30 green strands, seen from above under the sky at 16 samples. On both backends each covers pixels of its
+# color, as many on either within a tenth; the emitter hidden, its hair alone still; hidden, none
+scene = opened('hair')
+scene.flex_samples, scene.camera = 16, add(bpy.data.cameras.new('hair'), (0, -1.2, 0.9), (math.radians(55), 0, 0))
+def colored(name, color):  # A material of the color
+    material = bpy.data.materials.new(name)
+    material.node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_value = (*color, 1)
+    return material
+ground, bm = bpy.data.meshes.new('hair ground'), bmesh.new()
+bmesh.ops.create_grid(bm, size=0.5)
+bm.to_mesh(ground)
+grown = add(ground, (0, 0, 0))
+ground.materials.append(colored('hair ground', (0.2, 0.2, 0.2)))
+ground.materials.append(colored('red hair', (0.9, 0.05, 0.05)))
+red = ground.materials['red hair'].node_tree.nodes['Principled BSDF'].inputs  # Glowing, too dim to tint the green
+red['Emission Color'].default_value, red['Emission Strength'].default_value = (0.9, 0.05, 0.05, 1), 0.02
+settings = grown.modifiers.new('hair', 'PARTICLE_SYSTEM').particle_system.settings
+settings.type, settings.count, settings.hair_length, settings.child_type = 'HAIR', 40, 0.4, 'SIMPLE'
+settings.child_percent = settings.rendered_child_count = 20
+settings.root_radius, settings.radius_scale, settings.material = 1, 0.02, 2
+curves = bpy.data.hair_curves.new('green hair')
+curves.add_curves([4] * 30)
+curves.points.foreach_set('position', [c for k in range(30) for z in range(4)
+    for c in ((k % 6) * 0.03, (k // 6) * 0.03, z * 0.1)])
+(curves.attributes.get('radius') or curves.attributes.new('radius', 'FLOAT', 'POINT')).data.foreach_set('value',
+    [0.008] * 120)
+curves.attributes.new('surface_uv_coordinate', 'FLOAT2', 'CURVE')  # Read per curve, as the 5.2 splash's fur has it
+curves.materials.append(colored('green hair', (0.05, 0.9, 0.05)))
+green = add(curves, (0.3, 0, 0))
+add(bpy.data.hair_curves.new('no hair'), (0, 0, 0))  # Curves of no curve, piping nothing
+hue = lambda pixels, k: int(((pixels[..., k] > 2 * pixels[..., (k + 1) % 3])
+    & (pixels[..., k] > 2 * pixels[..., (k + 2) % 3])).sum())  # Pixels of the hue of channel k
+haired = [render_on(device) for device in ('OPTIX', 'VULKAN')]
+for k in (0, 1):
+    assert min(hue(image, k) for image in haired) > 20 and abs(hue(haired[0], k) - hue(haired[1], k)) \
+        <= 0.1 * hue(haired[0], k), ('hair', k, [hue(image, k) for image in haired])
+grown.show_instancer_for_render = False  # Its hair alone: a scene of no triangle but the lights'
+assert all(hue(render_on(device), 0) > 0.5 * hue(haired[0], 0) for device in ('OPTIX', 'VULKAN')), 'hair alone'
+grown.modifiers['hair'].show_render, green.hide_render = False, True
+assert all(hue(render_on(device), 0) == hue(render_on(device), 1) == 0 for device in ('OPTIX', 'VULKAN')), 'hidden'
+preferences.device = 'OPTIX'
 
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
