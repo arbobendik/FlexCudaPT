@@ -447,10 +447,11 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.colors = upload(read<float4>(3 * meshes)), scene.tangents = upload(read<float4>(3 * meshes));
     scene.passes = upload(read<float>(meshes)); // Per triangle of the meshes its material's pass index, then its
     const std::vector<Material> table = read<Material>(meshes + 1); // material and the world's
-    struct { unsigned points, segments; } hair; // Strands: their points, per segment its first point and strand, its
-    receive(&hair, sizeof(hair), 1); // bounds and its material
+    struct { unsigned points, segments, strands; } hair; // Strands: their points, per segment its first point and
+    receive(&hair, sizeof(hair), 1); // strand and its bounds, per strand its first point, count and random, per segment
     scene.points = upload(read<float4>(hair.points)), scene.segments = upload(read<unsigned>(2 * hair.segments));
-    loaded.bounds = (CUdeviceptr)upload(read<OptixAabb>(hair.segments));
+    loaded.bounds = (CUdeviceptr)upload(read<OptixAabb>(hair.segments)); // its material
+    scene.strands = upload(read<float4>(hair.strands));
     const std::vector<Material> strands = read<Material>(hair.segments);
     loaded.materials.clear();
     for (Instance& instance : instances) {
@@ -487,7 +488,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
         (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
-        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds};
+        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds, (CUdeviceptr)scene.strands};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
