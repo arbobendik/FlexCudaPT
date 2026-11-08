@@ -966,12 +966,13 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
     origin = origin + direction * (camera.lens.near / along);
     float reach = (camera.lens.far - camera.lens.near) / along;
     const float3 start = origin;
-    Hit hit = {NONE};
-    float distance = 0;
-    do {
-        hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : key(scene, hit));
-        origin = origin + direction * distance, reach -= distance;
-    } while (hit.triangle != NONE && scene.materials[key(scene, hit)].hidden);
+    float at = 0;
+    Hit hit = traverse(scene, origin, direction, reach, at);
+    // Past hidden surfaces layer by layer, from an ulp short of a hidden first hit
+    for (bool first = true; hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0; first = false) {
+        if (first) at = __uint_as_float(__float_as_uint(at) - 1);
+        hit = nextLayer(scene, origin, direction, reach, at, first ? NONE : key(scene, hit));
+    }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit,
@@ -1473,11 +1474,12 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             hit.uv = r.rc.uv;
             distance = length(reconnection - origin);
         }
-        // Past hidden surfaces wherever the camera sees straight
-        for (float past = distance; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden;
-            distance += past)
-            hit = traverse(scene, origin + direction * distance, direction, 1e16f, past,
-                past < 1e-4f ? NONE : key(scene, hit));
+        // Past hidden surfaces layer by layer wherever the camera sees straight
+        for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
+            first = false) {
+            if (first) distance = __uint_as_float(__float_as_uint(distance) - 1);
+            hit = nextLayer(scene, origin, direction, 1e16f, distance, first ? NONE : key(scene, hit));
+        }
         // The connection to the environment direction has to escape the scene
         if (replay && b == stop && rc == RC_ENV && hit.triangle != NONE) {
             return fail;
