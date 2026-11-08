@@ -91,7 +91,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None}  # MEDIUM and
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
+    'HAIR': lambda level: level}  # MEDIUM and
 # CURVES steps past every program's end, of a scene whose media vary from point to point, so the renderer tracks those
 # it fills alone, and of one with strands
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
@@ -335,7 +336,7 @@ def summarize(expression, table, scales):
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
         not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
-        'ANISOTROPIC') or any(part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
+        'ANISOTROPIC', 'HAIR') or any(part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
         part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
@@ -614,7 +615,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC') and OPS[name] \
+    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR') and OPS[name] \
         and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
@@ -1299,6 +1300,7 @@ def closed(ob, mesh):  # Whether the object is a closed mesh, each edge shared b
 SEALING = {'closed': True, 'asked': False}
 STEFAN_BOLTZMANN = 5.670374419e-8  # W / (m^2 K^4), CODATA 2018
 BLACKBODY_UNIT = 1e-6  # Blender's unit scale of a volume's Blackbody Intensity 1
+HAIRS = {}  # Of each hair table, by its entry, its first level
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
@@ -1466,6 +1468,7 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
+        HAIRS.clear()
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
@@ -1978,7 +1981,8 @@ class Flex(bpy.types.RenderEngine):
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
             ('CURVES', sum(map(len, hairs)))) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
-            if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures
+            if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
+                    self.hairs or any(  # textures, and hair tables,
                 # keep their shape, and no volume varies, whose bounds a value changed may move
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
@@ -2007,7 +2011,7 @@ class Flex(bpy.types.RenderEngine):
                 numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
                 numpy.array(again, 'I')))
             return
-        self.shape = shape
+        self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         self.volumes, self.varying = volumes, varying
@@ -2022,9 +2026,10 @@ class Flex(bpy.types.RenderEngine):
         # the point and segment counts, per point its position and radius, per segment its first point and strand and
         # its bounds, per strand its first point, point count, random number, root's UV and color, and per segment its
         # strand's material; then the texels and the programs of the bakes; then each image's width and height, RGBA8
-        # in its bit 26, and its texels
+        # in its bit 26, and its texels; the hair tables' count and entries after the steps, baked as the rest loads
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
+            struct.pack('<I', len(HAIRS)), numpy.array([*HAIRS], 'f'),
             *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
             values)), *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
