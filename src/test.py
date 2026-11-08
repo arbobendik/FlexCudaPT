@@ -1707,6 +1707,25 @@ for device in ('OPTIX', 'VULKAN'):
         for i, ob in enumerate(layers): ob.hide_render, ob.location.z = i >= n, 1 + i * spacing
         assert numpy.isclose(render().mean() / open_, 0.5 ** n, rtol=0.02), f'layers {device} {n} {spacing}'
 
+# Camera rays through three overlapping camera-hidden point lights of radius 1, as the Junkshop scene's, under reuse:
+# their spheres cross where two surfaces lie 1e-4 apart, which once held a ray between them forever, on both backends
+scene = new('hidden lights')
+scene.render.resolution_x, scene.render.resolution_y = 1280, 720
+scene.flex_samples, scene.flex_restir, scene.flex_neighbors, scene.flex_bounces = 64, True, 3, 16
+scene.camera = add(bpy.data.cameras.new('hidden lights'), (0, 0, 0))
+scene.camera.matrix_world = Matrix(((0.776316, 0.127446, 0.617326, 4.49636),
+    (0.630344, -0.157011, -0.760272, -8.036633), (3.4e-05, 0.979339, -0.202225, 0.634935), (0, 0, 0, 1)))
+scene.camera.data.lens, scene.camera.data.sensor_width = 24.972034, 32
+shape('hidden floor', grid(40), (0, 0, -0.5))
+for k, x, y in ((0, 1.372625, -1.460703), (1, 1.823639, -1.343166), (2, 1.594032, -1.392367)):
+    light = bpy.data.lights.new(f'hidden light {k}', 'POINT')
+    light.shadow_soft_size, light.energy = 1, 12
+    add(light, (x, y, 0.903875)).visible_camera = False
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    assert numpy.isfinite(bpy.data.images.load(scene.render.filepath).pixels[:]).all(), f'hidden lights {device}'
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')

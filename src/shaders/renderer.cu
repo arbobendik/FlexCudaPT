@@ -1006,12 +1006,15 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
     origin = origin + direction * (camera.lens.near / along);
     float reach = (camera.lens.far - camera.lens.near) / along;
     const float3 start = origin;
-    Hit hit = {NONE};
-    float distance = 0;
-    do {
-        hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : key(scene, hit));
-        origin = origin + direction * distance, reach -= distance;
-    } while (hit.triangle != NONE && scene.materials[key(scene, hit)].hidden);
+    float at = 0;
+    Hit hit = traverse(scene, origin, direction, reach, at);
+    // Past hidden surfaces layer by layer, by distance then index, so that each is met once and the loop ends; a hidden
+    // first hit starts the layers over an ulp short of it, from the lowest index there, in the one call it shares with
+    // the layers after, which Vulkan's shader holds once per caller
+    for (bool first = true; hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0; first = false) {
+        if (first) at = __uint_as_float(__float_as_uint(at) - 1);
+        hit = nextLayer(scene, origin, direction, reach, at, first ? NONE : key(scene, hit));
+    }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit,
