@@ -145,6 +145,7 @@ PANELS = (
     'RENDER_PT_simplify_viewport',
     *(panel.__name__ for panel in CAMERA_PANELS if panel.__name__ != 'DATA_PT_camera_stereoscopy'))  # One view
 SCENE, REQUEST, UPDATE, STEPS = range(4)  # Kinds of what the renderer is piped
+STRANDS = 2  # An instance's flag in place of whether in world space: of strands, in its object's space
 
 def span(node):  # Of the points of a curves node's curves
     curves = node.mapping.curves
@@ -1613,9 +1614,71 @@ class Flex(bpy.types.RenderEngine):
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
         points, segments, hairs, bounds = [numpy.empty((0, 4), 'f')], [], [], []  # Strands: their points in their
         # object's space and radius; per segment its first point and strand, material and bounds
+        tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for
+            layer in row), row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])  # Per slot a material
+        pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
+            and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
+            and (m.show_render if depsgraph.mode == 'RENDER' else m.show_viewport)]  # Its hair shown as paths
+        def hair(i, instance, ob):  # An object's strands, of its particle hair rendered as paths and its curves
+            SEALING['closed'] = False
+            shades = [rows[variant(material)] if variant(material) in rows else current.update(scales=None, made=[])
+                or rows.setdefault(variant(material), shaded_row(material)) for material in [slot.material
+                for slot in ob.material_slots] or [None]]
+            current.clear()
+            if shaded or (key := ('STRANDS', ob.name)) in entries:  # Its rows alone, or its strands piped once
+                return shaded or record(~i, instance, ob, entries[key])
+            paths, counts, index = [], [], []  # Per path or object its points and radius, per strand its count and
+            # material's slot
+            for system, modifier in pathed(ob):  # As evaluated
+                settings = system.settings
+                # Of the render's steps in a render, children alone if any, but parents shown too
+                steps = 2 ** (settings.render_step if depsgraph.mode == 'RENDER' else settings.display_step) + 1
+                parents, children = len(system.particles), len(system.child_particles)
+                radius = lambda n: (settings.tip_radius + (settings.root_radius - settings.tip_radius) * (1
+                    - numpy.linspace(0, 1, n)) ** (1 + settings.shape if settings.shape < 0 else 1 / (1
+                    - settings.shape) if settings.shape < 1 else numpy.inf)) * settings.radius_scale / 2 * (
+                    numpy.arange(n) < n - settings.use_close_tip)  # Half its thickness by its shape, of n points
+                for k in [*(range(parents) if not children or settings.use_parent_particles else ()),
+                        *range(parents, parents + children)]:  # In the world of the original, moved into its space;
+                    # its steps up to its own end, past which a shorter child's are the origin
+                    co = numpy.array([system.co_hair(ob, particle_no=k, step=s) for s in range(steps)])
+                    n = int(numpy.argmin(numpy.append(co[1:].any(1), False))) + 1
+                    paths.append(numpy.column_stack((transformed(co[:n], ob.matrix_world.inverted()), radius(n))))
+                    counts.append(n)
+                    index.append(settings.material - 1)
+            if ob.type == 'CURVES' and len(ob.data.curves):  # Its points by curve and their radius (Blender's default
+                # without), its own space
+                curves, offsets = ob.data, numpy.empty(len(ob.data.curves) + 1, 'i')
+                read = lambda name, n, value, kind='f': (a := numpy.full(n, value, kind), name in curves.attributes
+                    and curves.attributes[name].data.foreach_get('value' if curves.attributes[name].data_type
+                    in ('FLOAT', 'INT') else 'vector', a))[0]  # By its type: per curve, a Float2 is no value either
+                curves.curve_offset_data.foreach_get('value', offsets)
+                paths.append(numpy.column_stack((read('position', 3 * len(curves.points), 0).reshape(-1, 3),
+                    read('radius', len(curves.points), 0.005)))), counts.append(numpy.diff(offsets))
+                index.append(read('material_index', len(curves.curves), 0, 'i'))
+            count = numpy.hstack([[], *counts]).astype('I')  # Per strand its points
+            strand = numpy.repeat(numpy.arange(len(count), dtype='I'), count)
+            p = numpy.concatenate([numpy.empty((0, 4)), *paths], dtype='f')
+            segment = numpy.flatnonzero(strand[:-1] == strand[1:]).astype('I')  # Of each two points of a strand, by its
+            box = [f(p[:-1, :3] + sign * p[:-1, 3:], p[1:, :3] + sign * p[1:, 3:])[segment] for sign, f in ((-1,
+                numpy.minimum), (1, numpy.maximum))]  # first; its spheres' bounds
+            entries[key] = sum(map(len, segments)), len(segment), STRANDS
+            segments.append(numpy.column_stack((segment + sum(map(len, points)), strand[segment]
+                + sum(map(len, hairs)))))
+            bounds.append(numpy.hstack(box))
+            points.append(p)
+            hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
+            record(~i, instance, ob, entries[key])  # Apart from its emitter's mesh
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
+            if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
+                if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
+                    if ~i not in self.slots: return self.start(setattr(self, 'visible', None) or depsgraph)
+                    record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
+                    for column in columns: column.append(column[0])
+                if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
+                if ob.type == 'CURVES': continue
             # Hidden from renders as Blender's are: an object by its setting, though particles' and geometry nodes'
             # instances of it are kept, nested in collection instances too, whose members it isn't; an instancer of
             # particles, vertices or faces unless shown in renders; and the children a vertex or face instancer
@@ -1785,9 +1848,7 @@ class Flex(bpy.types.RenderEngine):
             for column, array in zip(columns, (positions if world else point, (normals if world else
                 normal.reshape(-1, 3)[loops]).reshape(-1, 3, 3), orco, point, uv, color, tangent,
                 passes[numpy.minimum(index, len(passes) - 1)])): column.append(array)
-            table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row),
-                row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
-            materials.append(table[index])
+            materials.append(tabled(shades, ob)[index])
             if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
             media = ((0,) * 6, 0)
             if i in volumes:  # Its volumes' bound inside its points: in the world, its object and their generated
@@ -1810,7 +1871,7 @@ class Flex(bpy.types.RenderEngine):
                 return self.start(depsgraph)
             self.volumes.update(volumes)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
-                enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], count),
+                enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
                 *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:41].astype('f'),
                 instances[k][3][:21].astype('f')))))
             return
@@ -1861,7 +1922,8 @@ class Flex(bpy.types.RenderEngine):
         bakes, again = [k + rows for k in bakes], [k + rows for k in again]  # The bakes' steps after the materials'
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
-        ops += [([*OPS].index('MEDIUM'), 0, 0, 0)] * bool(varying)
+        ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
+            ('CURVES', sum(map(len, hairs)))) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or any(  # textures
                 # keep their shape, and no volume varies, whose bounds a value changed may move
