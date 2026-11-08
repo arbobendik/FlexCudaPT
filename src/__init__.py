@@ -1065,14 +1065,14 @@ def normal_map(node, inputs, index):
     return normalize(mix(('NORMAL',), color, ('MAXIMUM', strength, 0)))
 
 # Color or alpha of an image node at its vector, projected and extended, pink when missing, of an environment node along
-# its projected direction. Cycles dissociates colors from their alpha where reading it unless the image packs channels,
-# ignores its alpha, which is one then, or holds data.
+# its projected direction, by default its position's from the world's origin, as Blender's. Cycles dissociates colors
+# from their alpha where reading it unless the image packs channels, ignores its alpha, which is one then, or holds data.
 def image(node, inputs, index):
     if not (node.image and node.image.size[0]): return numpy.array((1, 0, 1))
     source = ImageRead(node, point_of(node, inputs[0], ('UV',)))
     point = point_of(node, inputs[0], ('UV',))
     if node.type == 'TEX_ENVIRONMENT':
-        point = node.projection, point_of(node, inputs[0])
+        point = node.projection, point_of(node, inputs[0], ('POSITION',))
     elif node.projection in ('SPHERE', 'TUBE'):  # Around the center of the unit cube
         x, y, z = (('DOT_PRODUCT', ('SUBTRACT', ('MULTIPLY', point, 2), 1), axis) for axis in numpy.eye(3))
         around = ('ADD', 0.5, ('DIVIDE', ('ARCTAN2', x, y), -2 * math.pi)), ('ADD', ('MULTIPLY', z, 0.5), 0.5)
