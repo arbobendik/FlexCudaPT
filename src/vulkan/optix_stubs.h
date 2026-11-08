@@ -195,7 +195,7 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     }) ? OPTIX_ERROR_LAUNCH_FAILURE : OPTIX_SUCCESS;
 }
 
-// A build input as its level takes it: triangles at the bottom, instances of bottom levels on top
+// A build input as its level takes it: triangles or bounds at the bottom, instances of bottom levels on top
 struct Geometry {
     VkAccelerationStructureGeometryKHR geometry;
     VkAccelerationStructureBuildGeometryInfoKHR info;
@@ -216,6 +216,11 @@ inline void describe(Geometry& geometry, const OptixBuildInput& input, const Opt
         .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
         .vertexData = {.deviceAddress = array.vertexBuffers ? *array.vertexBuffers : 0},
         .vertexStride = 3 * sizeof(float), .maxVertex = array.numVertices ? array.numVertices - 1 : 0, .indexType = VK_INDEX_TYPE_NONE_KHR}}};
+    if (input.type == OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES) // Strands' segments, read on the device
+        geometry.count = input.customPrimitiveArray.numPrimitives, geometry.geometry = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_AABBS_KHR,
+            .geometry = {.aabbs = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_AABBS_DATA_KHR,
+            .data = {.deviceAddress = *input.customPrimitiveArray.aabbBuffers}, .stride = sizeof(OptixAabb)}}};
     geometry.info = {.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
         .type = geometry.top ? VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR
         : VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
