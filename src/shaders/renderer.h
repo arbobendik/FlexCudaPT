@@ -18,15 +18,15 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES }; // The last two no program takes: a scene's varying
-// media and strands
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO }; // MEDIUM and CURVES no program takes: a
+// scene's varying media and strands
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 640;
+constexpr unsigned RECORD_STRIDE = 656;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -111,5 +111,6 @@ struct Scene {
     unsigned long long* anchorTrails;
     float4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     unsigned long long* images; // Of each image the materials read, its texture by its index
-    float4* points; unsigned* segments; // Strands: their points and radius, per segment its first point and strand
+    float4* points; unsigned* segments; // Strands: their points and radius, per segment its first point and strand,
+    float4* strands; // per strand its first point and point count and its random number
 };

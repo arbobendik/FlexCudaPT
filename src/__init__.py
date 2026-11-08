@@ -91,9 +91,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None}  # The last two steps past every
-# program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, and of
-# one with strands
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None}  # MEDIUM and
+# CURVES steps past every program's end, of a scene whose media vary from point to point, so the renderer tracks those
+# it fills alone, and of one with strands
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1141,6 +1141,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         inputs[2])),
     'VERTEX_COLOR': lambda node, inputs, index: ('VERTEX_ALPHA',) if index else ('VERTEX_COLOR',),
     'OBJECT_INFO': lambda node, inputs, index: ('OBJECT_INFO', index),
+    'HAIR_INFO': lambda node, inputs, index: ('HAIR_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
         else (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
@@ -1612,8 +1613,9 @@ class Flex(bpy.types.RenderEngine):
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
-        points, segments, hairs, bounds = [numpy.empty((0, 4), 'f')], [], [], []  # Strands: their points in their
-        # object's space and radius; per segment its first point and strand, material and bounds
+        points, segments, hairs, bounds, roots = [numpy.empty((0, 4), 'f')], [], [], [], []  # Strands: their points
+        # in their object's space and radius; per segment its first point and strand, material and bounds; per strand its
+        # first point, point count and random number
         tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for
             layer in row), row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])  # Per slot a material
         pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
@@ -1666,6 +1668,8 @@ class Flex(bpy.types.RenderEngine):
             segments.append(numpy.column_stack((segment + sum(map(len, points)), strand[segment]
                 + sum(map(len, hairs)))))
             bounds.append(numpy.hstack(box))
+            roots.append(numpy.column_stack((numpy.cumsum(count) - count + sum(map(len, points)), count,
+                numpy.random.default_rng(0).random(len(count), 'f').view('I'))).astype('I'))
             points.append(p)
             hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
             record(~i, instance, ob, entries[key])  # Apart from its emitter's mesh
@@ -1966,16 +1970,18 @@ class Flex(bpy.types.RenderEngine):
         # world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9 vertex, 9 normal, 9
         # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
         # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); of strands
-        # the point and segment counts, per point its position and radius, per segment its first point and strand, its
-        # bounds and its strand's material; then the texels and the programs of the bakes; then each image's width and
-        # height, RGBA8 in its bit 26, and its texels
+        # the point and segment counts, per point its position and radius, per segment its first point and strand and
+        # its bounds, per strand its first point, point count and random number, and per segment its strand's
+        # material; then the texels and the programs of the bakes; then each image's width and height, RGBA8 in its bit
+        # 26, and its texels
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
             *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
             values)), *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
-            struct.pack('<2I', sum(map(len, points)), sum(map(len, segments))), *points,
+            struct.pack('<3I', sum(map(len, points)), sum(map(len, segments)), sum(map(len, hairs))), *points,
             *segments, *bounds, *(
+            numpy.hstack((root, numpy.zeros((len(root), 1), 'I'))) for root in roots), *(
             table[segment[:, 1]] for rows in [numpy.concatenate((numpy.empty((0, 6)), *hairs), dtype='f')] for table in [
             numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
             *texels, numpy.array(bakes, 'I'),
