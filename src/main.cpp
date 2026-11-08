@@ -53,6 +53,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         std::_Exit(0);
     }).detach();
     const int shared = std::atoi(argv[1]);
+    const bool tiered = TIERED && !argv[3]; // Headless (a third argument): awaiting the scene's own module, as it
+    // has no first frame to hurry
     // Scenes keep the reuse textures; the arrays of the last one loaded
     Scene scene{.pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]),
         loadPairing(PAIRING_SIZES[2])}};
@@ -212,7 +214,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     Tier* generic = nullptr;
     std::future<void> linking; // The generic's programs and pipeline, linked beside the scene's export, or a module's
     // compiled at once, beside its scene's load
-    if (TIERED) {
+    if (tiered) {
         Tier* tier = new Tier{.params = {{~0ull, ~0ull}}, .quick = true};
         start(*tier);
         if (compiled(*tier))
@@ -275,7 +277,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (again != retiring.end()) special = *again, retiring.erase(again);
                 else special = new Tier{.params = next}, give(begin(*special)); // Its compile, to the workers
                 last = std::exchange(interim, nullptr);
-                if (TIERED && !generic && !compiled(*special)) // Its module from the stand-in PTX, quicker, stands in:
+                if (tiered && !generic && !compiled(*special)) // Its module from the stand-in PTX, quicker, stands in:
                     interim = new Tier{.params = next, .quick = true}, give(begin(*interim)); // its tasks taken first
                 if ((early = compiled(*special) && !special->pipeline))
                     linking = std::async(std::launch::async, [&linked, tier = special] { linked(*tier); });
