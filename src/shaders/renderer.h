@@ -18,14 +18,15 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM }; // The last no program takes: a scene's varying media
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES }; // The last two no program takes: a scene's varying
+// media and strands
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 624;
+constexpr unsigned RECORD_STRIDE = 640;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -57,6 +58,7 @@ struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, 
 // adjugate turning its normals, its object's info and its first triangle in the scene's order
 // Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
 // generated point, and the largest extinction its volume reaches, 0 unless it varies from point to point
+constexpr unsigned STRANDS = 2; // An instance's world flag of strands, in its object's space
 struct Instance { unsigned first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
     unsigned key; };
 // Point of a triangle of an instance at its barycentrics, triangle NONE for no point
@@ -109,4 +111,5 @@ struct Scene {
     unsigned long long* anchorTrails;
     float4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     unsigned long long* images; // Of each image the materials read, its texture by its index
+    float4* points; unsigned* segments; // Strands: their points and radius, per segment its first point and strand
 };

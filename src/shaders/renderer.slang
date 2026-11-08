@@ -10,7 +10,8 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM }; // The last no program takes: a scene's varying media
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES }; // The last two no program takes: a scene's varying
+// media and strands
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -21,6 +22,7 @@ struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emis
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
 // texspace: location and size of the mesh's texture space; majorant: its volume's largest extinction
+static const uint STRANDS = 2; // An instance's world flag of strands, in its object's space
 struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info info; float texspace[6], majorant;
     uint key; };
 static const uint NONE = ~0u;
@@ -40,6 +42,7 @@ struct Scene {
     uint64_t* anchorTrails;
     uint4* bakeTexels; // Texels only bakes read, images and tiles
     uint64_t* images; // Of each image the materials read, its texture by its index
+    float4* points; uint* segments; // Strands: their points and radius, per segment its first point and strand
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -1739,8 +1742,8 @@ void bake(uint3 p, Scene* scene) {
 void lights(uint3 p, Scene* scene) {
     const uint triangle = p.x;
     const float emitted = scene.materials[triangle].emitted;
-    if (!(emitted > 0)) return;
     const Hit light = owned(scene, triangle);
+    if (!(emitted > 0) || scene.instances[light.instance].world == STRANDS) return; // Sampled by no light
     static const uint LIGHT_SAMPLES = 256;
     uint state = hash(triangle);
     float mean = 0;
@@ -1900,7 +1903,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 
 // A pass's record: its raygen program's number, then its scene
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 624; // From one record to the next
+static const uint RECORD_STRIDE = 640; // From one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
