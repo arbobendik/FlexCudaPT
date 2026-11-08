@@ -1042,12 +1042,15 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
     origin = origin + direction * (camera.lens.near / along);
     float reach = (camera.lens.far - camera.lens.near) / along;
     const float3 start = origin;
-    Hit hit = Hit(NONE, NONE, float2(0, 0));
-    float distance = 0;
-    do {
-        hit = traverse(scene, origin, direction, reach, distance, distance < 1e-4f ? NONE : key(scene, hit));
-        origin = origin + direction * distance, reach -= distance;
-    } while (hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0);
+    float at = 0;
+    Hit hit = traverse(scene, origin, direction, reach, at);
+    // Past hidden surfaces layer by layer, by distance then index, so that each is met once and the loop ends; a hidden
+    // first hit starts the layers over an ulp short of it, from the lowest index there, in the one call it shares with
+    // the layers after, which Vulkan's shader holds once per caller
+    for (bool first = true; hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0; first = false) {
+        if (first) at = asfloat(asuint(at) - 1);
+        hit = nextLayer(scene, origin, direction, reach, at, first ? NONE : key(scene, hit));
+    }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
     return Domain(start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit),
@@ -1587,12 +1590,11 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             hit.uv = asfloat(r.rc.yz);
             distance = length(reconnection - origin);
         }
-        // Hidden from the camera wherever it sees straight, passed as pixelDomain passes them, skipping the one passed
-        // beyond the margin
-        for (float past = distance; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
-            distance += past) {
-            hit = traverse(scene, origin + direction * distance, direction, 1e16f, past,
-                past < 1e-4f ? NONE : key(scene, hit));
+        // Hidden from the camera wherever it sees straight, passed layer by layer as pixelDomain passes them
+        for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
+            first = false) {
+            if (first) distance = asfloat(asuint(distance) - 1);
+            hit = nextLayer(scene, origin, direction, 1e16f, distance, first ? NONE : key(scene, hit));
         }
         // The connection to the environment direction has to escape the scene
         if (replay && b == stop && rc == RC_ENV && hit.triangle != NONE) {
