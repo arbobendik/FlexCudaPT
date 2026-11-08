@@ -52,6 +52,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         while (getppid() == parent) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         std::_Exit(0);
     }).detach();
+    // Scenes come through a pipe of 1 MiB, the most Linux grants unprivileged by default, which reads their gigabytes
+    // some four times as fast as its 64 KiB default
+    fcntl(0, F_SETPIPE_SZ, 1 << 20);
     const int shared = std::atoi(argv[1]);
     const bool tiered = TIERED && !argv[3]; // Headless (a third argument): awaiting the scene's own module, as it
     // has no first frame to hurry
