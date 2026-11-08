@@ -2,7 +2,7 @@
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
 import bpy, bmesh, bpy_extras.object_utils, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref, zlib
-from mathutils import Matrix
+from mathutils import Color, Matrix
 
 SIZE = 64
 COLOR = (0.8, 0.2, 0.1)
@@ -1504,9 +1504,39 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = numpy.array(bpy.data.images.load(inside.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
     assert abs(seen / math.exp(-0.99 ** 2 / 2) - 1) < 0.01, ('camera inside a varying volume', preferences.device, seen)
 preferences.device = device
-# A Principled Volume's blackbody emits per unit length a black body's radiance at its temperature, its exitance
-# 5.670374419e-8 T^4 over PI, by its intensity at Blender's unit scale of 1e-6, colored by its blackbody color: at
-# intensity 2 and 1500 K 0.18275 times that color; at 0 K nothing, never negative
+# A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
+# 2002 fit it, from 4000 K to past 12000 K: a Blackbody node seen on an emitter of strength 1, its table filtered as
+# each backend filters it
+shown = bpy.context.window.scene
+body = opened('black body')
+body.world.node_tree.nodes['Background'].inputs['Color'].default_value, body.flex_samples = (0, 0, 0, 1), 4
+body.camera = bpy.data.objects.new('black body', bpy.data.cameras.new('black body'))
+body.collection.objects.link(body.camera)
+body.camera.location.z, body.camera.data.type, body.camera.data.ortho_scale = 2, 'ORTHO', 1  # Filled by the emitter
+glowing = bpy.data.meshes.new('black body')
+bm = bmesh.new()
+bmesh.ops.create_grid(bm, size=2)
+bm.to_mesh(glowing)
+glowing.materials.append(hot := bpy.data.materials.new('black body'))
+emitting, heated = (hot.node_tree.nodes.new(kind) for kind in ('ShaderNodeEmission', 'ShaderNodeBlackbody'))
+hot.node_tree.links.new(heated.outputs[0], emitting.inputs['Color'])
+hot.node_tree.links.new(emitting.outputs[0], hot.node_tree.nodes['Material Output'].inputs['Surface'])
+body.collection.objects.link(bpy.data.objects.new('black body', glowing))
+for temperature in (4000, 6500, 20000):
+    heated.inputs['Temperature'].default_value = temperature
+    kim = -3.0258469e9 / temperature ** 3 + 2.1070379e6 / temperature ** 2 + 0.2226347e3 / temperature + 0.240390
+    locus = kim, 3.0817580 * kim ** 3 - 5.87338670 * kim ** 2 + 3.75112997 * kim - 0.37001483, 1
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        bpy.ops.render.render(scene=body.name, write_still=True)
+        seen = numpy.array(bpy.data.images.load(body.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+        xyz = numpy.array(Color(seen.mean((0, 1))).from_scene_linear_to_xyz_d65())
+        assert numpy.allclose((*xyz[:2] / xyz.sum(), xyz[1]), locus, atol=3e-4), ('black body', temperature,
+            preferences.device, xyz)
+preferences.device = device
+bpy.context.window.scene = shown
+# A Principled Volume's blackbody emits per unit length that color times a black body's radiance at its temperature,
+# its exitance 5.670374419e-8 T^4 over PI, by its intensity at Blender's unit scale of 1e-6: at intensity 2 and 1500 K
+# 0.18275 times that color; at 0 K nothing, never negative
 radiant = bpy.data.materials.new('blackbody').node_tree
 radiator = radiant.nodes.new('ShaderNodeVolumePrincipled')
 radiant.links.new(radiator.outputs[0], radiant.nodes['Material Output'].inputs['Volume'])
@@ -1516,8 +1546,10 @@ for temperature in (1500, 0):
     flex.SIDE['volume'] = True
     glow = flex.fold(flex.resolve(radiant.nodes['Material Output'].inputs['Volume']))[4]
     flex.SIDE['volume'] = False
-    radiance = 2 * 5.670374419e-8 * temperature ** 4 * 1e-6 / math.pi * flex.fold(flex.blackbody(temperature))
-    assert numpy.allclose(glow, radiance, rtol=1e-6, atol=0), ('blackbody radiance', temperature, glow, radiance)
+    radiance = 2 * 5.670374419e-8 * temperature ** 4 * 1e-6 / math.pi
+    assert not numpy.any(glow) if not radiance else glow[0] == 'MULTIPLY' and repr(glow[1]) == repr(flex.fold(
+        flex.blackbody(temperature, radiator))) and numpy.allclose(glow[2], radiance, rtol=1e-6, atol=0), (
+        'blackbody radiance', temperature, glow, radiance)
 # A volume emitting 0.5 per unit length, unscaled by its density, absorbing by the density 2 z over its
 # generated points or by 1, seen straight down against a black world, glows by the integral of its emission times its
 # transmittance along its depth of 2: 0.3200 and 0.4323, where its emission dropped would leave it black
