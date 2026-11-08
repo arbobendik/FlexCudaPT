@@ -91,8 +91,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None}  # The last a step past every program's end, of a
-# scene whose media vary from point to point, so the renderer tracks those it fills alone
+    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None}  # The last two steps past every
+# program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, and of
+# one with strands
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1610,6 +1611,8 @@ class Flex(bpy.types.RenderEngine):
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
+        points, segments, hairs, bounds = [numpy.empty((0, 4), 'f')], [], [], []  # Strands: their points in their
+        # object's space and radius; per segment its first point and strand, material and bounds
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -1900,14 +1903,20 @@ class Flex(bpy.types.RenderEngine):
         # renderer compiles from them while the rest loads; per instance its mesh's first triangle, count and whether in
         # world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9 vertex, 9 normal, 9
         # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
-        # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); then the
-        # texels and the programs of the bakes; then each image's width and height, RGBA8 in its bit 26, and its texels
+        # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); of strands
+        # the point and segment counts, per point its position and radius, per segment its first point and strand, its
+        # bounds and its strand's material; then the texels and the programs of the bakes; then each image's width and
+        # height, RGBA8 in its bit 26, and its texels
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
             *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
             values)), *(numpy.concatenate(column, dtype='f') for column in columns),
-            numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))), *texels,
-            numpy.array(bakes, 'I'),
+            numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
+            struct.pack('<2I', sum(map(len, points)), sum(map(len, segments))), *points,
+            *segments, *bounds, *(
+            table[segment[:, 1]] for rows in [numpy.concatenate((numpy.empty((0, 6)), *hairs), dtype='f')] for table in [
+            numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
+            *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes))
 
