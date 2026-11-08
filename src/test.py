@@ -1347,6 +1347,32 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
     assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber', preferences.device, seen)
 preferences.device = device
+# The absorber at a cost a bake takes, of density 2 z + Fac - Fac of a noise, on the cube unwrapped over [0, 1]: read
+# live at its points inside, which have no UV, it passes exp(-2) as before; baked over its UVs, every point inside would
+# read the one texel at UV (0, 0), which no face of the cube covers. The Fac - Fac pad is there only to put its cost
+# past the bake threshold: a change to the costs must keep this density one a bake would take
+unwrapped = new('unwrapped')
+unwrapped.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
+unwrapped.camera = fog.camera
+unwrapped.collection.objects.link(fog.camera)
+cover = bpy.data.meshes.new('unwrapped')
+bm = bmesh.new()
+bm.loops.layers.uv.new()
+bmesh.ops.create_cube(bm, size=2, calc_uvs=True)
+bm.to_mesh(cover)
+unwrapped.collection.objects.link(bpy.data.objects.new('unwrapped', cover))
+cover.materials.append(costly := mesh.materials[0].copy())
+nodes, links = costly.node_tree.nodes, costly.node_tree.links
+noise, cancel, padded = nodes.new('ShaderNodeTexNoise'), nodes.new('ShaderNodeMath'), nodes.new('ShaderNodeMath')
+cancel.operation, padded.operation = 'SUBTRACT', 'ADD'
+links.new(noise.outputs['Fac'], cancel.inputs[0]), links.new(noise.outputs['Fac'], cancel.inputs[1])
+links.new(nodes['Math'].outputs[0], padded.inputs[0]), links.new(cancel.outputs[0], padded.inputs[1])
+links.new(padded.outputs[0], nodes['Principled Volume'].inputs['Density'])
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=unwrapped.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(unwrapped.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber over UVs', preferences.device, seen)
+preferences.device = device
 # The absorber under a modifier making vertices of its own, its generated points those of its evaluated mesh, exports:
 # its texture space read while that mesh lives, which the export frees before bounding the volume
 shown = bpy.context.window.scene
