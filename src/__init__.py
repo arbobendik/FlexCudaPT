@@ -105,6 +105,9 @@ BLACK = [('NORMAL',), 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0.5, 0, 0, 0]
 # ramps, powers of a texel), and emission and coverage, which light sampling and shadow rays read with no cone, one
 # value for both
 UNFILTERED = (0, 3, 4, 6, 8, 9, 10, 11, 12, 15, 16, 17, 18)
+# Of those and the volume's emission after them, the ones a varying medium reads at points inside, which have no UV:
+# absorption, density, scattering color and emission, shaded live and never baked over UV space
+LIVE = (10, 11, 12, 19)
 # Albedo, metallic, roughness, emissive, its strength, transparency and ior per shader node, each the name of an input
 # or a constant; an ior of 1 reflects nothing specularly, as Cycles' diffuse shaders. Volume shaders on surfaces
 # reflect nothing, and rays pass through a portal without a position or direction; any other shader is diffuse. The
@@ -1566,7 +1569,7 @@ class Flex(bpy.types.RenderEngine):
             if cut:  # Its expressions as units, all, then its units cut
                 summaries.clear()
                 for attribute in surface: summarize(attribute, summaries, current.get('scales'))
-                surface = [bake(attribute) for attribute in surface]
+                surface = [attribute if k in LIVE else bake(attribute) for k, attribute in enumerate(surface)]
             if not emitted: return surface
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run main's programs, the
