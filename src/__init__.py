@@ -646,12 +646,41 @@ def constant(expression, seen=None):  # Whether it is constant before products o
             and all(constant(part, seen) for part in expression[1:])
     return seen[id(expression)]
 
-def coated(a, b):  # Two surfaces, one without a coat given the other's of weight 0, so a coat mixes in by its weight
-    return [[*x, [*y[19][:9], 0]] if len(x) < len(y) == 20 else x for x, y in ((a, b), (b, a))]
+def coated(a, b):  # Two surfaces of one shape: one without a coat given the other's of weight 0, so a coat mixes in by
+    # its weight, else none; one without hair a mark of none
+    def shaped(x, y):
+        x = [*x, *(None, 0)[len(x) - 19:max(len(x), len(y)) - 19]]
+        if len(x) > 19 and not x[19] and len(y) > 19 and y[19]: x[19] = [*y[19][:9], 0]
+        return x
+    return shaped(a, b), shaped(b, a)
+
+def joined(a, b, wa, wb):  # Two hair marks of shares wa and wb as one, their tables' entries so blended; or the one
+    entries = {1 + first: entry for entry, first in HAIRS.items()}
+    ea, eb = (entries.get(m[1][1]) if isinstance(m, tuple) and m[0] == 'HAIR' else None for m in (a, b))
+    if ea is None or eb is None: return b if ea is None else a  # Hair mixed with no hair stays hair
+    entry = [float((wa * x + wb * y) / (wa + wb)) for x, y in zip(ea, eb)]
+    entry[6] = 16 if entry[5] else 1
+    HAIRS.setdefault(entry := tuple(entry), sum(other[6] for other in HAIRS))
+    return 'HAIR', ('ADD', 1 + HAIRS[entry], (a if ea[6] > 1 else b)[1][2] if entry[6] > 1 else 0)
+
+def hairy(surface, a, b, wa, wb):  # The surface of a and b, its hair theirs joined; added, albedo and tint summed to 1
+    if len(surface) == 21:
+        surface[20] = joined(a[20], b[20], wa, wb)
+        if surface[20] and wa == wb == 1: surface[1], surface[7] = (('MINIMUM', ('ADD', a[k], b[k]), 1) for k in (1, 7))
+    return surface
 
 def mix(a, b, factor):  # Expression of a fading into b, surfaces attribute by attribute
-    if isinstance(a, list): return [mix(x, y, factor) for x, y in zip(*coated(a, b))]
+    if isinstance(a, list):
+        a, b = coated(a, b)
+        f = 0.5 if isinstance(factor, tuple) else float(numpy.mean(factor))  # A varying factor joins hair halfway
+        return hairy([None if x is None else mix(x, y, factor) for x, y in zip(a, b)], a, b, 1 - f, f)
     return 'ADD', ('MULTIPLY', a, ('SUBTRACT', 1, factor)), ('MULTIPLY', b, factor)
+
+def added(a, b):  # Of an add shader: two surfaces summed, attribute by attribute where they add, else averaged
+    a, b = coated(a, b)
+    return hairy([None if x is None else mix(x, y, 0.5) if k in (2, 3, 7, 8, 10, 12, *range(15, 20)) else
+        ('SUBTRACT', ('ADD', x, y), 1) if k in (6, 9) else ('ADD', x, y) for k, (x, y) in enumerate(zip(a, b))],
+        a, b, 1, 1)
 
 def clamp(value):
     return 'SUBTRACT', 1, ('MAXIMUM', 0, ('SUBTRACT', 1, ('MAXIMUM', 0, value)))
@@ -1139,9 +1168,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'CURVE_RGB': curves, 'CURVE_VEC': curves, 'CURVE_FLOAT': curves,
     'MIX': blend, 'MAP_RANGE': map_range, 'CLAMP': lambda node, inputs, index: between(*inputs)
         if node.clamp_type == 'RANGE' else ('MINIMUM', ('MAXIMUM', inputs[0], inputs[1]), inputs[2]),
-    'ADD_SHADER': lambda node, inputs, index: [mix(a, b, 0.5) if attribute in (2, 3, 7, 8, 10, 12, *range(15, 20))
-        else ('SUBTRACT', ('ADD', a, b), 1) if attribute in (6, 9) else ('ADD', a, b)
-        for attribute, (a, b) in enumerate(zip(*coated(*inputs)))],
+    'ADD_SHADER': lambda node, inputs, index: added(*inputs),
     'MATH': lambda node, inputs, index: (node.operation, *inputs) if OPS.get(node.operation)
         else COMPOSITES[node.operation](*inputs) if node.operation in COMPOSITES else inputs[0],
     'SEPXYZ': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], numpy.eye(3)[index]),
@@ -1214,19 +1241,41 @@ def resolve(socket, groups=()):
             k = 'MULTIPLY', k, k
             albedo = 'DIVIDE', ('ADD', ('MULTIPLY', ('SUBTRACT', n, 1), ('SUBTRACT', n, 1)), k), \
                 ('ADD', ('MULTIPLY', ('ADD', n, 1), ('ADD', n, 1)), k)
-        # Principled hair renders as a diffuse of its color: by melanin or absorption, of the color derived from
-        # Blender's documented parameters by the formulas Cycles' source reads them with, the absorption of a color at
-        # the radial roughness, and melanin's by eumelanin's and pheomelanin's coefficients and the tint's
-        if node.type == 'BSDF_HAIR_PRINCIPLED' and node.parametrization != 'COLOR':  # An approximation, as hair's is
-            fit, x = 0.245, get('Radial Roughness')
+        # Hair renders by Chiang's far field, which the loader bakes per material and Random Roughness level (HAIRS):
+        # Huang's fitted onto it, its roughness both ways, its lobes' weights R, TT, TRT and the rest by its Reflection,
+        # Transmission and Secondary Reflection, no coat, its aspect ratio round; Blender's old Hair BSDF as Chiang of
+        # its RoughnessU and V, its Reflection lobe R tinted by its color through nothing (u = 0), its Transmission
+        # no R, its color absorbed. Its albedo is the fiber's transmittance u = e^(-2 sigma) per channel, sigma per hit:
+        # of its color at the radial roughness, its absorption, or its melanin, varied per strand by the random number,
+        # eumelanin's and pheomelanin's coefficients and its tint's, by the formulas Cycles' source reads them with
+        hair, legacy, huang, hair_tint = node.type in ('BSDF_HAIR_PRINCIPLED', 'BSDF_HAIR'), node.type == 'BSDF_HAIR', \
+            getattr(node, 'model', None) == 'HUANG', 1
+        if hair:
+            fit, x, form = 0.245, get('RoughnessV' if legacy else 'Roughness' if huang else 'Radial Roughness'), \
+                getattr(node, 'parametrization', 'COLOR')
             for c in (5.574, -10.73, 2.532, -0.215, 5.969): fit = 'MULTIPLY_ADD', fit, x, c
-            sigma = get('Absorption Coefficient')
-            if node.parametrization == 'MELANIN':  # Its amount from the input's perceptually linear one
+            random = get('Random') if 'Random' in node.inputs and node.inputs['Random'].is_linked else ('HAIR_INFO', 5)
+            sigma = get('Absorption Coefficient') if form == 'ABSORPTION' else ('POWER', ('DIVIDE', ('LOGARITHM',
+                get('Color'), math.e), fit), 2)
+            if form == 'MELANIN':  # Its amount from the input's perceptually linear one
                 tint = 'DIVIDE', ('LOGARITHM', get('Tint'), math.e), fit
-                melanin = 'MULTIPLY', -1, ('LOGARITHM', ('MAXIMUM', ('SUBTRACT', 1, get('Melanin')), 1e-4), math.e)
+                melanin = 'MULTIPLY', ('MULTIPLY', -1, ('LOGARITHM', ('MAXIMUM', ('SUBTRACT', 1, get('Melanin')), 1e-4),
+                    math.e)), ('ADD', 1, ('MULTIPLY', ('SUBTRACT', ('MULTIPLY', random, 2), 1), get('Random Color')))
                 sigma = 'ADD', ('MULTIPLY', melanin, mix(numpy.array((0.506, 0.841, 1.653)),
                     numpy.array((0.343, 0.733, 1.924)), get('Melanin Redness'))), ('MULTIPLY', tint, tint)
-            albedo = 'EXPONENT', ('MULTIPLY', ('POWER', sigma, 0.5), ('MULTIPLY', fit, -1))
+            albedo, roughness = ('EXPONENT', ('MULTIPLY', sigma, -2)), 1
+            if form == 'COLOR': albedo = 'MULTIPLY', albedo, ('LESS_THAN', 0, get('Color'))  # A color of 0 absorbs all
+            if legacy: albedo, hair_tint = (0, get('Color')) if node.component == 'Reflection' else (albedo, 0)
+            # Its table: roughness, radial roughness, offset, coat, IOR, Random Roughness, levels and lobe weights, at
+            # their values unlinked; its strand's level by its random number, uniform in its square root
+            at = lambda name: float(node.inputs[name].default_value)
+            entry = (at('RoughnessU'), at('RoughnessV'), at('Offset'), 0, 1.55, 0, 1, 1, 1, 1, 1) if legacy else (
+                at('Roughness'), at('Roughness' if huang else 'Radial Roughness'), at('Offset'), 0 if huang else
+                at('Coat'), at('IOR'), at('Random Roughness'), 16 if at('Random Roughness') else 1, *((at('Reflection'),
+                at('Transmission'), *[at('Secondary Reflection')] * 2) if huang else (1, 1, 1, 1)))
+            HAIRS.setdefault(entry, sum(other[6] for other in HAIRS))
+            hair = 'HAIR', ('ADD', 1 + HAIRS[entry], ('MINIMUM', 15, ('FLOOR', ('MULTIPLY', 16, ('POWER', random, 0.5))))
+                if entry[6] > 1 else 0)
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
@@ -1256,7 +1305,7 @@ def resolve(socket, groups=()):
             density, scatter = 1, ('DIVIDE', single, path)
         # The specular level scales the reflectance at normal incidence of the share not transmitted, as Cycles'; a
         # tint or level off Blender's defaults marks the tint, the shader compiling both out for scenes marking none
-        tint, factor = get('Specular Tint', 1), get('Specular IOR Level', 0.5)
+        tint, factor = get('Specular Tint', hair_tint), get('Specular IOR Level', 0.5)  # Hair's its R lobe's tint
         level = mix(('MULTIPLY', factor, 2), 1, transparency)
         if any(isinstance(x, tuple) or numpy.any(x != y) for x, y in ((tint, 1), (factor, 0.5))):
             tint = 'SPECULAR', tint
@@ -1280,7 +1329,7 @@ def resolve(socket, groups=()):
             tint, level, alpha, absorption, density, scatter,
             ('TRANSLUCENT', get('Color')) if node.type == 'BSDF_TRANSLUCENT' else 0, sheen,
             get('Roughness' if node.type == 'BSDF_SHEEN' else 'Sheen Roughness', 0.5), anisotropy,
-            get('Anisotropic Rotation' if principled else 'Rotation'), get('Tangent')]
+            get('Anisotropic Rotation' if principled else 'Rotation'), get('Tangent')] + ([None, hair] if hair else [])
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if nonzero(weight):
@@ -1324,7 +1373,8 @@ def shade(material, program):
             vector(1, 1, 0)), {}, 'NORMAL')  # along it, where the surface reads the normal
     if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
         surface = [*BLACK[:9], 0, *BLACK[10:]]
-    layers = [surface[:10]] if len(surface) == 19 else [[*surface[19][:4], surface[4], *surface[19][5:]],
+    layers = [surface[:10]] if len(surface) == 19 or not surface[19] else [[*surface[19][:4], surface[4],
+        *surface[19][5:]],
         [*surface[:4], 0, *surface[5:10]]]
     # FlexLight's BSDF transmits apart from metallic reflection: its transmission is the share transmitted of the share
     # not metallic, its ior that of the share not metallic
@@ -1334,8 +1384,8 @@ def shade(material, program):
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
     # The base layer transmits the surface's translucent color diffusely and carries its sheen and anisotropy, a coat
     # over it none; each filled by its volume's emission
-    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow]
-        for layer in layers]
+    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow,
+        *(surface[20:] if layer is base else ())] for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1595,6 +1645,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run main's programs, the
             # shader compiling them out
+            if len(surface) == 21 and not marks(surface[20], 'HAIR'): surface = surface[:20]  # Its hair too
             if len(surface) == 20 and not nonzero(surface[19]): surface = surface[:19]  # Its volume's emission too
             if len(surface) == 19 and not marks(surface[16], 'ANISOTROPIC'): surface = surface[:16]
             if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
