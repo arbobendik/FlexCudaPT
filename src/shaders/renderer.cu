@@ -526,7 +526,7 @@ __device__ bool used(unsigned code) {
 #ifdef EXTENDED // Whether an instance holds strands, which only this PTX compiles
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
 #else // Nor varying media and strands, in a PTX compiled without their code
-#define used(code) (code != MEDIUM && code != CURVES && used(code))
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && used(code))
 #define STRAND(scene, i) false
 #endif
 #define CASE(code) case code: if (!used(code)) break;
@@ -575,6 +575,16 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                 ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
+#ifdef EXTENDED
+        CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
+            const bool strand = STRAND(scene, point.instance); // root, or random
+            const float4 root = strand ? scene.strands[scene.segments[2 * point.triangle + 1]] : make_float4(0, 0, 0, 0);
+            const float output = top[-1].x;
+            top[-1] = make_float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
+                ? (point.s + scene.segments[2 * point.triangle] - __float_as_uint(root.x)) / (__float_as_uint(root.y) - 1)
+                : 0);
+        } break;
+#endif
         CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
             const int k = int(top[-1].x);
             const float4 v = scene.attributes[info.attributes + k / 2];
