@@ -135,7 +135,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
         const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
-        const bool rare = tier.params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 7; // Varying media, strands or Hair Info,
+        const bool rare = tier.params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 15; // Varying media, strands or hair,
         // the steps after MEDIUM: the extended PTX alone
         const unsigned char* ptx[2][2] = {{build_shaders_ptx, build_standin_ptx}, {build_extended_ptx,
             build_extended_standin_ptx}};
