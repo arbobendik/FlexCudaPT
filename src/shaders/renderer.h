@@ -18,7 +18,7 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO }; // MEDIUM and CURVES no program takes: a
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR }; // MEDIUM and CURVES no program takes: a
 // scene's varying media and strands
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
@@ -33,7 +33,7 @@ struct Params { unsigned long long ops[2]; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent, glow;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow; float hair;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
 // will read, the color of Blender's Translucent BSDF, the color and roughness of its sheen, and its anisotropy, the
@@ -113,4 +113,6 @@ struct Scene {
     unsigned long long* images; // Of each image the materials read, its texture by its index
     float4* points; unsigned* segments; // Strands: their points and radius, per segment its first point and strand,
     float4* strands; // per strand its first point, point count and random number, its root's UV and color
+    float4* hairs; // Per level of a hair table: R's width and coat, offset, its rows' image; its slices, rows, columns
+    // and absorptions; its lobes' weights
 };
