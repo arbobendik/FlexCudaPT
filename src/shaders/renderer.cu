@@ -1784,8 +1784,8 @@ extern "C" __global__ void __raygen__lights() {
     const unsigned triangle = optixGetLaunchIndex().x;
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
     Material& material = scene.materials[triangle];
-    if (!(material.emitted > 0)) return;
     const Hit light = owned(scene, triangle);
+    if (!(material.emitted > 0) || scene.instances[light.instance].world == STRANDS) return; // Sampled by no light
     constexpr unsigned LIGHT_SAMPLES = 256;
     unsigned state = hash(triangle);
     float mean = 0;

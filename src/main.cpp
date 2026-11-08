@@ -131,7 +131,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
         const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
-        const bool rare = tier.params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 1; // Varying media: the extended PTX alone
+        const bool rare = (tier.params.ops[MEDIUM >> 6] >> (MEDIUM & 63) | tier.params.ops[CURVES >> 6]
+            >> (CURVES & 63)) & 1; // Varying media or strands: the extended PTX alone
         const unsigned char* ptx[2][2] = {{build_shaders_ptx, build_standin_ptx}, {build_extended_ptx,
             build_extended_standin_ptx}};
         const unsigned lengths[2][2] = {{build_shaders_ptx_len, build_standin_ptx_len}, {build_extended_ptx_len,
@@ -426,7 +427,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.anchorLights = (LightNode*)copy((CUdeviceptr)scene.lights);
             scene.anchorTrails = (unsigned long long*)copy((CUdeviceptr)scene.trails);
             scene.anchorHandle = buildScene(context, scene.anchorVertices, loaded.instances, anchorMeshes,
-                OPTIX_BUILD_OPERATION_BUILD, anchorTop);
+                OPTIX_BUILD_OPERATION_BUILD, anchorTop, loaded);
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
