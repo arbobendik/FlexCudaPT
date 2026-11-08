@@ -11,6 +11,7 @@
 #include <array>
 #include <thread>
 #include <future>
+#include <atomic>
 #include <cmath>
 #include <cuda.h>
 #include <optix_stubs.h>
@@ -296,13 +297,14 @@ inline std::vector<char> halved(const std::vector<char>& above, unsigned width, 
 // of its width asks for one, as some read samples it by its ray's cone, as two
 // textures: one the shaders read whole texels of its first level, RGBA8 as their bytes, others as their floats; and one
 // that filters linearly, by its extension, RGBA8 as k / 255 decoded from sRGB if it is, to the image's index's place
-// and the next
-inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject* objects) {
+// and the next. Its texels baked here instead where given
+inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject* objects, const void* baked = nullptr) {
     const bool chained = width >> 31;
     width &= ~(1u << 31);
     const unsigned form = shape >> 26 & 3, height = shape & 0xFFFFFF, sizes[] = {16, 4, 8, 8};
     std::vector<char> texels((size_t(width) * sizes[form] * height + 15) / 16 * 16); // As piped, in whole float4s
-    receive(texels.data(), 1, texels.size());
+    if (baked) std::copy_n((const char*)baked, texels.size(), texels.data());
+    else receive(texels.data(), 1, texels.size());
     const decltype(CU_AD_FORMAT_FLOAT) formats[] = {CU_AD_FORMAT_FLOAT, CU_AD_FORMAT_UNSIGNED_INT8, CU_AD_FORMAT_HALF,
         CU_AD_FORMAT_UNSIGNED_INT16};
     const unsigned levels = chained ? std::bit_width(std::max(width, height)) : 1;
@@ -402,6 +404,45 @@ inline void bakeHair(double so, double v, double v0, double r0, double s, double
             into[4 * j + 3] = rest / np;
         }
     }
+}
+
+// A hair material's tables, by bakeHair at no viewer angles evenly from pole to pole, nt = 4 no rows and np = 8 no columns, as
+// running sums from 0, RGBA its lobes: its rows' (nt + 1 wide), and its columns' for each sigma in turn (np + 2 wide,
+// the last past the total by the first column's, across the seam), which the renderer reads as differences of adjacent
+// sums and samples by their search
+struct HairTable { double v, v0, r0, s, alpha, eta; unsigned no; std::vector<float4> rows, columns; };
+// Each table's, their slices taken in turn by a worker on every core, the largest tables' first
+inline void hairTables(std::vector<HairTable>& tables, const std::vector<double>& sigmas) {
+    const size_t k = sigmas.size();
+    std::vector<std::pair<HairTable*, unsigned>> slices;
+    for (HairTable& t : tables) {
+        t.rows.assign(size_t(t.no) * (4 * t.no + 1), {}), t.columns.assign(t.no * k * (8 * t.no + 2), {});
+        for (unsigned o = 0; o < t.no; ++o) slices.push_back({&t, o});
+    }
+    std::stable_sort(slices.begin(), slices.end(), [](auto& a, auto& b) { return a.first->no > b.first->no; });
+    std::atomic<size_t> next = 0;
+    std::vector<std::thread> workers(std::max<size_t>(1, std::min<size_t>(slices.size(),
+        std::thread::hardware_concurrency())));
+    for (std::thread& worker : workers) worker = std::thread([&] {
+        std::vector<double> m, n;
+        const auto sums = [](const double* x, unsigned count, bool seam, float4* into) {
+            double a[4] = {};
+            for (unsigned i = 0; i <= count + seam; ++i) {
+                into[i] = {float(a[0]), float(a[1]), float(a[2]), float(a[3])};
+                for (int p = 0; p < 4; ++p) a[p] += x[4 * (i % count) + p];
+            }
+        };
+        for (size_t i; (i = next++) < slices.size();) {
+            const auto [t, o] = slices[i];
+            const unsigned no = t->no, nt = 4 * no, np = 8 * no;
+            m.resize(4 * nt), n.resize(4 * np * k);
+            bakeHair(std::sin(M_PI * o / (no - 1) - M_PI / 2), t->v, t->v0, t->r0, t->s, t->alpha, t->eta, nt, np,
+                sigmas, m.data(), n.data());
+            sums(m.data(), nt, false, &t->rows[size_t(o) * (nt + 1)]);
+            for (size_t q = 0; q < k; ++q) sums(&n[4 * np * q], np, true, &t->columns[(o * k + q) * (np + 2)]);
+        }
+    });
+    for (std::thread& worker : workers) worker.join();
 }
 
 // Refittable BVH over count triangles of vertices, or segments of strands by their bounds, built into temp and output
