@@ -18,8 +18,8 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES }; // The last two no program takes: a scene's varying
-// media and strands
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO }; // MEDIUM and CURVES no program takes: a
+// scene's varying media and strands
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -51,7 +51,8 @@ struct Scene {
     uint64_t* anchorTrails;
     uint4* bakeTexels; // Of the texels only bakes read, images and tiles: in the bake pass alone, then freed
     uint64_t* images; // Of each image the materials read, its texture by its index
-    float4* points; uint* segments; // Strands: their points and radius, per segment its first point and strand
+    float4* points; uint* segments; // Strands: their points and radius, per segment its first point and strand,
+    float4* strands; // per strand its first point and point count and its random number
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -561,7 +562,7 @@ struct Point {
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
 #ifndef EXTENDED // Nor varying media and strands, in a SPIR-V compiled without their code
-#define used(code) (code != MEDIUM && code != CURVES && used(code))
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface a program resolves to at the point, facing along the normal with the tangent space tbn, seen from the
@@ -2042,7 +2043,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 640; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 656; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
