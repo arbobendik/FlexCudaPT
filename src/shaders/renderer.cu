@@ -525,7 +525,7 @@ __device__ bool used(unsigned code) {
 #ifdef EXTENDED // Whether an instance holds strands, which only this PTX compiles
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
 #else // Nor varying media and strands, in a PTX compiled without their code
-#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && used(code))
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && used(code))
 #define STRAND(scene, i) false
 #endif
 #define CASE(code) case code: if (!used(code)) break;
@@ -552,6 +552,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(TRANSLUCENT) break;
         CASE(SHEEN) break;
         CASE(ANISOTROPIC) break;
+        CASE(HAIR) break;
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -733,7 +734,8 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         used(SHEEN) && top - stack > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top - stack > 18 ? stack[16].x : 0,
         used(ANISOTROPIC) && top - stack > 18 ? stack[17].x : 0,
         used(ANISOTROPIC) && top - stack > 18 ? stack[18] : make_float3(0, 0, 0),
-        used(MEDIUM) && top - stack > 19 ? stack[19] : make_float3(0, 0, 0)};
+        used(MEDIUM) && top - stack > 19 ? stack[19] : make_float3(0, 0, 0),
+        used(HAIR) && top - stack > 20 ? stack[20].x : 0};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {

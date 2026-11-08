@@ -929,9 +929,11 @@ twist.deform_axis, twist.angle = 'X', 0.6
 bpy.context.view_layer.update()
 exporter.visible, exporter.requests = (), io.BytesIO()
 Viewport.engine.start(exporter, depsgraph)
+tables = lambda piped, at: 4 + 44 * int(numpy.frombuffer(piped, 'I', count=1, offset=at)[0])  # Hair's, at at
 def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
     header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
-    instances = 44 + 16 * header[2]  # After the header and the steps, four words each
+    instances = 44 + 16 * header[2]  # After the header and the steps, four words each, and the hair tables
+    instances += tables(piped, instances)
     first, count = numpy.frombuffer(piped, 'I', count=2, offset=instances + 204 * k)
     return numpy.frombuffer(piped, 'f', count=9 * count, offset=instances + 204 * header[9] + 36 * (2 * header[8]
         + first)).reshape(-1, 3)
@@ -2134,7 +2136,8 @@ quarter.active_render, mesh.uv_layers.active = True, mesh.uv_layers[0]  # The gr
 exporter = exported()
 piped = exporter.requests.getvalue()
 header = numpy.frombuffer(piped, 'I', count=11)  # Mesh triangles, past the steps, instances and four columns before UVs
-assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 16 * header[2] + 204 * header[9]
+assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 16 * header[2]
+    + tables(piped, 44 + 16 * header[2]) + 204 * header[9]
     + 36 * 4 * header[8])
     == 0.25), 'render uv map'
 
