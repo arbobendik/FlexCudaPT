@@ -10,6 +10,7 @@
 #include <bit>
 #include <array>
 #include <thread>
+#include <future>
 #include <cmath>
 #include <cuda.h>
 #include <optix_stubs.h>
@@ -150,10 +151,13 @@ inline float cost(const LightNode& b, const LightNode& bounds, int dimension) {
 }
 
 constexpr int LIGHT_BUCKETS = 12;
+// Top levels of the light BVH whose second halves are built in threads of their own, 31 at most
+constexpr int LIGHT_FORKS = 5;
 
-// Light BVH over lights[start, end) appended to nodes, split between the buckets of their centroids per dimension of
-// least cost, else in the middle (pbrt-v4's buildBVH). Returns the bounds of its root.
-inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNode>& lights, size_t start, size_t end) {
+// Light BVH over lights[start, end) -> nodes: least-cost centroid bucket split, else the middle (pbrt-v4); second
+// halves of the top forks levels in threads, spliced after the first's; returns the root's bounds
+inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNode>& lights, size_t start, size_t end,
+    int forks = LIGHT_FORKS) {
     if (end - start == 1) return nodes.push_back(lights[start]), lights[start];
     LightNode bounds{};
     float3 low{INFINITY, INFINITY, INFINITY}, high = low * -1;
@@ -189,9 +193,15 @@ inline LightNode buildLights(std::vector<LightNode>& nodes, std::vector<LightNod
     if (middle == start || middle == end) middle = (start + end) / 2;
     const size_t index = nodes.size();
     nodes.emplace_back();
-    const LightNode first = buildLights(nodes, lights, start, middle);
+    std::vector<LightNode> apart; // The second half's nodes, numbered from its own root
+    std::future<LightNode> later;
+    if (forks)
+        later = std::async(std::launch::async, [&] { return buildLights(apart, lights, middle, end, forks - 1); });
+    const LightNode first = buildLights(nodes, lights, start, middle, std::max(forks - 1, 0));
     const unsigned second = nodes.size();
-    LightNode node = merge(first, buildLights(nodes, lights, middle, end));
+    LightNode node = merge(first, forks ? later.get() : buildLights(nodes, lights, middle, end, 0));
+    for (LightNode& below : apart) below.child += below.leaf ? 0 : second; // A leaf's child is its triangle
+    nodes.insert(nodes.end(), apart.begin(), apart.end());
     node.child = second;
     node.leaf = false;
     return nodes[index] = node;
