@@ -19,7 +19,7 @@ struct Surface {
     float anisotropy, anisotropic_rotation; float3 tangent, glow;
 };
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
-struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
+struct Info { float location[3], color[4], index, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
 // texspace: location and size of the mesh's texture space; majorant: its volume's largest extinction
 static const uint STRANDS = 2; // An instance's world flag of strands, in its object's space
@@ -1017,7 +1017,7 @@ float3 environment(Scene* scene, float3 direction, Ray ray) {
     const Point point = Point(0.5f - atan2(direction.y, direction.x) / (2 * PI),
         0.5f + atan2(direction.z, sqrt(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, float4(0, 0, 0, 0), direction, 0, 0, NONE, NONE);
-    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}};
+    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}};
     return shade(scene, scene.materials[scene.count].program, direction, float3x3(float3(0), float3(0), float3(0)),
         point, -direction, false, ray, info).emissive;
 }
@@ -1704,7 +1704,7 @@ void bake(uint3 p, Scene* scene) {
     const uint first = asuint(scene.ops[program - 1].value.x), width = asuint(scene.ops[program - 1].value.y);
     const uint height = asuint(scene.ops[program - 1].value.z);
     uint2* texels = (uint2*)(scene.texels + first);
-    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0}};
     if (asuint(scene.ops[program - 2].value.y) == 0) { // Over UV space, without tiles: each texel at its UV
         if (p.x >= width || p.y >= (height & 0xFFFFFF)) return;
         Point point = {};
