@@ -298,7 +298,7 @@ assert not isinstance(surface[4], tuple) and not numpy.any(surface[4]), 'degener
 # Options Flex lacks render as the closest it has: Subsurface Scattering's Burley and Skin as Random Walk, which main
 # read with an IOR of 0, as no subsurface; a DirectX normal map as the OpenGL one of its green inverted; a displacement
 # alone as its bump. A physical conductor's color is its reflectance at normal incidence, and Principled hair's by
-# melanin or absorption the color derived from Blender's documented parameters, by Cycles' source's formulas, at three
+# melanin or absorption its transmittance per hit e^(-2 sigma), sigma by Cycles' source's formulas, at three
 # values each
 closest = bpy.data.materials.new('closest')
 nodes, links, out = closest.node_tree.nodes, closest.node_tree.links, closest.node_tree.nodes['Material Output']
@@ -337,11 +337,10 @@ for melanin, redness, roughness in ((0.2, 0, 0.3), (0.5, 0.5, 0.5), (0.8, 1, 0.9
     m, r, x = (hair.inputs[name].default_value for name in ('Melanin', 'Melanin Redness', 'Radial Roughness'))
     sigma = -numpy.log(max(1 - m, 1e-4)) * ((1 - r) * numpy.array((0.506, 0.841, 1.653)) + r * numpy.array((0.343,
         0.733, 1.924))) + (numpy.log(tint) / fit(x)) ** 2
-    assert numpy.allclose(surface_of(hair)[1], numpy.exp(-numpy.sqrt(sigma) * fit(x))), ('hair by melanin', melanin)
+    assert numpy.allclose(surface_of(hair)[1], numpy.exp(-2 * sigma)), ('hair by melanin', melanin)
 hair.parametrization = 'ABSORPTION'
 sigma = numpy.array(hair.inputs['Absorption Coefficient'].default_value)
-x = hair.inputs['Radial Roughness'].default_value
-assert numpy.allclose(surface_of(hair)[1], numpy.exp(-numpy.sqrt(sigma) * fit(x))), 'hair by absorption'
+assert numpy.allclose(surface_of(hair)[1], numpy.exp(-2 * sigma)), 'hair by absorption'
 # A volume shader's Draine phase reads its α, an input named Alpha, as the phase's alone: the shader covers all of the
 # surface, as under Henyey-Greenstein, where main covered a quarter of it
 scatter = nodes.new('ShaderNodeVolumeScatter')
