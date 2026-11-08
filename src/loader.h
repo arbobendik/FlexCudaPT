@@ -11,6 +11,7 @@
 #include <array>
 #include <thread>
 #include <future>
+#include <atomic>
 #include <cmath>
 #include <cuda.h>
 #include <optix_stubs.h>
@@ -255,13 +256,14 @@ struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; s
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header; }; // Its counts
 
-// Of an image's texels in its format, a level's of half its width and height, odd ones floored, each texel the mean of
-// the 2 x 2 it covers in linear light: floats as they are, halves rounded back, RGBA8 and 16-bit UNORM rounded to their
-// nearest, RGBA8 decoded from sRGB first and encoded again if it is
+constexpr unsigned TEXEL_BYTES[] = {16, 4, 8, 8}; // Of a float4, an RGBA8, a half4 and a 16-bit UNORM texel
+
+// Next mip level: floor(width / 2) x floor(height / 2), each texel the 2 x 2 mean in linear light (sRGB decoded and
+// encoded again), rounded back to the format
 inline std::vector<char> halved(const std::vector<char>& above, unsigned width, unsigned height, unsigned form,
     bool srgb) {
-    const unsigned w = std::max(width / 2, 1u), h = std::max(height / 2, 1u), sizes[] = {16, 4, 8, 8};
-    std::vector<char> below(size_t(w) * h * sizes[form]);
+    const unsigned w = std::max(width / 2, 1u), h = std::max(height / 2, 1u);
+    std::vector<char> below(size_t(w) * h * TEXEL_BYTES[form]);
     static const auto decoded = [] { // Of sRGB bytes, as read below
         std::array<float, 256> table;
         for (int k = 0; k < 256; ++k) table[k] = k / 255.0f <= 0.04045f ? k / 255.0f / 12.92f
@@ -295,18 +297,16 @@ inline std::vector<char> halved(const std::vector<char>& above, unsigned width, 
     return below;
 }
 
-// An image piped in, of its width and height, its extension in bits 24 and 25, in 26 and 27 its format (floats, RGBA8,
-// halves or 16-bit UNORM, read as k / 65535 rounded) and sRGB in 29, with its mip chain down to one texel if bit 31
-// of its width asks for one, as some read samples it by its ray's cone, as two
-// textures: one the shaders read whole texels of its first level, RGBA8 as their bytes, others as their floats; and one
-// that filters linearly, by its extension, RGBA8 as k / 255 decoded from sRGB if it is, to the image's index's place
-// and the next
-inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject* objects) {
+// Image piped in (or baked): shape = height | extension << 24 | format << 26 | sRGB << 29, chained if width >> 31;
+// textures [index] whole texels of level 0, [index + 1] filtered by its extension
+inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject* objects, const void* baked = nullptr) {
     const bool chained = width >> 31;
     width &= ~(1u << 31);
-    const unsigned form = shape >> 26 & 3, height = shape & 0xFFFFFF, sizes[] = {16, 4, 8, 8};
-    std::vector<char> texels((size_t(width) * sizes[form] * height + 15) / 16 * 16); // As piped, in whole float4s
-    receive(texels.data(), 1, texels.size());
+    const unsigned form = shape >> 26 & 3, height = shape & 0xFFFFFF;
+    const bool srgb = shape >> 29 & 1;
+    std::vector<char> texels((size_t(width) * TEXEL_BYTES[form] * height + 15) / 16 * 16); // As piped, in whole float4s
+    if (baked) std::copy_n((const char*)baked, texels.size(), texels.data());
+    else receive(texels.data(), 1, texels.size());
     const decltype(CU_AD_FORMAT_FLOAT) formats[] = {CU_AD_FORMAT_FLOAT, CU_AD_FORMAT_UNSIGNED_INT8, CU_AD_FORMAT_HALF,
         CU_AD_FORMAT_UNSIGNED_INT16};
     const unsigned levels = chained ? std::bit_width(std::max(width, height)) : 1;
@@ -316,15 +316,15 @@ inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject*
     CUarray first;
     size_t bytes = 0;
     for (unsigned k = 0, w = width, h = height; k < levels; ++k) {
-        if (k) texels = halved(texels, w, h, form, shape >> 29 & 1), w = std::max(w / 2, 1u), h = std::max(h / 2, 1u);
+        if (k) texels = halved(texels, w, h, form, srgb), w = std::max(w / 2, 1u), h = std::max(h / 2, 1u);
         CUarray level;
         CHECK(cuMipmappedArrayGetLevel(&level, chain, k));
         if (!k) first = level;
         const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_HOST, .srcHost = texels.data(),
-            .srcPitch = w * sizes[form], .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = level,
-            .WidthInBytes = w * sizes[form], .Height = h};
+            .srcPitch = w * TEXEL_BYTES[form], .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = level,
+            .WidthInBytes = w * TEXEL_BYTES[form], .Height = h};
         CHECK(cuMemcpy2D(&copy));
-        bytes += size_t(w) * sizes[form] * h;
+        bytes += size_t(w) * TEXEL_BYTES[form] * h;
     }
     const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY, .res = {.array = {first}}};
     const CUDA_TEXTURE_DESC sampling{.addressMode = {CU_TR_ADDRESS_MODE_CLAMP, CU_TR_ADDRESS_MODE_CLAMP},
@@ -334,7 +334,7 @@ inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject*
     CUDA_RESOURCE_DESC mipmapped{.resType = CU_RESOURCE_TYPE_MIPMAPPED_ARRAY};
     mipmapped.res.mipmap.hMipmappedArray = chain;
     const CUDA_TEXTURE_DESC filtering{.addressMode = {extension, extension}, .filterMode = CU_TR_FILTER_MODE_LINEAR,
-        .flags = CU_TRSF_NORMALIZED_COORDINATES | (shape >> 29 & 1 ? CU_TRSF_SRGB : 0),
+        .flags = CU_TRSF_NORMALIZED_COORDINATES | (srgb ? CU_TRSF_SRGB : 0),
         .mipmapFilterMode = CU_TR_FILTER_MODE_LINEAR, .maxMipmapLevelClamp = float(levels - 1)};
     CHECK(cuTexObjectCreate(&objects[0], &resource, &sampling, nullptr));
     CHECK(cuTexObjectCreate(&objects[1], &mipmapped, &filtering, nullptr));
@@ -406,6 +406,45 @@ inline void bakeHair(double so, double v, double v0, double r0, double s, double
             into[4 * j + 3] = rest / np;
         }
     }
+}
+
+// A hair material's tables, by bakeHair at no viewer angles evenly from pole to pole, nt = 4 no rows and np = 8 no columns, as
+// running sums from 0, RGBA its lobes: its rows' (nt + 1 wide), and its columns' for each sigma in turn (np + 2 wide,
+// the last past the total by the first column's, across the seam), which the renderer reads as differences of adjacent
+// sums and samples by their search
+struct HairTable { double v, v0, r0, s, alpha, eta; unsigned no; std::vector<float4> rows, columns; };
+// Each table's, their slices taken in turn by a worker on every core, the largest tables' first
+inline void hairTables(std::vector<HairTable>& tables, const std::vector<double>& sigmas) {
+    const size_t k = sigmas.size();
+    std::vector<std::pair<HairTable*, unsigned>> slices;
+    for (HairTable& t : tables) {
+        t.rows.assign(size_t(t.no) * (4 * t.no + 1), {}), t.columns.assign(t.no * k * (8 * t.no + 2), {});
+        for (unsigned o = 0; o < t.no; ++o) slices.push_back({&t, o});
+    }
+    std::stable_sort(slices.begin(), slices.end(), [](auto& a, auto& b) { return a.first->no > b.first->no; });
+    std::atomic<size_t> next = 0;
+    std::vector<std::thread> workers(std::max<size_t>(1, std::min<size_t>(slices.size(),
+        std::thread::hardware_concurrency())));
+    for (std::thread& worker : workers) worker = std::thread([&] {
+        std::vector<double> m, n;
+        const auto sums = [](const double* x, unsigned count, bool seam, float4* into) {
+            double a[4] = {};
+            for (unsigned i = 0; i <= count + seam; ++i) {
+                into[i] = {float(a[0]), float(a[1]), float(a[2]), float(a[3])};
+                for (int p = 0; p < 4; ++p) a[p] += x[4 * (i % count) + p];
+            }
+        };
+        for (size_t i; (i = next++) < slices.size();) {
+            const auto [t, o] = slices[i];
+            const unsigned no = t->no, nt = 4 * no, np = 8 * no;
+            m.resize(4 * nt), n.resize(4 * np * k);
+            bakeHair(std::sin(M_PI * o / (no - 1) - M_PI / 2), t->v, t->v0, t->r0, t->s, t->alpha, t->eta, nt, np,
+                sigmas, m.data(), n.data());
+            sums(m.data(), nt, false, &t->rows[size_t(o) * (nt + 1)]);
+            for (size_t q = 0; q < k; ++q) sums(&n[4 * np * q], np, true, &t->columns[(o * k + q) * (np + 2)]);
+        }
+    });
+    for (std::thread& worker : workers) worker.join();
 }
 
 // Refittable BVH over count triangles of vertices, or segments of strands by their bounds, built into temp and output
