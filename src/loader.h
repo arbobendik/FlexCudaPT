@@ -208,7 +208,7 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
     for (unsigned i = 0; i < instances.size(); ++i) for (unsigned m = instances[i].first; m < instances[i].first +
         instances[i].count; ++m) {
         const unsigned t = instances[i].key + m - instances[i].first;
-        if (!(materials[t].emitted > 0)) continue;
+        if (!(materials[t].emitted > 0) || instances[i].world == STRANDS) continue; // Strands sampled by no light
         const float3 a = place(instances[i], vertices[3 * m]), b = place(instances[i], vertices[3 * m + 1]);
         const float3 c = place(instances[i], vertices[3 * m + 2]), n = cross(b - a, c - a);
         if (length(n) > 0)
@@ -235,7 +235,7 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 // light BVH is built from, the BVHs of its meshes by first triangle and the buffer of the BVH over its instances
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
     std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
-    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps; unsigned rows;
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps, bounds; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header; }; // Its counts
@@ -327,13 +327,16 @@ inline void texture(unsigned width, unsigned shape, Loaded& loaded, CUtexObject*
     loaded.textures.emplace_back(objects[0], objects[1], chain, bytes);
 }
 
-// Refittable BVH over count triangles of vertices, built into temp and output allocated for it or refit in them
+// Refittable BVH over count triangles of vertices, or segments of strands by their bounds, built into temp and output
+// allocated for it or refit in them
 inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr vertices, unsigned count,
-    OptixBuildOperation operation, CUdeviceptr& temp, CUdeviceptr& output) {
+    OptixBuildOperation operation, CUdeviceptr& temp, CUdeviceptr& output, bool strands = false) {
     unsigned flags = OPTIX_GEOMETRY_FLAG_NONE; // Any-hit only skips triangles, of rays enabling it
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES, .triangleArray = {
         .vertexBuffers = count ? &vertices : nullptr, .numVertices = 3 * count,
         .vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3, .flags = &flags, .numSbtRecords = 1}};
+    if (strands) input = {.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES, .customPrimitiveArray = {
+        .aabbBuffers = &vertices, .numPrimitives = count, .flags = &flags, .numSbtRecords = 1}};
     OptixAccelBuildOptions build{.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE, .operation = operation};
     OptixAccelBufferSizes sizes{};
     CHECK(optixAccelComputeMemoryUsage(context, &build, &input, 1, &sizes));
@@ -372,21 +375,24 @@ inline unsigned long long buildInstances(OptixDeviceContext context, const std::
 // triangle's number in the scene's order: each mesh's BVH built or refit in its own, the instances' anew in top
 inline unsigned long long buildScene(OptixDeviceContext context, const float3* vertices,
     const std::vector<Instance>& instances, std::map<unsigned, Mesh>& meshes, OptixBuildOperation operation,
-    CUdeviceptr& top) {
+    CUdeviceptr& top, const Loaded& loaded) {
     if (operation == OPTIX_BUILD_OPERATION_BUILD)
         for (auto& [first, mesh] : std::exchange(meshes, {})) release(mesh.temp), release(mesh.output);
-    std::map<unsigned, unsigned> counts; // Of each mesh by first triangle its triangle count; a scene of no instance
-    for (const Instance& instance : instances) counts[instance.first] = instance.count; // traces one of no triangles
+    std::map<unsigned, unsigned> counts; // Of each mesh by first triangle its triangle count, of strands by first
+    for (const Instance& instance : instances) // segment flagged in bit 31; a scene of no instance traces one of no
+        counts[instance.first | (instance.world == STRANDS) << 31] = instance.count; // triangles
     if (instances.empty()) counts[0] = 0;
-    for (auto [first, count] : counts)
-        meshes[first].handle = buildBVH(context, (CUdeviceptr)(vertices + 3 * first), count, operation,
-            meshes[first].temp, meshes[first].output);
+    for (auto [key, count] : counts) { // Strands by their segments' bounds
+        const unsigned first = key & ~(1u << 31);
+        meshes[key].handle = buildBVH(context, key >> 31 ? loaded.bounds + first * sizeof(OptixAabb)
+            : (CUdeviceptr)(vertices + 3 * first), count, operation, meshes[key].temp, meshes[key].output, key >> 31);
+    }
     std::vector<OptixInstance> placed(std::max<size_t>(instances.size(), 1), {.transform = {1, 0, 0, 0, 0, 1, 0, 0, 0,
         0, 1, 0}, .visibilityMask = 255, .traversableHandle = meshes.begin()->second.handle});
     for (size_t i = 0; i < instances.size(); ++i) {
         std::copy_n(instances[i].matrix, 12, placed[i].transform);
         placed[i].instanceId = instances[i].key, placed[i].visibilityMask = 255;
-        placed[i].traversableHandle = meshes.at(instances[i].first).handle;
+        placed[i].traversableHandle = meshes.at(instances[i].first | (instances[i].world == STRANDS) << 31).handle;
     }
     return buildInstances(context, placed, top);
 }
@@ -440,12 +446,17 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.colors = upload(read<float4>(3 * meshes)), scene.tangents = upload(read<float4>(3 * meshes));
     scene.passes = upload(read<float>(meshes)); // Per triangle of the meshes its material's pass index, then its
     const std::vector<Material> table = read<Material>(meshes + 1); // material and the world's
+    struct { unsigned points, segments; } hair; // Strands: their points, per segment its first point and strand, its
+    receive(&hair, sizeof(hair), 1); // bounds and its material
+    scene.points = upload(read<float4>(hair.points)), scene.segments = upload(read<unsigned>(2 * hair.segments));
+    loaded.bounds = (CUdeviceptr)upload(read<OptixAabb>(hair.segments));
+    const std::vector<Material> strands = read<Material>(hair.segments);
     loaded.materials.clear();
     for (Instance& instance : instances) {
         instance.key = loaded.materials.size();
-        const auto mesh = table.begin() + instance.first;
+        const auto mesh = (instance.world == STRANDS ? strands : table).begin() + instance.first;
         loaded.materials.insert(loaded.materials.end(), mesh, mesh + instance.count);
-        if (instance.world)
+        if (instance.world == 1)
             std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
     loaded.materials.push_back(table[meshes]);
@@ -468,13 +479,14 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     receive(&attributes, sizeof(unsigned), 1);
     scene.attributes = upload(read<float4>(attributes));
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
-        loaded.top);
+        loaded.top, loaded);
     if (last != scene.previousVertices) release((CUdeviceptr)last);
     if (3 * meshes != corners) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
-        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes};
+        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
+        (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
@@ -538,13 +550,13 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
         float rows[21]; // Its transform's rows and adjugate, of no use to a mesh in world space
         receive(rows, sizeof(float), 21);
         Instance& entry = loaded.instances[instance];
-        if (range.count) {
-            if (!entry.world) std::copy_n(rows, 12, entry.matrix), std::copy_n(rows + 12, 9, entry.adjugate);
+        if (range.count || entry.world == STRANDS) { // Of strands, piped without arrays
+            if (entry.world != 1) std::copy_n(rows, 12, entry.matrix), std::copy_n(rows + 12, 9, entry.adjugate);
             const unsigned attributes = entry.info.attributes; // Its instancer attributes as last piped
             entry.info = info, entry.info.attributes = attributes;
             CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[instance], &entry, sizeof(Instance)));
         }
     }
     scene.handle = buildScene(context, scene.vertices, loaded.instances, loaded.meshes, OPTIX_BUILD_OPERATION_UPDATE,
-        loaded.top);
+        loaded.top, loaded);
 }
