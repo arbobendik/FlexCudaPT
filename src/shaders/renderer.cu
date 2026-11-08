@@ -784,9 +784,22 @@ __device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, fl
             color[0].w + (color[1].w - color[0].w) * s + (color[2].w - color[0].w) * t),
         vertex.at(s, t), s, t, triangle, instance};
 }
+#ifdef EXTENDED
+// A strand segment's point, normal and axis direction in its object, at its uv as hit
+__device__ float3 strandPoint(const Scene& scene, unsigned segment, float2 uv, float3& n, float3& along) {
+    const unsigned code = __float_as_uint(uv.y), p = scene.segments[2 * segment];
+    const float theta = (code >> 16) * (PI / 65535), phi = ((code & 65535) / 65535.0f - 0.5f) * (2 * PI);
+    const float4 a = scene.points[p], b = scene.points[p + 1];
+    n = make_float3(sinf(theta) * cosf(phi), sinf(theta) * sinf(phi), cosf(theta));
+    along = normalize(make_float3(b.x - a.x, b.y - a.y, b.z - a.z));
+    return make_float3(a.x + (b.x - a.x) * uv.x, a.y + (b.y - a.y) * uv.x, a.z + (b.z - a.z) * uv.x)
+        + n * (a.w + (b.w - a.w) * uv.x);
+}
+#endif
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis) {
     if (point.triangle == NONE) return point;
+    if (STRAND(scene, point.instance)) return point; // No bump along a strand
     const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
     const float step = 1e-4f * fmaxf(ray.length, 1e-3f);
     return at(scene, point.instance, point.triangle,
@@ -796,16 +809,26 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 // Surface of an instance's triangle at its barycentrics, in a layer of its material
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
     float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
+    const Material& material = scene.materials[key(scene, instance, triangle)];
+    unsigned program = emission ? material.emission : material.program;
+    // Each layer's program follows the end of the one above it
+    while (layer) layer -= scene.ops[program++].code == END;
+#ifdef EXTENDED
+    if (STRAND(scene, instance)) { // A strand's segment, its frame along its axis and normal
+        const Instance& placed = scene.instances[instance];
+        float3 n, along;
+        const float3 o = strandPoint(scene, triangle, make_float2(s, t), n, along);
+        return shade(scene, program, normal, makeMatrix<float, 3, 3>(along, cross(n, along), n), Point{0, 0,
+            make_float3(0, 0, 0), o, make_float4(0, 0, 0, 0), place(placed, o), s, t, triangle, instance}, -direction,
+            false, ray, placed.info);
+    }
+#endif
     const Corners vertex = corners(scene.vertices, scene.instances[instance], triangle);
     const float3* normals = scene.normals + 3 * triangle;
     const Info& object = scene.instances[instance].info;
     const float3 a = objectNormal(scene, vertex.instance, normals[0]);
     const float3 b = objectNormal(scene, vertex.instance, normals[1]);
     const float3 c = objectNormal(scene, vertex.instance, normals[2]);
-    const Material& material = scene.materials[key(scene, instance, triangle)];
-    unsigned program = emission ? material.emission : material.program;
-    // Each layer's program follows the end of the one above it
-    while (layer) layer -= scene.ops[program++].code == END;
     // Footprint of the ray cone over the UVs (Akenine-Moller et al. 2019)
     // FOOTPRINT = width^2 / |cos| * UV_AREA / AREA, |cos| = |dot(face, direction)| / |face|
     // uv_cross = (uv[1] - uv[0]) x (uv[2] - uv[0]), UV_AREA / AREA = |uv_cross| / |face|
@@ -975,15 +998,31 @@ extern "C" __global__ void __anyhit__skip() {
     }
 }
 
-__device__ float3 hitPosition(const float3* vertices, const Instance* instances, Hit hit) { // Of those vertices
-    return corners(vertices, instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
+__device__ float3 hitPosition(const Scene& scene, const float3* vertices, Hit hit) { // Of those vertices
+#ifdef EXTENDED
+    float3 n, along;
+    if (STRAND(scene, hit.instance))
+        return place(scene.instances[hit.instance], strandPoint(scene, hit.triangle, hit.uv, n, along));
+#endif
+    return corners(vertices, scene.instances[hit.instance], hit.triangle).at(hit.uv.x, hit.uv.y);
 }
 
 __device__ float3 faceNormal(const Scene& scene, unsigned instance, unsigned triangle) {
     return corners(scene.vertices, scene.instances[instance], triangle).face();
 }
 
+// Of a hit, a strand's as smooth
+__device__ float3 faceNormal(const Scene& scene, Hit hit) {
+#ifdef EXTENDED
+    float3 n, along;
+    if (STRAND(scene, hit.instance))
+        return strandPoint(scene, hit.triangle, hit.uv, n, along), turn(scene.instances[hit.instance], n);
+#endif
+    return faceNormal(scene, hit.instance, hit.triangle);
+}
+
 __device__ float3 smoothNormal(const Scene& scene, Hit hit) {
+    if (STRAND(scene, hit.instance)) return faceNormal(scene, hit);
     const Corners normals = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
 }
@@ -1036,7 +1075,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
     }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
-    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene.vertices, scene.instances, hit), hit,
+    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
         camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : across / length(plane)};
 }
 
@@ -1174,7 +1213,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
                 .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
                 .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit.instance, hit.triangle), toward) > 0;
+                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
                 medium = leaves ? Medium{} : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
@@ -1271,7 +1310,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     };
     bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
     for (unsigned b = 0u; ; b++) {
-        const float3 face = faceNormal(scene, hit.instance, hit.triangle);
+        const float3 face = faceNormal(scene, hit);
         const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance, width};
         Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
             direction, ray, layer);
@@ -1281,7 +1320,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
                 make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter};
-        // Surfaces transmitting nothing face the ray
+        // Surfaces transmitting nothing face the ray; a strand's fiber has no wrong side
+        const bool strand = STRAND(scene, hit.instance);
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
@@ -1325,6 +1365,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Translucent, light sampled anywhere around
         const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
         const float3 light_normal = surface.transparency > 0 && scene.materials[key(scene, hit)].layers == 1 || sided
+            || strand
             ? make_float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
@@ -1434,21 +1475,22 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         SampleBSDF lobe = SampleBSDF{};
         if (connect) {
             if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene.vertices, scene.instances, r.rc);
+                reconnection = hitPosition(scene, scene.vertices, r.rc);
                 dir = normalize(reconnection - origin);
             }
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             // A translucent diffuse lobe past the shading normal refracts
             const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
-            if (wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE) & across), dir,
-                geometry_n)) {
+            if (!strand && wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE)
+                & across), dir, geometry_n)) {
                 return fail;
             }
         } else if (!arrived) {
             SampleBSDF bsdf_sampled = sampleBSDF(direction, surface.normal, material, eta_i, eta_o,
                 stream(r.seed, b), make_float2(0, 0));
             // Wrong-sided directions: sampled again against the face normal when transmitting, else mirrored across it
-            const bool wrong = wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction, geometry_n);
+            const bool wrong = !strand && wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction,
+                geometry_n);
             const bool fallback = wrong && surface.transparency > 0;
             if (fallback) {
                 const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, material,
@@ -1842,7 +1884,7 @@ extern "C" __global__ void __raygen__denoise() {
     const Camera& last = scene.denoisedCamera;
     const unsigned seen = dom.hit.triangle == NONE ? NONE : key(scene, dom.hit);
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
-        : hitPosition(scene.previousVertices, scene.instances, dom.hit);
+        : hitPosition(scene, scene.previousVertices, dom.hit);
     const float2 then = project(last, before, size);
     scene.flow[index] = project(scene.camera, dom.x1, size) - then;
     const int x = int(floorf(then.x)), y = int(floorf(then.y));
