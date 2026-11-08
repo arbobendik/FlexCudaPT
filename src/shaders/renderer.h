@@ -47,9 +47,9 @@ struct BSDFMaterial {
 // The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point. Light
 // sampling shades the program of its emission alone.
 struct Material { float emitted; unsigned program, hidden, layers, opaque, emission; };
-// Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index, its material's
-// pass index and its random number, then its axes, which with its location transform it into the world
-struct Info { float location[3], color[4], index, material, random, axes[9]; unsigned attributes; };
+// Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index and its random
+// number, then its axes, which with its location transform it into the world
+struct Info { float location[3], color[4], index, random, axes[9]; unsigned attributes; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of
 // their points, their power and the cone of their normals around w. A leaf holds triangle child of the instance, an
 // interior node is followed by its first child, child is its second.
