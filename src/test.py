@@ -149,7 +149,8 @@ assert not numpy.allclose(pixels[18:46, 34:62], SKY, atol=0.01), 'opaque'  # The
 for texel, (x, y) in zip(TEXELS, ((24, 0), (32, 0), (24, 8), (32, 8))):
     assert chroma(x, y, 8, texel), f'emission {texel}'
 assert chroma(44, 4, 8, (1, 1, 1)), 'leaf'
-for y in (2, 10): assert not pixels[y:y + 4, 56:60].any(), 'black'  # Reflecting nothing, as in Cycles
+# Reflecting nothing, as in Cycles: to the float noise of its evaluation, under 1e-31 where the sky lights it alone
+for y in (2, 10): assert pixels[y:y + 4, 56:60].max() < 1e-20, 'black'
 lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colored plane dark or far off its neighbors
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
 # Hidden from the camera wherever it sees straight: an emitter of radiance 1 under clear glass of IOR 1, which bends no
@@ -1851,6 +1852,49 @@ sun.energy, sun.angle = math.pi, 0
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.isclose(render().mean(), 1, rtol=0.01), f'parallel sun {device}'
+# A sphere light occludes nothing, as Cycles' lights: the sun reaches the floor through a camera-hidden point light of
+# radius 1 centered 2.5 over it, whose own 0.01 W adds 0.01 / (4 pi^2 2.5^2) there, and through one of no power
+# centered 0.5 over it, which the floor and the camera lie within; the floor holds one, as before, on both backends
+for height, power in ((2.5, 0.01), (0.5, 0)):
+    shell = add(bpy.data.lights.new(f'shell {height}', 'POINT'), (0, 0, height))
+    shell.data.shadow_soft_size, shell.data.energy, shell.visible_camera = 1, power, False
+    for device in ('OPTIX', 'VULKAN'):
+        preferences.device = device
+        seen = render().mean()
+        assert numpy.isclose(seen, 1 + power / (4 * math.pi ** 2 * height ** 2), rtol=0.01), ('light shell', height,
+            device, seen)
+    bpy.data.objects.remove(shell)
+# A sphere light is a thin shell glowing on both sides at half its radiance L = P / (4 pi^2 r^2): the floor crossing a
+# hidden one of 100 W and radius 1 centered 0.5 over it, the sun off, holds L / 2 within it, each way up meeting the
+# shell once, and without it L / 2 by the projected solid angle of the ways up through it, met twice, by quadrature
+# over the hemisphere: within 2% both, nowhere dark, seen across the rim at 0.866 from the axis
+shell = add(bpy.data.lights.new('crossed shell', 'POINT'), (0, 0, 0.5))
+shell.data.shadow_soft_size, shell.data.energy, shell.visible_camera = 1, 100, False
+sun.energy, scene.flex_samples = 0, 1024
+scene.camera.location, scene.camera.data.ortho_scale = (1, 0, 1.6), 2
+half = 100 / (8 * math.pi ** 2)
+theta, phi = ((numpy.arange(n) + 0.5) / n * k for n, k in ((256, math.pi / 2), (512, 2 * math.pi)))
+theta, phi = numpy.meshgrid(theta, phi, indexing='ij')
+up = numpy.stack((numpy.sin(theta) * numpy.cos(phi), numpy.sin(theta) * numpy.sin(phi), numpy.cos(theta)), -1)
+def crossed(rho):  # Of a point of the floor at rho from the axis, half the radiance's multiple its irradiance over pi is
+    b = up @ (numpy.array((rho, 0, 0)) - (0, 0, 0.5))
+    c = rho * rho + 0.25 - 1
+    root = numpy.sqrt(numpy.maximum(b * b - c, 0))
+    meets = (b * b > c) * ((root - b > 0).astype(float) + (-root - b > 0))
+    return (meets * numpy.cos(theta) * numpy.sin(theta)).sum() * (2 * math.pi / 512) * (math.pi / 2 / 256) / math.pi
+y, x = (numpy.mgrid[:SIZE, :SIZE] + 0.5) / SIZE * 2  # The pixels' points, the axis at y 1, x 0
+y = y - 1
+rho = numpy.hypot(x, y)
+rings = numpy.linspace(0, 2.3, 93)
+due = half * numpy.interp(rho, rings, [crossed(r) for r in rings])
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    seen = render().mean(2)
+    for name, band in (('inside', rho < 0.8), ('outside', (rho > 0.95) & (rho < 1.4))):
+        assert numpy.isclose(seen[band].mean(), due[band].mean(), rtol=0.02), ('crossed shell', name, device,
+            seen[band].mean(), due[band].mean())
+    assert (seen > 0.5 * due).all(), ('crossed shell dark', device)
+bpy.data.objects.remove(shell)
 
 # Blender's lights 2 m over Lambertian 0.8, seen from above: each ring of pixels about the light holds 0.8 / pi of the
 # irradiance Cycles' conventions give there, within 3% where above a tenth of the peak and under 1% of the peak where
