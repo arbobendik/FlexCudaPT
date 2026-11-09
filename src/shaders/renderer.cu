@@ -529,7 +529,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(PUSH) *top++ = op->value; break;
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
-        CASE(HAIR) break;
+        CASE(HAIR) top[-1] = normalize(transform(scene, tbn.rows[0], 1, info)) * top[-1].x; break; // Its fiber
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
         CASE(OBJECT) *top++ = object; break;
@@ -712,7 +712,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         used(ANISOTROPIC) && top - stack > 18 ? stack[17].x : 0,
         used(ANISOTROPIC) && top - stack > 18 ? stack[18] : make_float3(0, 0, 0),
         used(MEDIUM) && top - stack > 19 ? stack[19] : make_float3(0, 0, 0),
-        used(HAIR) && top - stack > 20 ? stack[20].x : 0};
+        used(HAIR) && top - stack > 20 ? stack[20] : make_float3(0, 0, 0)};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
