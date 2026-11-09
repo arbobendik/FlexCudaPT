@@ -215,6 +215,7 @@ for density, passed in ((0, 1), (1, math.exp(-0.6))):
 class Viewport:  # Stands in for the engine instance Blender creates for a viewport, which background mode has none of
     engine = bpy.types.RenderEngine.bl_rna_get_subclass_py('FLEX')
     start = engine.start
+    restart = engine.restart
     trace = engine.trace
     view_update = engine.view_update
     view_draw = engine.view_draw
@@ -1339,6 +1340,15 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     assert numpy.array_equal(rendered, shaded()), ('16-bit heights', preferences.device)
 preferences.device = device
 bpy.context.window.scene = scene
+# An engine persistent data keeps renders on the device the preference changed to since, as a new engine does
+scene.render.use_persistent_data, preferences.device = True, 'OPTIX'
+optix = numpy.array(shot().pixels)
+preferences.device = 'VULKAN'
+switched = numpy.array(shot().pixels)
+scene.render.use_persistent_data = False
+assert numpy.array_equal(switched, numpy.array(shot().pixels)) and not numpy.array_equal(switched, optix), \
+    'device switch'
+preferences.device = device
 # Mips: a diffuse plane of a checker of single texels, 1024 a side over 100 units, under a sky of one, seen 10 degrees
 # below the horizon from a unit above at 4 samples. Its far rows, where a pixel spans tens of texels, read its base
 # color at the level the ray's cone covers (emission reads level 0): they spread across pixels as the same plane of the
