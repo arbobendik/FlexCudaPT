@@ -746,8 +746,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[14]
         : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top > 18 ? stack[16].x : 0,
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
-        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20]
-        : float3(0, 0, 0));
+        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0));
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1325,9 +1324,66 @@ float lightPdf(Scene* scene, float3 origin, float3 normal, uint instance, uint t
         cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - origin) : 0;
 }
 
+// Running sums of a hair table level's rows (image 0) or columns (1), RGBA by lobe, filtered at x and y
+float4 hairSums(Scene* scene, float4* record, uint image, float x, float y) {
+    const float2 size = image == 0 ? float2(record[1].y + 1, record[1].x) : float2(record[1].z + 2, 16 * record[1].x);
+    return filtered[NonUniformResourceIndex(uint(scene.images[2 * uint(record[0].w) + 2 * image + 1]))].SampleLevel(
+        samplers[1], float2(x, y) / size, 0);
+}
+// Baked hair at slice o: per lobe its weight times the densities of its row y[p] and of column x,
+// lobe R tinted, an artistic extension
+static const float HAIR_WIDTHS[4] = {1, 0.5f, 2, 2};
+float3 hairSlice(Scene* scene, float4* record, float o, float4 y, float x, float3 u, float3 tint, bool binned,
+    out float density) {
+    const float nt = record[1].y, np = record[1].z, c = binned ? floor(x) : x - 0.5f - np * floor((x - 0.5f) / np);
+    float4 n[3], total = 0;
+    for (uint k = 0; k < 3; ++k) {
+        const float level = o * 16 + saturate(u[k]) * 15 + 0.5f;
+        n[k] = (hairSums(scene, record, 1, c + 1.5f, level) - hairSums(scene, record, 1, c + 0.5f, level)) * np
+            / (2 * PI);
+        if (binned) total += hairSums(scene, record, 1, np + 0.5f, level);
+    }
+    const float4 all = binned ? record[2] * hairSums(scene, record, 0, nt + 0.5f, o + 0.5f) : 0;
+    float3 f = 0;
+    density = 0;
+    for (uint p = 0; p < 4; ++p) {
+        const float w = record[0].x * (p == 0 ? record[0].y : 1) * HAIR_WIDTHS[p], a = asinh(PI / w);
+        const float r = binned ? floor(y[p]) : clamp(y[p] - 0.5f, 0, nt - 1), m = y[p] >= 0 && y[p] < nt ? record[2][p]
+            * (hairSums(scene, record, 0, r + 1.5f, o + 0.5f) - hairSums(scene, record, 0, r + 0.5f, o + 0.5f))[p]
+            / (w * cosh((2 * y[p] / nt - 1) * a) * a * 2 / nt) : 0;
+        f += m * float3(n[0][p], n[1][p], n[2][p]) * (p == 0 ? tint : float3(1, 1, 1));
+        density += m * (n[0][p] + n[1][p] + n[2][p]) / max(dot(all, total), 1e-30f);
+    }
+    return f;
+}
+// f cos toward out_dir and its density, blended between the slices about the viewer's sine
+SampleBSDF connectHair(Scene* scene, Surface surface, float3 in_dir, float3 out_dir) {
+    const float3 t = normalize(surface.hair);
+    float4* record = scene.hairs + 3 * (uint(length(surface.hair) + 0.5f) - 1);
+    const float no = record[1].x, s = clamp((asin(clamp(-dot(in_dir, t), -1, 1)) / PI + 0.5f) * (no - 1), 0, no - 1),
+        o = min(floor(s), no - 2); // Its slices even in the viewer's angle from pole to pole
+    float4 y;
+    for (uint p = 0; p < 4; ++p)
+        y[p] = hairRow(in_dir, t, out_dir, p, record[0].x * (p == 0 ? record[0].y : 1), record[0].z, uint(record[1].y));
+    const float x = hairColumn(in_dir, t, out_dir, uint(record[1].z));
+    const float cosine = max(length(cross(out_dir, t)), BIAS); // cos theta, off 0 along the fiber by BIAS
+    const float3 tint = used(SPECULAR) ? surface.tint : float3(1, 1, 1); // The Specular Tint, R's
+    float near, far, unused;
+    const float3 f = lerp(hairSlice(scene, record, o, y, x, surface.albedo, tint, false, unused), hairSlice(scene,
+        record, o + 1, y, x, surface.albedo, tint, false, unused), s - o);
+    hairSlice(scene, record, o, y, x, surface.albedo, tint, true, near), hairSlice(scene, record, o + 1, y, x,
+        surface.albedo, tint, true, far);
+    const float density = lerp(near, far, s - o);
+    return SampleBSDF(out_dir, density > 0 ? f / density : 0, 0, false, dot(out_dir, -in_dir) > dot(out_dir, t)
+        * dot(-in_dir, t) ? LOBE_REFLECT : LOBE_REFRACT, density / cosine);
+}
 // Each lobe competes with light sampling, but on the last bounce, which samples no BSDF
-float3 lightBSDF(float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material material, float eta_i,
-    float eta_o, uint random_state, float light, bool competing) {
+float3 lightBSDF(Scene* scene, Surface surface, float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material material,
+    float eta_i, float eta_o, uint random_state, float light, bool competing) {
+    if (used(HAIR) && dot(surface.hair, surface.hair) > 0) { // Hair's, weighed likewise
+        const SampleBSDF l = connectHair(scene, surface, in_dir, out_dir);
+        return l.throughput * l.pdf / (competing ? 1 + l.pdf * l.pdf / (light * light) : 1);
+    }
     // BSDF's lobes toward the light, each weighed against BSDF sampling where it competes (power heuristic)
     float3 throughputs[4];
     float pdfs[4];
@@ -1461,8 +1517,9 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         const bool nee = !passed && layer == 0u && neeDecision(material, n_dot_v, eta_i, eta_o);
         // Translucent, light sampled anywhere around
         const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
+        const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0; // Its fiber along it, by its level
         const float3 light_normal = surface.transparency > 0 && scene.materials[key(scene, hit)].layers == 1 || sided
-            || strand
+            || strand || hair
             ? float3(0, 0, 0) : surface.normal;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
@@ -1498,8 +1555,9 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
-                return Shift(throughput * lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i,
-                    eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance / r.jac, density / r.jac);
+                return Shift(throughput * lightBSDF(scene, surface, direction, light_dir, surface.normal, geometry_n,
+                    material, eta_i, eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance / r.jac,
+                    density / r.jac);
             }
             if (nee != (extractBits(r.path, PATH_NEE, 1u) == 1u)) {
                 return fail;
@@ -1513,8 +1571,9 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 const float3 radiance = sampleLight(scene, origin, light_normal, geometry_n, sides, fillings,
                     stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 return rgb_to_greyscale(radiance) > 0.0f
-                    ? Shift(throughput * lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i,
-                    eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance, 1.0f) : fail;
+                    ? Shift(throughput * lightBSDF(scene, surface, direction, light_dir, surface.normal, geometry_n,
+                    material, eta_i, eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance, 1.0f)
+                    : fail;
             }
             // Emission seen right after a vertex, against its next event estimation
             if (rc == RC_NONE && end_type == END_EMIT && !footprint) {
@@ -1534,8 +1593,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 const float3 radiance = sampleLight(scene, origin, light_normal, geometry_n, sides, fillings,
                     stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
-                    ? throughput * lightBSDF(direction, light_dir, surface.normal, geometry_n, material, eta_i, eta_o,
-                    stream(r.seed, b), light, b < scene.settings.bounces) * radiance : fail.f;
+                    ? throughput * lightBSDF(scene, surface, direction, light_dir, surface.normal, geometry_n, material,
+                    eta_i, eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance : fail.f;
                 Reservoir candidate = chain;
                 if (chain_found) {
                     candidate.radiance = safeDivide(f, chain_throughput);
@@ -1565,8 +1624,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
             // A translucent diffuse lobe past the shading normal refracts
             const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
-            if (!strand && wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE)
-                & across), dir, geometry_n)) {
+            if (!strand && !hair && wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index
+                == LOBE_DIFFUSE) & across), dir, geometry_n)) {
                 return fail;
             }
         } else if (!arrived) {
@@ -1590,7 +1649,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         }
         // Connections evaluate the given direction
         if (connect || arrived) {
-            lobe = lobeBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
+            lobe = hair ? connectHair(scene, surface, direction, dir)
+                : lobeBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
         }
         // Delta lobes and wrong-sided directions, of unknown density, have no competing light sample; straight
         // transmission keeps the preceding vertex's weights.
