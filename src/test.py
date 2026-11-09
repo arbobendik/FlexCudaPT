@@ -1438,6 +1438,22 @@ shown = bpy.context.window.scene
 opened('subdivided fog').collection.objects.link(smooth := bpy.data.objects.new('subdivided fog', mesh))
 smooth.modifiers.new('subdivision', 'SUBSURF')
 assert len(exported().varying) == 1, 'subdivided varying volume'
+# A fog of a varying color absorbing nothing, Principled Volume of density 0.5 colored by a noise mixing two colors,
+# tracks under its extinction, 0.5 as the color lies in [0, 1], not under the 1 its scattering and absorption bounded
+# apart give
+opened('colored fog').collection.objects.link(bpy.data.objects.new('colored fog', tinted := mesh.copy()))
+tinted.materials[0] = colored_fog = mesh.materials[0].copy()
+nodes, links = colored_fog.node_tree.nodes, colored_fog.node_tree.links
+links.remove(nodes['Principled Volume'].inputs['Density'].links[0])
+nodes['Principled Volume'].inputs['Density'].default_value = 0.5
+mix = nodes.new('ShaderNodeMix')
+mix.data_type, mix.inputs['A'].default_value, mix.inputs['B'].default_value = 'RGBA', (1, 0.2, 0, 1), (0, 0.6, 1, 1)
+links.new(nodes.new('ShaderNodeTexNoise').outputs['Fac'], mix.inputs['Factor'])
+links.new(mix.outputs['Result'], nodes['Principled Volume'].inputs['Color'])
+assert len(exported().varying) == 1, 'colored fog'
+majorant = flex.medium(colored_fog.evaluated_get(bpy.context.evaluated_depsgraph_get()), {'POSITION': (  # As shaded
+    numpy.full(3, -1), numpy.ones(3)), 'GENERATED': (numpy.zeros(3), numpy.ones(3))})
+assert majorant == 0.5, ('majorant of a colored fog', majorant)
 bpy.context.window.scene = shown
 # Light reaching a varying volume through it: the cube scattering all it meets, white, of density 1 + x along x, lit
 # by a sun along -x and seen straight down, once. A column at x scatters (1 - exp(-2 (1 + x))) of what reaches it
