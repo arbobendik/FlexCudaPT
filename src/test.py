@@ -1451,7 +1451,7 @@ smooth.modifiers.new('subdivision', 'SUBSURF')
 assert len(exported().varying) == 1, 'subdivided varying volume'
 # A fog of a varying color absorbing nothing, Principled Volume of density 0.5 colored by a noise mixing two colors,
 # tracks under its extinction, 0.5 as the color lies in [0, 1], not under the 1 its scattering and absorption bounded
-# apart give
+# apart give, and exactly so: constant and gray, its free flights drawn from it, which its sign tells the renderer
 opened('colored fog').collection.objects.link(bpy.data.objects.new('colored fog', tinted := mesh.copy()))
 tinted.materials[0] = colored_fog = mesh.materials[0].copy()
 nodes, links = colored_fog.node_tree.nodes, colored_fog.node_tree.links
@@ -1464,7 +1464,7 @@ links.new(mix.outputs['Result'], nodes['Principled Volume'].inputs['Color'])
 assert len(exported().varying) == 1, 'colored fog'
 majorant = flex.medium(colored_fog.evaluated_get(bpy.context.evaluated_depsgraph_get()), {'POSITION': (  # As shaded
     numpy.full(3, -1), numpy.ones(3)), 'GENERATED': (numpy.zeros(3), numpy.ones(3))})
-assert majorant == 0.5, ('majorant of a colored fog', majorant)
+assert majorant == -0.5, ('majorant of a colored fog, exact as negative', majorant)
 bpy.context.window.scene = shown
 # Light reaching a varying volume through it: the cube scattering all it meets, white, of density 1 + x along x, lit
 # by a sun along -x and seen straight down, once. A column at x scatters (1 - exp(-2 (1 + x))) of what reaches it
@@ -1541,6 +1541,79 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = numpy.array(bpy.data.images.load(dense.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
     assert abs(seen * 8 - 1) < 0.02, ('light leaving a dense medium', preferences.device, seen * 8)
 preferences.device = device
+# A fog of constant gray extinction, its free flights drawn exactly, renders as tracked: Principled Volume of density 1,
+# its color and its emission (0.5) of a noise mixing two colors, lit and seen as before over 2 bounces, matches its
+# twin of density 1 + Fac - Fac, whose bound spreads so that it tracks under a majorant 2, within 2% on both backends
+exact = new('exact fog')
+exact.flex_samples, exact.flex_bounces, exact.camera = 256, 2, haze.camera
+exact.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+exact.collection.objects.link(haze.camera)
+exact.collection.objects.link(sun)
+exact.collection.objects.link(cube := bpy.data.objects.new('exact fog', mesh.copy()))
+cube.data.materials[0] = bright_fog = colored_fog.copy()
+nodes, links = bright_fog.node_tree.nodes, bright_fog.node_tree.links
+principled = nodes['Principled Volume']
+principled.inputs['Density'].default_value, principled.inputs['Emission Strength'].default_value = 1, 0.5
+links.new(nodes['Mix'].outputs['Result'], principled.inputs['Emission Color'])
+cancel, padded = nodes.new('ShaderNodeMath'), nodes.new('ShaderNodeMath')
+cancel.operation, padded.operation, padded.inputs[0].default_value = 'SUBTRACT', 'ADD', 1
+links.new(nodes['Noise Texture'].outputs['Fac'], cancel.inputs[0]), links.new(nodes['Noise Texture'].outputs['Fac'],
+    cancel.inputs[1]), links.new(cancel.outputs[0], padded.inputs[1])
+seen = {}
+for pad in (False, True):
+    if pad: links.new(padded.outputs[0], principled.inputs['Density'])
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        bpy.ops.render.render(scene=exact.name, write_still=True)
+        seen[pad, preferences.device] = numpy.array(bpy.data.images.load(exact.render.filepath).pixels).reshape(
+            SIZE, SIZE, 4)[..., :3].mean(0).mean(0)
+for preferences.device in ('OPTIX', 'VULKAN'):
+    ratio = seen[False, preferences.device] / seen[True, preferences.device]
+    assert numpy.all(abs(ratio - 1) < 0.02), ('exact free flights', preferences.device, ratio)
+preferences.device = device
+# Shadow rays pass such a fog by its exponential alone: a box of Principled Volume of density 1, colored as the fog,
+# 1 deep over a white diffuse floor lit by a sun of pi straight down, seen straight down from under it at 1 sample
+# without bounces, reads exp(-1) in every pixel, where tracking reads 0 or 1; the export marks its majorant exact by
+# its sign, -1, and a density of the noise tracked, positive
+gray = new('gray fog')
+gray.flex_samples, gray.flex_bounces, gray.flex_restir, gray.flex_denoise = 1, 0, False, False
+gray.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+for name, size, z in (('gray floor', 8, 0), ('gray fog', 4, 2.5)):
+    data = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    (bmesh.ops.create_grid(bm, size=size / 2) if z == 0 else bmesh.ops.create_cube(bm, size=1))
+    bm.to_mesh(data)
+    data.materials.append(bpy.data.materials.new(name))
+    gray.collection.objects.link(ob := bpy.data.objects.new(name, data))
+    ob.location.z, ob.scale = z, (1, 1, 1) if z == 0 else (size, size, 1)
+floor_bsdf = bpy.data.materials['gray floor'].node_tree.nodes['Principled BSDF']
+floor_bsdf.inputs['Base Color'].default_value, floor_bsdf.inputs['IOR'].default_value = (1, 1, 1, 1), 1
+grayed = bpy.data.materials['gray fog'].node_tree
+grayed.nodes.remove(grayed.nodes['Principled BSDF'])
+volume, grain = grayed.nodes.new('ShaderNodeVolumePrincipled'), grayed.nodes.new('ShaderNodeTexNoise')
+volume.inputs['Density'].default_value = 1
+shades = grayed.nodes.new('ShaderNodeMix')  # Two colors by the noise, as the colored fog's
+shades.data_type, shades.inputs['A'].default_value, shades.inputs['B'].default_value = 'RGBA', (1, 0.2, 0, 1), \
+    (0, 0.6, 1, 1)
+grayed.links.new(grain.outputs['Fac'], shades.inputs['Factor'])
+grayed.links.new(shades.outputs['Result'], volume.inputs['Color'])
+grayed.links.new(volume.outputs[0], grayed.nodes['Material Output'].inputs['Volume'])
+gray.collection.objects.link(beam := bpy.data.objects.new('gray sun', bpy.data.lights.new('gray sun', 'SUN')))
+beam.data.angle, beam.data.energy = 0, math.pi
+gray.camera = bpy.data.objects.new('gray camera', bpy.data.cameras.new('gray camera'))
+gray.collection.objects.link(gray.camera)
+gray.camera.location, gray.camera.data.angle = (0, 0, 1), 0.5
+majorants, medium_exported = [], flex.medium
+flex.medium = lambda material, boxes: (value := medium_exported(material, boxes), majorants.append(value))[0]
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=gray.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(gray.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+    assert abs(seen.mean() - math.exp(-1)) < 1e-3 and seen.std() / seen.mean() < 1e-3, \
+        ('fog passed by its exponential', preferences.device, seen.mean(), seen.std() / seen.mean())
+grayed.links.new(grain.outputs['Fac'], volume.inputs['Density'])
+bpy.ops.render.render(scene=gray.name, write_still=True)
+flex.medium = medium_exported
+preferences.device = device
+assert majorants[0] == -1 and majorants[-1] > 0, ('exact majorant by its sign', majorants)
 # A volume clear at a face bounds it all the same: the absorber of density 2 z over its generated points, clear at its
 # bottom face, over a white diffuse floor lit by a sun straight down and seen through it, passes exp(-2) each way, the
 # floor reading exp(-4) / pi; a ray taking the absorber past its clear face would gain by its density's negative there
