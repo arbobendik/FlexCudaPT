@@ -1412,6 +1412,13 @@ class Flex(bpy.types.RenderEngine):
         self.answers = process.stdout
         process.stdin = process.stdout = None
 
+    # A renderer on the device the preference changed to since, as an engine persistent data keeps may see, piped the
+    # whole scene, with no reservoirs of a frame before to reuse
+    def restart(self):
+        if self.device != device():
+            self.spawn()
+            self.visible = self.following = None
+
     # Starts the renderer on the exported scene when what it renders changed. Blender also reports selection, scene
     # settings and cameras, which need none. Objects that only moved or deformed update their triangles in place, as
     # FlexLight updates the slots of its instances, while they keep their count and the key of their materials: camera
@@ -2058,6 +2065,7 @@ class Flex(bpy.types.RenderEngine):
         height = self.resolution_y
         self.update_progress(0)
         self.update_stats('', f'{scene.name} | Syncing scene')
+        self.restart()
         self.start(depsgraph)
         evaluated = scene.camera.evaluated_get(depsgraph)
         camera = (evaluated.matrix_world.normalized(),
@@ -2088,6 +2096,7 @@ class Flex(bpy.types.RenderEngine):
         self.end_result(result)
 
     def view_update(self, context, depsgraph):
+        self.restart()
         self.start(depsgraph)
 
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
