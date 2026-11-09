@@ -1851,6 +1851,9 @@ class Flex(bpy.types.RenderEngine):
                 if not light.normalize:
                     radiance *= area if light.type == 'AREA' else (math.pi * math.sin(light.angle / 2) ** 2 or 1) \
                         if light.type == 'SUN' else 4 * math.pi * light.shadow_soft_size ** 2 or 4
+                # A sphere glows on both sides of its shell, which every ray from outside crosses twice: at half its
+                # radiance it emits its power outward, and half that radiance inward
+                if light.type in ('POINT', 'SPOT'): radiance /= 2
                 emission = radiance * numpy.array(light.color) \
                     * (numpy.array(light.temperature_color) if light.use_temperature else 1)
                 shaped = 1
@@ -1874,8 +1877,12 @@ class Flex(bpy.types.RenderEngine):
                         1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), ('LESS_THAN', 0, cosine)
                 if isinstance(shaped, tuple):
                     emission = 'MULTIPLY', emission, mix(1, shaped, ('LESS_THAN', 0, ('LIGHT_PATH', 8)))
-                # Black reflects nothing
-                shades = [[program([*BLACK[:4], emission, *BLACK[5:]])], [program(BLACK)]]
+                # Black reflects nothing. A sphere light's shell transmits all, white and smooth at an ior of 1, so rays
+                # pass through it straight as Cycles' lights occlude none and what lies within it is lit; an area
+                # light, which its black back occludes all the same, and a sun stay black
+                sphere = light.type in ('POINT', 'SPOT')
+                shades = [[program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
+                    else [*BLACK[:4], emission, *BLACK[5:]])], [program(BLACK)]]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
