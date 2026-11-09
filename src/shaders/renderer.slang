@@ -1821,9 +1821,12 @@ void lights(uint3 p, Scene* scene) {
     float mean = 0;
     for (uint i = 0; i < LIGHT_SAMPLES; ++i) {
         const float side = sqrt((i + random(state)) / LIGHT_SAMPLES), along = random(state);
-        const float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along,
-            faceNormal(scene, light.instance, light.triangle), -faceNormal(scene, light.instance, light.triangle),
+        const float3 n = faceNormal(scene, light.instance, light.triangle);
+        float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, -n,
             Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
+        if (!(emission.x + emission.y + emission.z > 0)) // Its back's where its front emits nothing, as a portal's
+            emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, n,
+                Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
         mean += max(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     scene.materials[triangle].emitted = max(mean, emitted * 0.001f);
