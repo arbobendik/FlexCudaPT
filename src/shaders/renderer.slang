@@ -1141,11 +1141,11 @@ Medium volume(Surface surface) {
 }
 // Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
 uint fills(Scene* scene, uint instance, uint triangle) {
-    return used(MEDIUM) && scene.instances[instance].majorant > 0 ? key(scene, instance, triangle) : NONE;
+    return used(MEDIUM) && scene.instances[instance].majorant != 0 ? key(scene, instance, triangle) : NONE;
 }
 // Whether a face bounds a volume: shaded dense, or always of a varying one
 bool encloses(Scene* scene, Surface surface, uint instance) {
-    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
+    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant != 0;
 }
 // Coefficients of a varying medium at a point inside, by its material's volume there
 Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray, out float3 glow) {
@@ -1170,7 +1170,21 @@ Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray, 
 // glowed += weight * glow / majorant at each tentative collision
 float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction, float distance,
     inout uint state, inout float3 weight, inout float3 glowed, Ray ray, bool passing = false, bool absorbing = false) {
-    const float majorant = scene.instances[owner(scene, material)].majorant;
+    const float stored = scene.instances[owner(scene, material)].majorant, majorant = abs(stored);
+    // majorant = extinction, every collision real: weight *= at.scatter / majorant, glowed += weight * glow / majorant
+    // passing => weight *= exp(-majorant * distance)
+    if (stored < 0 && !absorbing) {
+        if (passing) {
+            weight = weight * exp(-majorant * distance);
+            return distance;
+        }
+        const float along = -log(1 - random(state)) / majorant;
+        if (!(along < distance)) return along;
+        float3 glow;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray, glow);
+        glowed = glowed + weight * glow / majorant, weight = weight * at.scatter / majorant, medium = at;
+        return along;
+    }
     for (float along = 0;;) {
         along -= log(1 - random(state)) / majorant;
         if (!(along < distance)) return along;
@@ -1651,7 +1665,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         // along = -ln(1 - u) / sigma, PDF(along) = sigma * exp(-sigma * along), T(along) = exp(-extinction * along)
         // => throughput *= scatter * T(along) / PDF(along) = scatter * exp((sigma - extinction) * along) / sigma
         const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
-        const float sigma = varying ? scene.instances[owner(scene, filling)].majorant
+        const float sigma = varying ? abs(scene.instances[owner(scene, filling)].majorant)
             : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
         if (reconnecting && sigma > 0) {
             return fail;
