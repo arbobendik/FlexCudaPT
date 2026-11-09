@@ -430,9 +430,17 @@ def bounds(expression, boxes, memo):
 # gathers its emission
 GLOW_COLLISIONS = 4
 def medium(material, boxes):
-    absorption, density, scatter, glow = (fold(part) for part in MEDIA.get(material, (0, 0, 0, 0)))
+    absorption, density, scatter, glow = MEDIA.get(material, (0, 0, 0, 0))
+    extinction = 'SUBTRACT', ('ADD', scatter, 1), absorption  # Over the density
+    # Principled Volume's, s + k max(0, 1 - s) of its color s and k = 1 - A, bounded as max(s, k + s (1 - k)): equal
+    # for k in [0, 1], above it elsewhere, of s once, so tight for a constant k, where its parts bounded apart lose that
+    # it absorbs what it does not scatter, twice its extinction for a varying color absorbing nothing
+    match absorption:
+        case ('SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, a), ('MAXIMUM', 0, ('SUBTRACT', 1, s)))):
+            extinction = 'MAXIMUM', s, ('ADD', ('SUBTRACT', 1, a), ('MULTIPLY', s, a))
+    absorption, density, scatter, glow = (fold(part) for part in (absorption, density, scatter, glow))
     if not any(isinstance(part, tuple) for part in (absorption, density, scatter)) and not nonzero(glow): return 0.0
-    box = bounds(('MULTIPLY', ('SUBTRACT', ('ADD', scatter, 1), absorption), density), boxes, {})
+    box = bounds(('MULTIPLY', fold(extinction), density), boxes, {})
     if box is None: raise ValueError(f"Flex: the volume of material '{material.name}' varies by steps no bound is "
         'known for, so its density has no largest value to track it under')
     least = GLOW_COLLISIONS / numpy.linalg.norm(boxes['POSITION'][1] - boxes['POSITION'][0]) if nonzero(glow) else 0
