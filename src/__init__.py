@@ -443,6 +443,9 @@ def medium(material, boxes):
     box = bounds(('MULTIPLY', fold(extinction), density), boxes, {})
     if box is None: raise ValueError(f"Flex: the volume of material '{material.name}' varies by steps no bound is "
         'known for, so its density has no largest value to track it under')
+    # An extinction bounded to one gray value is the medium's own, constant, proven so by the bound's conservatism: the
+    # renderer, told so by its sign, draws free flights from it exactly
+    if numpy.all(box[0] == box[1]) and numpy.ptp(box[1]) == 0 and box[1][0] > 0: return -float(box[1][0])
     least = GLOW_COLLISIONS / numpy.linalg.norm(boxes['POSITION'][1] - boxes['POSITION'][0]) if nonzero(glow) else 0
     return max(float(box[1].max()), least, 0.0)
 
@@ -1906,7 +1909,8 @@ class Flex(bpy.types.RenderEngine):
                     positions.reshape(-1, 3).max(0)), 'OBJECT': inside, 'GENERATED': (numpy.minimum(*spaced),
                     numpy.maximum(*spaced))}) for k in sorted(set(index.tolist())) if k < len(ob.material_slots)
                     and ob.material_slots[k].material]
-                media = (*space[0], *space[1]), max([0, *kinds])
+                exact = kinds and kinds[0] < 0 and kinds.count(kinds[0]) == len(kinds)  # As all its volumes are, alike
+                media = (*space[0], *space[1]), kinds[0] if exact else max([0, *map(abs, kinds)])
                 if media[1]: varying.add(i)
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
