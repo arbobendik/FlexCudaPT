@@ -1797,9 +1797,12 @@ extern "C" __global__ void __raygen__lights() {
     float mean = 0;
     for (unsigned i = 0; i < LIGHT_SAMPLES; ++i) {
         const float side = sqrtf((i + random(state)) / LIGHT_SAMPLES), along = random(state);
-        const float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along,
-            faceNormal(scene, light.instance, light.triangle), -faceNormal(scene, light.instance, light.triangle),
+        const float3 n = faceNormal(scene, light.instance, light.triangle);
+        float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, -n,
             {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
+        if (!(emission.x + emission.y + emission.z > 0)) // Its back's where its front emits nothing, as a portal's
+            emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, n,
+                {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
         mean += fmaxf(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     material.emitted = fmaxf(mean, material.emitted * 0.001f);
