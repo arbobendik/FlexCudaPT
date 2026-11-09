@@ -1740,6 +1740,31 @@ sun.energy, sun.angle = math.pi, 0
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.isclose(render().mean(), 1, rtol=0.01), f'parallel sun {device}'
+# Under a black roof hidden from shadows, or lit by a sun casting none, as Cycles', the floor holds the same; the roof
+# and sun as usual, none (main 02f9398, of neither setting, none all three times)
+plane('sun roof', 0, size=4).inputs['Base Color'].default_value = (0, 0, 0, 1)
+(roof := bpy.data.objects['sun roof']).location.z = 1.5
+for roof.visible_shadow, sun.use_shadow, due in ((False, True, 1), (True, False, 1), (True, True, 0)):
+    for device in ('OPTIX', 'VULKAN'):
+        preferences.device = device
+        assert numpy.isclose(render().mean(), due, rtol=0.01, atol=0.01), ('shadowless', roof.visible_shadow,
+            sun.use_shadow, device)
+# An emitter hidden from shadows still meets the roof on its way down, sunless: none (277afb8, testing it against
+# nothing, 1.58)
+(glow := plane('sun glow', 0, size=4)).inputs['Emission Color'].default_value = (1, 1, 1, 1)
+glow.inputs['Emission Strength'].default_value = 1
+glow = bpy.data.objects['sun glow']
+glow.location.z, glow.rotation_euler.x, glow.visible_shadow = 2.5, math.pi, False
+bpy.data.objects['sun'].hide_render = True
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert render().mean() < 0.01, ('shadowless glow', device)
+# Hidden from shadows, the roof is still seen: lowered between the camera and the floor, black (02f9398 under #98's
+# camera layers, passing any hidden bit, 1)
+glow.hide_render, bpy.data.objects['sun'].hide_render, roof.location.z, roof.visible_shadow = True, False, 0.5, False
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert render().mean() < 0.01, ('shadowless seen', device)
 
 # Blender's lights 2 m over Lambertian 0.8, seen from above: each ring of pixels about the light holds 0.8 / pi of the
 # irradiance Cycles' conventions give there, within 3% where above a tenth of the peak and under 1% of the peak where

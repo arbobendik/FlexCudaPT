@@ -1011,7 +1011,7 @@ __device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixe
     // Past hidden surfaces layer by layer, by distance then index, so that each is met once and the loop ends; a hidden
     // first hit starts the layers over an ulp short of it, from the lowest index there, in the one call it shares with
     // the layers after, which Vulkan's shader holds once per caller
-    for (bool first = true; hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0; first = false) {
+    for (bool first = true; hit.triangle != NONE && scene.materials[key(scene, hit)].hidden & 1; first = false) {
         if (first) at = __uint_as_float(__float_as_uint(at) - 1);
         hit = nextLayer(scene, origin, direction, reach, at, first ? NONE : key(scene, hit));
     }
@@ -1151,7 +1151,8 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     // by their transparency, entering the volumes of those it meets from the front and leaving them from the back
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
     // short of it, from the lowest index there
-    Hit first = traverse(scene, from, toward, left, at);
+    Hit first = scene.materials[key(scene, instance, light)].hidden & 4 ? Hit{NONE} // A light casting no shadows
+        : traverse(scene, from, toward, left, at);
     if (first.triangle != NONE && !scene.materials[key(scene, first)].opaque)
         at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
     for (Hit hit = first; hit.triangle != NONE;
@@ -1159,6 +1160,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque) return make_float3(0, 0, 0);  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
+        if (scene.materials[key(scene, hit)].hidden & 2) continue; // Hidden from shadows, it passes them whole
         for (unsigned layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
             const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
                 smoothNormal(scene, hit), toward,

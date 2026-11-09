@@ -42,7 +42,8 @@ struct BSDFMaterial {
     float specular_level = 1; float3 translucent{0, 0, 0}, sheen{0, 0, 0}; float sheen_roughness = 0.5f;
     float anisotropy = 0, anisotropic_rotation = 0; float3 tangent{0, 0, 0};
 };
-// Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
+// Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through, in
+// bit 0, and shadow rays, in bit 1; a light's bit 2 lets its shadow rays pass everything.
 // The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point. Light
 // sampling shades the program of its emission alone.
 struct Material { float emitted; unsigned program, hidden, layers, opaque, emission; };

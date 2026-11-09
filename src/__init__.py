@@ -1782,8 +1782,13 @@ class Flex(bpy.types.RenderEngine):
             for column, array in zip(columns, (positions if world else point, (normals if world else
                 normal.reshape(-1, 3)[loops]).reshape(-1, 3, 3), orco, point, uv, color, tangent,
                 passes[numpy.minimum(index, len(passes) - 1)])): column.append(array)
-            table = numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for layer in row),
-                row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])
+            # Hidden from the camera in bit 0, from shadows in bit 1: an object's, or a light's casting none, as Cycles',
+            # which bit 2 marks as well
+            dark = ob.type == 'LIGHT' and not ob.data.use_shadow
+            shadowless = not ob.visible_shadow or dark
+            table = numpy.array([(*row[0][:2], (not ob.visible_camera) | shadowless << 1 | dark << 2, len(row),
+                not shadowless and any(layer[2] for layer in row), row[0][3] if len(row[0]) > 3 else row[0][1])
+                for row in shades])
             materials.append(table[index])
             if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
             media = ((0,) * 6, 0)
@@ -1900,7 +1905,7 @@ class Flex(bpy.types.RenderEngine):
         # renderer compiles from them while the rest loads; per instance its mesh's first triangle, count and whether in
         # world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9 vertex, 9 normal, 9
         # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
-        # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); then the
+        # emission, program, hidden bits, layer count, opaque flag and emission program (then the world's); then the
         # texels and the programs of the bakes; then each image's width and height, RGBA8 in its bit 26, and its texels
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
