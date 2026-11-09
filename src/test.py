@@ -1490,6 +1490,47 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = numpy.array(bpy.data.images.load(body.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean((0, 1))
     assert numpy.allclose(seen, texels[4 + 3, :3], atol=1e-3), ('environment by position', preferences.device, seen)
 preferences.device = device
+# A light emitting from its back alone, as a window mixing a transparent front by Backfacing, is sampled by its back's
+# power: a Lambert floor of albedo 0.8 a unit below a square of half 0.1 emitting 10 blue downward, seen straight down
+# through it, reads 0.8 * 10 F within a tenth, F the square's form factor at the floor (Hottel), at 16 samples its
+# pixels spread under 0.45 of their mean beside a red square of its power, which shares the light samples with it (main
+# 02f9398, counting the back at a thousandth of its power, 0.63)
+def backlit():  # The scene: its squares, each a material of its nodes and links without a shader
+    lit = opened('back light')
+    lit.world.node_tree.nodes['Background'].inputs['Color'].default_value, lit.flex_samples = (0, 0, 0, 1), 16
+    lit.camera = bpy.data.objects.new('back light', bpy.data.cameras.new('back light'))
+    lit.collection.objects.link(lit.camera)
+    lit.camera.location.z, lit.camera.data.type, lit.camera.data.ortho_scale = 2, 'ORTHO', 0.04
+    def square(name, half, z):
+        bm, mesh = bmesh.new(), bpy.data.meshes.new(name)
+        bmesh.ops.create_grid(bm, size=half)
+        bm.to_mesh(mesh)
+        lit.collection.objects.link(placed := bpy.data.objects.new(name, mesh))
+        placed.location.z, made = z, bpy.data.materials.new(name)
+        mesh.materials.append(made)
+        made.node_tree.nodes.remove(made.node_tree.nodes['Principled BSDF'])
+        return made.node_tree.nodes, made.node_tree.links, made.node_tree.nodes['Material Output'].inputs['Surface']
+    nodes, links, out = square('back floor', 5, 0)
+    links.new((floor := nodes.new('ShaderNodeBsdfDiffuse')).outputs[0], out)
+    floor.inputs['Color'].default_value = (0.8, 0.8, 0.8, 1)
+    nodes, links, out = square('back light', 0.1, 1)  # Its back emits, its front passes light
+    links.new((sides := nodes.new('ShaderNodeMixShader')).outputs[0], out)
+    links.new(nodes.new('ShaderNodeNewGeometry').outputs['Backfacing'], sides.inputs[0])
+    links.new(nodes.new('ShaderNodeBsdfTransparent').outputs[0], sides.inputs[1])
+    links.new((glow := nodes.new('ShaderNodeEmission')).outputs[0], sides.inputs[2])
+    glow.inputs['Color'].default_value, glow.inputs['Strength'].default_value = (0, 0, 1, 1), 10
+    nodes, links, out = square('back decoy', 0.1, 1)  # Beside it, a red emitter of its power facing down
+    links.new((decoy := nodes.new('ShaderNodeEmission')).outputs[0], out)
+    decoy.inputs['Color'].default_value, decoy.inputs['Strength'].default_value = (1, 0, 0, 1), 10
+    bpy.data.objects['back decoy'].location.x, bpy.data.objects['back decoy'].rotation_euler.x = 0.6, math.pi
+    return lit
+backlight, form = backlit(), 4 / (2 * math.pi) * 2 * 0.1 / math.sqrt(1.01) * math.atan(0.1 / math.sqrt(1.01))
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=backlight.name, write_still=True)
+    blue = numpy.array(bpy.data.images.load(backlight.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., 2]
+    assert abs(blue.mean() / (8 * form) - 1) < 0.1 and blue.std() < 0.45 * blue.mean(), ('back light',
+        preferences.device, blue.mean() / (8 * form), blue.std() / blue.mean())
+preferences.device = device
 bpy.context.window.scene = shown
 # A Principled Volume's blackbody emits per unit length that color times a black body's radiance at its temperature,
 # its exitance 5.670374419e-8 T^4 over PI, by its intensity at Blender's unit scale of 1e-6: at intensity 2 and 1500 K
