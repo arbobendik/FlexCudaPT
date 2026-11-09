@@ -1195,12 +1195,12 @@ Medium volume(Surface surface) {
 }
 // Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
 uint fills(Scene* scene, uint instance, uint triangle) {
-    return used(MEDIUM) && scene.instances[instance].majorant > 0 ? key(scene, instance, triangle) : NONE;
+    return used(MEDIUM) && scene.instances[instance].majorant != 0 ? key(scene, instance, triangle) : NONE;
 }
 // Whether a face of an instance bounds a volume: where it is shaded dense, or always of one varying, which may be clear
 // right at its faces and dense within
 bool encloses(Scene* scene, Surface surface, uint instance) {
-    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
+    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant != 0;
 }
 // Of a varying medium, its coefficients at a point inside, seen along the direction, by its material's volume there: at
 // the point in its object, the instance's transform undone, and the generated point its mesh's texture space makes it
@@ -1225,7 +1225,20 @@ Medium inside(Scene* scene, uint material, float3 p, float3 direction, Ray ray, 
 // transmittance there as ratio tracking does: glowed, what the medium emits along the ray up to the distance returned
 float track(Scene* scene, inout Medium medium, uint material, float3 origin, float3 direction, float distance,
     inout uint state, inout float3 weight, inout float3 glowed, Ray ray, bool passing = false, bool absorbing = false) {
-    const float majorant = scene.instances[owner(scene, material)].majorant;
+    const float stored = scene.instances[owner(scene, material)].majorant, majorant = abs(stored);
+    // Stored negative, the majorant is the medium's constant gray extinction: free flights from it, as renderer.cu's
+    if (stored < 0 && !absorbing) {
+        if (passing) {
+            weight = weight * exp(-majorant * distance);
+            return distance;
+        }
+        const float along = -log(1 - random(state)) / majorant;
+        if (!(along < distance)) return along;
+        float3 glow;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray, glow);
+        glowed = glowed + weight * glow / majorant, weight = weight * at.scatter / majorant, medium = at;
+        return along;
+    }
     for (float along = 0;;) {
         along -= log(1 - random(state)) / majorant;
         if (!(along < distance)) return along;
@@ -1743,7 +1756,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
         // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
         const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
-        const float sigma = varying ? scene.instances[owner(scene, filling)].majorant
+        const float sigma = varying ? abs(scene.instances[owner(scene, filling)].majorant)
             : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
         if (reconnecting && sigma > 0) {
             return fail;

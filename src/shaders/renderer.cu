@@ -1151,12 +1151,12 @@ __device__ Medium volume(const Surface& surface) {
 }
 // Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
 __device__ unsigned fills(const Scene& scene, unsigned instance, unsigned triangle) {
-    return used(MEDIUM) && scene.instances[instance].majorant > 0 ? key(scene, instance, triangle) : NONE;
+    return used(MEDIUM) && scene.instances[instance].majorant != 0 ? key(scene, instance, triangle) : NONE;
 }
 // Whether a face of an instance bounds a volume: where it is shaded dense, or always of one varying, which may be clear
 // right at its faces and dense within
 __device__ bool encloses(const Scene& scene, const Surface& surface, unsigned instance) {
-    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant > 0;
+    return surface.density > 0 || used(MEDIUM) && scene.instances[instance].majorant != 0;
 }
 // Of a varying medium, its coefficients at a point inside, seen along the direction, by its material's volume there: at
 // the point in its object, the instance's transform undone, and the generated point its mesh's texture space makes it
@@ -1184,7 +1184,19 @@ __device__ Medium inside(const Scene& scene, unsigned material, float3 p, float3
 __device__ float track(const Scene& scene, Medium& medium, unsigned material, float3 origin, float3 direction,
     float distance, unsigned& state, float3& weight, float3& glowed, const Ray& ray, bool passing = false,
     bool absorbing = false) {
-    const float majorant = scene.instances[owner(scene, material)].majorant;
+    const float stored = scene.instances[owner(scene, material)].majorant, majorant = fabsf(stored);
+    // Stored negative, the majorant is the medium's extinction itself, constant and gray as its export proves: a free
+    // flight is drawn from it exactly and the medium shaded once, at its collision, which always scatters, the weight
+    // taking the albedo and the emission gathered over the extinction (the collision estimator); passing alone, light
+    // passes by its exponential, shading nothing. What absorbs alone still tracks, needing the scattering
+    if (stored < 0 && !absorbing) {
+        if (passing) return weight = weight * expf(-majorant * distance), distance;
+        const float along = -logf(1 - random(state)) / majorant;
+        if (!(along < distance)) return along;
+        float3 glow;
+        const Medium at = inside(scene, material, origin + direction * along, direction, ray, glow);
+        return glowed = glowed + weight * glow / majorant, weight = weight * at.scatter / majorant, medium = at, along;
+    }
     for (float along = 0;;) {
         along -= logf(1 - random(state)) / majorant;
         if (!(along < distance)) return along;
@@ -1699,7 +1711,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
         // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
         const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
-        const float sigma = varying ? scene.instances[owner(scene, filling)].majorant
+        const float sigma = varying ? fabsf(scene.instances[owner(scene, filling)].majorant)
             : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
         if (reconnecting && sigma > 0) {
             return fail;
