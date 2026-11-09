@@ -1008,11 +1008,17 @@ def bump(node, inputs, index):
         vector(strength, ('MULTIPLY', distance, -1 if node.invert else 1), 0)
 
 # Of a light falloff node: its strength by the ray's length to the power of the output's index, smoothed toward the
-# ray's start
+# ray's start; by no ray (the lights pass's), a unit away, where every output is its strength
 def light_falloff(node, inputs, index):
-    (strength, smooth), squared = inputs, ('MULTIPLY', ('LIGHT_PATH', 8), ('LIGHT_PATH', 8))
-    strength = ('MULTIPLY', strength, ('POWER', ('LIGHT_PATH', 8), index)) if index else strength
+    distance = mix(1, ('LIGHT_PATH', 8), ('LESS_THAN', 0, ('LIGHT_PATH', 8)))
+    (strength, smooth), squared = inputs, ('MULTIPLY', distance, distance)
+    strength = ('MULTIPLY', strength, ('POWER', distance, index)) if index else strength
     return ('MULTIPLY', strength, ('DIVIDE', squared, ('ADD', smooth, squared))) if nonzero(smooth) else strength
+
+def known(tree):  # Every node of the tree one Flex renders, its groups' within; else a light's tree is left as main's
+    return all(node.type in NODES or node.type in ('OUTPUT_LIGHT', 'GROUP_INPUT', 'GROUP_OUTPUT', 'FRAME')
+        or node.type == 'GROUP' and known(node.node_tree) or any(output.type == 'SHADER' for output in node.outputs)
+        for node in tree.nodes)
 
 def fresnel(node, inputs, index):  # Of a fresnel node, as Cycles'
     eta = 'MAXIMUM', inputs[0], 1e-5
@@ -1747,6 +1753,9 @@ class Flex(bpy.types.RenderEngine):
                         if light.type == 'SUN' else 4 * math.pi * light.shadow_soft_size ** 2 or 4
                 emission = radiance * numpy.array(light.color) \
                     * (numpy.array(light.temperature_color) if light.use_temperature else 1)
+                if light.use_nodes and light.node_tree and known(light.node_tree) and (out :=
+                    light.node_tree.get_output_node('CYCLES')):  # By its nodes, as Cycles', unless one is unknown
+                    emission = 'MULTIPLY', emission, resolve(out.inputs['Surface'])[4]
                 shaped = 1
                 # Spot cone and area spread on the direction emitted, as Cycles'; the lights pass, shading no ray, takes
                 # the unshaped power, a bound for the cone and exact for the spread, whose mean over the hemisphere is 1

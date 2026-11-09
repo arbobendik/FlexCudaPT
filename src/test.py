@@ -1744,7 +1744,8 @@ for device in ('OPTIX', 'VULKAN'):
 # Blender's lights 2 m over Lambertian 0.8, seen from above: each ring of pixels about the light holds 0.8 / pi of the
 # irradiance Cycles' conventions give there, within 3% where above a tenth of the peak and under 1% of the peak where
 # none is due. A point of 500 W, unnormalized at exposure 1 and 3000 K too; a spot of 60 degrees blended 0.3; a disk of
-# size 1, spread 30 degrees too; a sun of 3 W/m^2 turned 30 degrees; on both backends
+# size 1, spread 30 degrees too, and emitting by its nodes a Light Falloff's quadratic, linear and constant output of
+# strength 4 and smooth 0.5; a sun of 3 W/m^2 turned 30 degrees; on both backends
 scene = opened('lights')
 scene.flex_samples = 1024  # The spread's narrow beam within 2% of its truth at the ring around its peak
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
@@ -1755,12 +1756,13 @@ floor.inputs['Base Color'].default_value, floor.inputs['Roughness'].default_valu
 x, y = numpy.meshgrid(*[((numpy.arange(SIZE) + 0.5) / SIZE - 0.5) * 6] * 2)
 rho, d = numpy.hypot(x, y), numpy.sqrt(x * x + y * y + 4)
 r, p = numpy.meshgrid((numpy.arange(24) + 0.5) / 48, (numpy.arange(48) + 0.5) * math.pi / 24)  # Over the disk
-def disk(half):  # Its irradiance, by the half angle of its spread, Cycles' soft box
+def disk(half, falloff=lambda length: 1):  # Its irradiance, by the half angle of its spread, Cycles' soft box, and by
+    # what its nodes emit by the length to it
     dx, dy = x[..., None, None] - r * numpy.cos(p), y[..., None, None] - r * numpy.sin(p)
     cosine = 2 / numpy.sqrt(dx * dx + dy * dy + 4)
     spread = numpy.maximum(math.tan(half) - numpy.sqrt(1 - cosine ** 2) / cosine, 0) / (math.tan(half) - half) \
         if half < math.pi / 2 else 1
-    return (2000 / math.pi ** 2 * cosine ** 4 / 4 * spread * r / 48 * math.pi / 24).sum((2, 3))
+    return (2000 / math.pi ** 2 * cosine ** 4 / 4 * spread * falloff(2 / cosine) * r / 48 * math.pi / 24).sum((2, 3))
 point = 500 / (4 * math.pi) * 2 / d ** 3
 t = numpy.clip((2 / d - math.cos(math.pi / 6)) / ((1 - math.cos(math.pi / 6)) * 0.3), 0, 1)
 lights = {}
@@ -1770,6 +1772,9 @@ for name, kind, values, irradiance in (('point', 'POINT', dict(shadow_soft_size=
         spot_size=math.pi / 3, spot_blend=0.3), point * t * t * (3 - 2 * t)),
         ('disk', 'AREA', dict(shape='DISK', size=1), disk(math.pi / 2)),
         ('spread', 'AREA', dict(shape='DISK', size=1, spread=math.pi / 6), disk(math.pi / 12)),
+        *((f'falloff {k}', 'AREA', dict(shape='DISK', size=1, use_nodes=True), disk(math.pi / 2,
+        lambda length, k=k: 4 * length ** k * length ** 2 / (0.5 + length ** 2))) for k in range(3)),
+        ('ies', 'AREA', dict(shape='DISK', size=1, use_nodes=True), disk(math.pi / 2)),  # Its tree unknown, as main's
         ('turned sun', 'SUN', dict(energy=3, angle=math.radians(1)), numpy.full_like(x, 3 * math.cos(math.pi / 6)))):
     light = bpy.data.lights.new(name, kind)
     light.energy = 500
@@ -1777,6 +1782,13 @@ for name, kind, values, irradiance in (('point', 'POINT', dict(shadow_soft_size=
     lights[name] = add(light, (0, 0, 2), (0, math.pi / 6 * (kind == 'SUN'), 0)), irradiance[..., None] \
         * numpy.resize(light.temperature_color if light.use_temperature else 1, 3)
     lights[name][0].visible_camera = False
+    if name.startswith('falloff'):
+        tree, falloff = light.node_tree, light.node_tree.nodes.new('ShaderNodeLightFalloff')
+        falloff.inputs['Strength'].default_value, falloff.inputs['Smooth'].default_value = 4, 0.5
+        tree.links.new(falloff.outputs[int(name[-1])], tree.nodes['Emission'].inputs['Strength'])
+    if name == 'ies':  # An IES Texture of strength 0.03 (ba9ae10, passing it through, 3%)
+        (ies := light.node_tree.nodes.new('ShaderNodeTexIES')).inputs['Strength'].default_value = 0.03
+        light.node_tree.links.new(ies.outputs[0], light.node_tree.nodes['Emission'].inputs['Strength'])
 rings = lambda image: numpy.array([image[(rho >= k * 0.375) & (rho < k * 0.375 + 0.375)].mean(0) for k in range(11)])
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
@@ -1786,6 +1798,18 @@ for device in ('OPTIX', 'VULKAN'):
         peak = expected.max()
         assert all(abs(measured[expected > 0.1 * peak] / expected[expected > 0.1 * peak] - 1) < 0.03), (name, device)
         assert all(measured[expected == 0] < 0.01 * peak), (name, device, 'none due')
+# Beside the point light, each falloff's light shares the light samples by its power a unit away, where every output is
+# its strength: at 16 samples its pixels stray from their due as the disk's do beside it, within half again (by no ray's
+# length its power is none; far, the linear and constant ones take every sample)
+scene.flex_samples, scene.flex_restir = 16, False
+def stray(name):  # Relative spread of the pixels about their due, lit by that light and the point one
+    for other, _ in lights.values(): other.hide_render = other not in (lights[name][0], lights['point'][0])
+    due = 0.8 / math.pi * (lights[name][1] + lights['point'][1]).sum(2)
+    return (render().sum(2) / due)[due > 0.1 * due.max()].std()
+for preferences.device in ('OPTIX', 'VULKAN'):
+    strays = [stray(name) for name in ('disk', 'falloff 0', 'falloff 1', 'falloff 2')]
+    assert max(strays[1:]) < 1.5 * strays[0], ('falloff samples', preferences.device, strays)
+scene.flex_samples, scene.flex_restir = 1024, True
 # Turned, a spot exports anew, as its program holds its cone's axis; moved, it updates in place
 spot = lights['spot'][0]
 for other, _ in lights.values(): other.hide_render = other != spot
