@@ -45,6 +45,7 @@ constexpr unsigned LOBE_DIFFUSE = 0u;
 constexpr unsigned LOBE_REFRACT = 1u;
 constexpr unsigned LOBE_REFLECT = 2u;
 constexpr unsigned LOBE_NONE = 3u;
+constexpr float BIAS = 0.0000152587890625f; // FlexKernels' BIAS, which its CUDA output inlines and does not name
 // Of the ray a surface or the world is shaded for, as Cycles' light path node tells: whether it left the camera or
 // tests a shadow, the lobe it left by, its bounce, a bounce further for the world, and its length, none for the world
 // Of a ray's cone, the share of its width a read's mip level covers: 2^-1.5, the least that passes both the seed
@@ -1378,6 +1379,61 @@ __device__ void resample(const Scene& scene, Selection& sel, const Reservoir& ca
     if (grey > 0.0f && grey < 3.00000000549775576e+38f) sel.color = sel.color + weight;
 }
 
+// renderer.slang's baked hair: its level's sums, a slice's f cos and density, connected
+__device__ float4 operator+(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+__device__ float4 operator-(float4 a, float4 b) { return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
+__device__ float4 operator*(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
+__device__ float at(float4 v, unsigned p) { return (&v.x)[p]; }
+__device__ float4 hairSums(const Scene& scene, const float4* record, unsigned image, float x, float y) {
+    return tex2DLod<float4>(scene.images[2 * unsigned(record[0].w) + 2 * image + 1],
+        x / (image ? record[1].z + 2 : record[1].y + 1), y / (image ? 16 * record[1].x : record[1].x), 0);
+}
+__constant__ float HAIR_WIDTHS[4] = {1, 0.5f, 2, 2};
+__device__ float3 hairSlice(const Scene& scene, const float4* record, float o, const float* y, float x, float3 u,
+    float3 tint, bool binned, float& density) { // Lobe R's tinted, as an artistic extension: a tint <= 1 adds nothing
+    const float nt = record[1].y, np = record[1].z, c = binned ? floorf(x) : x - 0.5f - np * floorf((x - 0.5f) / np);
+    float4 n[3], total = make_float4(0, 0, 0, 0), all = total;
+    for (unsigned k = 0; k < 3; ++k) {
+        const float level = o * 16 + __saturatef((&u.x)[k]) * 15 + 0.5f;
+        n[k] = hairSums(scene, record, 1, c + 1.5f, level) - hairSums(scene, record, 1, c + 0.5f, level);
+        if (binned) total = total + hairSums(scene, record, 1, np + 0.5f, level);
+    }
+    if (binned) all = record[2] * hairSums(scene, record, 0, nt + 0.5f, o + 0.5f);
+    float3 f = make_float3(0, 0, 0);
+    density = 0;
+    for (unsigned p = 0; p < 4; ++p) {
+        const float w = record[0].x * (p == 0 ? record[0].y : 1) * HAIR_WIDTHS[p], a = asinhf(PI / w);
+        const float r = binned ? floorf(y[p]) : fminf(fmaxf(y[p] - 0.5f, 0), nt - 1), m = y[p] >= 0 && y[p] < nt
+            ? at(record[2] * (hairSums(scene, record, 0, r + 1.5f, o + 0.5f) - hairSums(scene, record, 0, r + 0.5f,
+            o + 0.5f)), p) / (w * coshf((2 * y[p] / nt - 1) * a) * a * 2 / nt) * np / (2 * PI) : 0;
+        f = f + m * make_float3(at(n[0], p), at(n[1], p), at(n[2], p)) * (p == 0 ? tint : make_float3(1, 1, 1));
+        density += m * (at(n[0], p) + at(n[1], p) + at(n[2], p)) / fmaxf(all.x * total.x + all.y * total.y
+            + all.z * total.z + all.w * total.w, 1e-30f);
+    }
+    return f;
+}
+__device__ SampleBSDF connectHair(const Scene& scene, const Surface& surface, float3 in_dir, float3 out_dir) {
+    const float3 t = normalize(surface.hair);
+    const float4* record = scene.hairs + 3 * (unsigned(length(surface.hair) + 0.5f) - 1);
+    const float no = record[1].x, s = fminf(fmaxf((asinf(fminf(fmaxf(-dot(in_dir, t), -1.0f), 1.0f)) / PI + 0.5f)
+        * (no - 1), 0), no - 1); // Its slices even in the viewer's angle from pole to pole
+    const float o = fminf(floorf(s), no - 2);
+    float y[4];
+    for (unsigned p = 0; p < 4; ++p)
+        y[p] = hairRow(in_dir, t, out_dir, p, record[0].x * (p == 0 ? record[0].y : 1), record[0].z, record[1].y);
+    const float x = hairColumn(in_dir, t, out_dir, record[1].z);
+    const float cosine = fmaxf(length(cross(out_dir, t)), BIAS); // cos theta, off 0 along the fiber by BIAS
+    const float3 tint = used(SPECULAR) ? surface.tint : make_float3(1, 1, 1); // The Specular Tint, R's
+    float near, far, unused;
+    const float3 f = hairSlice(scene, record, o, y, x, surface.albedo, tint, false, unused) * (1 - (s - o))
+        + hairSlice(scene, record, o + 1, y, x, surface.albedo, tint, false, unused) * (s - o);
+    hairSlice(scene, record, o, y, x, surface.albedo, tint, true, near), hairSlice(scene, record, o + 1, y, x,
+        surface.albedo, tint, true, far);
+    const float density = near * (1 - (s - o)) + far * (s - o);
+    return SampleBSDF{out_dir, density > 0 ? f / density : make_float3(0, 0, 0), 0, false, dot(out_dir, -in_dir)
+        > dot(out_dir, t) * dot(-in_dir, t) ? LOBE_REFLECT : LOBE_REFRACT, density / cosine};
+}
+
 // Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
 // vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
 // dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
@@ -1445,9 +1501,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
             surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
                 make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter};
-        // Surfaces transmitting nothing face the ray, as in Cycles; a strand's fiber passes light through it, as
-        // transmitting surfaces do: no side of it is wrong to leave or sample light on
-        const bool strand = STRAND(scene, hit.instance);
+        // Surfaces transmitting nothing face the ray, as in Cycles; a strand's fiber, or hair's, passes light through
+        // it, as transmitting surfaces do: no side of it is wrong to leave or sample light on
+        const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0; // Its fiber along it, by its level
+        const bool strand = STRAND(scene, hit.instance) || hair;
         const float facing = facingSign(surface.transparency, face, direction);
         const float3 geometry_n = face * facing;
         surface.normal = surface.normal * facing;
@@ -1520,6 +1577,10 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF; inlined, as
         // nvcc inlines it without the sheen FlexKernels' BSDF branches on, so that it folds the material's constants
         const auto lit = [&](float3 light_dir, float light) __attribute__((always_inline)) {
+            if (hair) { // Hair's, weighed likewise
+                const SampleBSDF l = connectHair(scene, surface, direction, light_dir);
+                return l.throughput * l.pdf / (b < scene.settings.bounces ? 1 + l.pdf * l.pdf / (light * light) : 1);
+            }
             if (b < scene.settings.bounces)
                 return neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
                     !(dot(side_n, -direction) * dot(side_n, light_dir) > 0), light, true, stream(r.seed, b))
@@ -1658,7 +1719,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         }
         // Connections evaluate the given direction
         if (connect || arrived) {
-            lobe = connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
+            lobe = hair ? connectHair(scene, surface, direction, dir)
+                : connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
         }
         // Delta lobes and wrong-sided directions, of unknown density, have no competing light sample; straight
         // transmission keeps the preceding vertex's weights.
