@@ -1290,12 +1290,13 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 // entering the volumes of those it meets from the front and leaving them from the back; transmitted, the share of light
 // reaching the light through them and the media between. Whether an occluder blocks it, opaque or passing nothing
 [ForceInline] bool occluded(Scene* scene, float3 from, float3 toward, float left, Medium medium, uint filling,
-    inout uint state, Ray ray, bool onSurface, out float3 transmitted) {
+    inout uint state, Ray ray, bool onSurface, out float3 transmitted, uint skip = NONE) {
     float before = 0, at = 0, occluder;
     transmitted = float3(1, 1, 1);
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
     // short of it, from the lowest index there
-    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
+    // Off a surface past its margin; off a medium's vertex, or an opaque surface past skip, its own triangle, from none
+    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, skip, 0);
     if (first.triangle != NONE && scene.materials[key(scene, first)].opaque == 0)
         at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
     for (Hit hit = first; hit.triangle != NONE;
@@ -1345,7 +1346,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 // Off a surface, as a medium's vertex, the shadow ray starts at origin itself
 [noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 lift, float offset,
     bool traced, float3 face, Medium sides[2], uint2 fillings, uint state, out float3 direction, out float density,
-    Ray ray, bool onSurface = true) {
+    Ray ray, bool onSurface = true, uint self = NONE) {
     direction = float3(0, 0, 0);
     density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
@@ -1375,6 +1376,9 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     // Off the side the light is on, along lift by offset; traced from a surface transmitting light
     float3 from = traced ? tracedLift(scene, origin, lift * sign(dot(face, toLight)), offset)
         : origin + lift * (dot(face, toLight) > 0 ? offset : 0.0f);
+    // Off an opaque surface from no margin, a face meeting it there or by the lifted start met; from its face itself
+    // past self, its own triangle, alone
+    const uint skip = !traced && !(dot(face, toLight) > 0 && offset > 0) ? self : NONE;
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
     if (dot(normal, normal) > 0 && !(dot(normal, shadow) > 0))  // As BSDF sampling sees it, from the lifted start
@@ -1385,7 +1389,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     direction = toward;
     float3 transmitted;
     if (occluded(scene, from, toward, left, sides[int(dot(face, toLight) > 0)], fillings[int(dot(face, toLight) > 0)],
-        state, ray, onSurface, transmitted))
+        state, ray, onSurface && traced, transmitted, skip))
         return float3(0, 0, 0);
     density = solidAngle(probability, lightNormal, shadow);
     return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
@@ -1590,7 +1594,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 float light = 0.0f;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
                     traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray) : float3(0.0f, 0.0f, 0.0f);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
+                    traced ? NONE : key(scene, hit)) : float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
                 }
@@ -1608,7 +1613,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
                     traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
+                    traced ? NONE : key(scene, hit));
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift(throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i,
                     eta_o, stream(r.seed, b), light, b < scene.settings.bounces) * radiance, 1.0f) : fail;
@@ -1630,7 +1636,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
                     traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
+                    traced ? NONE : key(scene, hit));
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lightBSDF(direction, light_dir, surface.normal, side_n, material, eta_i, eta_o,
                     stream(r.seed, b), light, b < scene.settings.bounces) * radiance : fail.f;
@@ -1776,8 +1783,13 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         }
         // Only occluders in front of the reconnection vertex matter
         const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
-        hit = traverse(scene, origin, direction, reconnecting ? length(reconnection - origin) * 1.001f : 1e16f,
-            distance, through);
+        const float far = reconnecting ? length(reconnection - origin) * 1.001f : 1e16f;
+        // Off an opaque surface from no margin, as from a medium's vertex, a face meeting it there or by the lifted start
+        // met; from its face itself past its own triangle alone
+        const bool opaque = !(traced || through != NONE);
+        const bool on = opaque && !(dot(direction, side_n) > 0 && offset > 0);
+        hit = opaque ? traverse(scene, origin, direction, far, distance, on ? key(scene, hit) : NONE, 0)
+            : traverse(scene, origin, direction, far, distance, through);
         // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
         if (reconnecting && hit.triangle == r.rc.x && hit.instance == r.rc.w) {
             hit.uv = asfloat(r.rc.yz);
