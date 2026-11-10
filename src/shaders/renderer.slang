@@ -1368,7 +1368,9 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     const float side = sqrt(random(state));
     const float along = random(state);
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
-    if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
+    // Past the flat face, along which lift points, the face meets a shadow ray starting on it again
+    if (dot(normal, normal) > 0
+        && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0 && (dot(lift, toLight) > 0 || offset > 0)))
         return float3(0, 0, 0);
     // Off the side the light is on, along lift by offset; traced from a surface transmitting light
     float3 from = traced ? tracedLift(scene, origin, lift * sign(dot(face, toLight)), offset)
@@ -1548,11 +1550,14 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         const float3 side_n = surface.transparency > 0 || sided || !(dot(surface.normal, -direction) > 0) ? geometry_n
             : surface.normal;
         // Reflections alone leave off the smooth surface of an opaque one, by its height: rays crossing the face have
-        // no terminator to clear and start at the hit, as the height bounds nothing behind it. Surfaces transmitting
-        // light, as strands' fibers do, keep the traced lift on either side: a ray started on a face whose normals tilt
-        // off it would meet its triangle again, and an untraced height could skip past a thin surface behind it
+        // no terminator to clear and start at the hit, as the height bounds nothing behind it. Starts under the
+        // traversal's least distance over the face stay on it, where rules meet the face again; from higher, a ray
+        // past the face meets it at least that far, where the traversal does. Surfaces transmitting light, as strands'
+        // fibers do, keep the traced lift on either side: a ray started on a face whose normals tilt off it would meet
+        // its triangle again, and an untraced height could skip past a thin surface behind it
         const bool traced = surface.transparency > 0 || strand;
-        const float offset = !traced && dot(side_n, -direction) > 0 ? smoothHeight(scene, hit, origin) : 0.0f;
+        const float height = !traced && dot(side_n, -direction) > 0 ? smoothHeight(scene, hit, origin) : 0.0f;
+        const float offset = height * dot(geometry_n, surface.normal) >= 1e-4f ? height : 0.0f;
         const float traced_offset = traced ? geometryOffset(scene, hit, geometry_n, origin) : 0.0f;
         // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
         // which the last bounce skips (power heuristic)
@@ -1745,6 +1750,9 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
         // Off the side it leaves through, or right from where it passes straight through
         const uint through = lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f ? key(scene, hit)
             : NONE;
+        // A direction the smooth normal sends past the face of a surface transmitting nothing, which faces the
+        // ray, meets it again where it leaves, as the face is flat
+        const bool again = !(traced || sided) && offset == 0 && dot(dir, geometry_n) < 0;
         direction = dir;
         // Off the side the normal faces, where light sampling toward it starts as well; into an opaque surface right
         // from the hit, as nothing bounds how thin it is behind; off a transmitting one by the traced lift
@@ -1752,17 +1760,18 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : traced_offset)
             : origin + lift * (dot(direction, side_n) > 0 ? offset : 0.0f);
         if (weighs) nee_start = leaving;
-        origin = passes || through != NONE ? origin : leaving;
+        origin = passes || again || through != NONE ? origin : leaving;
         if (!passes)
             medium = sides[int(dot(direction, side_n) > 0)], filling = fillings[int(dot(direction, side_n) > 0)];
         if (!replay && !survives(scene, r.seed, throughput, density, b)) {
             break;
         }
-        // Passing, the next vertex is the same hit in the other layer, reached without distance
+        // Passing, the next vertex is the same hit in the other layer, reached without distance; meeting the face again
+        // in this one, it is the hit the ray reached, by its distance, so live bumps step there as they did
         passed = passes;
         layer = passes ? layer ^ 1u : 0u;
-        if (passes) {
-            distance = 0.0f;
+        if (passes || again) {
+            distance = passes ? 0.0f : distance;
             continue;
         }
         // Only occluders in front of the reconnection vertex matter

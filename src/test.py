@@ -491,8 +491,8 @@ for roughness in (0, 1):
 # floor reads white, without reuse within four standard errors of its 7 x 8 blocks, with it within 0.1%, as ReSTIR's
 # reuse ties neighboring pixels, which the blocks' spread misses (main f8b1f30 read 0.99983 there). Light and bounces
 # leave by the shading normal's side, so directions past the face reach the floor itself and come back out a bounce
-# later: one bounce reads 0.71, the energy is whole by about seven. Light sampling alone finds more than the lobe's share
-# on the face's side, (1 + cos) / 2 of the tilt, and no more than all of it
+# later. Light sampling alone reads the lobe's share above the face, (1 + cos) / 2 of the tilt, within four standard
+# errors, as the floor hides all below it (main f36daea read 0.707, seeing below from a start lifted off the floor)
 scene.camera.data.angle = 0.3
 floor.inputs['IOR'].default_value = 1
 mesh = bpy.data.objects['floor'].data
@@ -508,7 +508,9 @@ for reuse in (False, True):
     blocks = mis_render(16, reuse).mean(2).reshape(7, 8, 8, 8).mean((1, 3))
     assert abs(blocks.mean() - 1) < (1e-3 if reuse else 4 * blocks.std(ddof=1) / blocks.size ** 0.5), (
         'MIS shading normals', reuse, float(blocks.mean()))
-assert (1 + 0.3122499) / 2 * 1.01 < mis_render(0, False).mean() <= 1.01, 'light sampling shading normals'
+blocks = mis_render(0, False).mean(2).reshape(7, 8, 8, 8).mean((1, 3))
+assert abs(blocks.mean() - (1 + 0.3122499) / 2) < 4 * blocks.std(ddof=1) / blocks.size ** 0.5, (
+    'light sampling shading normals', float(blocks.mean()))
 floor.inputs['Base Color'].default_value, bpy.data.objects['dim'].hide_render = color, False
 bpy.data.objects['box'].hide_render = True
 mesh.normals_split_custom_set([(0, 0, 1)] * len(mesh.loops))
@@ -1287,6 +1289,29 @@ def shaded():  # The bumped scene rendered, its pixels
 baked, points, module['POINTS'] = shaded(), module['POINTS'], ()  # Live: no unit reads a point
 live, module['POINTS'], module['summarize'] = shaded(), points, summarize
 assert numpy.percentile(numpy.abs(baked - live).max(-1), 99) < 0.016, 'baked bump'
+# The bumped plane white and diffuse under a hemisphere emitting 1 over it, nothing below, returns all it receives
+# given bounces enough: it reads 1 within four standard errors of 64 blocks (1.0001 at an error of 0.0002), as rays a
+# smooth normal sends past the face meet it again, where main c8fae50 read 0.647, losing them under the plane
+dome, bm, bsdf = bpy.data.meshes.new('dome'), bmesh.new(), nodes['Principled BSDF']
+bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=20)
+bmesh.ops.delete(bm, geom=[v for v in bm.verts if v.co.z < -1e-6], context='VERTS')
+bmesh.ops.reverse_faces(bm, faces=bm.faces[:]), bm.to_mesh(dome), dome.materials.append(bpy.data.materials.new('dome'))
+for name, value in ('Base Color', (0, 0, 0, 1)), ('Emission Color', (1, 1, 1, 1)), ('Emission Strength', 1), ('IOR', 1):
+    dome.materials[0].node_tree.nodes['Principled BSDF'].inputs[name].default_value = value
+bumped.collection.objects.link(lid := bpy.data.objects.new('dome', dome))
+color, ior, bounces = tuple(bsdf.inputs['Base Color'].default_value), bsdf.inputs['IOR'].default_value, \
+    bumped.flex_bounces
+bsdf.inputs['Base Color'].default_value, bsdf.inputs['IOR'].default_value = (1, 1, 1, 1), 1
+sun.hide_render, bumped.flex_bounces, bumped.flex_restir = True, 64, False
+preferences = bpy.context.preferences.addons[module['__name__']].preferences
+device = preferences.device
+for preferences.device in ('OPTIX', 'VULKAN'):
+    blocks = shaded().mean(2).reshape(8, 16, 8, 16).mean((1, 3))
+    assert abs(blocks.mean() - 1) < 4 * blocks.std(ddof=1) / 8, ('bumped furnace', preferences.device, blocks.mean())
+preferences.device = device
+bpy.data.objects.remove(lid)
+bsdf.inputs['Base Color'].default_value, bsdf.inputs['IOR'].default_value = color, ior
+sun.hide_render, bumped.flex_bounces, bumped.flex_restir = False, bounces, True
 # Each image the materials read is stored in the smallest format exact for it: a heightmap read from a 16-bit PNG,
 # 0.5 + 0.02 sin(16 pi u) over 2048 texels, as 16-bit UNORM, read as the correctly rounded k / 65535 where Blender has
 # k * (1 / 65535) (512 of the 65536 codes an ulp apart); floats that are halves as halves; others as floats. Filtered
@@ -1332,8 +1357,6 @@ assert export.shape[2][sixteen, read.extension][2] >> 26 & 3 == 0, '16-bit heigh
 assert [stored(image) for image in (sixteen, halves)] == [0, 0], '16-bit heights differentiated'
 bump.inputs['Distance'].default_value, bumped.camera.data.ortho_scale, sun.rotation_euler.z = 1, 2 * 32 / size, \
     math.radians(90)
-preferences = bpy.context.preferences.addons[module['__name__']].preferences
-device = preferences.device
 for preferences.device in ('OPTIX', 'VULKAN'):
     read.image = sixteen
     rendered = shaded()
