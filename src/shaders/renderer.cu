@@ -928,13 +928,15 @@ __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) 
 
 // Nearest hit of a ray within far and its distance, NONE on a miss
 // Of a ray leaving the skipped triangle, if any, from where it hit it, as Cycles skips it, starting back by the
-// distance it otherwise starts after to keep triangles there; a ray then passing a triangle hit there skips none
+// distance it otherwise starts after to keep triangles there; a ray then passing a triangle hit there skips none.
+// Rays start after near, a surface's margin from where they leave it; a medium's vertex, on none, has none. Not
+// near - back: Slang folds that to -back, a -0 that Vulkan's ray queries meet nothing past
 __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance,
-    unsigned skip = NONE) {
-    const float back = skip == NONE ? 0 : 1e-4f;
+    unsigned skip = NONE, float near = 1e-4f) {
+    const float back = skip == NONE ? 0 : near;
     unsigned layer = __float_as_uint(-INFINITY);
     // Traverse only; hit data is read from the hit object below.
-    optixTraverse(scene.handle, origin - direction * back, direction, 1e-4f - back, far + back, 0.0f, 255,
+    optixTraverse(scene.handle, origin - direction * back, direction, skip == NONE ? near : 0, far + back, 0.0f, 255,
         skip == NONE ? OPTIX_RAY_FLAG_DISABLE_ANYHIT : OPTIX_RAY_FLAG_NONE, 0, 1, 0, skip, layer);
     if (!optixHitObjectIsHit()) return {NONE};
     distance = optixHitObjectGetRayTmax() - back;
@@ -1216,10 +1218,11 @@ __device__ float3 passing(const Scene& scene, Medium medium, unsigned material, 
 // as no direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
 // arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
 // origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
+// Off a surface, as a medium's vertex, the shadow ray starts at origin itself.
 // Not inlined, as nvcc chooses without the sheen's code
 __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 shading,
     float offset, float3 face, const Medium* sides, uint2 fillings, unsigned state, float3& direction, float& density,
-    Ray ray) {
+    Ray ray, bool onSurface = true) {
     direction = make_float3(0, 0, 0), density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
@@ -1259,7 +1262,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     // by their transparency, entering the volumes of those it meets from the front and leaving them from the back
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
     // short of it, from the lowest index there
-    Hit first = traverse(scene, from, toward, left, at);
+    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
     if (first.triangle != NONE && !scene.materials[key(scene, first)].opaque)
         at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
     for (Hit hit = first; hit.triangle != NONE;
@@ -1711,7 +1714,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             const bool sampled = !replay || b == stop && !varying;
             const float3 f = sampled ? throughput * sampleLight(scene, origin, make_float3(0, 0, 0),
                 direction, 0, direction, around, make_uint2(filling, filling), stream(r.seed, b + STREAM_NEE),
-                light_dir, light, {false, false, prev.lobe, float(b), along})
+                light_dir, light, {false, false, prev.lobe, float(b), along}, false)
                 * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
             if (replay && b == stop) {
                 return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift{f, 1.0f} : fail;
@@ -1734,7 +1737,7 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
             const float z = 1 - 2 * random(state), angle = 2 * PI * random(state);
             direction = make_float3(sine(z) * cosf(angle), sine(z) * sinf(angle), z);
             prev = Vertex{false, LOBE_DIFFUSE, INV_PI / 4, 1.0f};
-            hit = traverse(scene, origin, direction, 1e16f, distance);
+            hit = traverse(scene, origin, direction, 1e16f, distance, NONE, 0);
         }
         if (hit.triangle == NONE) {
             const float3 f = throughput * environment(scene, direction, Ray{false, false, prev.lobe, float(b + 2u), 0});
