@@ -1161,6 +1161,53 @@ __device__ float3 passing(const Scene& scene, Medium medium, unsigned material, 
     return passed;
 }
 
+// Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
+__device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3 toward, float left, Medium medium,
+    unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted) {
+    float before = 0, at = 0, occluder;
+    transmitted = make_float3(1, 1, 1);
+    // Where the first hit lets light through, the layers start an ulp short of it
+    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
+    if (first.triangle != NONE && !scene.materials[key(scene, first)].opaque)
+        at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
+    for (Hit hit = first; hit.triangle != NONE;
+        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
+        occluder = at - before;
+        if (scene.materials[key(scene, hit)].opaque) return true;  // Shading it would pass nothing
+        transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
+        for (unsigned layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
+            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
+                smoothNormal(scene, hit), toward,
+                Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
+            transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
+                .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
+                .transmission = surface.transparency, .ior = surface.ior,
+                .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
+                .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
+            if (layer == 0 && encloses(scene, surface, hit.instance)) {
+                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+                medium = leaves ? Medium{} : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                    hit.triangle);
+            }
+        }
+        if (rgb_to_greyscale(transmitted) <= 0)
+            return true;
+    }
+    transmitted = transmitted * passing(scene, medium, filling, from, toward, before, left, state, ray);
+    return false;
+}
+
+// Medium the camera is in; filling: its material's key if varying, else NONE
+__device__ __forceinline__ Medium cameraMedium(const Scene& scene, float3 direction, float distance, unsigned& filling) {
+    const Hit held = scene.settings.medium == NONE ? Hit{NONE} : owned(scene, scene.settings.medium);
+    const Medium medium = held.triangle == NONE ? Medium{} : volume(shade(scene, held.instance, held.triangle, 0, 0,
+        cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
+        Ray{true, false, LOBE_NONE, 0.0f, distance}));
+    filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
+    return medium;
+}
+
 // Light sampling: a triangle picked by the light BVH, a uniform point on it
 // => transmitted * emission / PDF, PDF in solid angle, transmitted through the media between
 // Off a surface the shadow ray starts at origin
@@ -1189,45 +1236,15 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
     if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
         return make_float3(0, 0, 0);
-    float3 from = origin, transmitted = make_float3(1, 1, 1);
     // Visibility along the segment to the sampled point
     const float3 toward = normalize(toLight);
     const float left = shadowLength(toLight);
-    float before = 0, at = 0, occluder;
     direction = toward;
-    Medium medium = sides[dot(face, toLight) > 0];
-    unsigned filling = dot(face, toLight) > 0 ? fillings.y : fillings.x;
-    // Through each layer of occluders by distance then index, tinted by their transparency, entering their volumes
-    // where the first hit lets light through, the layers start an ulp short of it
-    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
-    if (first.triangle != NONE && !scene.materials[key(scene, first)].opaque)
-        at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
-    for (Hit hit = first; hit.triangle != NONE;
-        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
-        occluder = at - before;
-        if (scene.materials[key(scene, hit)].opaque) return make_float3(0, 0, 0);  // Shading it would pass nothing
-        transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
-        for (unsigned layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
-            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
-                smoothNormal(scene, hit), toward,
-                Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
-            transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
-                .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
-                .transmission = surface.transparency, .ior = surface.ior,
-                .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
-                .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
-            if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? Medium{} : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
-                    hit.triangle);
-            }
-        }
-        if (rgb_to_greyscale(transmitted) <= 0)
-            return make_float3(0, 0, 0);
-    }
-    return transmitted * passing(scene, medium, filling, from, toward, before, left, state, ray)
-        * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
+    float3 transmitted;
+    if (occluded(scene, origin, toward, left, sides[dot(face, toLight) > 0], dot(face, toLight) > 0 ? fillings.y
+        : fillings.x, state, ray, onSurface, transmitted))
+        return make_float3(0, 0, 0);
+    return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
         / (density = solidAngle(probability, lightNormal, toLight));
 }
@@ -1295,11 +1312,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     chain.seed = r.seed;
     float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
     // Medium the ray travels in, from the camera that of the volume it is in
-    const Hit held = scene.settings.medium == NONE ? Hit{NONE} : owned(scene, scene.settings.medium);
-    Medium medium = held.triangle == NONE ? Medium{} : volume(shade(scene, held.instance, held.triangle, 0, 0,
-        cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
-        Ray{true, false, LOBE_NONE, 0.0f, distance}));
-    unsigned filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
+    unsigned filling;
+    Medium medium = cameraMedium(scene, direction, distance, filling);
     unsigned camera = stream(r.seed, STREAM_CAMERA);
     float3 approach = make_float3(-0.f, -0.f, -0.f); // Its emission on the way, added to the first hit's: -0 adds none
     throughput = passing(scene, medium, filling, dom.x0, direction, 0, distance, camera,
