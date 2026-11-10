@@ -15,8 +15,9 @@ build/flex.zip: src/__init__.py src/blender_manifest.toml build/renderer build/r
 build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
 	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -ffp-contract=off $< -o $@ $(LDLIBS)
 
-build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flexkernels/pathtracer.cuh \
-	src/shaders/flexkernels/slang-cuda-prelude.h $(OPTIX_PATH)/include/optix.h
+build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter.h src/shaders/adapter.cuh \
+	src/shaders/flexkernels-restir/pathtracer.cuh src/shaders/flexkernels-restir/slang-cuda-prelude.h \
+	$(OPTIX_PATH)/include/optix.h
 	mkdir -p build
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
 	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DSTANDIN -rdc=true -I$(OPTIX_PATH)/include $< -o build/standin.ptx
@@ -27,11 +28,6 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flex
 	xxd -i build/standin.ptx >> $@
 	xxd -i build/extended.ptx >> $@
 	xxd -i build/extended_standin.ptx >> $@
-
-# FlexKernels' ReSTIR walk through the adapter's hooks, compile-checked alone: CI builds it, nothing ships or loads it
-build/restir.ptx: src/shaders/renderer.cu src/shaders/adapter.h src/shaders/adapter.cuh src/shaders/flexkernels-restir/pathtracer.cuh \
-	src/shaders/flexkernels-restir/slang-cuda-prelude.h
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -DFCPT_RESTIR -I$(OPTIX_PATH)/include $< -o $@
 
 # The same host on Vulkan, which src/vulkan stands in for CUDA and OptiX on
 build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulkan/cuda.h src/vulkan/optix_stubs.h \

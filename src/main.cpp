@@ -94,11 +94,11 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         char header[OPTIX_SBT_RECORD_HEADER_SIZE]; const Instance* instances; const unsigned* segments; // programs read
         const float4* points;
     } hit[2]{};
-    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; } walk; // The walk's
+    Record walk[2]{}; // The walk's, holding the scene its hooks read: the pass's, then the anchor's
     OptixShaderBindingTable sbt = {.hitgroupRecordBase = allocate(sizeof(hit)),
         .hitgroupRecordStrideInBytes = sizeof(HitRecord), .hitgroupRecordCount = 2,
-        .callablesRecordBase = allocate(sizeof(walk)), .callablesRecordStrideInBytes = sizeof(walk),
-        .callablesRecordCount = 1};
+        .callablesRecordBase = allocate(sizeof(walk)), .callablesRecordStrideInBytes = sizeof(Record),
+        .callablesRecordCount = 2};
     // OptiX's compile tasks, taken by a worker on every core while any is given: the renderer's for its lifetime, never
     // freed, as its workers wait on it to the end
     struct Workers {
@@ -199,8 +199,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         for (unsigned k = 0; k < 1 + (tier.params.ops[CURVES >> 6] >> (CURVES & 63) & 1); ++k)
             CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 2 * k], &hit[k]));
         CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, hit, sizeof(hit)));
-        CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 1], &walk));
-        CHECK(cuMemcpyHtoD(sbt.callablesRecordBase, &walk, sizeof(walk)));
+        for (Record& record : walk) CHECK(optixSbtRecordPackHeader(tier.groups[PASSES + 1], &record));
+        CHECK(cuMemcpyHtoD(sbt.callablesRecordBase, walk, sizeof(walk)));
     };
     const auto drop = [&](Tier* tier) {
         if (tier->pipeline) {
@@ -423,6 +423,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             anchored.normals = scene.anchorNormals, anchored.lights = scene.anchorLights;
             anchored.trails = scene.anchorTrails, anchored.instances = anchorInstances;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
+            walk[0].data = scene, walk[1].data = anchored;
+            CHECK(cuMemcpyHtoD(sbt.callablesRecordBase, walk, sizeof(walk)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
                 sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
                 CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));

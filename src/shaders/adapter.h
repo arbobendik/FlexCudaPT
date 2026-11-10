@@ -45,6 +45,6 @@ __device__ unsigned fcptMaxBounces();
 __device__ FKHit fcptReservoirHit(Reservoir r);
 __device__ void fcptWithReservoirHit(Reservoir* r, const FKHit* hit);
 #include "flexkernels-restir/pathtracer.cuh"
-// The renderer's own camera domain and vertex, which the walk's replace at C3, by other names until then
+// The walk's camera domain beside the renderer's own, which its pixels keep
+typedef Domain FKDomain;
 #define Domain NativeDomain
-#define Vertex NativeVertex

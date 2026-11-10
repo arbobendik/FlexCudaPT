@@ -31,7 +31,6 @@ jobs:
           sed -i "s/^\(version = \"[0-9]*\.[0-9]*\)\.[0-9]*\"/\1.$(git rev-list --count HEAD)\"/" src/blender_manifest.toml
           echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' src/blender_manifest.toml)" >> "$GITHUB_ENV"
       - run: make
-      - run: make build/restir.ptx
       - uses: actions/upload-artifact@v7
         with:
           path: build/flex.zip
