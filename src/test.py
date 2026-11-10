@@ -1464,6 +1464,24 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     ratio = seen[False, preferences.device] / seen[True, preferences.device]
     assert abs(ratio - 1) < 0.02, ('volume of noise', preferences.device, ratio)
 preferences.device = device
+# Light leaving a medium within a surface's margin of its face: the cube scattering all it meets, white, of density
+# 1e4, under an angle-0 sun of pi straight down and seen straight down, once, reads (1 - exp(-4e4)) / 8 = 1 / 8 by its
+# single scattering, the most from vertices within 1e-4 of the top face, whose shadow rays must leave it there
+dense = new('dense')
+dense.flex_bounces, dense.camera = 1, haze.camera
+dense.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+dense.collection.objects.link(haze.camera)
+dense.collection.objects.link(cube := bpy.data.objects.new('dense', mesh.copy()))
+cube.data.materials[0] = thick = scatterer.copy()
+for link in thick.node_tree.nodes['Principled Volume'].inputs['Density'].links: thick.node_tree.links.remove(link)
+thick.node_tree.nodes['Principled Volume'].inputs['Density'].default_value = 1e4
+dense.collection.objects.link(overhead := bpy.data.objects.new('dense sun', bpy.data.lights.new('dense sun', 'SUN')))
+overhead.data.angle, overhead.data.energy = 0, math.pi
+for preferences.device in ('OPTIX', 'VULKAN'):
+    bpy.ops.render.render(scene=dense.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(dense.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    assert abs(seen * 8 - 1) < 0.02, ('light leaving a dense medium', preferences.device, seen * 8)
+preferences.device = device
 # A volume clear at a face bounds it all the same: the absorber of density 2 z over its generated points, clear at its
 # bottom face, over a white diffuse floor lit by a sun straight down and seen through it, passes exp(-2) each way, the
 # floor reading exp(-4) / pi; a ray taking the absorber past its clear face would gain by its density's negative there
