@@ -1242,12 +1242,13 @@ __device__ float3 passing(const Scene& scene, Medium medium, unsigned material, 
 // entering the volumes of those it meets from the front and leaving them from the back; transmitted, the share of light
 // reaching the light through them and the media between. Whether an occluder blocks it, opaque or passing nothing
 __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3 toward, float left, Medium medium,
-    unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted) {
+    unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted, unsigned skip = NONE) {
     float before = 0, at = 0, occluder;
     transmitted = make_float3(1, 1, 1);
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
     // short of it, from the lowest index there
-    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
+    // Off a surface past its margin; off a medium's vertex, or an opaque surface past skip, its own triangle, from none
+    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, skip, 0);
     if (first.triangle != NONE && !scene.materials[key(scene, first)].opaque)
         at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
     for (Hit hit = first; hit.triangle != NONE;
@@ -1299,7 +1300,7 @@ __device__ __forceinline__ Medium cameraMedium(const Scene& scene, float3 direct
 // Not inlined, as nvcc chooses without the sheen's code
 __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 lift,
     float offset, bool traced, float3 face, const Medium* sides, uint2 fillings, unsigned state, float3& direction,
-    float& density, Ray ray, bool onSurface = true) {
+    float& density, Ray ray, bool onSurface = true, unsigned self = NONE) {
     direction = make_float3(0, 0, 0), density = 0;
     // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
     // BVHLightSampler::Sample)
@@ -1328,6 +1329,9 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     // Off the side the light is on, along lift by offset; traced from a surface transmitting light
     float3 from = traced ? tracedLift(scene, origin, lift * sign(dot(face, toLight)), offset)
         : origin + lift * (dot(face, toLight) > 0 ? offset : 0.0f);
+    // Off an opaque surface from no margin, a face meeting it there or by the lifted start met; from its face itself
+    // past self, its own triangle, alone
+    const unsigned skip = !traced && !(dot(face, toLight) > 0 && offset > 0) ? self : NONE;
     // Visibility along the segment from the offset start to the sampled point
     const float3 shadow = toLight + origin - from, toward = normalize(shadow);
     if (dot(normal, normal) > 0 && !(dot(normal, shadow) > 0))  // As BSDF sampling sees it, from the lifted start
@@ -1338,7 +1342,7 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     direction = toward;
     float3 transmitted;
     if (occluded(scene, from, toward, left, sides[dot(face, toLight) > 0], dot(face, toLight) > 0 ? fillings.y
-        : fillings.x, state, ray, onSurface, transmitted))
+        : fillings.x, state, ray, onSurface && traced, transmitted, skip))
         return make_float3(0, 0, 0);
     return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
@@ -1548,7 +1552,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float light;
                 const float3 radiance = nee ? sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
                     traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray)
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
+                    traced ? NONE : key(scene, hit))
                     : make_float3(0.0f, 0.0f, 0.0f);
                 if (!(rgb_to_greyscale(radiance) > 0.0f)) {
                     return fail;
@@ -1566,7 +1571,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
                     traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
+                    traced ? NONE : key(scene, hit));
                 return rgb_to_greyscale(radiance) > 0.0f
                     ? Shift{throughput * lit(light_dir, light) * radiance, 1.0f} : fail;
             }
@@ -1587,7 +1593,8 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
                 float light;
                 const float3 radiance = sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
                     traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray);
+                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
+                    traced ? NONE : key(scene, hit));
                 const float3 f = rgb_to_greyscale(radiance) > 0.0f
                     ? throughput * lit(light_dir, light) * radiance : fail.f;
                 Reservoir candidate = chain;
@@ -1731,8 +1738,13 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
         }
         // Only occluders in front of the reconnection vertex matter
         const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
-        hit = traverse(scene, origin, direction, reconnecting ? length(reconnection - origin) * 1.001f : 1e16f,
-            distance, through);
+        const float far = reconnecting ? length(reconnection - origin) * 1.001f : 1e16f;
+        // Off an opaque surface from no margin, as from a medium's vertex, a face meeting it there or by the lifted start
+        // met; from its face itself past its own triangle alone
+        const bool opaque = !(traced || through != NONE);
+        const bool on = opaque && !(dot(direction, side_n) > 0 && offset > 0);
+        hit = opaque ? traverse(scene, origin, direction, far, distance, on ? key(scene, hit) : NONE, 0)
+            : traverse(scene, origin, direction, far, distance, through);
         // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
         if (reconnecting && hit.triangle == r.rc.triangle && hit.instance == r.rc.instance) {
             hit.uv = r.rc.uv;
