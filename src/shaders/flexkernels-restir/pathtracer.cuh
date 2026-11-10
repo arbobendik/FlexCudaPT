@@ -2639,7 +2639,7 @@ static __device__ Shift walk_0(Domain * dom_0, Reservoir * r_3, bool replay_1, f
                 uint _S725 = _slang_select(_S717, 0U,b_4);
                 uint _S726 = (&prev_0)->lobe;
                 uint _S727 = _slang_select(_S717, 3U,_S726);
-                float _S728 = (fcptTrackMedium((_S709), (_S722), (_S723), (_S724), (&tracking_0), (&weight_1), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (_S725), (_S727)));
+                float _S728 = (fcptTrackMedium((_S709), (_S722), (_S723), (_S724), (&tracking_0), (&weight_1), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (_S725), (_S727), (_S717)));
                 threshold_2 = _S728;
             }
             else
@@ -4384,7 +4384,7 @@ static __device__ Shift walk_0(Domain * dom_0, Reservoir * r_3, bool replay_1, f
                     uint _S1124 = _slang_select(_S1116, 0U,b_7);
                     uint _S1125 = (&prev_0)->lobe;
                     uint _S1126 = _slang_select(_S1116, 3U,_S1125);
-                    float _S1127 = (fcptTrackMedium((_S1105), (_S1121), (_S1122), (_S1123), (&tracking_1), (&weight_1), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (_S1124), (_S1126)));
+                    float _S1127 = (fcptTrackMedium((_S1105), (_S1121), (_S1122), (_S1123), (&tracking_1), (&weight_1), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (_S1124), (_S1126), (_S1116)));
                     spread_3 = _S1127;
                 }
                 else
