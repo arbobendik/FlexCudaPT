@@ -1203,6 +1203,52 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     return passed;
 }
 
+// Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
+[ForceInline] bool occluded(Scene* scene, float3 from, float3 toward, float left, Medium medium, uint filling,
+    inout uint state, Ray ray, bool onSurface, out float3 transmitted) {
+    float before = 0, at = 0, occluder;
+    transmitted = float3(1, 1, 1);
+    // Where the first hit lets light through, the layers start an ulp short of it
+    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
+    if (first.triangle != NONE && scene.materials[key(scene, first)].opaque == 0)
+        at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
+    for (Hit hit = first; hit.triangle != NONE;
+        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
+        occluder = at - before;
+        if (scene.materials[key(scene, hit)].opaque != 0) return true;  // Shading it would pass nothing
+        transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
+        for (uint layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
+            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
+                smoothNormal(scene, hit), toward,
+                Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder), layer);
+            transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
+                surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
+                float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
+                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
+            if (layer == 0 && encloses(scene, surface, hit.instance)) {
+                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+                medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                    hit.triangle);
+            }
+        }
+        if (rgb_to_greyscale(transmitted) <= 0)
+            return true;
+    }
+    transmitted = transmitted * passing(scene, medium, filling, from, toward, before, left, state, ray);
+    return false;
+}
+
+// Medium the camera is in; filling: its material's key if varying, else NONE
+[ForceInline] Medium cameraMedium(Scene* scene, float3 direction, float distance, out uint filling) {
+    const Hit held = scene.settings.medium == NONE ? Hit(NONE, NONE, float2(0, 0))
+        : owned(scene, scene.settings.medium);
+    const Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0,
+        0, cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
+        Ray(true, false, LOBE_NONE, 0.0f, distance)));
+    filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
+    return medium;
+}
+
 // Light sampling: a light picked by the light tree, P(light) the product of child shares down to it
 // Triangle: uniform point, PDF = solidAngle(P(light))
 // radiance = L * T / PDF
@@ -1232,44 +1278,16 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
     if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
         return float3(0, 0, 0);
-    float3 from = origin, transmitted = float3(1, 1, 1);
     // Visibility along the segment to the sampled point
     const float3 toward = normalize(toLight);
     const float left = shadowLength(toLight);
-    float before = 0, at = 0, occluder;
     direction = toward;
-    Medium medium = sides[int(dot(face, toLight) > 0)];
-    uint filling = fillings[int(dot(face, toLight) > 0)];
-    // Through each layer of occluders by distance then index, tinted by their transparency, entering their volumes
-    // where the first hit lets light through, the layers start an ulp short of it
-    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
-    if (first.triangle != NONE && scene.materials[key(scene, first)].opaque == 0)
-        at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
-    for (Hit hit = first; hit.triangle != NONE;
-        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
-        occluder = at - before;
-        if (scene.materials[key(scene, hit)].opaque != 0) return float3(0, 0, 0);  // Shading it would pass nothing
-        transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
-        for (uint layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
-            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
-                smoothNormal(scene, hit), toward,
-                Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder), layer);
-            transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
-                surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
-                float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
-                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
-            if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
-                    hit.triangle);
-            }
-        }
-        if (rgb_to_greyscale(transmitted) <= 0)
-            return float3(0, 0, 0);
-    }
+    float3 transmitted;
+    if (occluded(scene, origin, toward, left, sides[int(dot(face, toLight) > 0)], fillings[int(dot(face, toLight) > 0)],
+        state, ray, onSurface, transmitted))
+        return float3(0, 0, 0);
     density = solidAngle(probability, lightNormal, toLight);
-    return transmitted * passing(scene, medium, filling, from, toward, before, left, state, ray)
-        * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
+    return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight)), 0, true).emissive
         / density;
 }
@@ -1367,12 +1385,8 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
     chain.seed = r.seed;
     float3 chain_throughput = float3(0.0f, 0.0f, 0.0f);
     // Medium the ray travels in, from the camera that of the volume it is in
-    const Hit held = scene.settings.medium == NONE ? Hit(NONE, NONE, float2(0, 0))
-        : owned(scene, scene.settings.medium);
-    Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0,
-        0, cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
-        Ray(true, false, LOBE_NONE, 0.0f, distance)));
-    uint filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
+    uint filling;
+    Medium medium = cameraMedium(scene, direction, distance, filling);
     uint camera = stream(r.seed, STREAM_CAMERA);
     float3 approach = float3(-0.f, -0.f, -0.f); // Its emission on the way, added to the first hit's: -0 adds none
     throughput = passing(scene, medium, filling, dom.x0, direction, 0, distance, camera,
