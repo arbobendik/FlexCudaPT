@@ -2059,7 +2059,10 @@ class Flex(bpy.types.RenderEngine):
         self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
             *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
         self.requests.flush()
-        launched, *self.memory = struct.unpack('<I2f', self.answers.read(12))  # Launches, memory, the view's sums
+        # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
+        answer = self.answers.read(12)
+        if len(answer) < 12: return self.report({'ERROR'}, 'Flex: the renderer stopped') or (0, None)
+        launched, *self.memory = struct.unpack('<I2f', answer)
         sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
         return launched, numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
 
@@ -2088,7 +2091,7 @@ class Flex(bpy.types.RenderEngine):
         while not self.test_break():
             launched, sums = self.trace(width, height, sampling(scene, follows), min(count or 1, RENDER_SAMPLES),
                 settings(scene, False, self.device), *camera)
-            if count and not launched: break
+            if sums is None or count and not launched: break
             count = int(sums[0, 0, 3])
             pixels = sums[y:y + result.resolution_y, x:x + result.resolution_x] * (1 / count)
             result.layers[0].passes['Combined'].rect.foreach_set(pixels.ravel())
