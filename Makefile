@@ -28,6 +28,11 @@ build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flex
 	xxd -i build/extended.ptx >> $@
 	xxd -i build/extended_standin.ptx >> $@
 
+# FlexKernels' ReSTIR walk through the adapter's hooks, compile-checked alone: CI builds it, nothing ships or loads it
+build/restir.ptx: src/shaders/renderer.cu src/shaders/adapter.h src/shaders/adapter.cuh src/shaders/flexkernels-restir/pathtracer.cuh \
+	src/shaders/flexkernels-restir/slang-cuda-prelude.h
+	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -DFCPT_RESTIR -I$(OPTIX_PATH)/include $< -o $@
+
 # The same host on Vulkan, which src/vulkan stands in for CUDA and OptiX on
 build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulkan/cuda.h src/vulkan/optix_stubs.h \
 	src/vulkan/vector_types.h build/vulkan/shaders.h $(OPTIX_PATH)/include/optix.h
