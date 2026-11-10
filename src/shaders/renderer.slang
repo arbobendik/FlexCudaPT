@@ -978,14 +978,15 @@ float candidate(Scene* scene, inout RayQuery<RAY_FLAG_NONE> query, uint skip, fl
 }
 
 // Nearest hit of a ray within far and its distance, NONE on a miss
-// Leaving the skipped triangle, the ray starts back by its margin, to keep triangles there
-Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout float distance, uint skip = NONE) {
-    const float back = skip == NONE ? 0 : 1e-4f;
+// Rays start past near; leaving the skipped triangle, back by near, to keep triangles there
+Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout float distance, uint skip = NONE,
+    float near = 1e-4f) {
+    const float back = skip == NONE ? 0 : near;
     // Every candidate but the skipped triangle committed
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(RaytracingAccelerationStructure(scene.handle),
         skip == NONE ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE, 255,
-        RayDesc(origin - direction * back, 1e-4f - back, direction, far + back));
+        RayDesc(origin - direction * back, skip == NONE ? near : 0, direction, far + back));
     float2 uv = float2(0, 0);
     while (query.Proceed()) {
         const float t = candidate(scene, query, skip, query.CommittedStatus() == COMMITTED_NOTHING ? far + back
@@ -1205,8 +1206,9 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 // Light sampling: a light picked by the light tree, P(light) the product of child shares down to it
 // Triangle: uniform point, PDF = solidAngle(P(light))
 // radiance = L * T / PDF
+// Off a surface, as a medium's vertex, the shadow ray starts at origin itself
 [noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 face, Medium sides[2],
-    uint2 fillings, uint state, out float3 direction, out float density, Ray ray) {
+    uint2 fillings, uint state, out float3 direction, out float density, Ray ray, bool onSurface = true) {
     direction = float3(0, 0, 0);
     density = 0;
     // Down the light tree by the children's importance, pick rescaled (pbrt-v4 BVHLightSampler::Sample)
@@ -1240,7 +1242,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     uint filling = fillings[int(dot(face, toLight) > 0)];
     // Through each layer of occluders by distance then index, tinted by their transparency, entering their volumes
     // where the first hit lets light through, the layers start an ulp short of it
-    Hit first = traverse(scene, from, toward, left, at);
+    Hit first = onSurface ? traverse(scene, from, toward, left, at) : traverse(scene, from, toward, left, at, NONE, 0);
     if (first.triangle != NONE && scene.materials[key(scene, first)].opaque == 0)
         at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
     for (Hit hit = first; hit.triangle != NONE;
@@ -1679,7 +1681,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             const bool sampled = !replay || b == stop && !varying;
             const float3 f = sampled ? throughput * sampleLight(scene, origin, float3(0, 0, 0),
                 direction, around, uint2(filling, filling), stream(r.seed, b + STREAM_NEE), light_dir, light,
-                Ray(false, false, prev.lobe, float(b), along))
+                Ray(false, false, prev.lobe, float(b), along), false)
                 * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
             if (replay && b == stop) {
                 return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift(f, 1.0f) : fail;
@@ -1704,7 +1706,7 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
             const float z = 1 - 2 * random(state), angle = 2 * PI * random(state);
             direction = float3(sine(z) * cos(angle), sine(z) * sin(angle), z);
             prev = Vertex(false, LOBE_DIFFUSE, INV_PI / 4, 1.0f);
-            hit = traverse(scene, origin, direction, 1e16f, distance);
+            hit = traverse(scene, origin, direction, 1e16f, distance, NONE, 0);
         }
         if (hit.triangle == NONE) {
             const float3 f = throughput * environment(scene, direction, Ray(false, false, prev.lobe, float(b + 2u), 0));
