@@ -2982,7 +2982,7 @@ static __device__ Shift walk_0(Domain * dom_0, Reservoir * r_3, bool replay_1, f
         {
             uint _S817 = stream(_S703, b_4);
             uint _S818 = arrivalLobe_0(b_4, (&prev_0)->lobe);
-            FKSurface _S819 = (fcptSurfaceAtPath((hit_1), ((&ray_2)->origin), (_S817), (width_2), (layer_0), (b_4), (_S818)));
+            FKSurface _S819 = (fcptSurfaceAtPath((hit_1), ((&ray_2)->origin), (_S817), (width_2), (layer_0), (b_4), (_S818), ((&ray_2)->unit_direction)));
             bool _S820 = !passes_0;
             FKSurface _S821 = _S819;
             FKSurface _S822 = emitting_0(&_S821, _S820);
