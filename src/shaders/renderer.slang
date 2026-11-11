@@ -5,6 +5,14 @@
 // into the launch's record, which by value each call out of line would copy to local memory.
 import pathtracer;
 
+// FlexKernels' walk's own types, under names apart from the renderer's
+typealias FKHit = Hit;
+typealias FKRay = Ray;
+typealias FKSurface = Surface;
+typealias FKMedium = Medium;
+typealias FKDomain = Domain;
+typealias FKLight = Light;
+
 // The renderer's own names, apart from those FlexKernels' walk exports, which it reaches by aliases at global scope
 namespace fcpt {
 
@@ -1343,6 +1351,160 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
     return medium;
 }
+
+// FlexKernels' scene hooks (walk.slang's IScene) by the renderer's own functions, as renderer.cu's adapter defines
+// them, hook by hook: thin calls, its types converted to and from the renderer's. The scene a pass's record holds
+static const float MARGIN = 1e-4f; // A surface's, rays leaving it start past
+Hit nativeHit(FKHit hit) { return Hit(hit.triangle_index, hit.instance_index, hit.uv); }
+// A shaded surface as the walk takes it, unfaced, its material as the walk's BSDF takes it, absorbing nothing (FK's
+// walk keeps FlexLight's absorption; the renderer's media absorb); shading takes no random number
+FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, uint random_state) {
+    const float3 face = faceNormal(scene, at);
+    Material material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic, surface.transparency,
+        surface.ior, float3(1, 1, 1), used(SPECULAR) ? surface.tint : float3(1, 1, 1),
+        used(SPECULAR) ? surface.level : 1, used(TRANSLUCENT) ? surface.translucent : float3(0, 0, 0),
+        used(SHEEN) ? surface.sheen : float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
+        used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+        used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0)};
+    const Medium filled = volume(surface);
+    // Opaque surfaces leave by their smooth surface's height, none under the margin over the face; those transmitting
+    // light and strands by the traced lift's offset, as the renderer's own walk lifted them
+    const bool traced = surface.transparency > 0 || used(CURVES) && scene.instances[at.instance].world == STRANDS;
+    const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0;  // Its fiber, which rays leave from the vertex
+    const float height = traced || hair ? 0.0f : smoothHeight(scene, at, position);
+    return {surface.normal, face, hair ? 0.0f : traced ? geometryOffset(scene, at, face, position)
+        : height * dot(face, surface.normal) >= MARGIN ? height : 0.0f, material, false, random_state,
+        surface.coverage, encloses(scene, surface, at.instance), {filled.scatter, filled.extinction},
+        fills(scene, at.instance, at.triangle), surface.hair};
+}
+struct VkScene : IScene {
+    Scene* scene;
+    // A miss has no instance, as the walk tests it; no point lights exist to consider. Off a surface, past its margin,
+    // as traverse starts by default, skipping the face a straight pass leaves by, if it was reached past that margin;
+    // from no margin, as from a medium's vertex, skipping the face it starts on, if any. Seen straight from the camera,
+    // hidden layers passed as pixelDomain passes them
+    FKHit traverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left,
+        bool viewed) {
+        float distance = 0;
+        Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
+            left.instance_index != NONE && left.distance >= MARGIN ? key(scene, nativeHit(left)) : NONE)
+            : traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
+            left.instance_index != NONE ? key(scene, nativeHit(left)) : NONE, 0);
+        for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
+            first = false) {
+            if (first) distance = asfloat(asuint(distance) - 1);
+            hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
+        }
+        return FKHit(hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance);
+    }
+    // FK: the sky's shadow toward a sample of the environment's CDF, which the renderer has none of until C9-C10
+    float3 shadowTransmittance(FKRay ray, float l) { return float3(0, 0, 0); }
+    // Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone
+    // width
+    float3 shadowTransmittanceIn(FKRay ray, float l, float3 extinction, uint filling, uint random_state, uint depth,
+        uint lobe, bool surface, float length, float width, FKHit left) {
+        float3 transmitted;
+        uint state = random_state;
+        return occluded(scene, ray.origin, ray.unit_direction, l, Medium(float3(0, 0, 0), extinction), filling, state,
+            Ray(depth == 0, false, lobe, float(depth), length, width), surface, transmitted,
+            left.instance_index != NONE ? key(scene, nativeHit(left)) : NONE) ? float3(0, 0, 0) : transmitted;
+    }
+    // FlexLight's, which the walk built for the renderer never calls
+    FKSurface surfaceAt(FKHit hit, float3 origin, uint init_random_state) { return {}; }
+    // A light sample's emission as sampleLight shades it: its emission program, toward the triangle's face, for no ray
+    // a bounce past the vertex sampling it
+    FKSurface lightSurfaceAt(FKHit hit, float3 point, uint init_random_state, float3 dir, uint depth, float length) {
+        const Hit at = nativeHit(hit);
+        const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
+        return walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
+            cross(corner[1] - corner[0], corner[2] - corner[0]), dir, Ray(false, false, LOBE_NONE, float(depth + 1),
+            length), 0, true), point, init_random_state);
+    }
+    // The surface as the walk's loop shades a hit
+    FKSurface surfaceAtPath(FKHit hit, float3 origin, uint init_random_state, float width, uint layer, uint depth,
+        uint lobe, float3 dir) {
+        const Hit at = nativeHit(hit);
+        return walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y, smoothNormal(scene, at),
+            dir, Ray(depth == 0, false, lobe, float(depth), hit.distance, width), layer),
+            hitPosition(scene, scene.vertices, at), init_random_state);
+    }
+    uint layers(FKHit hit) { return scene.materials[key(scene, nativeHit(hit))].layers; }
+    // Its size: stored negative, it marks an extinction drawn exactly
+    float majorant(uint filling) { return abs(scene.instances[owner(scene, filling)].majorant); }
+    FKMedium cameraMedium(float3 direction, float distance, out uint filling) {
+        const Medium medium = fcpt.cameraMedium(scene, direction, distance, filling);
+        return {medium.scatter, medium.extinction};
+    }
+    float trackMedium(uint filling, float3 origin, float3 dir, float distance, inout uint random_state,
+        inout float3 weight, inout float3 glowed, inout float3 scatter, inout float3 extinction, uint depth, uint lobe,
+        bool camera) {
+        if (!used(MEDIUM)) return distance; // Of none in a SPIR-V compiled without varying media, as the walk gated it
+        Medium medium = Medium(scatter, extinction);
+        const float along = track(scene, medium, filling, origin, dir, distance, random_state, weight, glowed,
+            Ray(camera, false, lobe, float(depth), distance));
+        scatter = medium.scatter, extinction = medium.extinction;
+        return along;
+    }
+    float3 hitPosition(FKHit hit) { return fcpt.hitPosition(scene, scene.vertices, nativeHit(hit)); }
+    float3x3 worldTriangle(uint instance_index, uint triangle_index) {
+        const Corners corner = corners(scene.vertices, scene.instances[instance_index], triangle_index);
+        return float3x3(corner[0], corner[1], corner[2]);
+    }
+    // The light tree's nodes as FlexLight's texels: x whether a leaf (0 a node, 1 a triangle, 2 a point light, none
+    // here), a leaf's y its instance and z its triangle within it, which a node's leave meaningless, w unused; a node's
+    // second child, the first following it
+    LightBounds lightBounds(uint n) {
+        const LightNode node = scene.lights[n];
+        return {node.low, node.high, node.w, node.phi, node.cos_theta_o};
+    }
+    uint4 lightNode(uint n) {
+        const LightNode node = scene.lights[n];
+        return uint4(node.leaf, node.instance, node.child - scene.instances[node.instance].first, 0);
+    }
+    uint lightSecond(uint n) { return scene.lights[n].child; }
+    // A light's slot, its triangle's number, whose trail of 64 bits is x low and y high; none of a strand, which no
+    // light sampling picks
+    uint lightSlot(FKHit hit) {
+        return used(CURVES) && scene.instances[hit.instance_index].world == STRANDS ? NONE
+            : key(scene, nativeHit(hit));
+    }
+    uint4 lightTrail(uint j) {
+        const uint64_t trail = scene.trails[j];
+        return uint4(uint(trail), uint(trail >> 32), 0, 0);
+    }
+    bool slotLeaf(uint n, uint j, uint4 trail_texel) {
+        const Hit light = owned(scene, j);
+        return scene.lights[n].child == light.triangle && scene.lights[n].instance == light.instance;
+    }
+    // FK: point lights, which the renderer has none of; no node names one
+    FKLight light(uint index) { return {}; }
+    uint triangleOffset(uint instance_index) { return scene.instances[instance_index].first; }
+    float3 calculatePointLightContrib(uint index) { return float3(0, 0, 0); }
+    // The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
+    // b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
+    // world always shades. Its luminance CDF none (FK: sky sampling, which the renderer has none of until C9-C10), nor
+    // an ambient color without a world
+    float3 env_map_sample(float3 dir, uint depth, uint lobe) {
+        return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
+    }
+    float4 environmentCdf(uint2 cell) { return float4(0, 0, 0, 0); }
+    uint2 environmentCdfSize() { return uint2(0, 0); }
+    uint2 environmentMapSize() { return uint2(2, 2); }
+    float3 ambient() { return float3(0, 0, 0); }
+    uint maxBounces() { return scene.settings.bounces; }
+    // A hair fiber's scattering, as the renderer's walk takes it: of its fiber along hair by its level, its color and
+    // the specular tint, which are all the hair's BSDF reads of a surface
+    SampleBSDF connectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir) {
+        Surface fiber = {};
+        fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
+        return fcpt.connectHair(scene, fiber, in_dir, out_dir);
+    }
+    SampleBSDF sampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, uint random_state) {
+        Surface fiber = {};
+        fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
+        return fcpt.sampleHair(scene, fiber, in_dir, random_state);
+    }
+};
 
 // Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
 // the start moved along lift on its side of the face, through the medium on that side, of sides behind and in front
