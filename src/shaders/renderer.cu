@@ -907,14 +907,6 @@ struct Domain {
     float width, spread;
 };
 
-// Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
-struct Vertex {
-    bool rough;
-    unsigned lobe;
-    float pdf;
-    float cos;
-};
-
 __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) {
     return path >> offset & ((1u << count) - 1u);
 }
@@ -1288,93 +1280,6 @@ __device__ __forceinline__ Medium cameraMedium(const Scene& scene, float3 direct
     return medium;
 }
 
-// Light sampling: an emitting triangle picked by the light BVH, a uniform point on it, counted if visible from
-// the start moved along lift on its side of the face, through the medium on that side, of sides behind and in front
-// of face, and those its shadow ray enters; without a normal, only where the lifted start sees it on that side too,
-// as no direction sampled from there reaches past the face. Returns emission * the light's cosine / distance^2 / pdf
-// arriving along direction, pdf = the triangle's probability / area, and the density in solid angle. The ray reached
-// origin; shadows are tested for it and emission is shaded for no ray, both a bounce further, as Cycles shades them.
-// Off a surface, as a medium's vertex, the shadow ray starts at origin itself.
-// Not inlined, as nvcc chooses without the sheen's code
-__device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, float3 normal, float3 lift,
-    float offset, bool traced, float3 face, const Medium* sides, uint2 fillings, unsigned state, float3& direction,
-    float& density, Ray ray, bool onSurface = true, unsigned self = NONE) {
-    direction = make_float3(0, 0, 0), density = 0;
-    // From the root down to either child by its share of importance, the pick rescaled to choose again (pbrt-v4's
-    // BVHLightSampler::Sample)
-    float pick = random(state), probability = 1;
-    unsigned node = 0;
-    while (!scene.lights[node].leaf) {
-        const unsigned child = pickChild(scene.lights[node + 1], scene.lights[scene.lights[node].child], origin, normal,
-            &pick, &probability);
-        if (child > 1)
-            return make_float3(0, 0, 0);
-        node = child ? scene.lights[node].child : node + 1;
-    }
-    if (node == 0 && !(importance(scene.lights[0], origin, normal) > 0))
-        return make_float3(0, 0, 0);
-    const unsigned light = scene.lights[node].child, instance = scene.lights[node].instance;
-    const Corners corner = corners(scene.vertices, scene.instances[instance], light);
-    const float3 la = corner[0], lb = corner[1], lc = corner[2];
-    const float3 lightNormal = cross(lb - la, lc - la);
-    const float side = sqrtf(random(state));
-    const float along = random(state);
-    const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
-    // Past the flat face, along which lift points, the face meets a shadow ray starting on it again
-    if (dot(normal, normal) > 0
-        && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0 && (dot(lift, toLight) > 0 || offset > 0)))
-        return make_float3(0, 0, 0);
-    // Off the side the light is on, along lift by offset; traced from a surface transmitting light
-    float3 from = traced ? tracedLift(scene, origin, lift * sign(dot(face, toLight)), offset)
-        : origin + lift * (dot(face, toLight) > 0 ? offset : 0.0f);
-    // Off an opaque surface from no margin, a face meeting it there or by the lifted start met; from its face itself
-    // past self, its own triangle, alone
-    const unsigned skip = traced || !(dot(face, toLight) > 0 && offset > 0) ? self : NONE; // Traced, hair's segment
-    // Visibility along the segment from the offset start to the sampled point
-    const float3 shadow = toLight + origin - from, toward = normalize(shadow);
-    if (dot(normal, normal) > 0 && !(dot(normal, shadow) > 0))  // As BSDF sampling sees it, from the lifted start
-        return make_float3(0, 0, 0);
-    if (dot(normal, normal) == 0 && !(dot(face, shadow) * dot(face, toLight) > 0))
-        return make_float3(0, 0, 0);
-    const float left = shadowLength(shadow);
-    direction = toward;
-    float3 transmitted;
-    if (occluded(scene, from, toward, left, sides[dot(face, toLight) > 0], dot(face, toLight) > 0 ? fillings.y
-        : fillings.x, state, ray, onSurface && traced, transmitted, skip,
-        scene.materials[key(scene, instance, light)].opaque & 4 ? 0 : SHADOWS)) // A light casting none: past all
-        return make_float3(0, 0, 0);
-    return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
-        Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
-        / (density = solidAngle(probability, lightNormal, shadow));
-}
-
-// Density in solid angle of light sampling from origin picking point on triangle, down the trail to its leaf
-// (pbrt-v4's BVHLightSampler::PMF)
-__device__ float lightPdf(const Scene& scene, float3 origin, float3 normal, float3 start, unsigned instance,
-    unsigned triangle, float3 point) {
-    if (STRAND(scene, instance)) return 0; // Strands, which no light sampling picks
-    float probability = 1;
-    unsigned node = 0;
-    unsigned long long trail = scene.trails[key(scene, instance, triangle)];
-    for (; !scene.lights[node].leaf; trail >>= 1) {
-        probability *= childShare(scene.lights[node + 1], scene.lights[scene.lights[node].child], origin, normal,
-            trail & 1);
-        node = trail & 1 ? scene.lights[node].child : node + 1;
-    }
-    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
-    return scene.lights[node].child == triangle && scene.lights[node].instance == instance
-        && importance(scene.lights[node], origin, normal) > 0
-        && (dot(normal, normal) == 0 || dot(normal, point - start) > 0) ? solidAngle(probability,
-        cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - start) : 0;
-}
-
-// Of a generated path's contribution: resampled into sel under ReSTIR, otherwise only summed, as offer sums it
-__device__ void resample(const Scene& scene, Selection& sel, const Reservoir& candidate, float3 weight) {
-    if (scene.settings.restir) return offer(&sel, candidate, weight);
-    const float grey = rgb_to_greyscale(weight);
-    if (grey > 0.0f && grey < 3.00000000549775576e+38f) sel.color = sel.color + weight;
-}
-
 // renderer.slang's baked hair: its level's sums and their search, a slice's f cos and density, connected and sampled
 __device__ float4 operator+(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
 __device__ float4 operator-(float4 a, float4 b) { return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
@@ -1484,503 +1389,23 @@ __device__ SampleBSDF sampleHair(const Scene& scene, const Surface& surface, flo
     return sampled;
 }
 
-// Walk a path from dom. Generating, every path of the tree is resampled into sel with its reconnection
-// vertex (Sec. 6.1), Russian roulette only modifies their source density (Sec. 6.2.4). Replaying, the hybrid shift maps r into
-// dom (Sec. 2.3): random replay up to x_k-1 and reconnection to x_k. It returns the shifted integrand times the Jacobian
-// determinant of Eq. 2, zero if the path is not in the image of the shift.
-// Seen is what dom's hit emits toward the camera, through the camera's medium.
-__device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r, bool replay, float scale,
-    Selection& sel, float3& seen) {
-    const Shift fail = Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
-    const unsigned end = extractBits(r.path, PATH_END, 5u);
-    const unsigned k = extractBits(r.path, PATH_K, 5u);
-    const unsigned rc = extractBits(r.path, PATH_RC, 2u);
-    const unsigned end_type = extractBits(r.path, PATH_TYPE, 3u);
-    // Replaying stops sampling at x_k-1 for reconnections and at the path end otherwise
-    const unsigned stop = rc == RC_NONE ? end + (end_type == END_ENV ? 1u : 0u) : k - 1u;
-    float3 origin = dom.x1;
-    float3 direction = normalize(dom.x1 - dom.x0);
-    Hit hit = dom.hit;
-    float distance = length(dom.x1 - dom.x0);
-    // The path's cone (Akenine-Moller et al. 2019): its width at the hit, widening by its spread, which each bounce
-    // widens by the angle of the solid angle its lobe's density spans, up to all around, and mirrors keep
-    float spread = dom.spread, width = dom.width + spread * distance;
-    float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
-    // Replaying the densities of the reconnection, generating the product of Russian roulette survival probabilities
-    float density = 1.0f;
-    bool direct_light_emission = true;
-    // Where light was last sampled, against which normal, and the BSDF's density of the direction the ray left along
-    float3 nee_origin = origin, nee_normal = direction, nee_start = origin;
-    float nee_pdf = 0.0f;
-    float threshold = 0.0f;
-    float3 reconnection = origin;
-    Vertex prev = Vertex{false, 0u, 0.0f, 0.0f};
-    // Layer of the hit's material the ray meets, and whether it came there from another layer of the hit, between them
-    unsigned layer = 0u;
-    bool passed = false;
-    // Template for generated paths reconnecting at the first vertex meeting both footprint criteria
-    Reservoir chain = {};
-    chain.seed = r.seed;
-    float3 chain_throughput = make_float3(0.0f, 0.0f, 0.0f);
-    // Medium the ray travels in: from the camera that of the volume it is in, which absorbs on the way to the first hit;
-    // what it scatters out there it is taken to scatter back in
-    unsigned filling;
-    Medium medium = cameraMedium(scene, direction, distance, filling);
-    unsigned camera = stream(r.seed, STREAM_CAMERA);
-    float3 approach = make_float3(-0.f, -0.f, -0.f); // Its emission on the way, added to the first hit's: -0 adds none
-    throughput = passing(scene, medium, filling, dom.x0, direction, 0, distance, camera,
-        Ray{true, false, LOBE_NONE, 0.0f, distance}, true, &approach);
-    // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
-    const auto survives = [&](unsigned b) {
-        const float survival_probability = survivalProbability(throughput, density);
-        if (survival_probability < pcg(stream(r.seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
-            return false;
-        }
-        density *= survival_probability;
-        return true;
-    };
-    bool viewed = true;  // Seen straight from the camera, past refractions at an IOR of 1 alone, which bend no ray
-    for (unsigned b = 0u; ; b++) {
-        const float3 face = faceNormal(scene, hit);
-        const Ray ray = {b == 0u, false, b ? prev.lobe : LOBE_NONE, float(b), distance, width};
-        Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
-            direction, ray, layer);
-        // Only the top layer emits, where the ray first meets it
-        if (passed) surface.emissive = make_float3(0, 0, 0);
-        // Rays pass straight through the uncovered share of surfaces, which keep their emission and medium
-        if (pcg(stream(r.seed, b + STREAM_COVERAGE)).value >= surface.coverage)
-            surface = Surface{surface.normal, make_float3(1, 1, 1), 0, 0, surface.emissive, 1, 1,
-                make_float3(1, 1, 1), 1, 1, surface.absorption, surface.density, surface.scatter};
-        // Surfaces transmitting nothing face the ray, as in Cycles; a strand's fiber, or hair's, passes light through
-        // it, as transmitting surfaces do: no side of it is wrong to leave or sample light on
-        const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0; // Its fiber along it, by its level
-        const unsigned own = hair ? key(scene, hit) : NONE; // Its segment, which light samples and bounces leaving skip
-        const bool strand = STRAND(scene, hit.instance) || hair;
-        const float facing = facingSign(surface.transparency, face, direction);
-        const float3 geometry_n = face * facing;
-        surface.normal = surface.normal * facing;
-        // As FlexLight's Material, which the shared BSDF takes, absorbing the volume's transmittance over unit distance,
-        // its dielectric's reflectance at normal incidence tinted and scaled by its specular level, which scenes not
-        // marking it keep at their defaults, compiled out
-        const BSDFMaterial material = {surface.albedo, surface.emissive, surface.roughness, surface.metallic,
-            surface.transparency, surface.ior, make_float3(expf(surface.density * (surface.absorption.x - 1)),
-            expf(surface.density * (surface.absorption.y - 1)), expf(surface.density * (surface.absorption.z - 1))),
-            used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
-            used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
-            used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
-            used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-            used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)};
-        // Starts leave by the offset's height along the face normal: along a tilted shading normal they would slide
-        // sideways past walls meeting the face
-        const float3 lift = geometry_n * dot(geometry_n, surface.normal);
-        // Media behind and in front of geometry_n: a volume fills the back of its faces, the ray leaving it leaves any
-        Medium sides[2] = {medium, medium};
-        uint2 fillings = make_uint2(filling, filling);
-        if (encloses(scene, surface, hit.instance)) {
-            const bool back = dot(geometry_n, face) < 0, front = dot(geometry_n, face) > 0;
-            sides[back] = volume(surface), (back ? fillings.y : fillings.x) = fills(scene, hit.instance, hit.triangle);
-            if (dot(direction, face) > 0) sides[front] = Medium{}, (front ? fillings.y : fillings.x) = NONE;
-        }
-        const float geometry_density = geometryDensity(geometry_n, direction, distance);
-        if (b == 0u) {
-            // Primary ray footprint (Eq. 5)
-            threshold = footprintThreshold(geometry_density);
-            seen = throughput * surface.emissive + approach;
-        }
-        // Ray footprint criterion for reconnecting from the previous vertex to this one (Eq. 5), never between layers
-        const bool footprint = withinFootprint(!passed, prev.rough, prev.pdf, geometry_density, threshold);
-        const float n_dot_v = dot(surface.normal, - direction);
-        const bool is_entering = n_dot_v < 0.0f;
-        // Incident side is air, outgoing side is material (entering)
-        const float eta_i = is_entering ? surface.ior : 1.0f;
-        // Incident side is material, outgoing side is air (exiting)
-        const float eta_o = is_entering ? 1.0f : surface.ior;
-        // Light is sampled at the top layer alone
-        const bool nee = !passed && layer == 0u && samplesLights(material);
-        // Translucent, light sampled anywhere around, on the side the lifted start sees it; compiled out without it
-        const bool sided = used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
-        const float3 light_normal = surface.transparency > 0 && scene.materials[key(scene, hit)].layers == 1 || sided
-            || strand
-            ? make_float3(0, 0, 0) : surface.normal;
-        // The side light and bounces leave by: for surfaces transmitting nothing and seen from the shading normal's
-        // side, the shading normal's, so a smooth normal is lit where it faces the light though its face doesn't
-        // (the shadow terminator); else the face's, so a ray arriving behind the shading normal leaves no way through
-        const float3 side_n = surface.transparency > 0 || sided || !(dot(surface.normal, -direction) > 0) ? geometry_n
-            : surface.normal;
-        // Reflections alone leave off the smooth surface of an opaque one, by its height: rays crossing the face have
-        // no terminator to clear and start at the hit, as the height bounds nothing behind it. Starts under the
-        // traversal's least distance over the face stay on it, where rules meet the face again; from higher, a ray
-        // past the face meets it at least that far, where the traversal does. Surfaces transmitting light, as strands'
-        // fibers do, keep the traced lift on either side: a ray started on a face whose normals tilt off it would meet
-        // its triangle again, and an untraced height could skip past a thin surface behind it
-        const bool traced = surface.transparency > 0 || strand;
-        const float height = !traced && dot(side_n, -direction) > 0 ? smoothHeight(scene, hit, origin) : 0.0f;
-        const float offset = height * dot(geometry_n, surface.normal) >= 1e-4f ? height : 0.0f;
-        const float traced_offset = traced ? geometryOffset(scene, hit, geometry_n, origin) : 0.0f;
-        // Emission met against light sampling at the vertex the ray left, light sampled here against sampling the BSDF,
-        // which the last bounce skips (power heuristic)
-        const float3 emitted = surface.emissive * (direct_light_emission || !(rgb_to_greyscale(surface.emissive) > 0.0f)
-            ? 1.0f : powerHeuristic(nee_pdf, lightPdf(scene, nee_origin, nee_normal, nee_start, hit.instance,
-                hit.triangle, origin)));
-        if (replay && rc == RC_SURFACE && b > k && b == end && end_type == END_EMIT) {
-            return Shift{throughput * emitted / r.jac, density / r.jac};
-        }
-        // Each lobe competes with light sampling separately, but on the last bounce, which samples no BSDF; inlined, as
-        // nvcc inlines it without the sheen FlexKernels' BSDF branches on, so that it folds the material's constants
-        const auto lit = [&](float3 light_dir, float light) __attribute__((always_inline)) {
-            if (hair) { // Hair's, weighed likewise
-                const SampleBSDF l = connectHair(scene, surface, direction, light_dir);
-                return l.throughput * l.pdf / (b < scene.settings.bounces ? 1 + l.pdf * l.pdf / (light * light) : 1);
-            }
-            if (b < scene.settings.bounces)
-                return neeBSDF(direction, light_dir, surface.normal, material, eta_i, eta_o,
-                    !(dot(side_n, -direction) * dot(side_n, light_dir) > 0), light, true, stream(r.seed, b))
-                    * light;
-            const float3 f = BSDF(direction, light_dir, surface.normal, side_n, material, eta_i, eta_o,
-                stream(r.seed, b));
-            // Translucent's share selected, not branched on, so scenes without it compile to BSDF alone
-            const float3 correction = translucentCorrection(direction, light_dir, surface.normal, geometry_n, material,
-                eta_i, eta_o, stream(r.seed, b));
-            return sided ? f + correction : f;
-        };
-        const bool chain_found = extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE;
-        // Reconnection at this vertex for paths ending here
-        Reservoir here = chain;
-        here.path = b << PATH_K | RC_SURFACE << PATH_RC | prev.lobe << PATH_LOBE_PREV;
-        here.jac = prev.pdf * geometry_density;
-        here.rc = hit;
-        const bool arrived = replay && rc == RC_SURFACE && b == k;
-        if (arrived) {
-            // The stored path takes over at the reconnection vertex
-            if (hit.triangle != r.rc.triangle || hit.instance != r.rc.instance || !footprint) {
-                return fail;
-            }
-            throughput = throughput * geometry_density;
-            density *= geometry_density;
-            if (k == end && end_type == END_EMIT) {
-                return Shift{throughput * emitted / r.jac, density / r.jac};
-            }
-            // Light sampling at the reconnection vertex replays its random numbers, as the light may have moved
-            if (k == end && end_type == END_NEE) {
-                float3 light_dir;
-                float light;
-                const float3 radiance = nee ? sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
-                    traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
-                    traced ? own : key(scene, hit))
-                    : make_float3(0.0f, 0.0f, 0.0f);
-                if (!(rgb_to_greyscale(radiance) > 0.0f)) {
-                    return fail;
-                }
-                return Shift{throughput * lit(light_dir, light) * radiance / r.jac, density / r.jac};
-            }
-            if (nee != (extractBits(r.path, PATH_NEE, 1u) == 1u)) {
-                return fail;
-            }
-        } else if (replay && b == stop && rc != RC_SURFACE && rc != RC_ENV) {
-            if (rc == RC_LIGHT && nee && !footprint) {
-                // Forced reconnection to the light vertex of next event estimation (Sec. 6.2.3), the point its replayed
-                // random numbers pick again (unit Jacobian)
-                float3 light_dir;
-                float light;
-                const float3 radiance = sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
-                    traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
-                    traced ? own : key(scene, hit));
-                return rgb_to_greyscale(radiance) > 0.0f
-                    ? Shift{throughput * lit(light_dir, light) * radiance, 1.0f} : fail;
-            }
-            // Emission seen right after a vertex, against its next event estimation
-            if (rc == RC_NONE && end_type == END_EMIT && !footprint) {
-                return Shift{throughput * emitted, 1.0f};
-            }
-            return fail;
-        } else if (!replay) {
-            // Emission seen directly carries no randomness to resample, shading adds it
-            if (b > 0u) {
-                const Reservoir candidate = !chain_found && footprint ? here : chain;
-                resample(scene, sel, withEnd(candidate, END_EMIT, b, throughput * emitted),
-                    throughput * emitted * scale / density);
-            }
-            if (nee) {
-                float3 light_dir;
-                float light;
-                const float3 radiance = sampleLight(scene, origin, light_normal, traced ? surface.normal : lift,
-                    traced ? traced_offset : offset, traced, side_n,
-                    sides, fillings, stream(r.seed, b + STREAM_NEE), light_dir, light, ray, true,
-                    traced ? own : key(scene, hit));
-                const float3 f = rgb_to_greyscale(radiance) > 0.0f
-                    ? throughput * lit(light_dir, light) * radiance : fail.f;
-                Reservoir candidate = chain;
-                if (chain_found) {
-                    candidate.radiance = safeDivide(f, chain_throughput);
-                } else if (footprint) {
-                    candidate = here;
-                    candidate.path |= 1u << PATH_NEE;
-                    candidate.dir = light_dir;
-                    candidate.radiance = radiance;
-                } else {
-                    // Forced reconnection to the light vertex (Sec. 6.2.3)
-                    candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
-                }
-                resample(scene, sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
-            }
-        }
-        // Replaying, x_k-1 connects to the reconnection vertex and x_k leaves along the stored direction with the stored lobes
-        const bool connect = replay && b == stop;
-        unsigned lobe_index = extractBits(r.path, arrived ? PATH_LOBE : PATH_LOBE_PREV, 2u);
-        float3 dir = r.dir;
-        // Sample leaving this vertex
-        SampleBSDF lobe = SampleBSDF{};
-        if (connect) {
-            if (rc == RC_SURFACE) {
-                reconnection = hitPosition(scene, scene.vertices, r.rc);
-                dir = normalize(reconnection - (origin
-                    + lift * (dot(reconnection - origin, side_n) > 0 ? offset : 0.0f)));
-                if (traced) dir = normalize(reconnection - tracedLift(scene, origin,
-                    surface.normal * sign(dot(reconnection - origin, side_n)), traced_offset));
-            }
-            // Directions on the wrong side of the face, which the path tracer samples again or mirrors, have no density
-            // A translucent diffuse lobe past the shading normal refracts, as in FlexKernels' BSDF
-            const bool across = dot(surface.normal, dir) * dot(surface.normal, -direction) < 0;
-            if (!strand && wrongSide(direction, lobe_index == LOBE_REFRACT || (sided & (lobe_index == LOBE_DIFFUSE)
-                & across), dir, side_n)) {
-                return fail;
-            }
-        } else if (!arrived) {
-            SampleBSDF bsdf_sampled = hair ? sampleHair(scene, surface, direction, stream(r.seed, b))
-                : sampleBSDF(direction, surface.normal, material, eta_i, eta_o, stream(r.seed, b), make_float2(0, 0));
-            // A direction the smooth normal sends to the wrong side of the face carries on at an unknown density:
-            // through transmitting surfaces sampled again against the face normal, pretending the self reflection
-            // faces along it, elsewhere mirrored across the face, keeping its lobe and weight
-            const bool wrong = !strand && wrongSide(direction, bsdf_sampled.refracted, bsdf_sampled.unit_direction,
-                side_n);
-            const bool fallback = wrong && surface.transparency > 0;
-            if (fallback) {
-                const SampleBSDF geometry_bsdf_sampled = sampleBSDF(bsdf_sampled.unit_direction, geometry_n, material,
-                    eta_i, eta_o, bsdf_sampled.random_state, make_float2(0, 0));
-                bsdf_sampled.unit_direction = geometry_bsdf_sampled.unit_direction;
-                bsdf_sampled.throughput = geometry_bsdf_sampled.throughput;
-            }
-            lobe_index = bsdf_sampled.lobe;
-            dir = bsdf_sampled.unit_direction;
-            if (wrong && !fallback) dir = dir - 2 * dot(dir, geometry_n) * geometry_n;
-            lobe = bsdf_sampled;
-            if (hair && !(lobe.pdf > 0)) return fail; // Hair's row past the pole: no direction
-            if (wrong) lobe.pdf = 0;
-        }
-        // Connections evaluate the given direction
-        if (connect || arrived) {
-            lobe = hair ? connectHair(scene, surface, direction, dir)
-                : connectBSDF(direction, dir, surface.normal, material, eta_i, eta_o, lobe_index, stream(r.seed, b));
-        }
-        // Delta lobes and wrong-sided directions, of unknown density, have no competing light sample; straight
-        // transmission keeps the preceding vertex's weights, but not hair's, whose directions its density weighs.
-        const bool delta = !hair && lobe_index != LOBE_DIFFUSE
-            && (surface.roughness == 0.0f || (lobe_index == LOBE_REFRACT && eta_i == eta_o));
-        const bool weighs = nee && !delta && lobe.pdf > 0;
-        direct_light_emission = !weighs
-            && (hair || direct_light_emission || lobe_index != LOBE_REFRACT || surface.ior != 1);
-        if (weighs) {
-            nee_origin = origin, nee_normal = light_normal;
-            nee_pdf = lobe.pdf;
-        }
-        // Inverse ray footprint criterion for the density of the direction leaving this vertex (Eq. 5)
-        const bool inverse_footprint = withinInverseFootprint(lobe.pdf, lobe_index == LOBE_DIFFUSE, prev.cos, distance,
-            threshold);
-        // Directions between the face and the shading normal (the shadow terminator's) are judged by a side depending on
-        // the incoming direction, which shifts change, so no reconnection is made along them
-        const bool wedge = dot(dir, surface.normal) * dot(dir, geometry_n) < 0;
-        const bool rough = !wedge && roughLobe(lobe.pdf, lobe_index == LOBE_DIFFUSE, surface.roughness);
-        if (arrived) {
-            if (!inverse_footprint) {
-                return fail;
-            }
-            if (end_type != END_EMIT) {
-                return Shift{throughput * (lobe.throughput * lobe.pdf) * r.radiance / r.jac, density * lobe.pdf / r.jac};
-            }
-            // Emission's MIS weight depends on the reconnected BSDF; replay its suffix instead of caching that weight.
-            throughput = throughput * lobe.pdf;
-            density *= lobe.pdf;
-        }
-        // Refracting into the hit from outside or reflecting between its layers, the ray meets the other layer there
-        const bool passes = scene.materials[key(scene, hit)].layers > 1u && (lobe_index == LOBE_REFRACT) != passed;
-        // A replayed path meeting the criteria before x_k is not in the image of the shift, nor one connecting there
-        if ((replay && b <= stop && footprint && inverse_footprint) || (connect && (!rough || passes))) {
-            return fail;
-        }
-        if (connect) {
-            throughput = throughput * (lobe.throughput * lobe.pdf);
-            density = lobe.pdf;
-        } else {
-            throughput = throughput * make_float3(fmaxf(lobe.throughput.x, 0.0f), fmaxf(lobe.throughput.y, 0.0f),
-                fmaxf(lobe.throughput.z, 0.0f));
-        }
-        if (!replay && scene.settings.restir && !chain_found && footprint && inverse_footprint) {
-            chain = here;
-            chain.path |= lobe_index << PATH_LOBE | (nee ? 1u : 0u) << PATH_NEE;
-            chain.jac *= lobe.pdf;
-            chain.dir = dir;
-            chain_throughput = throughput;
-        }
-        prev = Vertex{rough, lobe_index, lobe.pdf, fabsf(dot(geometry_n, dir))};
-        spread += delta ? 0 : fminf(2 * sqrtf(1 / (PI * lobe.pdf)), PI);
-        viewed = viewed && !hair && lobe_index == LOBE_REFRACT && eta_i == eta_o;
-        // Off the side it leaves through, or right from where it passes straight through
-        const unsigned through = hair ? own : lobe_index == LOBE_REFRACT && surface.ior == 1 && distance >= 1e-4f
-            ? key(scene, hit) : NONE;
-        // A direction the smooth normal sends past the face of a surface transmitting nothing, which faces the
-        // ray, meets it again where it leaves, as the face is flat
-        const bool again = !(traced || sided) && offset == 0 && dot(dir, geometry_n) < 0;
-        direction = dir;
-        // Off the side the normal faces, where light sampling toward it starts as well; into an opaque surface right
-        // from the hit, as nothing bounds how thin it is behind; off a transmitting one by the traced lift
-        const float3 leaving = traced ? tracedLift(scene, origin, surface.normal * sign(dot(direction, side_n)),
-            lobe_index == LOBE_REFRACT && eta_i == eta_o ? 0.0f : traced_offset)
-            : origin + lift * (dot(direction, side_n) > 0 ? offset : 0.0f);
-        if (weighs) nee_start = leaving;
-        origin = passes || again || through != NONE ? origin : leaving;
-        if (!passes)
-            medium = sides[dot(direction, side_n) > 0], filling = dot(direction, side_n) > 0 ? fillings.y : fillings.x;
-        if (!replay && !survives(b)) {
-            break;
-        }
-        // Passing, the next vertex is the same hit in the other layer, reached without distance; meeting the face again
-        // in this one, it is the hit the ray reached, by its distance, so live bumps step there as they did
-        passed = passes;
-        layer = passes ? layer ^ 1u : 0u;
-        if (passes || again) {
-            distance = passes ? 0.0f : distance;
-            continue;
-        }
-        // Only occluders in front of the reconnection vertex matter
-        const bool reconnecting = replay && b == stop && rc == RC_SURFACE;
-        const float far = reconnecting ? length(reconnection - origin) * 1.001f : 1e16f;
-        // Off an opaque surface from no margin, as from a medium's vertex, a face meeting it there or by the lifted start
-        // met; from its face itself past its own triangle alone
-        const bool opaque = !(traced || through != NONE);
-        const bool on = opaque && !(dot(direction, side_n) > 0 && offset > 0);
-        hit = opaque ? traverse(scene, origin, direction, far, distance, on ? key(scene, hit) : NONE, 0)
-            : traverse(scene, origin, direction, far, distance, through, hair ? 0 : 1e-4f); // Hair's from its vertex
-        // Reaching the reconnection vertex, it is shaded exactly where the stored path has it
-        if (reconnecting && hit.triangle == r.rc.triangle && hit.instance == r.rc.instance) {
-            hit.uv = r.rc.uv;
-            distance = length(reconnection - origin);
-        }
-        // Hidden from the camera wherever it sees straight, passed layer by layer as pixelDomain passes them
-        for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
-            first = false) {
-            if (first) distance = __uint_as_float(__float_as_uint(distance) - 1);
-            hit = nextLayer(scene, origin, direction, 1e16f, distance, first ? NONE : key(scene, hit));
-        }
-        // The connection to the environment direction has to escape the scene
-        if (replay && b == stop && rc == RC_ENV && hit.triangle != NONE) {
-            return fail;
-        }
-        // Before the hit, the medium scatters the ray at distances its mean scattering coefficient samples, at vertices
-        // lighting it through the isotropic phase function 1 / (4 PI) which ReSTIR neither reconnects at nor across
-        const bool varying = used(MEDIUM) && filling != NONE;  // Tracked under its majorant, point by point
-        const float sigma = varying ? fabsf(scene.instances[owner(scene, filling)].majorant)
-            : (medium.scatter.x + medium.scatter.y + medium.scatter.z) / 3;
-        if (reconnecting && sigma > 0) {
-            return fail;
-        }
-        prev.rough = prev.rough && !(sigma > 0);
-        unsigned tracking = stream(r.seed, b + STREAM_MEDIUM);
-        // Of a varying medium's tentative collisions passed, and what it emits along the ray to the next, which the
-        // pixel adds as it does what its first hit emits, neither resampled
-        float3 weight = make_float3(1, 1, 1), glowed = make_float3(0, 0, 0);
-        const auto glow = [&]() {
-            if (varying && !replay) seen = seen + throughput * glowed / density;
-            glowed = make_float3(0, 0, 0);
-        };
-        for (float along; hit.triangle != NONE && (along = varying ? track(scene, medium, filling, origin, direction,
-            distance, tracking, weight, glowed, Ray{false, false, prev.lobe, float(b), distance})
-            : -logf(1 - pcg(stream(r.seed, b + STREAM_MEDIUM)).value) / sigma) < distance;) {
-            glow();
-            b++;
-            viewed = false;  // Scattered: no longer seen straight from the camera
-            origin = origin + direction * along;
-            width += spread * along, spread += PI;
-            throughput = varying ? throughput * weight : throughput * medium.scatter
-                * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * along) / sigma;
-            tracking = stream(r.seed, b + STREAM_MEDIUM), weight = make_float3(1, 1, 1);
-            const Medium around[2] = {medium, medium};
-            float3 light_dir;
-            float light;
-            // Light sampled in a varying medium shifts to no other pixel: its shadow ratio-tracked from their starts
-            // left test 3 1.1% dark at 4096 samples, as reuse of no shift reads it within 0.1%
-            const bool sampled = !replay || b == stop && !varying;
-            const float3 f = sampled ? throughput * sampleLight(scene, origin, make_float3(0, 0, 0),
-                direction, 0, false, direction, around, make_uint2(filling, filling), stream(r.seed, b + STREAM_NEE),
-                light_dir, light, {false, false, prev.lobe, float(b), along}, false)
-                * (INV_PI / 4 * powerHeuristic(light, b < scene.settings.bounces ? INV_PI / 4 : 0)) : fail.f;
-            if (replay && b == stop) {
-                return rc == RC_LIGHT && rgb_to_greyscale(f) > 0.0f ? Shift{f, 1.0f} : fail;
-            }
-            if (!replay) {
-                Reservoir candidate = chain;
-                if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
-                    candidate.radiance = safeDivide(f, chain_throughput);
-                } else {
-                    candidate.path = (b + 1u) << PATH_K | RC_LIGHT << PATH_RC;
-                }
-                resample(scene, sel, withEnd(candidate, END_NEE, b, f), f * scale / density);
-                if (!survives(b)) {
-                    return fail;
-                }
-            }
-            direct_light_emission = false;
-            nee_origin = nee_start = origin, nee_normal = make_float3(0, 0, 0), nee_pdf = INV_PI / 4;
-            unsigned state = stream(r.seed, b);
-            const float z = 1 - 2 * random(state), angle = 2 * PI * random(state);
-            direction = make_float3(sine(z) * cosf(angle), sine(z) * sinf(angle), z);
-            prev = Vertex{false, LOBE_DIFFUSE, INV_PI / 4, 1.0f};
-            hit = traverse(scene, origin, direction, 1e16f, distance, NONE, 0);
-        }
-        if (hit.triangle == NONE) {
-            const float3 f = throughput * environment(scene, direction, Ray{false, false, prev.lobe, float(b + 2u), 0});
-            if (replay) {
-                if (b == stop && rc == RC_ENV) {
-                    return Shift{f / r.jac, density / r.jac};
-                }
-                if (rc == RC_NONE && end_type == END_ENV && b == end && !prev.rough) {
-                    return Shift{f, 1.0f};
-                }
-                return fail;
-            }
-            Reservoir candidate = chain;
-            if (extractBits(chain.path, PATH_RC, 2u) == RC_SURFACE) {
-                candidate.radiance = safeDivide(f, chain_throughput);
-            } else if (prev.rough) {
-                // Reconnection to the environment direction, guarded by the roughness threshold only (Sec. 4.2)
-                candidate.path = (b + 1u) << PATH_K | RC_ENV << PATH_RC | prev.lobe << PATH_LOBE_PREV;
-                candidate.jac = prev.pdf;
-                candidate.dir = direction;
-            }
-            resample(scene, sel, withEnd(candidate, END_ENV, b, f), f * scale / density);
-            break;
-        }
-        // Project ray origin to hit point, through the medium
-        glow();
-        throughput = varying ? throughput * weight
-            : throughput * exponential((make_float3(1, 1, 1) * sigma - medium.extinction) * distance);
-        origin = origin + direction * distance;
-        width += spread * distance;
-    }
-    return fail;
+// The walk as direct callables that the passes call, one per replay, its branches on it folded away: FlexKernels' walk
+// through the adapter's hooks, each compiled as a function of its own, where OptiX would compile it into each pass
+// calling it, its state spilled around each of its traces there. Their records hold the scene the hooks read: the first
+// pass's, the pass's; then the shift's, the pass's and the anchor's
+#define WALK_CALLABLE(name, replay) extern "C" __device__ Shift name(const Domain* dom, const Reservoir* r, float scale, \
+    Selection* sel) { \
+    return walk_hook(FKDomain{dom->x0, dom->x1, {dom->hit.uv, dom->hit.instance, dom->hit.triangle, 0, \
+        length(dom->x1 - dom->x0)}, dom->width, dom->spread}, *r, replay, scale, sel); \
 }
-// The walk a direct callable that the passes call: compiled once as one function of its own, where OptiX would compile
-// it into each pass calling it, its state spilled around each of its traces there
-extern "C" __device__ Shift __direct_callable__walk(const Scene* scene, const Domain* dom, const Reservoir* r,
-    bool replay, float scale, Selection* sel, float3* seen) { return walk(*scene, *dom, *r, replay, scale, *sel, *seen); }
-#define WALK(scene, dom, r, replay, scale, sel, seen) \
-    optixDirectCall<Shift>(0, &(scene), &(dom), &(r), replay, scale, &(sel), &(seen))
+WALK_CALLABLE(__direct_callable__first, false)
+WALK_CALLABLE(__direct_callable__walk, true)
+#define WALK(scene, dom, r, replay, scale, sel) optixDirectCall<Shift>( \
+    !(replay) ? 0 : &(scene) == (const Scene*)optixGetSbtDataPointer() ? 1 : 2, &(dom), &(r), scale, &(sel))
 
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
 __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
     Selection sel;
-    float3 seen;
     if (r.w <= 0.0f) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
@@ -1988,7 +1413,7 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
     if (dom.hit.triangle == NONE) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
-    return WALK(scene, dom, r, true, 0.0f, sel, seen);
+    return WALK(scene, dom, r, true, 0.0f, sel);
 }
 
 // Pixel coordinates a camera sees a position at
@@ -2138,6 +1563,7 @@ extern "C" __global__ void __raygen__initial() {
     const unsigned pixel_seed = stream(hash(scene.frame), index);
     Selection initial = {};
     initial.random_state = stream(pixel_seed, STREAM_SELECT);
+    initial.sums = !scene.settings.restir;
     // The pixel's own seed even without a sample, its domain for later passes
     initial.r.seed = stream(pixel_seed, 0u);
     float3 seen = make_float3(0.0f, 0.0f, 0.0f);
@@ -2145,14 +1571,15 @@ extern "C" __global__ void __raygen__initial() {
         Reservoir r = {};
         r.seed = stream(pixel_seed, i);
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        float3 first;
         if (dom.hit.triangle != NONE) {
-            WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial, first);
+            WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
+        } else {
+            seen = seen + environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
+                / scene.settings.paths;
         }
-        seen = seen + (dom.hit.triangle == NONE
-            ? environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0}) : first)
-            / scene.settings.paths;
     }
+    // What the walks saw at their first hits through the camera's medium, which they add up unresampled
+    seen = seen + initial.glow / scene.settings.paths;
     if (scene.settings.restir) scene.initial[index] = finalize(initial, 1.0f);
     const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
     float4& sum = scene.accumulation[index];
