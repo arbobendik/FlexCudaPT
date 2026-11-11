@@ -14,18 +14,18 @@ struct FKLight { float3 position; float is_area_light; float3 color; float inten
 static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left,
     bool viewed);
 static __device__ float3 fcptShadowTransmittance(FKRay ray, float l);
-static __device__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
+static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
     unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left);
-static __device__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
+static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
     float length);
-static __device__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
+static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
     unsigned depth, unsigned lobe, float3 dir);
 struct SampleBSDF;  // FlexKernels' sampled BSDF, which the hair hooks hand back
 static __device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir);
 static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, unsigned random_state);
 static __device__ unsigned fcptLayers(FKHit hit);
 static __device__ float fcptMajorant(unsigned filling);
-static __device__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
+static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
 static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance, unsigned* random_state,
     float3* weight, float3* glowed, float3* scatter, float3* extinction, unsigned depth, unsigned lobe, bool camera);
 static __device__ float3 fcptHitPosition(FKHit hit);
