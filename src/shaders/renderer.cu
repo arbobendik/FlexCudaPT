@@ -1,7 +1,7 @@
 #include "renderer.h"
 #include <optix.h>
 #include <cuda_runtime.h>
-#include "flexkernels/pathtracer.cuh"
+#include "adapter.h"
 
 constexpr int STACK = 64;
 constexpr int SLOTS = 32; // Values a program keeps for reuse, as the extension's
@@ -2293,3 +2293,4 @@ extern "C" __global__ void __raygen__duplicates() {
     }
     scene.duplication[index] = own.w > 0.0f ? (count - 1u) / 288.0f : 0.0f;
 }
+#include "adapter.cuh"

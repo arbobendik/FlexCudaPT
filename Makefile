@@ -17,7 +17,8 @@ build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
 
 # The walk's CUDA reads Slang's prelude from the Slang it pins
 PTXFLAGS = -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -I$(OPTIX_PATH)/include -I$(SLANG_PATH)/include
-build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flexkernels/pathtracer.cuh $(SLANGC) \
+build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter.h src/shaders/adapter.cuh \
+	src/shaders/flexkernels/pathtracer.cuh $(SLANGC) \
 	$(OPTIX_PATH)/include/optix.h
 	mkdir -p build
 	$(NVCC) $(PTXFLAGS) $< -o build/shaders.ptx
