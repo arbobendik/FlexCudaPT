@@ -1442,8 +1442,14 @@ uint hairSearch(Scene* scene, float4* record, uint image, float y, uint p, float
 // bins' centres where binned, density then the same with the channels' columns summed over the slice's total
 static const float HAIR_WIDTHS[4] = {1, 0.5f, 2, 2};
 static const float HAIR_TILTS[4] = {-2, 1, 4, 0};
+// Rows of lobe p's poles for the viewer at in_angle, by hairRow's mapping of +-pi / 2, within the slice's rows
+float2 hairPoles(float4* record, uint p, float w, float a, float in_angle) {
+    const float nt = record[1].y, tilt = in_angle + HAIR_TILTS[p] * record[0].z;
+    return float2(clamp((asinh((-PI / 2 - tilt) / w) / a + 1) * nt / 2, 0, nt),
+        clamp((asinh((PI / 2 - tilt) / w) / a + 1) * nt / 2, 0, nt));
+}
 float3 hairSlice(Scene* scene, float4* record, float o, float4 y, float x, float3 u, float3 tint, bool binned,
-    out float density) {
+    out float density, float in_angle) {
     const float nt = record[1].y, np = record[1].z, c = binned ? floor(x) : x - 0.5f - np * floor((x - 0.5f) / np);
     float4 n[3], total = 0;
     for (uint k = 0; k < 3; ++k) {
@@ -1460,8 +1466,11 @@ float3 hairSlice(Scene* scene, float4* record, float o, float4 y, float x, float
         const float r = binned ? floor(y[p]) : clamp(y[p] - 0.5f, 0, nt - 1), m = y[p] >= 0 && y[p] < nt ? record[2][p]
             * (hairSums(scene, record, 0, r + 1.5f, o + 0.5f) - hairSums(scene, record, 0, r + 0.5f, o + 0.5f))[p]
             / (w * cosh((2 * y[p] / nt - 1) * a) * a * 2 / nt) : 0;
-        f += m * float3(n[0][p], n[1][p], n[2][p]) * (p == 0 ? tint : float3(1, 1, 1));
-        density += m * (n[0][p] + n[1][p] + n[2][p]) / max(dot(all, total), 1e-30f);
+        const float2 pole = hairPoles(record, p, w, a, in_angle); // The lobe whole between the poles
+        const float scale = hairSums(scene, record, 0, nt + 0.5f, o + 0.5f)[p] / max((hairSums(scene, record, 0,
+            pole.y + 0.5f, o + 0.5f) - hairSums(scene, record, 0, pole.x + 0.5f, o + 0.5f))[p], 1e-30f);
+        f += m * scale * float3(n[0][p], n[1][p], n[2][p]) * (p == 0 ? tint : float3(1, 1, 1));
+        density += m * scale * (n[0][p] + n[1][p] + n[2][p]) / max(dot(all, total), 1e-30f);
     }
     return f;
 }
@@ -1479,11 +1488,11 @@ SampleBSDF connectHair(Scene* scene, Surface surface, float3 in_dir, float3 out_
     const float x = hairColumn(in_dir, t, out_dir, uint(record[1].z));
     const float cosine = max(length(cross(out_dir, t)), BIAS); // cos theta, off 0 along the fiber by BIAS
     const float3 tint = used(SPECULAR) ? surface.tint : float3(1, 1, 1); // The Specular Tint, R's
-    float near, far, unused;
-    const float3 f = lerp(hairSlice(scene, record, o, y, x, surface.albedo, tint, false, unused), hairSlice(scene,
-        record, o + 1, y, x, surface.albedo, tint, false, unused), s - o);
-    hairSlice(scene, record, o, y, x, surface.albedo, tint, true, near), hairSlice(scene, record, o + 1, y, x,
-        surface.albedo, tint, true, far);
+    float near, far, unused, in_angle = asin(clamp(dot(in_dir, t), -1, 1));
+    const float3 f = lerp(hairSlice(scene, record, o, y, x, surface.albedo, tint, false, unused, in_angle),
+        hairSlice(scene, record, o + 1, y, x, surface.albedo, tint, false, unused, in_angle), s - o);
+    hairSlice(scene, record, o, y, x, surface.albedo, tint, true, near, in_angle), hairSlice(scene, record, o + 1, y, x,
+        surface.albedo, tint, true, far, in_angle);
     const float density = lerp(near, far, s - o);
     return SampleBSDF(out_dir, density > 0 ? f / density : 0, 0, false, dot(out_dir, -in_dir) > dot(out_dir, t)
         * dot(-in_dir, t) ? LOBE_REFLECT : LOBE_REFRACT, density / cosine);
@@ -1505,9 +1514,15 @@ SampleBSDF sampleHair(Scene* scene, Surface surface, float3 in_dir, uint state) 
     uint p = 0, k = 0;
     for (; p < 3 && q >= mass[p]; ++p) q -= mass[p];
     for (q = (r = pcg(r.state)).value * mass[p]; k < 2 && q >= n[k][p]; ++k) q -= n[k][p];
+    // Its row between the poles, by the sums' linear inverse there: no draw crosses a pole
+    const float w = record[0].x * (p == 0 ? record[0].y : 1) * HAIR_WIDTHS[p];
+    const float2 pole = hairPoles(record, p, w, asinh(PI / w), asin(clamp(dot(in_dir, t), -1, 1)));
+    const float low = hairSums(scene, record, 0, pole.x + 0.5f, o + 0.5f)[p], row_q = low + (r = pcg(r.state)).value
+        * (hairSums(scene, record, 0, pole.y + 0.5f, o + 0.5f)[p] - low);
+    const uint row = hairSearch(scene, record, 0, o + 0.5f, p, row_q, uint(nt));
+    const float s0 = hairSums(scene, record, 0, row + 0.5f, o + 0.5f)[p];
+    float y = row + (row_q - s0) / max(hairSums(scene, record, 0, row + 1.5f, o + 0.5f)[p] - s0, 1e-30f);
     r = pcg(r.state);
-    float y = hairSearch(scene, record, 0, o + 0.5f, p, r.value * all[p] / record[2][p], uint(nt));
-    y += (r = pcg(r.state)).value;
     r = pcg(r.state);
     float x = hairSearch(scene, record, 1, o * 16 + saturate(surface.albedo[k]) * 15 + 0.5f, p, r.value * n[k][p]
         / all[p], uint(np));
