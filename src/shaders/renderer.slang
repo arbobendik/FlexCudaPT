@@ -5,6 +5,9 @@
 // into the launch's record, which by value each call out of line would copy to local memory.
 import pathtracer;
 
+// The renderer's own names, apart from those FlexKernels' walk exports, which it reaches by aliases at global scope
+namespace fcpt {
+
 // As renderer.h declares them, laid out alike: Slang lays out what pointers reach as C++ does. A bool there is a byte,
 // a char2 two int8_t, an Op's texel, width and height the bits of its value, and Material SceneMaterial here, as the
 // shared code's Material is renderer.h's BSDFMaterial.
@@ -2321,8 +2324,7 @@ struct Launch { Record* record; uint width, height, depth; };
 
 // The launch's raygen program at its index in the launch's size, the threads of a group in a row for launches one high,
 // as the lights pass over the triangles
-[shader("compute")] [numthreads(8, 8, 1)]
-void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+void run(uint3 thread, uint3 group, uint index) {
     const uint3 size = uint3(launch.width, launch.height, launch.depth);
     const uint3 p = size.y == 1 && size.z == 1 ? uint3(group.x * 64 + index, 0, 0) : thread;
     if (any(p >= size)) return;
@@ -2337,4 +2339,11 @@ void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint ind
         case 6: lights(p, scene); break;
         default: denoise(p, size, scene); break;
     }
+}
+}
+
+// The entry point, outside the namespace, where Slang finds it
+[shader("compute")] [numthreads(8, 8, 1)]
+void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    fcpt.run(thread, group, index);
 }
