@@ -1546,6 +1546,46 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     ratio = seen[False, preferences.device] / seen[True, preferences.device]
     assert abs(ratio - 1) < 0.02, ('volume of noise', preferences.device, ratio)
 preferences.device = device
+# An area light emits nothing behind it, however far: a disk area light 1 across, of radiance 1 on its front, facing up
+# 20 and 50 above a white diffuse floor, which only light sampling reaching past its black back lit, reads 0 there by
+# light sampling alone and with a bounce; facing down from 2 above it, the floor beneath its axis reads its irradiance
+# over pi, of a power of pi pi (h h + r r) 1
+behind = new('behind')
+behind.flex_samples, behind.flex_restir, behind.flex_denoise = 64, False, False
+behind.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+data = bpy.data.meshes.new('behind floor')
+bm = bmesh.new()
+bmesh.ops.create_grid(bm, size=500)
+bm.to_mesh(data)
+data.materials.append(white := bpy.data.materials.new('behind floor'))
+white.node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_value = (1, 1, 1, 1)
+white.node_tree.nodes['Principled BSDF'].inputs['IOR'].default_value = 1
+behind.collection.objects.link(bpy.data.objects.new('behind floor', data))
+disk_light = bpy.data.lights.new('behind disk', 'AREA')
+disk_light.shape, disk_light.size = 'DISK', 1
+behind.collection.objects.link(disk_object := bpy.data.objects.new('behind disk', disk_light))
+behind.camera = bpy.data.objects.new('behind camera', bpy.data.cameras.new('behind camera'))
+behind.collection.objects.link(behind.camera)
+behind.camera.data.type = 'ORTHO'
+for preferences.device in ('OPTIX', 'VULKAN'):
+    disk_object.rotation_euler, disk_light.energy = (math.pi, 0, 0), math.pi * math.pi / 4  # Facing up, radiance 1
+    for height in (20, 50):
+        disk_object.location.z, behind.camera.location.z = height, height / 2
+        behind.camera.data.ortho_scale, behind.camera.data.clip_end = height, height
+        for behind.flex_bounces in (0, 1):
+            bpy.ops.render.render(scene=behind.name, write_still=True)
+            seen = numpy.array(bpy.data.images.load(behind.render.filepath).pixels)
+            assert seen.reshape(-1, 4)[:, :3].max() == 0, ('behind an area light', preferences.device, height,
+                behind.flex_bounces, seen.reshape(-1, 4)[:, :3].mean())
+    disk_object.rotation_euler, disk_object.location.z = (0, 0, 0), 2  # Facing down
+    disk_light.energy = math.pi * math.pi * (4 + 0.25)
+    behind.camera.location.z, behind.camera.data.ortho_scale, behind.camera.data.clip_end = 1, 0.05, 2
+    behind.flex_bounces = 0
+    bpy.ops.render.render(scene=behind.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(behind.render.filepath).pixels).reshape(-1, 4)[:, :3].mean()
+    assert abs(seen - 1) < 0.01, ('in front of an area light', preferences.device, seen)
+preferences.device = device
+
 # Light leaving a medium within a surface's margin of its face: the cube scattering all it meets, white, of density
 # 1e4, under an angle-0 sun of pi straight down and seen straight down, once, reads (1 - exp(-4e4)) / 8 = 1 / 8 by its
 # single scattering, the most from vertices within 1e-4 of the top face, whose shadow rays must leave it there
