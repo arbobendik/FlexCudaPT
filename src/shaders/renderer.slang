@@ -1,5 +1,8 @@
 import pathtracer;
 
+// Names apart from the imported ones
+namespace fcpt {
+
 struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near, far; }; // Orthographic: rays along
 // z's normal; near, far: depths rays start and end at
 struct Camera { float3 origin, x, y, z; Lens lens; };
@@ -64,6 +67,7 @@ float random(inout uint state) { return ((state = hash(state)) >> 8) * (1.0f / 1
 float sinpi(float x) { return sin(PI * (x - 2 * round(x / 2))); }
 float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 
+static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
 // Share of a ray cone's width a mip level covers, 2^-1.5
 static const float CONE_SHARE = 0.35355339;
@@ -2177,8 +2181,7 @@ struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
 // The launch's raygen program at its index; a group's threads in a row for launches one high
-[shader("compute")] [numthreads(8, 8, 1)]
-void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+void run(uint3 thread, uint3 group, uint index) {
     const uint3 size = uint3(launch.width, launch.height, launch.depth);
     const uint3 p = size.y == 1 && size.z == 1 ? uint3(group.x * 64 + index, 0, 0) : thread;
     if (any(p >= size)) return;
@@ -2193,4 +2196,11 @@ void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint ind
         case 6: lights(p, scene); break;
         default: denoise(p, size, scene); break;
     }
+}
+}
+
+// The entry point
+[shader("compute")] [numthreads(8, 8, 1)]
+void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    fcpt.run(thread, group, index);
 }
