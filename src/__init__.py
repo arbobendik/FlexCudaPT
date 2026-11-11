@@ -1870,14 +1870,16 @@ class Flex(bpy.types.RenderEngine):
                     if light.spot_blend:
                         t = clamp(('MULTIPLY', ('SUBTRACT', cosine, edge), 1 / ((1 - edge) * light.spot_blend)))
                         shaped = 'MULTIPLY', ('MULTIPLY', t, t), ('SUBTRACT', 3, ('MULTIPLY', t, 2))
-                if light.type == 'AREA' and light.spread < math.pi:
-                    half = (light.spread or SPREAD_ZERO) / 2
+                if light.type == 'AREA':  # None behind it at any distance, past where its black back is met
                     normal = -numpy.array(instance.matrix_world.to_3x3().col[2].normalized())
                     cosine = 'DOT_PRODUCT', ('INCOMING',), normal
+                    shaped = 'LESS_THAN', 0, cosine
+                if light.type == 'AREA' and light.spread < math.pi:
+                    half = (light.spread or SPREAD_ZERO) / 2
                     tangent = 'DIVIDE', length(('CROSS_PRODUCT', ('INCOMING',), normal)), cosine
                     # None behind the light or along its plane, where the tangent turns negative
                     shaped = 'MULTIPLY', ('MAXIMUM', ('MULTIPLY', ('SUBTRACT', math.tan(half), tangent),
-                        1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), ('LESS_THAN', 0, cosine)
+                        1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), shaped
                 if isinstance(shaped, tuple):
                     emission = 'MULTIPLY', emission, mix(1, shaped, ('LESS_THAN', 0, ('LIGHT_PATH', 8)))
                 # Black reflects nothing. A sphere light's shell transmits all, white and smooth at an ior of 1, so rays
