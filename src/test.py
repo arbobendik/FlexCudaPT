@@ -2803,6 +2803,38 @@ grown.modifiers['hair'].show_render, green.hide_render = False, True
 assert all(hue(render_on(device), 0) == hue(render_on(device), 1) == 0 for device in ('OPTIX', 'VULKAN')), 'hidden'
 preferences.device = 'OPTIX'
 
+# No light gets past faces whose smooth normals tilt off them: a wall whose normals tilt 60 degrees toward a light
+# behind it, in the wedge between its face and its shading plane, reads exactly 0 at 256 samples under a black sky, on
+# both backends; the light moved in front lights it
+scene = opened('leak')
+scene.flex_bounces, scene.flex_denoise = 8, False
+scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+leak_white = bpy.data.materials.new('leak white')
+leak_white.node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_value = (1, 1, 1, 1)
+leak_white.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value = 1
+def leak_mesh(name, make, smooth, tilt=None):  # Of the white material, smooth or flat, its normals tilt if given
+    data, bm = bpy.data.meshes.new(name), bmesh.new()
+    make(bm), bm.to_mesh(data), bm.free()
+    for polygon in data.polygons: polygon.use_smooth = smooth
+    if tilt: data.normals_split_custom_set([tilt] * len(data.loops))
+    data.materials.append(leak_white)
+    return add(data, (0, 0, 0))
+lamp = add(bpy.data.lights.new('leak light', 'POINT'), (-1, 5, 0))
+lamp.data.energy, lamp.data.shadow_soft_size, lamp.visible_camera = 100, 0.05, False
+scene.camera = add(bpy.data.cameras.new('leak camera'), (3, 0, 0), (math.radians(90), 0, math.radians(90)))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 2
+def grid(bm):  # 2 x 2 in the x = 0 plane, facing +x
+    bmesh.ops.create_grid(bm, x_segments=8, y_segments=8, size=1)
+    bmesh.ops.rotate(bm, verts=bm.verts, matrix=Matrix.Rotation(math.radians(90), 3, 'Y'))
+wall = leak_mesh('leak wall', grid, True, (math.cos(math.radians(60)), math.sin(math.radians(60)), 0))
+assert wall.data.polygons[0].normal.x > 0.99, 'leak wall faces +x'
+for device in ('OPTIX', 'VULKAN'):
+    assert render_on(device).max() == 0, ('wedge wall', device)
+lamp.location = (1, 5, 0)
+for device in ('OPTIX', 'VULKAN'):
+    assert render_on(device).mean() > 0.01, ('wedge wall lit', device)
+preferences.device = 'OPTIX'
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
