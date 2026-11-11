@@ -24,7 +24,7 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
 // FK: the sky's shadow toward a sample of the environment's CDF, which the renderer has none of until C9-C10
 static __device__ float3 fcptShadowTransmittance(FKRay ray, float l) { return make_float3(0, 0, 0); }
 // Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone width
-static __device__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
+static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
     unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left) {
     float3 transmitted;
     return occluded(hookScene(), ray.origin, ray.unit_direction, l, Medium{make_float3(0, 0, 0), extinction}, filling,
@@ -54,7 +54,7 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
 }
 // A light sample's emission as sampleLight shades it: its emission program, toward the triangle's face, for no ray a
 // bounce past the vertex sampling it
-static __device__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
+static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
     float length) {
     const Scene& scene = hookScene();
     const Hit at = nativeHit(hit);
@@ -64,7 +64,7 @@ static __device__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned
         0, true), point, random_state);
 }
 // The surface as the walk's loop shades a hit
-static __device__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
+static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
     unsigned depth, unsigned lobe, float3 dir) {
     const Scene& scene = hookScene();
     const Hit at = nativeHit(hit);
@@ -88,7 +88,7 @@ static __device__ unsigned fcptLayers(FKHit hit) { return hookScene().materials[
 static __device__ float fcptMajorant(unsigned filling) {  // Its size: stored negative, it marks an extinction drawn exactly
     return fabsf(hookScene().instances[owner(hookScene(), filling)].majorant);
 }
-static __device__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
+static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
     const Medium medium = cameraMedium(hookScene(), direction, distance, *filling);
     return {medium.scatter, medium.extinction};
 }
