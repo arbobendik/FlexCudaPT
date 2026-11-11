@@ -15,14 +15,15 @@ build/flex.zip: src/__init__.py src/blender_manifest.toml build/renderer build/r
 build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
 	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -ffp-contract=off $< -o $@ $(LDLIBS)
 
-build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flexkernels/pathtracer.cuh \
-	src/shaders/flexkernels/slang-cuda-prelude.h $(OPTIX_PATH)/include/optix.h
+# The walk's CUDA reads Slang's prelude from the Slang it pins
+PTXFLAGS = -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -I$(OPTIX_PATH)/include -I$(SLANG_PATH)/include
+build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/flexkernels/pathtracer.cuh $(SLANGC) \
+	$(OPTIX_PATH)/include/optix.h
 	mkdir -p build
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -I$(OPTIX_PATH)/include $< -o build/shaders.ptx
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DSTANDIN -rdc=true -I$(OPTIX_PATH)/include $< -o build/standin.ptx
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -rdc=true -I$(OPTIX_PATH)/include $< -o build/extended.ptx
-	$(NVCC) -std=c++20 -ptx -arch=compute_75 --use_fast_math -DEXTENDED -DSTANDIN -rdc=true -I$(OPTIX_PATH)/include $< \
-		-o build/extended_standin.ptx
+	$(NVCC) $(PTXFLAGS) $< -o build/shaders.ptx
+	$(NVCC) $(PTXFLAGS) -DSTANDIN $< -o build/standin.ptx
+	$(NVCC) $(PTXFLAGS) -DEXTENDED $< -o build/extended.ptx
+	$(NVCC) $(PTXFLAGS) -DEXTENDED -DSTANDIN $< -o build/extended_standin.ptx
 	xxd -i build/shaders.ptx > $@
 	xxd -i build/standin.ptx >> $@
 	xxd -i build/extended.ptx >> $@
