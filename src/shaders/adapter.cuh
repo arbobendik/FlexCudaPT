@@ -4,14 +4,19 @@ __device__ const Scene& hookScene() { return *(const Scene*)optixGetSbtDataPoint
 __device__ Hit nativeHit(FKHit hit) { return {hit.triangle_index, hit.instance_index, hit.uv}; }
 // A miss has no instance, as the walk tests it; no point lights exist to consider. Off a surface, past its margin, as
 // traverse starts by default, skipping the face a straight pass leaves by, if it was reached past that margin; from a
-// medium's vertex, on none, right at it
+// medium's vertex, on none, right at it. Seen straight from the camera, hidden layers passed as pixelDomain passes them
 __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface,
-    FKHit left) {
+    FKHit left, bool viewed) {
     const Scene& scene = hookScene();
     float distance = 0;
-    const Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
+    Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
         left.instance_index != NONE && left.distance >= MARGIN ? key(scene, nativeHit(left)) : NONE)
         : traverse(scene, ray.origin, ray.unit_direction, max_len, distance, NONE, 0);
+    for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
+        first = false) {
+        if (first) distance = __uint_as_float(__float_as_uint(distance) - 1);
+        hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
+    }
     return {hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance};
 }
 // FK: the sky's shadow toward a sample of the environment's CDF, which the renderer has none of until C9-C10

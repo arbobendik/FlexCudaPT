@@ -11,7 +11,8 @@ struct FKSurface {
     float coverage; bool encloses; FKMedium volume; unsigned fills;
 };
 struct FKLight { float3 position; float is_area_light; float3 color; float intensity, variance; };
-__device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left);
+__device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left,
+    bool viewed);
 __device__ float3 fcptShadowTransmittance(FKRay ray, float l);
 __device__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
     unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width);
