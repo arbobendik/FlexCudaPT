@@ -11,42 +11,42 @@ struct FKSurface {
     float coverage; bool encloses; FKMedium volume; unsigned fills; float3 hair;
 };
 struct FKLight { float3 position; float is_area_light; float3 color; float intensity, variance; };
-__device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left,
+static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left,
     bool viewed);
-__device__ float3 fcptShadowTransmittance(FKRay ray, float l);
-__device__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
+static __device__ float3 fcptShadowTransmittance(FKRay ray, float l);
+static __device__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
     unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left);
-__device__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
+static __device__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
     float length);
-__device__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
+static __device__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
     unsigned depth, unsigned lobe, float3 dir);
 struct SampleBSDF;  // FlexKernels' sampled BSDF, which the hair hooks hand back
-__device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir);
-__device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, unsigned random_state);
-__device__ unsigned fcptLayers(FKHit hit);
-__device__ float fcptMajorant(unsigned filling);
-__device__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
-__device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance, unsigned* random_state,
+static __device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir);
+static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, unsigned random_state);
+static __device__ unsigned fcptLayers(FKHit hit);
+static __device__ float fcptMajorant(unsigned filling);
+static __device__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
+static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance, unsigned* random_state,
     float3* weight, float3* glowed, float3* scatter, float3* extinction, unsigned depth, unsigned lobe, bool camera);
-__device__ float3 fcptHitPosition(FKHit hit);
-__device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, unsigned triangle);
-__device__ LightNode fcptLightBounds(unsigned n);
-__device__ uint4 fcptLightNode(unsigned n);
-__device__ unsigned fcptLightSecond(unsigned n);
-__device__ unsigned fcptLightSlot(FKHit hit);
-__device__ uint4 fcptLightTrail(unsigned j);
-__device__ bool fcptSlotLeaf(unsigned n, unsigned j);
-__device__ FKLight fcptLight(unsigned index);
-__device__ unsigned fcptTriangleOffset(unsigned instance);
-__device__ float3 fcptCalculatePointLightContrib(unsigned index);
-__device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe);
-__device__ float4 fcptEnvironmentCdf(uint2 cell);
-__device__ uint2 fcptEnvironmentCdfSize();
-__device__ uint2 fcptEnvironmentMapSize();
-__device__ float3 fcptAmbient();
-__device__ unsigned fcptMaxBounces();
-__device__ FKHit fcptReservoirHit(Reservoir r);
-__device__ void fcptWithReservoirHit(Reservoir* r, const FKHit* hit);
+static __device__ float3 fcptHitPosition(FKHit hit);
+static __device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, unsigned triangle);
+static __device__ LightNode fcptLightBounds(unsigned n);
+static __device__ uint4 fcptLightNode(unsigned n);
+static __device__ unsigned fcptLightSecond(unsigned n);
+static __device__ unsigned fcptLightSlot(FKHit hit);
+static __device__ uint4 fcptLightTrail(unsigned j);
+static __device__ bool fcptSlotLeaf(unsigned n, unsigned j);
+static __device__ FKLight fcptLight(unsigned index);
+static __device__ unsigned fcptTriangleOffset(unsigned instance);
+static __device__ float3 fcptCalculatePointLightContrib(unsigned index);
+static __device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe);
+static __device__ float4 fcptEnvironmentCdf(uint2 cell);
+static __device__ uint2 fcptEnvironmentCdfSize();
+static __device__ uint2 fcptEnvironmentMapSize();
+static __device__ float3 fcptAmbient();
+static __device__ unsigned fcptMaxBounces();
+static __device__ FKHit fcptReservoirHit(Reservoir r);
+static __device__ void fcptWithReservoirHit(Reservoir* r, const FKHit* hit);
 #include "flexkernels/pathtracer.cuh"
 // The walk's camera domain beside the renderer's own, which its pixels keep
 typedef Domain FKDomain;
