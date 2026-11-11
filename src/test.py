@@ -2952,6 +2952,47 @@ for device in ('OPTIX', 'VULKAN'):
 lamp.location = (1, 5, 0)
 for device in ('OPTIX', 'VULKAN'):
     assert render_on(device).mean() > 0.01, ('wedge wall lit', device)
+# Hair in a closed enclosure of radiance 1: one straight white strand (Principled Hair of color white), seen across,
+# scatters all it receives, as white Chiang conserves energy, so its pixels read its albedo, 1, whichever way a path
+# counts the light: both ways weighed (an emitting shell, bounces on), light sampling alone (the shell, no bounce) and
+# bounces alone (a world of 1, which no light sample takes). Weights summing above 1 read more, its own fiber's shadow
+# less. Seen 5 and 1 degrees from its axis, with the scales' tilt, each lobe kept whole between the viewer's poles: its
+# albedo 1 there too, by every way within 1%
+scene = opened('enclosed hair')
+scene.flex_denoise, scene.flex_restir = False, False
+scene.camera = add(bpy.data.cameras.new('enclosed hair'), (0, -50, 0), (math.pi / 2, 0, 0))
+scene.camera.data.type, scene.camera.data.ortho_scale, scene.camera.data.clip_end = 'ORTHO', 1, 200
+strand = bpy.data.hair_curves.new('white strand')
+strand.add_curves([4])
+strand.points.foreach_set('position', [c for z in range(4) for c in (0, 0, 20 * z - 30)])  # 1 of 60 seen at 89
+(strand.attributes.get('radius') or strand.attributes.new('radius', 'FLOAT', 'POINT')).data.foreach_set('value',
+    [0.1] * 4)
+white = bpy.data.materials.new('white strand')
+nodes = white.node_tree.nodes
+fiber = nodes.new('ShaderNodeBsdfHairPrincipled')
+fiber.model, fiber.parametrization, fiber.inputs['Color'].default_value = 'CHIANG', 'COLOR', (1, 1, 1, 1)
+fiber.inputs['Coat'].default_value = 0
+white.node_tree.links.new(fiber.outputs[0], nodes['Material Output'].inputs['Surface'])
+strand.materials.append(white)
+held = add(strand, (0, 0, 0))
+enclosure = shape('enclosure', lambda bm: [bmesh.ops.create_cube(bm, size=150),
+    bmesh.ops.reverse_faces(bm, faces=bm.faces[:])], (0, 0, 0))  # Facing in, black, emitting 1
+enclosure.inputs['Base Color'].default_value, enclosure.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1,) * 4
+enclosure.inputs['Emission Strength'].default_value, enclosure.inputs['IOR'].default_value = 1, 1
+background = scene.world.node_tree.nodes['Background'].inputs['Color']
+for seen, offset, roughness, scene.flex_samples in ((0, 0, 0.3, 256), (85, 2, 0.1, 16384), (85, 2, 0.3, 16384),
+        (89, 2, 0.1, 16384)):
+    # Light sampling noisier at grazing views, its lobes narrow there
+    held.rotation_euler.x, fiber.inputs['Offset'].default_value = math.radians(seen), math.radians(offset)
+    fiber.inputs['Roughness'].default_value = fiber.inputs['Radial Roughness'].default_value = roughness
+    for device in ('OPTIX', 'VULKAN'):
+        ways = []
+        for bounces, world in ((16, 0), (0, 0), (16, 1)):  # Weighed, light sampling alone, bounces alone
+            scene.flex_bounces, background.default_value = bounces, (world,) * 3 + (1,)
+            bpy.data.objects['enclosure'].hide_render = bool(world)
+            ways.append(render_on(device)[8:56, 28:36].mean())  # Within the strand's 0.2 of the view's 1
+        assert max(abs(lit - 1) for lit in ways) < 0.01 and max(ways) - min(ways) < 0.01, \
+            ('enclosed hair', seen, roughness, device, ways)
 preferences.device = 'OPTIX'
 
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
