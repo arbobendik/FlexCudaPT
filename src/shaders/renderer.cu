@@ -934,8 +934,9 @@ __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) 
 // distance it otherwise starts after to keep triangles there; a ray then passing a triangle hit there skips none.
 // Rays start after near, a surface's margin from where they leave it; a medium's vertex, on none, has none. Not
 // near - back: Slang folds that to -back, a -0 that Vulkan's ray queries meet nothing past
+constexpr float MARGIN = 1e-4f;  // A surface's, rays leaving it start past
 __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance,
-    unsigned skip = NONE, float near = 1e-4f) {
+    unsigned skip = NONE, float near = MARGIN) {
     const float back = skip == NONE ? 0 : near;
     unsigned layer = __float_as_uint(-INFINITY);
     // Traverse only; hit data is read from the hit object below.
