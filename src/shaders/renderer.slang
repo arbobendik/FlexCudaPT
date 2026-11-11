@@ -77,6 +77,7 @@ float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 
 static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
+static const uint LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
 // Share of a ray cone's width a mip level covers, 2^-1.5
 static const float CONE_SHARE = 0.35355339;
 // Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length,
@@ -2053,7 +2054,6 @@ void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 wei
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
 Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
     Selection sel = {};
-    float3 seen;
     if (r.w <= 0.0f) {
         return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
     }
@@ -2061,7 +2061,7 @@ Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
     if (dom.hit.triangle == NONE) {
         return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
     }
-    return walk(scene, dom, r, true, 0.0f, sel, seen);
+    return walkHooks<true>(VkScene(scene), dom, r, 0.0f, sel);
 }
 
 // Pixel coordinates a camera sees a position at
@@ -2201,6 +2201,7 @@ void initial(uint3 p, uint3 size, Scene* scene) {
     const uint pixel_seed = stream(hash(scene.frame), index);
     Selection initial = {};
     initial.random_state = stream(pixel_seed, STREAM_SELECT);
+    initial.sums = scene.settings.restir == 0;
     // The pixel's own seed even without a sample, its domain for later passes
     initial.r.seed = stream(pixel_seed, 0u);
     float3 seen = float3(0.0f, 0.0f, 0.0f);
@@ -2208,14 +2209,15 @@ void initial(uint3 p, uint3 size, Scene* scene) {
         Reservoir r = {};
         r.seed = stream(pixel_seed, i);
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        float3 first;
         if (dom.hit.triangle != NONE) {
-            walk(scene, dom, r, false, 1.0f / scene.settings.paths, initial, first);
+            walkHooks<false>(VkScene(scene), dom, r, 1.0f / scene.settings.paths, initial);
+        } else {
+            seen = seen + environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0))
+                / scene.settings.paths;
         }
-        seen = seen + (dom.hit.triangle == NONE
-            ? environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0)) : first)
-            / scene.settings.paths;
     }
+    // What the walks saw at their first hits through the camera's medium, which they add up unresampled
+    seen = seen + initial.glow / scene.settings.paths;
     if (scene.settings.restir != 0) scene.initial[index] = finalize(initial, 1.0f);
     const float3 radiance = scene.settings.restir != 0 ? seen : seen + initial.color;
     scene.accumulation[index] = scene.accumulation[index] + float4(radiance, 1);
@@ -2359,6 +2361,13 @@ void run(uint3 thread, uint3 group, uint index) {
         default: denoise(p, size, scene); break;
     }
 }
+}
+
+// The walk through the scene hooks
+[noinline] Shift walkHooks<let REPLAY: bool>(fcpt.VkScene scene, fcpt.Domain dom, Reservoir r, float scale,
+    inout Selection sel) {
+    return walk(scene, FKDomain(dom.x0, dom.x1, FKHit(dom.hit.uv, dom.hit.instance, dom.hit.triangle, 0,
+        length(dom.x1 - dom.x0)), dom.width, dom.spread), r, REPLAY, scale, sel);
 }
 
 // The entry point
