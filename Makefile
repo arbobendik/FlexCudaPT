@@ -61,6 +61,9 @@ install: build/flex.zip  # A running Blender loads the new build within a second
 
 test: export BLENDER_USER_RESOURCES = $(CURDIR)/build/blender
 test: install  # Into the exported resources instead of the user's
+	$(SLANGC) -warnings-disable 41035 -Isrc/shaders/flexkernels src/shaders/renderer.slang -target spirv-asm \
+		-o build/vulkan/walks.spvasm
+	test $$(grep -cE 'OpName %[A-Za-z0-9_]+ "walk"' build/vulkan/walks.spvasm) = 1  # Walk instantiated once, shift's copy
 	blender -b --python-exit-code 1 -P src/test.py
 
 clean:

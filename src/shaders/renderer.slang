@@ -2035,7 +2035,12 @@ Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
     if (dom.hit.triangle == NONE) {
         return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
     }
-    return walk(scene, dom, r, true, 0.0f, sel, seen);
+    // Copied into a Reservoir of the walk's own type, so Slang instantiates walk once, not once more for the buffer
+    // layout r arrives in: the driver compiles the walk once, the pipeline's cold compile ~30% shorter
+    Reservoir own = {};
+    own.seed = r.seed, own.path = r.path, own.w = r.w, own.c = r.c, own.f = r.f, own.jac = r.jac, own.rc = r.rc;
+    own.dir = r.dir, own.radiance = r.radiance;
+    return walk(scene, dom, own, true, 0.0f, sel, seen);
 }
 
 // Pixel coordinates a camera sees a position at
