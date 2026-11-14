@@ -15,7 +15,6 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "shaders.h"
-#include <algorithm>
 #include <string>
 #include <fcntl.h>
 #include <sys/file.h>
