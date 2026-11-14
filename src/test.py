@@ -1972,6 +1972,19 @@ scene.camera.data.angle = 0.01
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), (0.0112, 0.0230, 0.0441), rtol=0.02), ('zenith sky', device)
+# Through RGB curves, the sky's colour chain read as one table of it, the same: the curves at the zenith's colour, as
+# Blender's own curve evaluator takes them
+curves = scene.world.node_tree.nodes.new('ShaderNodeRGBCurve')
+curves.mapping.curves[3].points.new(0.02, 0.3)
+links = scene.world.node_tree.links
+links.new(dome.outputs['Color'], curves.inputs['Color'])
+links.new(curves.outputs['Color'], scene.world.node_tree.nodes['Background'].inputs['Color'])
+curves.mapping.update()
+due = [curves.mapping.evaluate(curves.mapping.curves[3], curves.mapping.evaluate(curves.mapping.curves[c], value))
+    for c, value in enumerate((0.0112, 0.0230, 0.0441))]
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('folded sky', device, due)
 
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends

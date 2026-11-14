@@ -190,8 +190,41 @@ def sky(node, width=512, height=256):  # A Hosek-Wilkie sky node's radiance alon
         * numpy.cos(gamma)) ** 1.5 + c[:, 7] * numpy.sqrt(cos_theta)) * c[:, 9] * (2 * math.pi / 683)
     return numpy.concatenate((radiance.transpose(1, 2, 0), numpy.ones((height, width, 1))), -1)
 
+class Folded:  # A sky table of an expression of one sky read alone: its values at the texels of the read's table, as
+    type = 'TEX_SKY'  # shaded() takes them, read in its place
+    def __init__(self, expression, read):
+        made = {}  # Of each part once, as shaded() memoizes them
+        swapped = lambda e: made.get(id(e)) or made.setdefault(id(e), ('IMAGE_LINEAR', ('UV',), read[-1]) if e is read
+            else (e[0], *map(swapped, e[1:]))) if isinstance(e, tuple) else e
+        h, w = texels_of(read[-1], cache := {None: None})[0].shape[:2]
+        uv = numpy.stack(numpy.meshgrid((numpy.arange(w) + 0.5) / w, (numpy.arange(h) + 0.5) / h), -1).reshape(-1, 2)
+        self.texels = numpy.concatenate((shaded(swapped(expression), uv, cache, {}).reshape(h, w, 3),
+            numpy.ones((h, w, 1))), -1)
+
+def skied(expression, memo):  # The expression with each largest part a function of one sky read alone read from a
+    # table of that part's values in its place, so a sky's colour chain costs one read
+    def alone(e):  # The sky read e is a function of alone, else None, or () of none
+        if not isinstance(e, tuple): return ()
+        if id(e) not in memo:
+            parts = [alone(part) for part in e[1:]]
+            reads = {expression_key(r): r for r in parts if r}
+            memo[id(e)] = e if e[0] in READS and getattr(e[-1], 'type', None) == 'TEX_SKY' else None if not (e[0] in
+                READS or e[0] == 'UNASSOCIATE' or callable(OPS.get(e[0]))) or None in parts or len(reads) > 1 \
+                else next(iter(reads.values()), ())  # Inputs, noise and animated values are not the sky's
+        return memo[id(e)]
+    read = alone(expression)
+    if read and read is not expression:  # One table of each chain per export, its programs' and its bakes' alike
+        return 'IMAGE_LINEAR', read[1], FOLDED.get(key := expression_key(expression)) or FOLDED.setdefault(key,
+            Folded(expression, read))
+    if not isinstance(expression, tuple) or read is not None: return expression
+    if ('parts', id(expression)) not in memo:  # Each part once, and unchanged where it reads no sky, so shared parts
+        parts = [skied(part, memo) for part in expression[1:]]  # stay shared
+        memo['parts', id(expression)] = expression if all(a is b for a, b in zip(parts, expression[1:])) \
+            else (expression[0], *parts)
+    return memo['parts', id(expression)]
+
 def table(node):  # Colors of a wavelength, blackbody, ramp or curves node, RGB curves after the combined curve, or sky
-    if node.type == 'TEX_SKY': return sky(node)
+    if node.type == 'TEX_SKY': return node.texels if isinstance(node, Folded) else sky(node)
     if node.type == 'WAVELENGTH': return [(*numpy.array(Color(xyz).from_xyz_d65_to_scene_linear()) / 2.52, 1)
         for xyz in CIE]
     if node.type in ('BLACKBODY', 'PRINCIPLED_VOLUME'):
@@ -1389,6 +1422,7 @@ SEALING = {'closed': True, 'asked': False}
 STEFAN_BOLTZMANN = 5.670374419e-8  # W / (m^2 K^4), CODATA 2018
 BLACKBODY_UNIT = 1e-6  # Blender's unit scale of a volume's Blackbody Intensity 1
 HAIRS = {}  # Of each hair table, by its entry, its first level
+FOLDED = {}  # Of each sky's folded chain, by its expression's key, its table
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
@@ -1557,7 +1591,7 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
-        HAIRS.clear()
+        HAIRS.clear(), FOLDED.clear()
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
@@ -1670,6 +1704,7 @@ class Flex(bpy.types.RenderEngine):
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
+            surface = [skied(attribute, memo) for memo in [{}] for attribute in surface]  # Skies' chains read once
             surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
             derived.update(differentiated(surface))
             seen, table = set(), {}  # Reads of attributes shading isn't linear in, or that aren't affine in their reads
