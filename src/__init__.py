@@ -1698,8 +1698,11 @@ class Flex(bpy.types.RenderEngine):
         points, segments, hairs, bounds, roots, spaces = [numpy.empty((0, 4), 'f')], [], [], [], [], {}  # Strands:
         # their points in their object's space and radius; per segment its first point and strand, material and bounds;
         # per strand its first point, point count, random number, root's UV and color; per object its texture space
-        tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), any(layer[2] for
-            layer in row), row[0][3] if len(row[0]) > 3 else row[0][1]) for row in shades])  # Per slot a material
+        # Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too
+        dark = lambda ob: ob.type == 'LIGHT' and not ob.data.use_shadow
+        tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), 2 | dark(ob) << 2
+            if not ob.visible_shadow or dark(ob) else any(layer[2] for layer in row), row[0][3] if len(row[0]) > 3
+            else row[0][1]) for row in shades])  # Per slot a material
         pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
             and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
             and (m.show_render if depsgraph.mode == 'RENDER' else m.show_viewport)]  # Its hair shown as paths
@@ -1805,7 +1808,7 @@ class Flex(bpy.types.RenderEngine):
                 current.clear()
                 continue
             key = ob.type != 'LIGHT' and not moved and (ob.data and ob.data.as_pointer(), ob.visible_camera,
-                tuple(slot.material for slot in ob.material_slots))
+                ob.visible_shadow, tuple(slot.material for slot in ob.material_slots))
             if key in entries:  # Another instance of a mesh, or another object linking it, with the same materials:
                 # its mesh and materials piped once
                 record(i, instance, ob, entries[key])
