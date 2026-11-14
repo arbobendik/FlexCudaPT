@@ -203,6 +203,15 @@ for density, passed in ((0, 1), (1, math.exp(-0.6))):
         bpy.data.objects['veiled'].visible_camera = not hidden
         seen = render(veil, 16)[6:10, 6:10].mean()
         assert abs(seen - (0 if hidden else passed)) < 0.03, ('veil', density, hidden, seen)
+# A Volume Coefficients node absorbs by its coefficients per unit length as given: absorbing (1, 2, 3) and scattering
+# nothing over the depth of 0.6, the emitter reads exp(-0.6 (1, 2, 3)) per channel
+bpy.data.objects['veiled'].visible_camera = True
+coefficients = fill.node_tree.nodes.new('ShaderNodeVolumeCoefficients')
+coefficients.inputs['Absorption Coefficients'].default_value = (1, 2, 3)
+coefficients.inputs['Scatter Coefficients'].default_value = (0, 0, 0)
+fill.node_tree.links.new(coefficients.outputs[0], fill.node_tree.nodes['Material Output'].inputs['Volume'])
+seen = render(veil, 16)[6:10, 6:10].mean((0, 1))
+assert numpy.allclose(seen, numpy.exp(-0.6 * numpy.array((1, 2, 3))), atol=0.03), ('volume coefficients', seen)
 
 class Viewport:  # Stands in for the engine instance Blender creates for a viewport, which background mode has none of
     engine = bpy.types.RenderEngine.bl_rna_get_subclass_py('FLEX')
