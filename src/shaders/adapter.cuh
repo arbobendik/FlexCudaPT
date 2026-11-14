@@ -1,0 +1,112 @@
+// FlexKernels' scene hooks (walk.slang's HookScene) by the renderer's own functions, in the order walk.slang lists
+// them: thin calls, its types converted to and from the renderer's. The scene is the one the raygens read
+static __device__ const Scene& hookScene() { return *(const Scene*)optixGetSbtDataPointer(); }
+static __device__ Hit nativeHit(FKHit hit) { return {hit.triangle_index, hit.instance_index, hit.uv}; }
+// A miss has no instance, as the walk tests it; no point lights exist to consider. Off a surface, past its margin, as
+// traverse starts by default, skipping the face a straight pass leaves by, if it was reached past that margin; from no
+// margin, as from a medium's vertex, skipping the face it starts on, if any. Seen straight from the camera, hidden
+// layers passed as pixelDomain passes them
+static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface,
+    FKHit left, bool viewed) {
+    const Scene& scene = hookScene();
+    float distance = 0;
+    Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
+        left.instance_index != NONE && left.distance >= MARGIN ? key(scene, nativeHit(left)) : NONE)
+        : traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
+        left.instance_index != NONE ? key(scene, nativeHit(left)) : NONE, 0);
+    for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
+        first = false) {
+        if (first) distance = __uint_as_float(__float_as_uint(distance) - 1);
+        hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
+    }
+    return {hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance};
+}
+// FK: the sky's shadow toward a sample of the environment's CDF, which the renderer has none of until it samples its
+// world by a luminance CDF
+static __device__ float3 fcptShadowTransmittance(FKRay ray, float l) { return make_float3(0, 0, 0); }
+// Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone
+// width
+static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
+    unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left,
+    FKHit light) {
+    float3 transmitted;
+    return occluded(hookScene(), ray.origin, ray.unit_direction, l, Medium{make_float3(0, 0, 0), extinction}, filling,
+        random_state, Ray{depth == 0, false, lobe, float(depth), length, width}, surface, transmitted,
+        left.instance_index != NONE ? key(hookScene(), nativeHit(left)) : NONE,  // A light casting none: past all
+        light.instance_index != NONE && hookScene().materials[key(hookScene(), nativeHit(light))].opaque & 4 ? 0
+        : SHADOWS)
+        ? make_float3(0, 0, 0) : transmitted;
+}
+// FlexLight's geometry offset of a triangle's point at position, along its smooth normal, by its corners' normals' tilt
+// off the face; none on a strand's segment, which has no corners
+static __device__ float geometryOffsetAt(const Scene& scene, Hit at, float3 face, float3 position) {
+    if (STRAND(scene, at.instance)) return 0;
+    const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
+    const Corners normal = cornerNormals(scene.normals, scene.instances[at.instance], at.triangle);
+    return geometryOffset(corner[0], corner[1], corner[2], normal[0], normal[1], normal[2], face,
+        make_float3(1 - at.uv.x - at.uv.y, at.uv.x, at.uv.y), position);
+}
+// A shaded surface as the walk takes it, unfaced, its material as the walk's BSDF takes it, absorbing nothing (FK's
+// walk keeps FlexLight's absorption; the renderer's media absorb); shading takes no random number. Rays leave a
+// surface letting no light through by FlexLight's geometry offset; one transmitting or translucent, and a fiber, from
+// the hit: a start lifted along the smooth normal passes the far side of a shell thinner than the lift, which an
+// eighth of the face's shortest edge reaches on any thin closed mesh shaded smooth
+static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surface& surface, float3 position,
+    unsigned random_state) {
+    const float3 face = faceNormal(scene, at);
+    const bool enclosed = encloses(scene, surface, at.instance);
+    const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0;  // Its fiber, which rays leave from the vertex
+    const bool passes = surface.transparency > 0 || used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
+    return {surface.normal, face, hair || passes ? 0.0f : geometryOffsetAt(scene, at, face, position), {surface.albedo,
+        surface.emissive,
+        surface.roughness, surface.metallic, surface.transparency, surface.ior, make_float3(1, 1, 1),
+        used(SPECULAR) ? surface.tint : make_float3(1, 1, 1), used(SPECULAR) ? surface.level : 1,
+        used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
+        used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
+        used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+        used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, false, random_state, surface.coverage,
+        enclosed, enclosed ? FKMedium{volume(surface).scatter, volume(surface).extinction} : FKMedium{},
+        enclosed ? fills(scene, at.instance, at.triangle) : NONE, surface.hair};
+}
+// A light sample's emission as the renderer's light sampling shaded it: its emission program toward the triangle's
+// face, for no ray a bounce past the vertex sampling it, and its smooth normal; the shadow ray ends at the sampled
+// point itself, not lifted
+static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir,
+    unsigned depth, float length) {
+    const Scene& scene = hookScene();
+    const Hit at = nativeHit(hit);
+    const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
+    FKSurface light = walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
+        cross(corner[1] - corner[0], corner[2] - corner[0]), dir,
+        Ray{false, false, LOBE_NONE, float(depth + 1), length}, 0, true), point, random_state);
+    light.smooth_n = smoothNormal(scene, at);
+    return light;
+}
+// The surface as the walk's loop shades a hit
+static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width,
+    unsigned layer, unsigned depth, unsigned lobe, float3 dir) {
+    const Scene& scene = hookScene();
+    const Hit at = nativeHit(hit);
+    return walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y, smoothNormal(scene, at), dir,
+        Ray{depth == 0, false, lobe, float(depth), hit.distance, width}, layer), hitPosition(scene, scene.vertices, at),
+        random_state);
+}
+// Whether hair is compiled in: the renderer's own switch, false in the PTX compiled without it, which folds the walk's
+// hair code out; bound per scene where it is compiled
+static __device__ __forceinline__ bool fcptHairUsed() { return used(HAIR); }
+// Whether the walk shades a light sample's emitter only once its shadow ray lets light through: on OptiX, where many
+// emitters each shaded before the test cost more than the test's branch
+static __device__ __forceinline__ constexpr bool fcptShadowFirst() { return true; }
+// A hair fiber's scattering, as the renderer's walk takes it: of its fiber along hair by its level, its color and the
+// specular tint, which are all the hair's BSDF reads of a surface
+static __device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir) {
+    Surface fiber{};
+    fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
+    return connectHair(hookScene(), fiber, in_dir, out_dir);
+}
+static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir,
+    unsigned random_state) {
+    Surface fiber{};
+    fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
+    return sampleHair(hookScene(), fiber, in_dir, random_state);
+}
