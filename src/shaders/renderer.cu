@@ -1,7 +1,7 @@
 #include "renderer.h"
 #include <optix.h>
 #include <cuda_runtime.h>
-#include "flexkernels/pathtracer.cuh"
+#include "adapter.h"
 
 constexpr int STACK = 64;
 constexpr int SLOTS = 32; // Values a program keeps for reuse, as the extension's
@@ -907,14 +907,6 @@ struct Domain {
     float width, spread;
 };
 
-// Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
-struct Vertex {
-    bool rough;
-    unsigned lobe;
-    float pdf;
-    float cos;
-};
-
 __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) {
     return path >> offset & ((1u << count) - 1u);
 }
@@ -924,8 +916,9 @@ __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) 
 // distance it otherwise starts after to keep triangles there; a ray then passing a triangle hit there skips none.
 // Rays start after near, a surface's margin from where they leave it; a medium's vertex, on none, has none. Not
 // near - back: Slang folds that to -back, a -0 that Vulkan's ray queries meet nothing past
+constexpr float MARGIN = 1e-4f;  // A surface's, rays leaving it start past
 __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance,
-    unsigned skip = NONE, float near = 1e-4f, unsigned mask = 255) {
+    unsigned skip = NONE, float near = MARGIN, unsigned mask = 255) {
     const float back = skip == NONE ? 0 : near;
     unsigned layer = __float_as_uint(-INFINITY);
     // Traverse only; hit data is read from the hit object below.
@@ -1884,17 +1877,23 @@ __device__ Shift walk(const Scene& scene, const Domain& dom, const Reservoir& r,
     }
     return fail;
 }
-// The walk a direct callable that the passes call: compiled once as one function of its own, where OptiX would compile
-// it into each pass calling it, its state spilled around each of its traces there
-extern "C" __device__ Shift __direct_callable__walk(const Scene* scene, const Domain* dom, const Reservoir* r,
-    bool replay, float scale, Selection* sel, float3* seen) { return walk(*scene, *dom, *r, replay, scale, *sel, *seen); }
-#define WALK(scene, dom, r, replay, scale, sel, seen) \
-    optixDirectCall<Shift>(0, &(scene), &(dom), &(r), replay, scale, &(sel), &(seen))
+// The walk as direct callables that the passes call, one per replay, its branches on it folded away: FlexKernels' walk
+// through the adapter's hooks, each compiled as a function of its own, where OptiX would compile it into each pass
+// calling it, its state spilled around each of its traces there. Their records hold the scene the hooks read: the first
+// pass's, the pass's; then the shift's, the pass's and the anchor's
+#define WALK_CALLABLE(name, replay) extern "C" __device__ Shift name(const Domain* dom, const Reservoir* r, \
+    float scale, Selection* sel) { \
+    return walk_hook(FKDomain{dom->x0, dom->x1, {dom->hit.uv, dom->hit.instance, dom->hit.triangle, 0, \
+        length(dom->x1 - dom->x0)}, dom->width, dom->spread}, *r, replay, scale, sel); \
+}
+WALK_CALLABLE(__direct_callable__first, false)
+WALK_CALLABLE(__direct_callable__walk, true)
+#define WALK(scene, dom, r, replay, scale, sel) optixDirectCall<Shift>( \
+    !(replay) ? 0 : &(scene) == (const Scene*)optixGetSbtDataPointer() ? 1 : 2, &(dom), &(r), scale, &(sel))
 
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
 __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
     Selection sel;
-    float3 seen;
     if (r.w <= 0.0f) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
@@ -1902,7 +1901,7 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
     if (dom.hit.triangle == NONE) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
-    return WALK(scene, dom, r, true, 0.0f, sel, seen);
+    return WALK(scene, dom, r, true, 0.0f, sel);
 }
 
 // Pixel coordinates a camera sees a position at
@@ -2052,6 +2051,7 @@ extern "C" __global__ void __raygen__initial() {
     const unsigned pixel_seed = stream(hash(scene.frame), index);
     Selection initial = {};
     initial.random_state = stream(pixel_seed, STREAM_SELECT);
+    initial.sums = !scene.settings.restir;
     // The pixel's own seed even without a sample, its domain for later passes
     initial.r.seed = stream(pixel_seed, 0u);
     float3 seen = make_float3(0.0f, 0.0f, 0.0f);
@@ -2059,14 +2059,15 @@ extern "C" __global__ void __raygen__initial() {
         Reservoir r = {};
         r.seed = stream(pixel_seed, i);
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        float3 first;
         if (dom.hit.triangle != NONE) {
-            WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial, first);
+            WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
+        } else {
+            seen = seen + environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
+                / scene.settings.paths;
         }
-        seen = seen + (dom.hit.triangle == NONE
-            ? environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0}) : first)
-            / scene.settings.paths;
     }
+    // What the walks saw at their first hits through the camera's medium, which they add up unresampled
+    seen = seen + initial.glow / scene.settings.paths;
     if (scene.settings.restir) scene.initial[index] = finalize(initial, 1.0f);
     const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
     float4& sum = scene.accumulation[index];
@@ -2207,3 +2208,4 @@ extern "C" __global__ void __raygen__duplicates() {
     }
     scene.duplication[index] = own.w > 0.0f ? (count - 1u) / 288.0f : 0.0f;
 }
+#include "adapter.cuh"
