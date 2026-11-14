@@ -23,11 +23,9 @@ __device__ float3 operator*(float3 a, float3 b) { return make_float3(a.x * b.x, 
 __device__ float3 operator*(float3 a, float s) { return make_float3(a.x * s, a.y * s, a.z * s); }
 __device__ float3 operator*(float s, float3 a) { return a * s; }
 __device__ float3 operator/(float3 a, float s) { return make_float3(a.x / s, a.y / s, a.z / s); }
+__device__ float4 operator*(float4 a, float s) { return make_float4(a.x * s, a.y * s, a.z * s, a.w * s); }
 __device__ float3 mix(float3 a, float3 b, float t) { return a * (1 - t) + b * t; }
-__device__ float4 mix(float4 a, float4 b, float t) {
-    return make_float4(a.x * (1 - t) + b.x * t, a.y * (1 - t) + b.y * t,
-        a.z * (1 - t) + b.z * t, a.w * (1 - t) + b.w * t);
-}
+__device__ float4 mix(float4 a, float4 b, float t) { return a * (1 - t) + b * t; }
 // -1, 0 or 1
 __device__ float sign(float x) { return (x > 0) - (x < 0); }
 __device__ float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -667,13 +665,8 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(SUBTRACT) --top; top[-1] = top[-1] - *top; break;
         CASE(MULTIPLY) --top; top[-1] = top[-1] * *top; break;
         CASE(DOT_PRODUCT) --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
-        CASE(MAXIMUM) --top;
-            top[-1] = make_float3(fmaxf(top[-1].x, top->x), fmaxf(top[-1].y, top->y), fmaxf(top[-1].z, top->z));
-            break;
-        CASE(LOGARITHM) --top;
-            top[-1] = make_float3(logarithm(top[-1].x, top->x), logarithm(top[-1].y, top->y),
-                logarithm(top[-1].z, top->z));
-            break;
+        CASE(MAXIMUM) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fmaxf(a, b); }); break;
+        CASE(LOGARITHM) --top; top[-1] = each(top[-1], *top, logarithm); break;
         CASE(MULTIPLY_ADD) top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
         CASE(DIVIDE) --top; top[-1] = divide(top[-1], *top); break;
         CASE(SNAP) { --top;
@@ -807,10 +800,7 @@ __device__ Point at(const Scene& scene, unsigned instance, unsigned triangle, fl
         uv[0].y + (uv[1].y - uv[0].y) * s + (uv[2].y - uv[0].y) * t,
         generated[0] + (generated[1] - generated[0]) * s + (generated[2] - generated[0]) * t,
         object[0] + (object[1] - object[0]) * s + (object[2] - object[0]) * t,
-        make_float4(color[0].x + (color[1].x - color[0].x) * s + (color[2].x - color[0].x) * t,
-            color[0].y + (color[1].y - color[0].y) * s + (color[2].y - color[0].y) * t,
-            color[0].z + (color[1].z - color[0].z) * s + (color[2].z - color[0].z) * t,
-            color[0].w + (color[1].w - color[0].w) * s + (color[2].w - color[0].w) * t),
+        color[0] + (color[1] - color[0]) * s + (color[2] - color[0]) * t,
         vertex.at(s, t), s, t, triangle, instance};
 }
 // Along an edge only when a bump program asks for its height or position; the world's point stays fixed
