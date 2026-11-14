@@ -38,8 +38,8 @@ build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulk
 build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/shaders/flexkernels/pathtracer.slang-module \
 	$(SLANGC)
 	mkdir -p build/vulkan
-	$(SLANGC) -warnings-disable 41035 -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/shaders.spv
-	$(SLANGC) -warnings-disable 41035 -DEXTENDED -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/extended.spv
+	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/shaders.spv
+	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/extended.spv
 	xxd -i -n build_shaders_ptx build/vulkan/shaders.spv > $@
 	xxd -i -n build_extended_ptx build/vulkan/extended.spv >> $@
 	printf '#define build_standin_ptx build_shaders_ptx\n' >> $@ # Its own stand-in: Vulkan has no inlining to undo
