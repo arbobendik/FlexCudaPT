@@ -30,20 +30,23 @@ def power(a, b):  # Of a to the power of b, zero where undefined as Blender's on
     with numpy.errstate(all='ignore'):
         return numpy.where(b == 0, 1, numpy.where((a == 0) | (a < 0) & (b != numpy.trunc(b)), 0, numpy.power(a, b)))
 
-def to_hsv(c):  # RGB to HSV, as Cycles'
-    c = numpy.resize(c, 3)
-    high, delta = max(c), max(c) - min(c)
-    if not (high and delta): return numpy.array((0, 0, high))
-    d = (high - c) / delta
-    h = (d[2] - d[1] if c[0] == high else 2 + d[0] - d[2] if c[1] == high else 4 + d[1] - d[0]) / 6
-    return numpy.array((h + (h < 0), delta / high, high))
+def to_hsv(c):  # RGB to HSV, as Cycles', of a color or rows of them
+    c = numpy.asarray(c); c = numpy.resize(c, 3) if c.ndim < 2 else c
+    high, delta = c.max(-1), numpy.ptp(c, -1)
+    with numpy.errstate(all='ignore'):
+        d = (high[..., None] - c) / delta[..., None]
+        h = numpy.select((c[..., 0] == high, c[..., 1] == high), (d[..., 2] - d[..., 1], 2 + d[..., 0] - d[..., 2]),
+            4 + d[..., 1] - d[..., 0]) / 6
+        gray = (high == 0) | (delta == 0)
+        return numpy.stack((numpy.where(gray, 0, h + (h < 0)), numpy.where(gray, 0, delta / high), high), -1)
 
-def from_hsv(c):  # HSV to RGB, as Cycles'
-    h, s, v = numpy.resize(c, 3)
-    if not s: return numpy.full(3, v)
-    i, f = divmod(0 if h == 1 else 6 * h, 1)
+def from_hsv(c):  # HSV to RGB, as Cycles', of a color or rows of them
+    c = numpy.asarray(c); h, s, v = (numpy.resize(c, 3) if c.ndim < 2 else c).T
+    i, f = numpy.divmod(numpy.where(h == 1, 0, 6 * h), 1)
     p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
-    return numpy.array(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v))[int(i)] if 0 <= i < 5 else (v, p, q))
+    rows = numpy.stack(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)))
+    return numpy.where(s == 0, v, numpy.take_along_axis(rows, numpy.where((i >= 0) & (i < 5), i, 5).astype(int)[None,
+        None], 0)[0]).T
 
 def to_hsl(c):  # RGB to HSL, as Cycles'
     c = numpy.resize(c, 3)
@@ -163,7 +166,65 @@ def rebuilt(mapping):
     mapping.update() if ordered else mapping.initialize()
     return mapping
 
-def table(node):  # Colors of a wavelength, blackbody, ramp or curves node, RGB curves after the combined curve
+# Hosek and Wilkie's sky model: its RGB dataset (hosek_wilkie.LICENSE) by channel, ground albedo, turbidity, coefficient
+# and Bezier point over the cube root of the sun's elevation
+HOSEK_WILKIE = numpy.load(os.path.join(os.path.dirname(__file__), 'hosek_wilkie.npy'))
+
+def sky(node, width=512, height=256):  # A Hosek-Wilkie sky node's radiance along the directions an equirectangular
+    # image's texels read, rows up from the nadir; below the horizon the horizon's, in scene linear as Blender's node
+    sun = numpy.array(node.sun_direction) / numpy.linalg.norm(node.sun_direction)
+    x = (max(math.asin(sun[2]), 0) / (math.pi / 2)) ** (1 / 3)
+    t, a = min(max(node.turbidity, 1), 10), node.ground_albedo
+    low = min(int(t), 9)  # Between the turbidities low and low + 1, numbered from 1
+    config = sum(wa * wt * HOSEK_WILKIE[:, i, j] for i, wa in enumerate((1 - a, a))
+        for j, wt in ((low - 1, low + 1 - t), (low, t - low))) \
+        @ (numpy.array((1, 5, 10, 10, 5, 1)) * (1 - x) ** numpy.arange(5, -1, -1) * x ** numpy.arange(6))
+    phi, up = numpy.meshgrid((0.5 - (numpy.arange(width) + 0.5) / width) * 2 * math.pi,
+        ((numpy.arange(height) + 0.5) / height - 0.5) * math.pi)
+    cos_theta = numpy.maximum(numpy.sin(up), math.sin(0.001))  # Of the zenith angle, at most 90 degrees less 0.001
+    gamma = numpy.arccos(numpy.clip(numpy.cos(up) * (numpy.cos(phi) * sun[0] + numpy.sin(phi) * sun[1])
+        + numpy.sin(up) * sun[2], -1, 1))
+    c = config[:, :, None, None]
+    radiance = (1 + c[:, 0] * numpy.exp(c[:, 1] / (cos_theta + 0.01))) * (c[:, 2] + c[:, 3] * numpy.exp(c[:, 4] * gamma)
+        + c[:, 5] * numpy.cos(gamma) ** 2 + c[:, 6] * (1 + numpy.cos(gamma) ** 2) / (1 + c[:, 8] ** 2 - 2 * c[:, 8]
+        * numpy.cos(gamma)) ** 1.5 + c[:, 7] * numpy.sqrt(cos_theta)) * c[:, 9] * (2 * math.pi / 683)
+    return numpy.concatenate((radiance.transpose(1, 2, 0), numpy.ones((height, width, 1))), -1)
+
+class Folded:  # A sky table of an expression of one sky read alone: its values at the texels of the read's table, as
+    type = 'TEX_SKY'  # shaded() takes them, read in its place
+    def __init__(self, expression, read):
+        made = {}  # Of each part once, as shaded() memoizes them
+        swapped = lambda e: made.get(id(e)) or made.setdefault(id(e), ('IMAGE_LINEAR', ('UV',), read[-1]) if e is read
+            else (e[0], *map(swapped, e[1:]))) if isinstance(e, tuple) else e
+        h, w = texels_of(read[-1], cache := {None: None})[0].shape[:2]
+        uv = numpy.stack(numpy.meshgrid((numpy.arange(w) + 0.5) / w, (numpy.arange(h) + 0.5) / h), -1).reshape(-1, 2)
+        self.texels = numpy.concatenate((shaded(swapped(expression), uv, cache, {}).reshape(h, w, 3),
+            numpy.ones((h, w, 1))), -1)
+
+def skied(expression, memo):  # The expression with each largest part a function of one sky read alone read from a
+    # table of that part's values in its place, so a sky's colour chain costs one read
+    def alone(e):  # The sky read e is a function of alone, else None, or () of none
+        if not isinstance(e, tuple): return ()
+        if id(e) not in memo:
+            parts = [alone(part) for part in e[1:]]
+            reads = {expression_key(r): r for r in parts if r}
+            memo[id(e)] = e if e[0] in READS and getattr(e[-1], 'type', None) == 'TEX_SKY' else None if not (e[0] in
+                READS or e[0] == 'UNASSOCIATE' or callable(OPS.get(e[0]))) or None in parts or len(reads) > 1 \
+                else next(iter(reads.values()), ())  # Inputs, noise and animated values are not the sky's
+        return memo[id(e)]
+    read = alone(expression)
+    if read and read is not expression:  # One table of each chain per export, its programs' and its bakes' alike
+        return 'IMAGE_LINEAR', read[1], FOLDED.get(key := expression_key(expression)) or FOLDED.setdefault(key,
+            Folded(expression, read))
+    if not isinstance(expression, tuple) or read is not None: return expression
+    if ('parts', id(expression)) not in memo:  # Each part once, and unchanged where it reads no sky, so shared parts
+        parts = [skied(part, memo) for part in expression[1:]]  # stay shared
+        memo['parts', id(expression)] = expression if all(a is b for a, b in zip(parts, expression[1:])) \
+            else (expression[0], *parts)
+    return memo['parts', id(expression)]
+
+def table(node):  # Colors of a wavelength, blackbody, ramp or curves node, RGB curves after the combined curve, or sky
+    if node.type == 'TEX_SKY': return node.texels if isinstance(node, Folded) else sky(node)
     if node.type == 'WAVELENGTH': return [(*numpy.array(Color(xyz).from_xyz_d65_to_scene_linear()) / 2.52, 1)
         for xyz in CIE]
     if node.type in ('BLACKBODY', 'PRINCIPLED_VOLUME'):
@@ -197,10 +258,11 @@ def texture(source, textures, texels):
     key = source if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
     if key not in textures:
         image = source if ramp else source.image
-        pixels = numpy.array(table(source), 'f').ravel() if ramp else numpy.empty(len(image.pixels), 'f')
+        pixels = numpy.array(table(source), 'f') if ramp else numpy.empty(len(image.pixels), 'f')
         if not ramp: image.pixels.foreach_get(pixels)
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
-        width, height = (len(pixels) // 4, 1) if ramp else image.size
+        width, height = (pixels.shape[-2], pixels.size // 4 // pixels.shape[-2]) if ramp else image.size  # A sky's 2D
+        pixels = pixels.ravel()
         srgb = not (ramp or image.is_float or image.colorspace_settings.is_data)
         straight = not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data
         levels = numpy.empty(len(pixels), 'u1')  # Rounded: read only where they are k / 255 exactly
@@ -222,8 +284,9 @@ def texture(source, textures, texels):
             if srgb: pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
             if straight: pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]
             mean = pixels.reshape(-1, 4).mean(0)
+        extension = key[1] if not ramp else 'EXTEND' if source.type == 'TEX_SKY' else 'REPEAT'  # A sky's poles apart
         textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
-            'REPEAT' if ramp else key[1]) << 24 | packed << 26 | (packed and srgb) << 29, mean)
+            extension) << 24 | packed << 26 | (packed and srgb) << 29, mean)
         texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
     return textures[key]
 
@@ -485,7 +548,7 @@ def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linea
             value = value[:, 3:] if name.startswith('ALPHA') else value[:, :3]
         else:
             parts = [shaded(part, uv, cache, memo) for part in operands]
-            value = OPS[name](*parts) if name not in ROWS else [OPS[name](*row) for row in zip(*parts)]
+            value = OPS[name](*parts) if name not in ROWS[2:] else [OPS[name](*row) for row in zip(*parts)]
         memo[id(expression)] = numpy.broadcast_to(numpy.asarray(value, 'f8'), (len(uv), 3))
     return memo[id(expression)]
 
@@ -1167,6 +1230,9 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
     'BLACKBODY': lambda node, inputs, index: blackbody(inputs[0], node),
+    'TEX_SKY': lambda node, inputs, index: ('IMAGE_LINEAR', ('EQUIRECTANGULAR', point_of(node, inputs[0],
+        ('POSITION',))), node) if node.sky_type == 'HOSEK_WILKIE' else 0,  # Along its direction, as an environment's;
+    # other skies black
     'WAVELENGTH': wavelength,
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
     'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),
@@ -1356,6 +1422,7 @@ SEALING = {'closed': True, 'asked': False}
 STEFAN_BOLTZMANN = 5.670374419e-8  # W / (m^2 K^4), CODATA 2018
 BLACKBODY_UNIT = 1e-6  # Blender's unit scale of a volume's Blackbody Intensity 1
 HAIRS = {}  # Of each hair table, by its entry, its first level
+FOLDED = {}  # Of each sky's folded chain, by its expression's key, its table
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
@@ -1524,7 +1591,7 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
-        HAIRS.clear()
+        HAIRS.clear(), FOLDED.clear()
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
@@ -1637,6 +1704,7 @@ class Flex(bpy.types.RenderEngine):
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
+            surface = [skied(attribute, memo) for memo in [{}] for attribute in surface]  # Skies' chains read once
             surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
             derived.update(differentiated(surface))
             seen, table = set(), {}  # Reads of attributes shading isn't linear in, or that aren't affine in their reads
