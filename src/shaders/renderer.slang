@@ -1106,9 +1106,6 @@ float3 environment(Scene* scene, float3 direction, Ray ray) {
         point, -direction, false, ray, info).emissive;
 }
 
-// A light BVH node's emitters
-LightBounds bounds(LightNode node) { return LightBounds(node.low, node.high, node.w, node.phi, node.cos_theta_o); }
-
 // Scattering and extinction coefficients of a medium, none by default
 struct Medium { float3 scatter, extinction; };
 static const Medium NO_MEDIUM = {float3(0), float3(0)};
@@ -1400,70 +1397,6 @@ struct VkScene : IScene {
     }
 };
 
-// Light sampling: a light picked by the light tree, P(light) the product of child shares down to it
-// Triangle: uniform point, PDF = solidAngle(P(light))
-// radiance = L * T / PDF
-// Off a surface, as a medium's vertex, the shadow ray starts at origin itself
-[noinline] float3 sampleLight(Scene* scene, float3 origin, float3 normal, float3 face, Medium sides[2],
-    uint2 fillings, uint state, out float3 direction, out float density, Ray ray, bool onSurface = true,
-    uint self = NONE) {
-    direction = float3(0, 0, 0);
-    density = 0;
-    // Down the light tree by the children's importance, pick rescaled (pbrt-v4 BVHLightSampler::Sample)
-    float pick = random(state), probability = 1;
-    uint node = 0;
-    while (scene.lights[node].leaf == 0) {
-        const uint child = pickChild(bounds(scene.lights[node + 1]), bounds(scene.lights[scene.lights[node].child]),
-            origin, normal, pick, probability);
-        if (child > 1)
-            return float3(0, 0, 0);
-        node = child == 1 ? scene.lights[node].child : node + 1;
-    }
-    if (node == 0 && !(importance(bounds(scene.lights[0]), origin, normal) > 0))
-        return float3(0, 0, 0);
-    const uint light = scene.lights[node].child, instance = scene.lights[node].instance;
-    const Corners corner = corners(scene.vertices, scene.instances[instance], light);
-    const float3 la = corner[0], lb = corner[1], lc = corner[2];
-    const float3 lightNormal = cross(lb - la, lc - la);
-    const float side = sqrt(random(state));
-    const float along = random(state);
-    const float3 toLight = la * (1 - side) + lb * (side * (1 - along)) + lc * (side * along) - origin;
-    if (dot(normal, normal) > 0 && !(dot(normal, toLight) > 0 && dot(face, toLight) > 0))
-        return float3(0, 0, 0);
-    // Visibility along the segment from origin to the sampled point, past self, a hair vertex's own segment
-    const float3 toward = normalize(toLight);
-    const float left = shadowLength(toLight);
-    direction = toward;
-    float3 transmitted;
-    if (occluded(scene, origin, toward, left, sides[int(dot(face, toLight) > 0)], fillings[int(dot(face, toLight) > 0)],
-        state, ray, onSurface, transmitted, self,
-        (scene.materials[key(scene, instance, light)].opaque & 4) != 0 ? 0 : SHADOWS)) // A light casting none: past all
-        return float3(0, 0, 0);
-    density = solidAngle(probability, lightNormal, toLight);
-    return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
-        Ray(false, false, LOBE_NONE, ray.depth + 1, length(toLight)), 0, true).emissive
-        / density;
-}
-
-// PDF = solidAngle(probability), probability the product of child shares down the trail
-// (pbrt-v4 BVHLightSampler::PMF)
-float lightPdf(Scene* scene, float3 origin, float3 normal, uint instance, uint triangle, float3 point) {
-    if (used(CURVES) && scene.instances[instance].world == STRANDS) return 0; // Strands, which no light sampling picks
-    float probability = 1;
-    uint node = 0;
-    for (uint64_t trail = scene.trails[key(scene, instance, triangle)]; scene.lights[node].leaf == 0; trail >>= 1) {
-        const uint taken = uint(trail & 1);
-        probability *= childShare(bounds(scene.lights[node + 1]), bounds(scene.lights[scene.lights[node].child]),
-            origin, normal, taken);
-        node = taken == 1 ? scene.lights[node].child : node + 1;
-    }
-    const Corners vertices = corners(scene.vertices, scene.instances[instance], triangle);
-    return scene.lights[node].child == triangle && scene.lights[node].instance == instance
-        && importance(bounds(scene.lights[node]), origin, normal) > 0
-        && (dot(normal, normal) == 0 || dot(normal, point - origin) > 0) ? solidAngle(probability,
-        cross(vertices[1] - vertices[0], vertices[2] - vertices[0]), point - origin) : 0;
-}
-
 // Running sums of a hair table level's rows (image 0) or columns (1), RGBA by lobe, filtered at x and y
 float4 hairSums(Scene* scene, float4* record, uint image, float x, float y) {
     const float2 size = image == 0 ? float2(record[1].y + 1, record[1].x) : float2(record[1].z + 2, 16 * record[1].x);
@@ -1569,31 +1502,6 @@ SampleBSDF sampleHair(Scene* scene, Surface surface, float3 in_dir, uint state) 
     sampled.random_state = r.state;
     return sampled;
 }
-// Each lobe competes with light sampling, but on the last bounce, which samples no BSDF
-float3 lightBSDF(Scene* scene, Surface surface, float3 in_dir, float3 out_dir, float3 n, float3 g_n, Material material,
-    float eta_i, float eta_o, uint random_state, float light, bool competing) {
-    if (used(HAIR) && dot(surface.hair, surface.hair) > 0) { // Hair's, weighed likewise
-        const SampleBSDF l = connectHair(scene, surface, in_dir, out_dir);
-        return l.throughput * l.pdf / (competing ? 1 + l.pdf * l.pdf / (light * light) : 1);
-    }
-    // BSDF's lobes toward the light, each weighed against BSDF sampling where it competes (power heuristic)
-    float3 throughputs[4];
-    float pdfs[4];
-    const float3 f = BSDF(in_dir, out_dir, n, material, eta_i, eta_o, !(dot(g_n, -in_dir) * dot(g_n, out_dir) > 0),
-        random_state, throughputs, pdfs);
-    if (!competing) {
-        return f;
-    }
-    float3 weighted = float3(0);
-    for (int i = 0; i < 4; i++) {
-        if (pdfs[i] > 0) {
-            const float ratio = pdfs[i] / light;
-            weighted += throughputs[i] * pdfs[i] / (light * (1 + ratio * ratio));
-        }
-    }
-    return weighted * light;
-}
-
 // Generating, whether the path survives Russian roulette and the bounce limit after vertex b
 bool survives(Scene* scene, uint seed, float3 throughput, inout float density, uint b) {
     const float survival_probability = survivalProbability(throughput, density);
