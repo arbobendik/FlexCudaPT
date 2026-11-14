@@ -921,7 +921,6 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
 // space
 
 // Random streams besides the per vertex ones
-static const uint STREAM_RR = 128u;
 static const uint STREAM_JITTER = 192u;
 static const uint STREAM_SELECT = 193u;
 
@@ -1576,23 +1575,6 @@ SampleBSDF sampleHair(Scene* scene, Surface surface, float3 in_dir, uint state) 
     sampled.random_state = r.state;
     return sampled;
 }
-// Generating, whether the path survives Russian roulette and the bounce limit after vertex b
-bool survives(Scene* scene, uint seed, float3 throughput, inout float density, uint b) {
-    const float survival_probability = survivalProbability(throughput, density);
-    if (survival_probability < pcg(stream(seed, b + STREAM_RR)).value || b >= scene.settings.bounces) {
-        return false;
-    }
-    density *= survival_probability;
-    return true;
-}
-
-// Of a generated path's contribution: resampled into sel under ReSTIR, otherwise only summed, as offer sums it
-void resample(Scene* scene, inout Selection sel, Reservoir candidate, float3 weight) {
-    if (scene.settings.restir != 0) { offer(sel, candidate, weight); return; }
-    const float grey = rgb_to_greyscale(weight);
-    if (grey > 0.0f && grey < 3.00000000549775576e+38f) sel.color = sel.color + weight;
-}
-
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
 Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
     Selection sel = {};
