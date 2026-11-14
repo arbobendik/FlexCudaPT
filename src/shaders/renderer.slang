@@ -98,6 +98,7 @@ float lightPath(Ray ray, int output) {
 
 // Of a to the base b, zero where undefined as Blender's
 float logarithm(float a, float b) { return a > 0 && b > 0 && b != 1 ? log(a) / log(b) : 0; }
+float3 logarithm(float3 a, float3 b) { return float3(logarithm(a.x, b.x), logarithm(a.y, b.y), logarithm(a.z, b.z)); }
 // sRGB to linear, as Cycles'
 float decode(float c) { return c < 0.04045f ? max(c, 0) / 12.92f : pow((c + 0.055f) / 1.055f, 2.4f); }
 // Of a to the power of b, zero where undefined as Blender's on the GPU
@@ -105,6 +106,7 @@ float power(float a, float b) {
     return b == 0 ? 1 : a == 0 || a < 0 && b != trunc(b) ? 0 : a > 0 ? pow(a, b)
         : (fmod(b, 2) == 0 ? 1 : -1) * pow(-a, b);
 }
+float3 power(float3 a, float3 b) { return float3(power(a.x, b.x), power(a.y, b.y), power(a.z, b.z)); }
 // Cycles' conversions of RGB to HSV and HSL and back
 float3 toHsv(float3 c) {
     const float high = max(c.x, max(c.y, c.z)), delta = high - min(c.x, min(c.y, c.z));
@@ -697,10 +699,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(MULTIPLY) --top; stack[top - 1] = stack[top - 1] * stack[top]; break;
         CASE(DOT_PRODUCT) --top; stack[top - 1] = float3(1, 1, 1) * dot(stack[top - 1], stack[top]); break;
         CASE(MAXIMUM) --top; stack[top - 1] = max(stack[top - 1], stack[top]); break;
-        CASE(LOGARITHM) --top;
-            stack[top - 1] = float3(logarithm(stack[top - 1].x, stack[top].x), logarithm(stack[top - 1].y, stack[top].y),
-                logarithm(stack[top - 1].z, stack[top].z));
-            break;
+        CASE(LOGARITHM) --top; stack[top - 1] = logarithm(stack[top - 1], stack[top]); break;
         CASE(MULTIPLY_ADD) top -= 2; stack[top - 1] = stack[top - 1] * stack[top] + stack[top + 1]; break;
         CASE(DIVIDE) --top; stack[top - 1] = divide(stack[top - 1], stack[top]); break;
         CASE(SNAP) { --top;
@@ -720,10 +719,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             stack[top - 1] = float3(1, 1, 1) * fractal(stack[top - 1], stack[top], stack[top + 1], stack[top + 2].x,
                 int(stack[top + 2].y));
             break;
-        CASE(POWER) --top;
-            stack[top - 1] = float3(power(stack[top - 1].x, stack[top].x), power(stack[top - 1].y, stack[top].y),
-                power(stack[top - 1].z, stack[top].z));
-            break;
+        CASE(POWER) --top; stack[top - 1] = power(stack[top - 1], stack[top]); break;
         CASE(EXPONENT) stack[top - 1] = exp(stack[top - 1]); break;
         CASE(MINIMUM) --top; stack[top - 1] = min(stack[top - 1], stack[top]); break;
         CASE(LESS_THAN) --top; stack[top - 1] = float3(stack[top - 1] < stack[top]); break;
