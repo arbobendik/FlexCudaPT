@@ -9,7 +9,8 @@ SLANGC ?= $(SLANG_PATH)/bin/slangc
 CPPFLAGS += -I$(CUDA_PATH)/include -I$(OPTIX_PATH)/include
 LDLIBS += -L$(CUDA_PATH)/lib64 -lcuda -ldl
 
-build/flex.zip: src/__init__.py src/blender_manifest.toml build/renderer build/renderer-vulkan
+build/flex.zip: src/__init__.py src/blender_manifest.toml src/hosek_wilkie.npy src/hosek_wilkie.LICENSE build/renderer \
+	build/renderer-vulkan
 	python3 -m zipfile -c $@ $^
 
 build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h

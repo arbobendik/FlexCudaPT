@@ -645,8 +645,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
 // materials' values changed, an animated one's by frame; then the tables the programs read, rebuilt, each as its first
-// texel and width and its texels, until a width of 0; then per program its first step and light power hint, until a
-// first of 2^32 - 1, which the materials of the programs take; then the bakes to run again
+// texel and texel count and its texels, until a count of 0; then per program its first step and light power hint,
+// until a first of 2^32 - 1, which the materials of the programs take; then the bakes to run again
 inline void updateSteps(Scene& scene, Loaded& loaded) {
     unsigned count;
     receive(&count, sizeof(count), 1);
