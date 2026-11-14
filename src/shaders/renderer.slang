@@ -932,18 +932,6 @@ struct Domain {
     float width, spread;
 };
 
-// Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
-struct Vertex {
-    bool rough;
-    uint lobe;
-    float pdf;
-    float cos;
-};
-
-// The Hit of a reconnection record, which the shared Reservoir holds as FlexLight's uint4
-uint4 rcOf(Hit hit) { return uint4(hit.triangle, asuint(hit.uv), hit.instance); }
-Hit hitOf(uint4 rc) { return Hit(rc.x, rc.w, asfloat(rc.yz)); }
-
 // Nearest hit before t past lo of a ray in an object's space and a segment of its strands, between points a and b:
 // Roth's union of their spheres and the cone tangent to both, every root of each taken (Roth 1982, Max 1990); its axis
 // parameter and its normal's polar angles, in 16 bits each
