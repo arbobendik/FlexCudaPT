@@ -1998,21 +1998,83 @@ for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('folded sky', device, due)
 # A value edited in a material whose emission is a folded sky chain pipes steps alone, the chain's table kept, as in a
-# material without one, where a table made anew would count as a new texture and export the scene anew
+# material without one, where a table made anew would count as a new texture and export the scene anew; also after
+# Blender copied the material anew in between, as new data makes it do, its nodes at new addresses: tables are keyed by
+# the original nodes, read from the evaluated
 bpy.context.window.scene = scene
 glowing, material = plane('glowing', 0), bpy.data.materials['glowing']
 glow, gamma = material.node_tree.nodes.new('ShaderNodeTexSky'), material.node_tree.nodes.new('ShaderNodeGamma')
 glow.sky_type, gamma.inputs['Gamma'].default_value = 'HOSEK_WILKIE', 2.2
 material.node_tree.links.new(glow.outputs['Color'], gamma.inputs['Color'])
 material.node_tree.links.new(gamma.outputs['Color'], glowing.inputs['Emission Color'])
-exporter = exported()
-exporter.start, exporter.requests = lambda depsgraph: Viewport.engine.start(exporter, depsgraph), io.BytesIO()
-glowing.inputs['Roughness'].default_value += 0.1
+def churned(material):  # Of a value edited in the material after Blender copied it anew, the kind piped
+    exporter = exported()
+    exporter.start, exporter.requests = lambda depsgraph: Viewport.engine.start(exporter, depsgraph), io.BytesIO()
+    for group in [bpy.data.node_groups.new(f'churn {k}', 'ShaderNodeTree') for k in range(50)]:
+        for _ in range(5): group.nodes.new('ShaderNodeMath')
+    material.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value += 0.1
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+        object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material,
+        is_updated_geometry=False, is_updated_transform=False)]))
+    for group in [group for group in bpy.data.node_groups if group.name.startswith('churn')]:
+        bpy.data.node_groups.remove(group)
+    return numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0]
+assert churned(material) == flex.STEPS, 'value beside a folded sky'
+# So beside a live color ramp, which the update reads again from the material's evaluated copy
+ramped, material = plane('ramped', 0), bpy.data.materials['ramped']
+facing, ramp = material.node_tree.nodes.new('ShaderNodeLayerWeight'), material.node_tree.nodes.new('ShaderNodeValToRGB')
+ramp.color_ramp.elements[1].color, ramped.inputs['Emission Strength'].default_value = (0.2, 0.5, 0.9, 1), 1
+material.node_tree.links.new(facing.outputs['Facing'], ramp.inputs['Fac'])
+material.node_tree.links.new(ramp.outputs['Color'], ramped.inputs['Emission Color'])
+assert churned(material) == flex.STEPS, 'value beside a color ramp'
+assert all(node.id_data.is_evaluated for node in module['SOURCES'].values() if isinstance(node, bpy.types.Node)), \
+    'tables read from evaluated nodes'
+# A kept engine under two skies, an emitter of one's colour tinted by the other's edited between two F12s with no
+# export between, pipes steps alone, which the renderer reads as piped: its second F12 is a new engine's; so a kept
+# viewport's draw after the same edit. Steps it can't read leave it waiting: its renderers killed after 60 s, the row
+# fails
+scene.camera.location, scene.camera.rotation_euler = (0, 0, 3), (0, 0, 0)
+scene.camera.data.sensor_width, scene.camera.data.lens = 36, 50
+material = bpy.data.materials['glowing']
+roughness = material.node_tree.nodes['Principled BSDF'].inputs['Roughness']
+tint = material.node_tree.nodes.new('ShaderNodeTexSky')
+tint.sky_type, tint.turbidity = 'HOSEK_WILKIE', 5
+material.node_tree.links.new(tint.outputs['Color'], material.node_tree.nodes['Principled BSDF'].inputs['Base Color'])
 depsgraph = bpy.context.evaluated_depsgraph_get()
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material, is_updated_geometry=False,
-    is_updated_transform=False)]))
-assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.STEPS, 'value beside a folded sky'
+context = types.SimpleNamespace(region=region, region_data=types.SimpleNamespace(view_matrix=scene.camera.matrix_world
+    .inverted(), window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA'),
+    space_data=types.SimpleNamespace(camera=scene.camera, clip_end=1000))
+def sky_drawn(viewport, updated):  # The viewport's draw to its sample limit once updated by the depsgraph given
+    with offscreen.bind():
+        gpu.matrix.load_matrix(Matrix.Identity(4))
+        gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+        viewport.view_update(context, updated)
+        viewport.view_draw(context, bpy.context.evaluated_depsgraph_get())
+        while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, bpy.context.evaluated_depsgraph_get())
+        return numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+def watched(f, *args):  # f(*args), its renderers killed if it takes past 60 s
+    watchdog = threading.Timer(60, subprocess.run, (('pkill', '-P', str(os.getpid()), 'renderer'),))
+    watchdog.start()
+    value = f(*args)
+    watchdog.cancel()
+    return value
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    scene.render.use_persistent_data, roughness.default_value = True, 0.5
+    render()
+    roughness.default_value = 0.6
+    shown = watched(render)
+    scene.render.use_persistent_data = False
+    assert numpy.allclose(shown, render(), atol=2e-3), ('kept sky', device)
+    roughness.default_value = 0.5
+    sky_drawn(kept := Viewport(), bpy.context.evaluated_depsgraph_get())
+    roughness.default_value = 0.6
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    edit = types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+        updates=[types.SimpleNamespace(id=material, is_updated_geometry=False, is_updated_transform=False)])
+    assert numpy.allclose(watched(sky_drawn, kept, edit), sky_drawn(Viewport(), depsgraph), atol=2e-3), \
+        ('kept sky viewport', device)
 
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
