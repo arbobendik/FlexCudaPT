@@ -512,7 +512,8 @@ inline unsigned long long buildScene(OptixDeviceContext context, const float3* v
         0, 1, 0}, .visibilityMask = 255, .traversableHandle = meshes.begin()->second.handle});
     for (size_t i = 0; i < instances.size(); ++i) {
         std::copy_n(instances[i].matrix, 12, placed[i].transform);
-        placed[i].instanceId = instances[i].key, placed[i].visibilityMask = 255;
+        placed[i].instanceId = instances[i].key, placed[i].visibilityMask = instances[i].count
+            && loaded.materials[instances[i].key].opaque & 2 ? 255 & ~SHADOWS : 255; // Hidden from shadows
         placed[i].sbtOffset = instances[i].world == STRANDS; // Strands by their own hit group
         placed[i].traversableHandle = meshes.at(instances[i].first | (instances[i].world == STRANDS) << 31).handle;
     }
