@@ -484,6 +484,16 @@ def bounds(expression, boxes, memo):
     elif name == 'DOT_PRODUCT':
         low, high = product(*parts)
         box = numpy.full(3, low.sum()), numpy.full(3, high.sum())
+    elif name in ('SINE', 'COSINE'):  # Its values at the ends and at the extrema between, two of which span [-1, 1]
+        f, c = (numpy.sin, math.pi / 2) if name == 'SINE' else (numpy.cos, 0)
+        at = [f([low, high, *(c + k * math.pi for k in range(math.ceil((low - c) / math.pi),
+            math.floor((high - c) / math.pi) + 1)[:2])]) for low, high in zip(*parts[0])]
+        box = numpy.array([min(v) for v in at]), numpy.array([max(v) for v in at])
+    elif name == 'DIVIDE':  # By a divisor of one sign alone, else unbounded
+        box = product(parts[0], (1 / parts[1][1], 1 / parts[1][0])) if ((parts[1][0] > 0) | (parts[1][1] < 0)).all() \
+            else None
+    elif name == 'FLOOR': box = numpy.floor(parts[0][0]), numpy.floor(parts[0][1])
+    elif name == 'LESS_THAN': box = numpy.zeros(3), numpy.ones(3)  # A comparison
     else: box = None
     memo[id(expression)] = box if box is None or numpy.isfinite(box).all() else None
     return memo[id(expression)]
