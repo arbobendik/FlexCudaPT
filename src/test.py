@@ -9,23 +9,23 @@ COLOR = (0.8, 0.2, 0.1)
 TEXELS = ((1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 1))  # 2x2 texture, bottom row first
 SKY = (0.1, 0.2, 0.4)
 
-def new(name):  # Scene rendered by Flex into an EXR of SIZE x SIZE pixels at 256 samples, under the sky
+def new(name, size=SIZE, samples=256, sky=SKY):  # Scene Flex renders into an EXR, size x size pixels, under the sky
     scene = bpy.data.scenes.new(name)
     scene.render.engine = 'FLEX'
-    scene.render.resolution_x = scene.render.resolution_y = SIZE
-    scene.flex_samples = 256
+    scene.render.resolution_x = scene.render.resolution_y = size
+    scene.flex_samples = samples
     scene.render.image_settings.file_format = 'OPEN_EXR'
     scene.render.filepath = bpy.app.tempdir + name + '.exr'
     scene.world = bpy.data.worlds.new('sky')
-    scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (*SKY, 1)
+    scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (*sky, 1)
     return scene
 
 scene = new('test')
 scene.render.use_border = True
 scene.render.border_max_y = 0.875  # Leaves the top eighth unrendered
 
-def opened(name):  # A new scene, the window's
-    bpy.context.window.scene = made = new(name)
+def opened(name, sky=SKY):  # A new scene, the window's
+    bpy.context.window.scene = made = new(name, sky=sky)
     return made
 
 def add(data, location, rotation=(0, 0, 0)):
@@ -110,9 +110,10 @@ bare.nodes.remove(bare.nodes['Material Output'])
 for node in (node for material in bpy.data.materials for node in material.node_tree.nodes if node.type == 'TEX_IMAGE'):
     node.interpolation = 'Closest'  # Whole texels
 
-def render():  # The scene rendered, its pixels' colors
-    bpy.ops.render.render(scene=scene.name, write_still=True)
-    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+def render(rendered=None, size=SIZE):  # The scene rendered, or the one given at its size, its pixels' colors
+    rendered = rendered or scene
+    bpy.ops.render.render(scene=rendered.name, write_still=True)
+    return numpy.array(bpy.data.images.load(rendered.render.filepath).pixels).reshape(size, size, 4)[..., :3]
 
 STATS = []
 def stats(*args): STATS.append(args[0])
@@ -155,14 +156,7 @@ lit = pixels[18:46, 2:30].sum(2)  # Light sampling leaves no pixel of the colore
 assert lit.min() > 0.5 * lit.mean() and lit.max() < 2 * lit.mean(), 'lighting'
 # Hidden from the camera wherever it sees straight: an emitter of radiance 1 under clear glass of IOR 1, which bends no
 # ray, or a cutout reads 1 seen and 0 hidden from the camera
-veil = bpy.data.scenes.new('veil')
-veil.render.engine = 'FLEX'
-veil.render.resolution_x = veil.render.resolution_y = 16
-veil.flex_samples = 16
-veil.render.image_settings.file_format = 'OPEN_EXR'
-veil.render.filepath = bpy.app.tempdir + 'veil.exr'
-veil.world = bpy.data.worlds.new('black')
-veil.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+veil = new('veil', 16, 16, (0, 0, 0))
 for name, z in (('veiled', 0), ('veil', 0.5)):
     mesh = bpy.data.meshes.new(name)
     bm = bmesh.new()
@@ -184,9 +178,7 @@ for kind in ('glass', 'cutout'):  # The cutout of alpha 0, which rays pass strai
     if kind == 'cutout': glass.inputs['Transmission Weight'].default_value, glass.inputs['Alpha'].default_value = 0, 0
     for hidden in (False, True):
         bpy.data.objects['veiled'].visible_camera = not hidden
-        bpy.ops.render.render(scene=veil.name, write_still=True)
-        seen = numpy.array(bpy.data.images.load(veil.render.filepath, check_existing=False).pixels).reshape(16, 16,
-            4)[4:12, 4:12, :3].mean()
+        seen = render(veil, 16)[4:12, 4:12].mean()
         assert abs(seen - (0 if hidden else 1)) < 0.02, ('veil', kind, hidden, seen)
 # And past the faces of a volume, scattering nothing: of density 0, or absorbing 1 per unit length over its depth of 0.6,
 # where the emitter reads exp(-0.6) seen, along the rays near the middle the window takes, and 0 hidden; at 256
@@ -208,9 +200,7 @@ for density, passed in ((0, 1), (1, math.exp(-0.6))):
     absorber.inputs['Density'].default_value = density
     for hidden in (False, True):
         bpy.data.objects['veiled'].visible_camera = not hidden
-        bpy.ops.render.render(scene=veil.name, write_still=True)
-        seen = numpy.array(bpy.data.images.load(veil.render.filepath, check_existing=False).pixels).reshape(16, 16,
-            4)[6:10, 6:10, :3].mean()
+        seen = render(veil, 16)[6:10, 6:10].mean()
         assert abs(seen - (0 if hidden else passed)) < 0.03, ('veil', density, hidden, seen)
 
 class Viewport:  # Stands in for the engine instance Blender creates for a viewport, which background mode has none of
@@ -398,10 +388,8 @@ colored.inputs['Specular IOR Level'].default_value, scene.flex_restir = 0.5, Tru
 REALIZATIONS = tuple(SIZE * k for k in range(1, 7))
 def block(width):  # Mean color of the furnace block at width pixels, the same part of the plane at each
     scene.render.resolution_x = scene.render.resolution_y = width
-    bpy.ops.render.render(scene=scene.name, write_still=True)
     k = width // SIZE
-    image = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(width, width, 4)
-    return image[18 * k:46 * k, 2 * k:30 * k, :3].mean((0, 1))
+    return render(scene, width)[18 * k:46 * k, 2 * k:30 * k].mean((0, 1))
 for tint in ((1, 1, 1, 1), (1, 0.08, 0.375, 1)):
     colored.inputs['Specular Tint'].default_value = tint
     shifts = []
@@ -431,8 +419,7 @@ bpy.data.objects['ceiling'].location.z = 2
 probe.inputs['Base Color'].default_value, probe.inputs['Roughness'].default_value = (1, 1, 1, 1), 0
 def passed(metallic, transmission):  # Mean light the plane passes, its metallic and transmission weight given
     probe.inputs['Metallic'].default_value, probe.inputs['Transmission Weight'].default_value = metallic, transmission
-    bpy.ops.render.render(scene=scene.name, write_still=True)
-    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3].mean()
+    return render()[24:40, 24:40].mean()
 metal, dielectric = passed(1, 0), passed(0, 0.5)
 assert abs(passed(0.5, 0.5) - (metal + dielectric) / 2) < 0.02, 'metallic share blends linearly'
 # Light sampling finds a dim emitter by the points it lights, a bright light behind them outshining it: at a sample
@@ -686,8 +673,7 @@ noise = numpy.random.default_rng(1)
 for vertex in bm.verts: vertex.co = (*(numpy.array(vertex.co) + noise.normal(0, 0.02, 3)),)
 bm.to_mesh(prism.data)
 prism.data.shade_smooth()
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+pixels = render()[24:40, 24:40]
 assert (pixels.mean(2) > 0.05).all() and 0.85 < pixels.mean() < 1.01, 'faceted glass internal reflections'
 # So does a white metal normal-mapped by noise under the white sky
 prism.data, prism.hide_render = flat, True
@@ -697,8 +683,7 @@ relief, mapped = metal.id_data.nodes.new('ShaderNodeTexNoise'), metal.id_data.no
 relief.inputs['Scale'].default_value = 8
 metal.id_data.links.new(relief.outputs['Color'], mapped.inputs['Color'])
 metal.id_data.links.new(mapped.outputs[0], metal.inputs['Normal'])
-bpy.ops.render.render(scene=scene.name, write_still=True)
-pixels = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(SIZE, SIZE, 4)[24:40, 24:40, :3]
+pixels = render()[24:40, 24:40]
 assert (pixels.mean(2) > 0.05).all() and 0.6 < pixels.mean() < 1.01, 'normal-mapped metal'
 bpy.data.objects['metal'].hide_render, prism.hide_render = True, False
 scene.camera.matrix_world = matrix
@@ -1285,8 +1270,7 @@ exporter.requests = io.BytesIO()
 Viewport.engine.start(exporter, bpy.context.evaluated_depsgraph_get())
 assert [exporter.shape[2][unit][1] for _, key, unit, *_ in exporter.placed] == [3488], 'bump bakes its gradient'
 def shaded():  # The bumped scene rendered, its pixels
-    bpy.ops.render.render(scene=bumped.name, write_still=True)
-    return numpy.array(bpy.data.images.load(bumped.render.filepath).pixels).reshape(128, 128, 4)[..., :3]
+    return render(bumped, 128)
 baked, points, module['POINTS'] = shaded(), module['POINTS'], ()  # Live: no unit reads a point
 live, module['POINTS'], module['summarize'] = shaded(), points, summarize
 assert numpy.percentile(numpy.abs(baked - live).max(-1), 99) < 0.016, 'baked bump'
@@ -1401,8 +1385,7 @@ mips.collection.objects.link(mips.camera)
 mips.camera.location, mips.camera.rotation_euler, mips.camera.data.angle = (0, -50, 1), (math.radians(80), 0, 0), \
     math.pi / 2
 def far():  # Its far rows rendered
-    bpy.ops.render.render(scene=mips.name, write_still=True)
-    return numpy.array(bpy.data.images.load(mips.render.filepath).pixels).reshape(SIZE, SIZE, 4)[30:36, :, 0]
+    return render(mips)[30:36, :, 0]
 for preferences.device in ('OPTIX', 'VULKAN'):
     checked = far()
     links.remove(diffuse.inputs['Color'].links[0])
@@ -1437,8 +1420,7 @@ fog.camera = bpy.data.objects.new('fog camera', bpy.data.cameras.new('fog camera
 fog.collection.objects.link(fog.camera)
 fog.camera.data.type, fog.camera.data.ortho_scale, fog.camera.location = 'ORTHO', 1, (0, 0, 3)
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=fog.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    seen = render(fog).mean()
     assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber', preferences.device, seen)
 preferences.device = device
 # The absorber at a cost a bake takes, of density 2 z + Fac - Fac of a noise, on the cube unwrapped over [0, 1]: read
@@ -1463,8 +1445,7 @@ links.new(noise.outputs['Fac'], cancel.inputs[0]), links.new(noise.outputs['Fac'
 links.new(nodes['Math'].outputs[0], padded.inputs[0]), links.new(cancel.outputs[0], padded.inputs[1])
 links.new(padded.outputs[0], nodes['Principled Volume'].inputs['Density'])
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=unwrapped.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(unwrapped.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    seen = render(unwrapped).mean()
     assert abs(seen / math.exp(-2) - 1) < 0.01, ('varying absorber over UVs', preferences.device, seen)
 preferences.device = device
 # The absorber under a modifier making vertices of its own, its generated points those of its evaluated mesh, exports:
@@ -1511,8 +1492,7 @@ sun.data.angle, sun.rotation_euler = 0, (0, math.pi / 2, 0)
 band = lambda low: numpy.mean([(1 - math.exp(-2 * (1 + v))) * math.exp((1 + v) ** 2 / 2 - 2)
     for v in numpy.linspace(low, low + 0.5, 2000)])  # Of the columns over [low, low + 0.5]
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=haze.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(haze.render.filepath).pixels).reshape(SIZE, SIZE, 4)[8:-8, :, :3]
+    seen = render(haze)[8:-8]
     seen = seen.mean((0, 2))
     ratio = seen[5 * SIZE // 8:7 * SIZE // 8].mean() / seen[SIZE // 8:3 * SIZE // 8].mean()
     expected = band(0.25) / band(-0.75)
@@ -1540,9 +1520,7 @@ seen = {}
 for pad in (False, True):
     if pad: links.new(padded.outputs[0], nodes['Math'].inputs[0])
     for preferences.device in ('OPTIX', 'VULKAN'):
-        bpy.ops.render.render(scene=noisy.name, write_still=True)
-        seen[pad, preferences.device] = numpy.array(bpy.data.images.load(noisy.render.filepath).pixels).reshape(
-            SIZE, SIZE, 4)[..., :3].mean()
+        seen[pad, preferences.device] = render(noisy).mean()
 for preferences.device in ('OPTIX', 'VULKAN'):
     ratio = seen[False, preferences.device] / seen[True, preferences.device]
     assert abs(ratio - 1) < 0.02, ('volume of noise', preferences.device, ratio)
@@ -1582,8 +1560,7 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     disk_light.energy = math.pi * math.pi * (4 + 0.25)
     behind.camera.location.z, behind.camera.data.ortho_scale, behind.camera.data.clip_end = 1, 0.05, 2
     behind.flex_bounces = 0
-    bpy.ops.render.render(scene=behind.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(behind.render.filepath).pixels).reshape(-1, 4)[:, :3].mean()
+    seen = render(behind).mean()
     assert abs(seen - 1) < 0.01, ('in front of an area light', preferences.device, seen)
 preferences.device = device
 
@@ -1601,8 +1578,7 @@ thick.node_tree.nodes['Principled Volume'].inputs['Density'].default_value = 1e4
 dense.collection.objects.link(overhead := bpy.data.objects.new('dense sun', bpy.data.lights.new('dense sun', 'SUN')))
 overhead.data.angle, overhead.data.energy = 0, math.pi
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=dense.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(dense.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    seen = render(dense).mean()
     assert abs(seen * 8 - 1) < 0.02, ('light leaving a dense medium', preferences.device, seen * 8)
 preferences.device = device
 # A fog of constant gray extinction, its free flights drawn exactly, renders as tracked: Principled Volume of density 1,
@@ -1627,9 +1603,7 @@ seen = {}
 for pad in (False, True):
     if pad: links.new(padded.outputs[0], principled.inputs['Density'])
     for preferences.device in ('OPTIX', 'VULKAN'):
-        bpy.ops.render.render(scene=exact.name, write_still=True)
-        seen[pad, preferences.device] = numpy.array(bpy.data.images.load(exact.render.filepath).pixels).reshape(
-            SIZE, SIZE, 4)[..., :3].mean(0).mean(0)
+        seen[pad, preferences.device] = render(exact).mean(0).mean(0)
 for preferences.device in ('OPTIX', 'VULKAN'):
     ratio = seen[False, preferences.device] / seen[True, preferences.device]
     assert numpy.all(abs(ratio - 1) < 0.02), ('exact free flights', preferences.device, ratio)
@@ -1669,8 +1643,7 @@ gray.camera.location, gray.camera.data.angle = (0, 0, 1), 0.5
 majorants, medium_exported = [], flex.medium
 flex.medium = lambda material, boxes: (value := medium_exported(material, boxes), majorants.append(value))[0]
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=gray.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(gray.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+    seen = render(gray)
     assert abs(seen.mean() - math.exp(-1)) < 1e-3 and seen.std() / seen.mean() < 1e-3, \
         ('fog passed by its exponential', preferences.device, seen.mean(), seen.std() / seen.mean())
 grayed.links.new(grain.outputs['Fac'], volume.inputs['Density'])
@@ -1696,8 +1669,7 @@ white.node_tree.links.new(diffuse.outputs[0], white.node_tree.nodes['Material Ou
 fog.collection.objects.link(sun := bpy.data.objects.new('fog sun', bpy.data.lights.new('fog sun', 'SUN')))
 sun.data.angle, sun.data.energy = 0, 1
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=fog.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    seen = render(fog).mean()
     assert abs(seen * math.pi / math.exp(-4) - 1) < 0.02, ('floor through a varying volume', preferences.device, seen)
 preferences.device = device
 # A camera inside a varying volume: in the absorber at its center, seeing straight down a white sky from its near
@@ -1709,8 +1681,7 @@ inside.camera = bpy.data.objects.new('inside camera', bpy.data.cameras.new('insi
 inside.collection.objects.link(inside.camera)
 inside.camera.data.type, inside.camera.data.ortho_scale, inside.camera.data.clip_start = 'ORTHO', 1, 0.01
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=inside.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(inside.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    seen = render(inside).mean()
     assert abs(seen / math.exp(-0.99 ** 2 / 2) - 1) < 0.01, ('camera inside a varying volume', preferences.device, seen)
 preferences.device = device
 # A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
@@ -1738,8 +1709,7 @@ for temperature in (4000, 6500, 20000):
     heated.inputs['Temperature'].default_value = temperature
     locus = *planckian(temperature), 1
     for preferences.device in ('OPTIX', 'VULKAN'):
-        bpy.ops.render.render(scene=body.name, write_still=True)
-        seen = numpy.array(bpy.data.images.load(body.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3]
+        seen = render(body)
         xyz = numpy.array(Color(seen.mean((0, 1))).from_scene_linear_to_xyz_d65())
         assert numpy.allclose((*xyz[:2] / xyz.sum(), xyz[1]), locus, atol=3e-4), ('black body', temperature,
             preferences.device, xyz)
@@ -1755,8 +1725,7 @@ looked = hot.node_tree.nodes.new('ShaderNodeTexEnvironment')
 looked.image, looked.interpolation = sky, 'Closest'
 hot.node_tree.links.new(looked.outputs[0], emitting.inputs['Color'])
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=body.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(body.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean((0, 1))
+    seen = render(body).mean((0, 1))
     assert numpy.allclose(seen, texels[4 + 3, :3], atol=1e-3), ('environment by position', preferences.device, seen)
 preferences.device = device
 # A light emitting from its back alone, as a window mixing a transparent front by Backfacing, is sampled by its back's
@@ -1795,8 +1764,7 @@ def backlit():  # The scene: its squares, each a material of its nodes and links
     return lit
 backlight, form = backlit(), 4 / (2 * math.pi) * 2 * 0.1 / math.sqrt(1.01) * math.atan(0.1 / math.sqrt(1.01))
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=backlight.name, write_still=True)
-    blue = numpy.array(bpy.data.images.load(backlight.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., 2]
+    blue = render(backlight)[..., 2]
     assert abs(blue.mean() / (8 * form) - 1) < 0.1 and blue.std() < 0.45 * blue.mean(), ('back light',
         preferences.device, blue.mean() / (8 * form), blue.std() / blue.mean())
 preferences.device = device
@@ -1834,8 +1802,7 @@ for optical, density in ((2 * depth - depth * depth / 2, None), (depth, 1)):
     if density: emitter.inputs['Density'].default_value = density
     expected = numpy.trapezoid(0.5 * numpy.exp(-optical), depth)
     for preferences.device in ('OPTIX', 'VULKAN'):
-        bpy.ops.render.render(scene=glow.name, write_still=True)
-        seen = numpy.array(bpy.data.images.load(glow.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+        seen = render(glow).mean()
         assert abs(seen / expected - 1) < 0.01, ('emitting volume', density, preferences.device, seen, expected)
 preferences.device = device
 # A camera inside the emitting volume, now of density 1, at its center seeing straight down from its near plane at depth
@@ -1846,8 +1813,7 @@ lit.collection.objects.link(bpy.data.objects.new('emitting inside', cube.data))
 lit.camera = inside.camera
 lit.collection.objects.link(inside.camera)
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=lit.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(lit.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean()
+    seen = render(lit).mean()
     assert abs(seen / (0.5 * (1 - math.exp(-0.99))) - 1) < 0.01, ('camera inside an emitting volume',
         preferences.device, seen)
 preferences.device = device
@@ -1866,8 +1832,7 @@ reader.image, reader.interpolation, straight.alpha_mode = straight, 'Closest', '
 links.new(nodes['Texture Coordinate'].outputs['Generated'], reader.inputs['Vector'])
 links.new(reader.outputs['Color'], absorber.inputs['Density'])
 for preferences.device in ('OPTIX', 'VULKAN'):
-    bpy.ops.render.render(scene=fog.name, write_still=True)
-    seen = numpy.array(bpy.data.images.load(fog.render.filepath).pixels).reshape(SIZE, SIZE, 4)[..., :3].mean((0, 2))
+    seen = render(fog).mean((0, 2))
     halves = seen[:SIZE // 2].mean(), seen[SIZE // 2:].mean()
     assert numpy.allclose(halves, numpy.exp((-1, -1.5)), rtol=0.02), ('straight image in a volume', preferences.device,
         halves)
@@ -2775,8 +2740,7 @@ instancing('face instanced', lambda seed: children('FACES', seed), 2, 1)
 # overrides the outer's; each plane's pixel holds its instance's color, on both backends
 def tinted(name, nested):
     global scene
-    scene = opened(name)
-    scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+    scene = opened(name, (0, 0, 0))
     scene.camera = add(bpy.data.cameras.new(name), (0, 0, 5))  # Sees [-1.8, 1.8]^2: the nested reach 1.4
     bsdf, seed = plane(f'{name} seed', 0, 0, 0.3), bpy.data.objects[f'{name} seed']
     seed.hide_render, bsdf.inputs['Base Color'].default_value = True, (0, 0, 0, 1)
@@ -2845,8 +2809,7 @@ assert len(read) > 10 and all(numpy.allclose(tint, where, atol=1e-5) for tint, w
 # The shadow terminator: a sphere of 16 segments, smooth, lit near its terminator by a sun and by a point light, renders
 # as one of 256 segments does there, not cut along its faces: of the pixels where the fine sphere reads 1-40% of its
 # brightest, under 7% read under half of it, on both backends (main f8b1f30: 22.5% under the sun, 9.4% under the point)
-scene = opened('terminator')
-scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene = opened('terminator', (0, 0, 0))
 scene.camera = add(bpy.data.cameras.new('terminator'), (0, -4, 0), (math.pi / 2, 0, 0))
 spheres = {}
 for segments in (16, 256):  # Smooth, white Diffuse
@@ -2861,8 +2824,7 @@ point = add(bpy.data.lights.new('terminator point', 'POINT'), (4, -0.35, 0.3))
 point.data.energy, point.data.shadow_soft_size = 1000, 0.05
 scene.render.resolution_x = scene.render.resolution_y = 128  # Finer than SIZE, so the band holds enough pixels
 def lum():  # The scene rendered at its own size, its pixels' mean of the channels
-    bpy.ops.render.render(scene=scene.name, write_still=True)
-    return numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(128, 128, 4)[..., :3].mean(2)
+    return render(scene, 128).mean(2)
 devices = bpy.context.preferences.addons[flex.__name__].preferences
 for device in ('OPTIX', 'VULKAN'):
     devices.device = device
@@ -2903,8 +2865,7 @@ devices.device = 'OPTIX'
 # Rays reach a mesh in its own space through its instance's transform, its normals turned by the adjugate: a smooth
 # sphere turned and stretched unevenly under the sun shades as a copy of it with the transform applied to its mesh does,
 # on both backends
-scene = opened('turned')
-scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (0, 0, 0, 1)
+scene = opened('turned', (0, 0, 0))
 scene.camera = add(bpy.data.cameras.new('turned view'), (0, 0, 4))
 add(bpy.data.lights.new('turned sun', 'SUN'), (0, 0, 5), (0.5, 0.3, 0)).data.energy = math.pi
 shape('turned', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=48, v_segments=24, radius=1), (0, 0, 0),
