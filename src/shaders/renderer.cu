@@ -906,11 +906,11 @@ __device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) 
 // Nearest hit of a ray within far and its distance, NONE on a miss
 // Rays start past near; leaving the skipped triangle, back by near, to keep triangles there
 __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, float far, float& distance,
-    unsigned skip = NONE, float near = 1e-4f) {
+    unsigned skip = NONE, float near = 1e-4f, unsigned mask = 255) {
     const float back = skip == NONE ? 0 : near;
     unsigned layer = __float_as_uint(-INFINITY);
     // Traverse only; hit data is read from the hit object below.
-    optixTraverse(scene.handle, origin - direction * back, direction, skip == NONE ? near : 0, far + back, 0.0f, 255,
+    optixTraverse(scene.handle, origin - direction * back, direction, skip == NONE ? near : 0, far + back, 0.0f, mask,
         skip == NONE ? OPTIX_RAY_FLAG_DISABLE_ANYHIT : OPTIX_RAY_FLAG_NONE, 0, 1, 0, skip, layer);
     if (!optixHitObjectIsHit()) return {NONE};
     distance = optixHitObjectGetRayTmax() - back;
@@ -921,14 +921,15 @@ __device__ Hit traverse(const Scene& scene, float3 origin, float3 direction, flo
 }
 
 // Next layer past the triangle after at distance at, by distance then index; at becomes its distance
-__device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, float far, float& at, unsigned after) {
+__device__ Hit nextLayer(const Scene& scene, float3 origin, float3 direction, float far, float& at, unsigned after,
+    unsigned mask = 255) {
     unsigned layer = __float_as_uint(at), gather = __float_as_uint(INFINITY), index = NONE, u, v, instance;
-    optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), far, 0.0f, 255, OPTIX_RAY_FLAG_NONE,
-        0, 1, 0, after, layer, gather, index, u, v, instance);
+    optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), far, 0.0f, mask,
+        OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v, instance);
     if (!optixHitObjectIsHit()) return {NONE};
     at = optixHitObjectGetRayTmax(), gather = __float_as_uint(at);
     optixTraverse(scene.handle, origin, direction, at * (1 - 4.76837158203125e-7f), at * (1 + 4.76837158203125e-7f), 0.0f,
-        255, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v, instance);
+        mask, OPTIX_RAY_FLAG_NONE, 0, 1, 0, after, layer, gather, index, u, v, instance);
     if (index == NONE) return {NONE};
     return {scene.instances[instance].first + index - scene.instances[instance].key, instance,
         make_float2(__uint_as_float(u), __uint_as_float(v))};
@@ -1178,17 +1179,18 @@ __device__ float3 passing(const Scene& scene, Medium medium, unsigned material, 
 
 // Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
 __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3 toward, float left, Medium medium,
-    unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted, unsigned skip = NONE) {
+    unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted, unsigned skip = NONE,
+    unsigned mask = SHADOWS) {
     float before = 0, at = 0, occluder;
     transmitted = make_float3(1, 1, 1);
     // First hit off a surface past its margin, else from the start, a hair vertex's segment skipped;
     // where it lets light through, the layers start an ulp short of it
-    Hit first = onSurface && skip == NONE ? traverse(scene, from, toward, left, at)
-        : traverse(scene, from, toward, left, at, skip, 0);
+    Hit first = onSurface && skip == NONE ? traverse(scene, from, toward, left, at, NONE, 1e-4f, mask)
+        : traverse(scene, from, toward, left, at, skip, 0, mask);
     if (first.triangle != NONE && !scene.materials[key(scene, first)].opaque)
-        at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
+        at = __uint_as_float(__float_as_uint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE, mask);
     for (Hit hit = first; hit.triangle != NONE;
-        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
+        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit), mask)) {
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque) return true;  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
@@ -1259,7 +1261,8 @@ __device__ __noinline__ float3 sampleLight(const Scene& scene, float3 origin, fl
     direction = toward;
     float3 transmitted;
     if (occluded(scene, origin, toward, left, sides[dot(face, toLight) > 0], dot(face, toLight) > 0 ? fillings.y
-        : fillings.x, state, ray, onSurface, transmitted, self))
+        : fillings.x, state, ray, onSurface, transmitted, self,
+        scene.materials[key(scene, instance, light)].opaque & 4 ? 0 : SHADOWS)) // A light casting none: past all
         return make_float3(0, 0, 0);
     return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
         Ray{false, false, LOBE_NONE, ray.depth + 1, length(toLight)}, 0, true).emissive
