@@ -248,6 +248,38 @@ specular.links.new(specular.nodes.new('ShaderNodeEeveeSpecular').outputs[0],
 module = Viewport.engine.start.__globals__
 surface = module['fold'](module['resolve'](specular.nodes['Material Output'].inputs['Surface']))
 assert numpy.any(surface[1]) and numpy.all(surface[6] == 1.5), 'eevee specular'
+# A varying volume's majorant bounds its extinction everywhere in its box: densities of sines, cosines, a divisor of one
+# sign, floors, fractions, comparisons and absolute values of 7 (x + 0.07) at the generated x, against the extinction
+# the CPU shades at 10,000 points of the box; of 0.5 (x + 0.07), where sines and cosines have no extremum, by their
+# ends alone, as tight as the points reach; a divisor reaching 0 has none, which makes its export raise
+bounded = bpy.data.materials.new('bounded').node_tree
+x, shifted, scaled, step = (bounded.nodes.new(kind) for kind in ('ShaderNodeSeparateXYZ', *3 * ('ShaderNodeMath',)))
+absorber = bounded.nodes.new('ShaderNodeVolumeAbsorption')
+for a, b in ((bounded.nodes.new('ShaderNodeTexCoord').outputs['Generated'], x.inputs[0]), (x.outputs[0],
+        shifted.inputs[0]), (shifted.outputs[0], scaled.inputs[0]), (scaled.outputs[0], step.inputs[0]),
+        (step.outputs[0], absorber.inputs['Density']), (absorber.outputs[0],
+        bounded.nodes['Material Output'].inputs['Volume'])):
+    bounded.links.new(a, b)
+shifted.inputs[1].default_value, scaled.operation = 0.07, 'MULTIPLY'
+swapped = lambda e: (('UV',) if e[0] == 'GENERATED' else (e[0], *map(swapped, e[1:]))) if isinstance(e, tuple) else e
+uv, boxes = numpy.random.default_rng(0).random((10000, 2)), {'GENERATED': (numpy.zeros(3), numpy.ones(3))}
+for operation, by, factor in (('SINE', 1, 7), ('COSINE', 1, 7), ('SINE', 1, 0.5), ('COSINE', 1, 0.5),
+        ('DIVIDE', scaled, 7), ('FLOOR', 1, 7), ('FRACT', 1, 7), ('LESS_THAN', 3, 7), ('ABSOLUTE', 1, 7),
+        ('DIVIDE', x, 7)):
+    step.operation, scaled.inputs[1].default_value = operation, factor
+    for link in step.inputs[1].links: bounded.links.remove(link)
+    bounded.links.new(by.outputs[0], step.inputs[1]) if by in (scaled, x) else setattr(step.inputs[1], 'default_value',
+        by)
+    module['SIDE']['volume'] = True
+    absorption, density, scatter = module['resolve'](bounded.nodes['Material Output'].inputs['Volume'])[10:13]
+    module['SIDE']['volume'] = False
+    extinction = 'MULTIPLY', ('SUBTRACT', ('ADD', scatter, 1), absorption), density
+    box = module['bounds'](extinction, boxes, {})
+    if by is x: assert box is None, 'unbounded divisor'
+    else:
+        shaded = module['shaded'](swapped(extinction), uv, {None: None}, {})
+        assert box is not None and (box[0] <= shaded).all() and (shaded <= box[1]).all(), ('bounded', operation)
+        assert factor > 1 or numpy.allclose(box, (shaded.min(0), shaded.max(0)), atol=1e-3), ('ends', operation, box)
 
 gpu.init()
 bpy.context.window.scene = scene
