@@ -1947,6 +1947,35 @@ scene.camera.data.angle = 0.01
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), (0.0112, 0.0230, 0.0441), rtol=0.02), ('zenith sky', device)
+# Through RGB curves, the sky's colour chain read as one table of it, the same: the curves at the zenith's colour, as
+# Blender's own curve evaluator takes them, the combined curve first
+curves = scene.world.node_tree.nodes.new('ShaderNodeRGBCurve')
+curves.mapping.curves[3].points.new(0.02, 0.3)
+links = scene.world.node_tree.links
+links.new(dome.outputs['Color'], curves.inputs['Color'])
+links.new(curves.outputs['Color'], scene.world.node_tree.nodes['Background'].inputs['Color'])
+curves.mapping.update()
+due = [curves.mapping.evaluate(curves.mapping.curves[c], curves.mapping.evaluate(curves.mapping.curves[3], value))
+    for c, value in enumerate((0.0112, 0.0230, 0.0441))]
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('folded sky', device, due)
+# A value edited in a material whose emission is a folded sky chain pipes steps alone, the chain's table kept, as in a
+# material without one, where a table made anew would count as a new texture and export the scene anew
+bpy.context.window.scene = scene
+glowing, material = plane('glowing', 0), bpy.data.materials['glowing']
+glow, gamma = material.node_tree.nodes.new('ShaderNodeTexSky'), material.node_tree.nodes.new('ShaderNodeGamma')
+glow.sky_type, gamma.inputs['Gamma'].default_value = 'HOSEK_WILKIE', 2.2
+material.node_tree.links.new(glow.outputs['Color'], gamma.inputs['Color'])
+material.node_tree.links.new(gamma.outputs['Color'], glowing.inputs['Emission Color'])
+exporter = exported()
+exporter.start, exporter.requests = lambda depsgraph: Viewport.engine.start(exporter, depsgraph), io.BytesIO()
+glowing.inputs['Roughness'].default_value += 0.1
+depsgraph = bpy.context.evaluated_depsgraph_get()
+Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material, is_updated_geometry=False,
+    is_updated_transform=False)]))
+assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.STEPS, 'value beside a folded sky'
 
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
