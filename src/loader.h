@@ -12,7 +12,6 @@
 #include <thread>
 #include <future>
 #include <atomic>
-#include <future>
 #include <cmath>
 #include <cuda.h>
 #include <optix_stubs.h>
@@ -573,8 +572,7 @@ inline void loadSteps(Scene& scene, Loaded& loaded) {
     // as the rest loads
     unsigned tables;
     receive(&tables, sizeof(unsigned), 1);
-    std::vector<float> entries(11 * tables);
-    receive(entries.data(), sizeof(float), entries.size());
+    const std::vector<float> entries = read<float>(11 * tables);
     loaded.tables.clear(), loaded.hairs.clear();
     const auto variance = [](double r) { r = std::max(r, 0.001); return std::pow(0.726 * r + 0.812 * r * r + 3.7
         * std::pow(r, 20), 2); };
@@ -633,10 +631,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     receive(only.data(), sizeof(float4), header.only);
     scene.texels = (float4*)allocate(texels.size() * sizeof(float4), texels.data());
     scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
-    loaded.bakes.resize(header.bakes);
-    receive(loaded.bakes.data(), sizeof(unsigned), header.bakes);
-    std::vector<unsigned> shapes(2 * header.images); // Each image a texture, found by its index
-    receive(shapes.data(), sizeof(unsigned), shapes.size());
+    loaded.bakes = read<unsigned>(header.bakes);
+    const std::vector<unsigned> shapes = read<unsigned>(2 * header.images); // Each image a texture, found by its index
     std::vector<CUtexObject> images(2 * header.images); // Each image's two textures
     for (unsigned k = 0; k < header.images; ++k) texture(shapes[2 * k], shapes[2 * k + 1], loaded, &images[2 * k]);
     unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
@@ -682,8 +678,7 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
         hints[hint.first] = hint.second;
     for (Material& material : loaded.materials) material.emitted = hints.at(material.program);
     receive(&count, sizeof(count), 1);
-    loaded.rebakes.resize(count);
-    receive(loaded.rebakes.data(), sizeof(unsigned), count);
+    loaded.rebakes = read<unsigned>(count);
     if (count) // Those bakes' programs and texels for their pass alone, as a scene's
         loaded.bakeOps = allocate((loaded.ops.size() - loaded.rows) * sizeof(Op), loaded.ops.data() + loaded.rows),
         scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
