@@ -901,18 +901,6 @@ struct Domain {
     float width, spread;
 };
 
-// Sampling record of the previous path vertex for the reconnection criteria (Sec. 4)
-struct Vertex {
-    bool rough;
-    uint lobe;
-    float pdf;
-    float cos;
-};
-
-// A reconnection record of a hit
-uint4 rcOf(Hit hit) { return uint4(hit.triangle, asuint(hit.uv), hit.instance); }
-Hit hitOf(uint4 rc) { return Hit(rc.x, rc.w, asfloat(rc.yz)); }
-
 // Nearest hit before t past lo of a ray and a strand's segment from a to b: the union of their spheres and
 // tangent cone (Roth 1982, Max 1990); uv its axis parameter and its normal's polar angles, 16 bits each
 bool strand(float3 o, float3 d, float4 a, float4 b, float lo, inout float t, inout float2 uv) {
