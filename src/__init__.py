@@ -129,7 +129,8 @@ SHADERS = {'BSDF_PRINCIPLED': ('Base Color', 'Metallic', 'Roughness', 'Emission 
     'SUBSURFACE_SCATTERING': ('Color', 0, 'Roughness', 0, 0, 0, 'IOR')}
 # Absorption color, density and scattering color per volume shader node; any other absorbs and scatters nothing
 VOLUMES = {'VOLUME_ABSORPTION': ('Color', 'Density', 0), 'VOLUME_SCATTER': (1, 'Density', 'Color'),
-    'PRINCIPLED_VOLUME': ('Absorption Color', 'Density', 'Color')}
+    'PRINCIPLED_VOLUME': ('Absorption Color', 'Density', 'Color'),
+    'VOLUME_COEFFICIENTS': (0, 1, 'Scatter Coefficients')}
 # Luminance of a color and mean of a vector, as Blender converts them to values
 WEIGHTS = {'RGBA': numpy.array((0.2126, 0.7152, 0.0722)), 'VECTOR': numpy.full(3, 1 / 3)}
 # Blender's panels the engine shows, those whose settings it reads; lights and an object's visibility, which it reads in
@@ -1352,6 +1353,9 @@ def resolve(socket, groups=()):
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
+        if node.type == 'VOLUME_COEFFICIENTS':  # Its coefficients per unit length as they are, of density 1, emitting
+            absorption = 'SUBTRACT', 1, get('Absorption Coefficients')  # in a volume alone, isotropic for now
+            emissive, strength = (get('Emission Coefficients'), 1) if SIDE['volume'] else (0, 0)
         # In a volume it emits per unit length by its emission and by a black body's radiance at its temperature,
         # STEFAN_BOLTZMANN T^4 / PI, linear in its intensity, by BLACKBODY_UNIT, colored by blackbody(); neither by its
         # density, none at 0 K or below; on a surface nothing
