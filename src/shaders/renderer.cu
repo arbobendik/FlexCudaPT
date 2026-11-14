@@ -1176,13 +1176,6 @@ __device__ __forceinline__ Medium cameraMedium(const Scene& scene, float3 direct
     return medium;
 }
 
-// A generated path's contribution: resampled into sel under ReSTIR, otherwise summed
-__device__ void resample(const Scene& scene, Selection& sel, const Reservoir& candidate, float3 weight) {
-    if (scene.settings.restir) return offer(&sel, candidate, weight);
-    const float grey = rgb_to_greyscale(weight);
-    if (grey > 0.0f && grey < 3.00000000549775576e+38f) sel.color = sel.color + weight;
-}
-
 // Baked hair: its level's sums and their search, a slice's f cos and PDF, connected and sampled
 __device__ float4 operator+(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
 __device__ float4 operator-(float4 a, float4 b) { return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
