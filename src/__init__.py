@@ -215,9 +215,10 @@ def skied(expression, memo):  # The expression with each largest part a function
                 else next(iter(reads.values()), ())  # Inputs, noise and animated values are not the sky's
         return memo[id(e)]
     read = alone(expression)
-    if read and read is not expression:  # One table of each chain, its programs' and its bakes' alike, kept by updates
-        return 'IMAGE_LINEAR', read[1], FOLDED.get(key := expression_key(expression)) or FOLDED.setdefault(key,
-            Folded(expression, read))
+    if read and read is not expression:  # One table of each chain, its programs' and its bakes' alike, kept by updates,
+        folded = FOLDED.setdefault(expression_key(expression), Folded(expression, read))  # read from its latest
+        folded.expression, folded.read = expression, read  # expression, whose nodes are the evaluated copy's now
+        return 'IMAGE_LINEAR', read[1], folded
     if not isinstance(expression, tuple) or read is not None: return expression
     if ('parts', id(expression)) not in memo:  # Each part once, and unchanged where it reads no sky, so shared parts
         parts = [skied(part, memo) for part in expression[1:]]  # stay shared
@@ -253,11 +254,16 @@ def counted(levels):  # Counts of each level by channel of RGBA8 texels, sorted 
 # mean of an image node's image or of a node's color table, added as linear floats at first use; those Blender reads as
 # k / 255 exactly as RGBA8, four texels to a float4, which the shader decodes to the same floats and from sRGB, before
 # it filters them
+# A node's original, by which tables are keyed: the evaluated copy's nodes move whenever Blender copies a material anew
+original = lambda node: node.id_data.original.nodes[node.name] if getattr(node, 'id_data', None) is not None \
+    and node.id_data.is_evaluated else node
+
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
     if isinstance(source, Bake): return textures[source]
     ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
-    key = source if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
+    key = original(source) if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
+    if ramp: SOURCES[key] = source  # The latest evaluated node of the table, which reading it again reads
     if key not in textures:
         image = source if ramp else source.image
         pixels = numpy.array(table(source), 'f') if ramp else numpy.empty(len(image.pixels), 'f')
@@ -317,7 +323,7 @@ def expression_key(expression, memo=None, table=None):
     if isinstance(expression, ImageRead): return expression.key
     if isinstance(expression, (int, float, numpy.number, numpy.ndarray)):
         return tuple(numpy.resize(expression, 3).astype('f'))
-    return expression
+    return original(expression) if isinstance(expression, bpy.types.Node) else expression
 
 class ImageRead:  # Samples Cycles can merge share whether their alpha is read
     def __init__(self, node, point):
@@ -1429,6 +1435,7 @@ STEFAN_BOLTZMANN = 5.670374419e-8  # W / (m^2 K^4), CODATA 2018
 BLACKBODY_UNIT = 1e-6  # Blender's unit scale of a volume's Blackbody Intensity 1
 HAIRS = {}  # Of each hair table, by its entry, its first level
 FOLDED = {}  # Of each sky's folded chain, by its expression's key, its table, until a full export
+SOURCES = {}  # Of each node's table, by its original, the evaluated node it was last read from
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
@@ -1603,7 +1610,7 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
-        HAIRS.clear(), shaded or FOLDED.clear()  # A value update keeps each folded chain's table, its key
+        HAIRS.clear(), shaded or (FOLDED.clear(), SOURCES.clear())  # An update keeps each folded chain's table, its key
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
@@ -2135,8 +2142,9 @@ class Flex(bpy.types.RenderEngine):
             read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
             tables = {key: [] for key, entry in textures.items()
                 if not isinstance(key, (tuple, Bake)) and entry[0] in read}
-            means = {key: texture(key, {}, tables[key])[3] for key in tables}  # read, rebuilt; their means, which the
-            if any((means[key] != textures[key][3]).any() for key in tables):  # hints take, as the renderer has them
+            # read, rebuilt from their evaluated nodes; their means, which the hints take, as the renderer has them
+            means = {key: texture(SOURCES[key], {}, tables[key])[3] for key in tables}
+            if any((means[key] != textures[key][3]).any() for key in tables):
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
                 return self.start(depsgraph)
             # Then per table its first texel, width and texels, until a width of 0, those only bakes read flagged in bit

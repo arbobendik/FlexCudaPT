@@ -1989,21 +1989,38 @@ for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('folded sky', device, due)
 # A value edited in a material whose emission is a folded sky chain pipes steps alone, the chain's table kept, as in a
-# material without one, where a table made anew would count as a new texture and export the scene anew
+# material without one, where a table made anew would count as a new texture and export the scene anew; also after
+# Blender copied the material anew in between, as new data makes it do, its nodes at new addresses: tables are keyed by
+# the original nodes, read from the evaluated
 bpy.context.window.scene = scene
 glowing, material = plane('glowing', 0), bpy.data.materials['glowing']
 glow, gamma = material.node_tree.nodes.new('ShaderNodeTexSky'), material.node_tree.nodes.new('ShaderNodeGamma')
 glow.sky_type, gamma.inputs['Gamma'].default_value = 'HOSEK_WILKIE', 2.2
 material.node_tree.links.new(glow.outputs['Color'], gamma.inputs['Color'])
 material.node_tree.links.new(gamma.outputs['Color'], glowing.inputs['Emission Color'])
-exporter = exported()
-exporter.start, exporter.requests = lambda depsgraph: Viewport.engine.start(exporter, depsgraph), io.BytesIO()
-glowing.inputs['Roughness'].default_value += 0.1
-depsgraph = bpy.context.evaluated_depsgraph_get()
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material, is_updated_geometry=False,
-    is_updated_transform=False)]))
-assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.STEPS, 'value beside a folded sky'
+def churned(material):  # Of a value edited in the material after Blender copied it anew, the kind piped
+    exporter = exported()
+    exporter.start, exporter.requests = lambda depsgraph: Viewport.engine.start(exporter, depsgraph), io.BytesIO()
+    for group in [bpy.data.node_groups.new(f'churn {k}', 'ShaderNodeTree') for k in range(50)]:
+        for _ in range(5): group.nodes.new('ShaderNodeMath')
+    material.node_tree.nodes['Principled BSDF'].inputs['Roughness'].default_value += 0.1
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
+        object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material,
+        is_updated_geometry=False, is_updated_transform=False)]))
+    for group in [group for group in bpy.data.node_groups if group.name.startswith('churn')]:
+        bpy.data.node_groups.remove(group)
+    return numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0]
+assert churned(material) == flex.STEPS, 'value beside a folded sky'
+# So beside a live color ramp, which the update reads again from the material's evaluated copy
+ramped, material = plane('ramped', 0), bpy.data.materials['ramped']
+facing, ramp = material.node_tree.nodes.new('ShaderNodeLayerWeight'), material.node_tree.nodes.new('ShaderNodeValToRGB')
+ramp.color_ramp.elements[1].color, ramped.inputs['Emission Strength'].default_value = (0.2, 0.5, 0.9, 1), 1
+material.node_tree.links.new(facing.outputs['Facing'], ramp.inputs['Fac'])
+material.node_tree.links.new(ramp.outputs['Color'], ramped.inputs['Emission Color'])
+assert churned(material) == flex.STEPS, 'value beside a color ramp'
+assert all(node.id_data.is_evaluated for node in module['SOURCES'].values() if isinstance(node, bpy.types.Node)), \
+    'tables read from evaluated nodes'
 
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
