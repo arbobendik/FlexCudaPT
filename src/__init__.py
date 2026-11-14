@@ -30,20 +30,23 @@ def power(a, b):  # Of a to the power of b, zero where undefined as Blender's on
     with numpy.errstate(all='ignore'):
         return numpy.where(b == 0, 1, numpy.where((a == 0) | (a < 0) & (b != numpy.trunc(b)), 0, numpy.power(a, b)))
 
-def to_hsv(c):  # RGB to HSV, as Cycles'
-    c = numpy.resize(c, 3)
-    high, delta = max(c), max(c) - min(c)
-    if not (high and delta): return numpy.array((0, 0, high))
-    d = (high - c) / delta
-    h = (d[2] - d[1] if c[0] == high else 2 + d[0] - d[2] if c[1] == high else 4 + d[1] - d[0]) / 6
-    return numpy.array((h + (h < 0), delta / high, high))
+def to_hsv(c):  # RGB to HSV, as Cycles', of a color or rows of them
+    c = numpy.asarray(c); c = numpy.resize(c, 3) if c.ndim < 2 else c
+    high, delta = c.max(-1), numpy.ptp(c, -1)
+    with numpy.errstate(all='ignore'):
+        d = (high[..., None] - c) / delta[..., None]
+        h = numpy.select((c[..., 0] == high, c[..., 1] == high), (d[..., 2] - d[..., 1], 2 + d[..., 0] - d[..., 2]),
+            4 + d[..., 1] - d[..., 0]) / 6
+        gray = (high == 0) | (delta == 0)
+        return numpy.stack((numpy.where(gray, 0, h + (h < 0)), numpy.where(gray, 0, delta / high), high), -1)
 
-def from_hsv(c):  # HSV to RGB, as Cycles'
-    h, s, v = numpy.resize(c, 3)
-    if not s: return numpy.full(3, v)
-    i, f = divmod(0 if h == 1 else 6 * h, 1)
+def from_hsv(c):  # HSV to RGB, as Cycles', of a color or rows of them
+    c = numpy.asarray(c); h, s, v = (numpy.resize(c, 3) if c.ndim < 2 else c).T
+    i, f = numpy.divmod(numpy.where(h == 1, 0, 6 * h), 1)
     p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
-    return numpy.array(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v))[int(i)] if 0 <= i < 5 else (v, p, q))
+    rows = numpy.stack(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)))
+    return numpy.where(s == 0, v, numpy.take_along_axis(rows, numpy.where((i >= 0) & (i < 5), i, 5).astype(int)[None,
+        None], 0)[0]).T
 
 def to_hsl(c):  # RGB to HSL, as Cycles'
     c = numpy.resize(c, 3)
@@ -485,7 +488,7 @@ def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linea
             value = value[:, 3:] if name.startswith('ALPHA') else value[:, :3]
         else:
             parts = [shaded(part, uv, cache, memo) for part in operands]
-            value = OPS[name](*parts) if name not in ROWS else [OPS[name](*row) for row in zip(*parts)]
+            value = OPS[name](*parts) if name not in ROWS[2:] else [OPS[name](*row) for row in zip(*parts)]
         memo[id(expression)] = numpy.broadcast_to(numpy.asarray(value, 'f8'), (len(uv), 3))
     return memo[id(expression)]
 
