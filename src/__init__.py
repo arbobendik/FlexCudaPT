@@ -166,7 +166,32 @@ def rebuilt(mapping):
     mapping.update() if ordered else mapping.initialize()
     return mapping
 
-def table(node):  # Colors of a wavelength, blackbody, ramp or curves node, RGB curves after the combined curve
+# Hosek and Wilkie's sky model: its RGB dataset (hosek_wilkie.LICENSE) by channel, ground albedo, turbidity, coefficient
+# and Bezier point over the cube root of the sun's elevation
+HOSEK_WILKIE = numpy.load(os.path.join(os.path.dirname(__file__), 'hosek_wilkie.npy'))
+
+def sky(node, width=512, height=256):  # A Hosek-Wilkie sky node's radiance along the directions an equirectangular
+    # image's texels read, rows up from the nadir; below the horizon the horizon's, in scene linear as Blender's node
+    sun = numpy.array(node.sun_direction) / numpy.linalg.norm(node.sun_direction)
+    x = (max(math.asin(sun[2]), 0) / (math.pi / 2)) ** (1 / 3)
+    t, a = min(max(node.turbidity, 1), 10), node.ground_albedo
+    low = min(int(t), 9)  # Between the turbidities low and low + 1, numbered from 1
+    config = sum(wa * wt * HOSEK_WILKIE[:, i, j] for i, wa in enumerate((1 - a, a))
+        for j, wt in ((low - 1, low + 1 - t), (low, t - low))) \
+        @ (numpy.array((1, 5, 10, 10, 5, 1)) * (1 - x) ** numpy.arange(5, -1, -1) * x ** numpy.arange(6))
+    phi, up = numpy.meshgrid((0.5 - (numpy.arange(width) + 0.5) / width) * 2 * math.pi,
+        ((numpy.arange(height) + 0.5) / height - 0.5) * math.pi)
+    cos_theta = numpy.maximum(numpy.sin(up), math.sin(0.001))  # Of the zenith angle, at most 90 degrees less 0.001
+    gamma = numpy.arccos(numpy.clip(numpy.cos(up) * (numpy.cos(phi) * sun[0] + numpy.sin(phi) * sun[1])
+        + numpy.sin(up) * sun[2], -1, 1))
+    c = config[:, :, None, None]
+    radiance = (1 + c[:, 0] * numpy.exp(c[:, 1] / (cos_theta + 0.01))) * (c[:, 2] + c[:, 3] * numpy.exp(c[:, 4] * gamma)
+        + c[:, 5] * numpy.cos(gamma) ** 2 + c[:, 6] * (1 + numpy.cos(gamma) ** 2) / (1 + c[:, 8] ** 2 - 2 * c[:, 8]
+        * numpy.cos(gamma)) ** 1.5 + c[:, 7] * numpy.sqrt(cos_theta)) * c[:, 9] * (2 * math.pi / 683)
+    return numpy.concatenate((radiance.transpose(1, 2, 0), numpy.ones((height, width, 1))), -1)
+
+def table(node):  # Colors of a wavelength, blackbody, ramp or curves node, RGB curves after the combined curve, or sky
+    if node.type == 'TEX_SKY': return sky(node)
     if node.type == 'WAVELENGTH': return [(*numpy.array(Color(xyz).from_xyz_d65_to_scene_linear()) / 2.52, 1)
         for xyz in CIE]
     if node.type in ('BLACKBODY', 'PRINCIPLED_VOLUME'):
@@ -200,10 +225,11 @@ def texture(source, textures, texels):
     key = source if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
     if key not in textures:
         image = source if ramp else source.image
-        pixels = numpy.array(table(source), 'f').ravel() if ramp else numpy.empty(len(image.pixels), 'f')
+        pixels = numpy.array(table(source), 'f') if ramp else numpy.empty(len(image.pixels), 'f')
         if not ramp: image.pixels.foreach_get(pixels)
         if not ramp and image.alpha_mode == 'NONE': pixels.reshape(-1, 4)[:, 3] = 1
-        width, height = (len(pixels) // 4, 1) if ramp else image.size
+        width, height = (pixels.shape[-2], pixels.size // 4 // pixels.shape[-2]) if ramp else image.size  # A sky's 2D
+        pixels = pixels.ravel()
         srgb = not (ramp or image.is_float or image.colorspace_settings.is_data)
         straight = not ramp and image.alpha_mode == 'STRAIGHT' and not image.colorspace_settings.is_data
         levels = numpy.empty(len(pixels), 'u1')  # Rounded: read only where they are k / 255 exactly
@@ -225,8 +251,9 @@ def texture(source, textures, texels):
             if srgb: pixels.reshape(-1, 4)[:, :3] = decode(pixels.reshape(-1, 4)[:, :3])
             if straight: pixels.reshape(-1, 4)[:, :3] *= pixels.reshape(-1, 4)[:, 3:]
             mean = pixels.reshape(-1, 4).mean(0)
+        extension = key[1] if not ramp else 'EXTEND' if source.type == 'TEX_SKY' else 'REPEAT'  # A sky's poles apart
         textures[key] = (sum(map(len, texels)) // 4, width, height | ('REPEAT', 'EXTEND', 'CLIP', 'MIRROR').index(
-            'REPEAT' if ramp else key[1]) << 24 | packed << 26 | (packed and srgb) << 29, mean)
+            extension) << 24 | packed << 26 | (packed and srgb) << 29, mean)
         texels.append(numpy.concatenate((levels, numpy.zeros(-len(levels) % 16, 'u1'))).view('f') if packed else pixels)
     return textures[key]
 
@@ -1170,6 +1197,9 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
     'BLACKBODY': lambda node, inputs, index: blackbody(inputs[0], node),
+    'TEX_SKY': lambda node, inputs, index: ('IMAGE_LINEAR', ('EQUIRECTANGULAR', point_of(node, inputs[0],
+        ('POSITION',))), node) if node.sky_type == 'HOSEK_WILKIE' else 0,  # Along its direction, as an environment's;
+    # other skies black
     'WAVELENGTH': wavelength,
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
     'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),

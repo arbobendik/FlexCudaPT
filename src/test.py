@@ -1960,6 +1960,19 @@ for device in ('OPTIX', 'VULKAN'):
     bpy.ops.render.render(scene=scene.name, write_still=True)
     assert numpy.isfinite(bpy.data.images.load(scene.render.filepath).pixels[:]).all(), f'hidden lights {device}'
 
+# A Hosek-Wilkie sky seen straight up through a narrow lens holds the model's zenith radiance: (0.0112, 0.0230, 0.0441)
+# by the published formula at turbidity 2.9, ground albedo 0.3 and the sun 18.5 degrees up, as Blender's node scales it
+# (by 2 pi / 683), evaluated apart from Flex
+scene = new('sky texture', samples=16)
+dome = scene.world.node_tree.nodes.new('ShaderNodeTexSky')
+dome.sky_type, dome.turbidity, dome.ground_albedo, dome.sun_direction = 'HOSEK_WILKIE', 2.9, 0.3, (-0.946, 0.062, 0.318)
+scene.world.node_tree.links.new(dome.outputs['Color'], scene.world.node_tree.nodes['Background'].inputs['Color'])
+scene.camera = add(bpy.data.cameras.new('sky texture'), (0, 0, 0), (math.pi, 0, 0))
+scene.camera.data.angle = 0.01
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.allclose(render().mean((0, 1)), (0.0112, 0.0230, 0.0441), rtol=0.02), ('zenith sky', device)
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')
