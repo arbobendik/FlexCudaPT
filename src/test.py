@@ -2009,6 +2009,46 @@ sun.energy, sun.angle = math.pi, 0
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.isclose(render().mean(), 1, rtol=0.01), f'parallel sun {device}'
+# Under a black roof hidden from shadows, or lit by a sun casting none, as Cycles', the floor holds the same; the roof
+# and sun as usual, none (main, of neither setting, reads none all three times)
+plane('sun roof', 0, size=4).inputs['Base Color'].default_value = (0, 0, 0, 1)
+(roof := bpy.data.objects['sun roof']).location.z = 1.5
+for roof.visible_shadow, sun.use_shadow, due in ((False, True, 1), (True, False, 1), (True, True, 0)):
+    for device in ('OPTIX', 'VULKAN'):
+        preferences.device = device
+        assert numpy.isclose(render().mean(), due, rtol=0.01, atol=0.01), ('shadowless', roof.visible_shadow,
+            sun.use_shadow, device)
+# A mesh and materials linked by the roof and a copy of it, one over the floor and the other far off casting shadows,
+# either way round: the floor dark under the one casting them and lit under the one hidden from them, each instance
+# masked by its own setting
+twin = roof.copy()
+scene.collection.objects.link(twin)
+for near, far in ((roof, twin), (twin, roof)):
+    near.location.x, far.location.x, far.visible_shadow = 0, 100, True
+    for near.visible_shadow, due in ((True, 0), (False, 1)):  # Over the floor, casting: dark, so it is there
+        for device in ('OPTIX', 'VULKAN'):
+            preferences.device = device
+            assert numpy.isclose(render().mean(), due, rtol=0.01, atol=0.01), ('shared mesh', near.name,
+                near.visible_shadow, device)
+bpy.data.objects.remove(twin)
+roof.location.x, roof.visible_shadow = 0, True
+# An emitter hidden from shadows still meets the roof on its way down, sunless: none (a form testing the emitter itself
+# against nothing read 1.58)
+(glow := plane('sun glow', 0, size=4)).inputs['Emission Color'].default_value = (1, 1, 1, 1)
+glow.inputs['Emission Strength'].default_value = 1
+glow = bpy.data.objects['sun glow']
+glow.location.z, glow.rotation_euler.x, glow.visible_shadow = 2.5, math.pi, False
+(beam := next(ob for ob in bpy.data.objects if ob.data == sun)).hide_render = True  # The camera is the one named sun
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert render().mean() < 0.01, ('shadowless glow', device)
+# Hidden from shadows, the roof is still seen: lowered between the camera and the floor, black (camera rays skipping
+# it read 1)
+glow.hide_render, beam.hide_render, roof.location.z, roof.visible_shadow = True, False, 0.5, False
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert render().mean() < 0.01, ('shadowless seen', device)
+bpy.data.objects.remove(roof), bpy.data.objects.remove(glow)  # The sun alone again, as the shells below take it
 # A sphere light occludes nothing, as Cycles' lights: the sun reaches the floor through a camera-hidden point light of
 # radius 1 centered 2.5 over it, whose own 0.01 W adds 0.01 / (4 pi^2 2.5^2) there, and through one of no power
 # centered 0.5 over it, which the floor and the camera lie within; the floor holds one, as before, on both backends

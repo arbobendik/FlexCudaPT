@@ -26,6 +26,7 @@ struct Surface {
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
     float anisotropy, anisotropic_rotation; float3 tangent, glow, hair;
 };
+static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
 struct Info { float location[3], color[4], index, material, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
@@ -1020,12 +1021,12 @@ float candidate(Scene* scene, inout RayQuery<RAY_FLAG_NONE> query, uint skip, fl
 // Rays start after near, a surface's margin from where they leave it; a medium's vertex, on none, has none. Not
 // near - back: Slang folds that to -back, a -0 that Vulkan's ray queries meet nothing past
 Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout float distance, uint skip = NONE,
-    float near = 1e-4f) {
+    float near = 1e-4f, uint mask = 255) {
     const float back = skip == NONE ? 0 : near;
     // A ray query, which commits every candidate but the skipped triangle as OptiX's any-hit program does
     RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(RaytracingAccelerationStructure(scene.handle),
-        skip == NONE ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE, 255,
+        skip == NONE ? RAY_FLAG_FORCE_OPAQUE : RAY_FLAG_NONE, mask,
         RayDesc(origin - direction * back, skip == NONE ? near : 0, direction, far + back));
     float2 uv = float2(0, 0);
     while (query.Proceed()) {
@@ -1046,9 +1047,10 @@ Hit traverse(Scene* scene, float3 origin, float3 direction, float far, inout flo
 // that a loop over layers meets each once and ends; at becomes its distance. The ray queries' bounds keep a few ulps of
 // slack, the candidate tests order: the nearest hit past the layer, then of the hits at exactly its distance the lowest
 // index past the layer
-Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout float at, uint after) {
+Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout float at, uint after,
+    uint mask = 255) {
     RayQuery<RAY_FLAG_NONE> query;
-    query.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
+    query.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, mask,
         RayDesc(origin, at * (1 - 4.76837158203125e-7f), direction, far));
     float2 uv = float2(0, 0);
     while (query.Proceed()) {
@@ -1063,7 +1065,7 @@ Hit nextLayer(Scene* scene, float3 origin, float3 direction, float far, inout fl
     const float t = query.CommittedRayT();
     Hit hit = Hit(NONE, NONE, float2(0, 0));
     RayQuery<RAY_FLAG_NONE> gather;
-    gather.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, 255,
+    gather.TraceRayInline(RaytracingAccelerationStructure(scene.handle), RAY_FLAG_NONE, mask,
         RayDesc(origin, t * (1 - 4.76837158203125e-7f), direction, t * (1 + 4.76837158203125e-7f)));
     uint lowest = NONE; // Number of the hit kept
     while (gather.Proceed()) {
@@ -1292,19 +1294,19 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 // entering the volumes of those it meets from the front and leaving them from the back; transmitted, the share of light
 // reaching the light through them and the media between. Whether an occluder blocks it, opaque or passing nothing
 [ForceInline] bool occluded(Scene* scene, float3 from, float3 toward, float left, Medium medium, uint filling,
-    inout uint state, Ray ray, bool onSurface, out float3 transmitted, uint skip = NONE) {
+    inout uint state, Ray ray, bool onSurface, out float3 transmitted, uint skip = NONE, uint mask = SHADOWS) {
     float before = 0, at = 0, occluder;
     transmitted = float3(1, 1, 1);
     // The nearest hit, any of the triangles at its distance; where it lets light through, the layers start over an ulp
     // short of it, from the lowest index there
     // Off a surface past its margin; off a medium's vertex, or an opaque surface past skip, its own triangle, from none
     // A hair vertex's own segment skipped too, the ray starting at it, as its bounces do
-    Hit first = onSurface && skip == NONE ? traverse(scene, from, toward, left, at)
-        : traverse(scene, from, toward, left, at, skip, 0);
+    Hit first = onSurface && skip == NONE ? traverse(scene, from, toward, left, at, NONE, 1e-4f, mask)
+        : traverse(scene, from, toward, left, at, skip, 0, mask);
     if (first.triangle != NONE && scene.materials[key(scene, first)].opaque == 0)
-        at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE);
+        at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE, mask);
     for (Hit hit = first; hit.triangle != NONE;
-        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit))) {
+        before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit), mask)) {
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque != 0) return true;  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
@@ -1393,7 +1395,8 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     direction = toward;
     float3 transmitted;
     if (occluded(scene, from, toward, left, sides[int(dot(face, toLight) > 0)], fillings[int(dot(face, toLight) > 0)],
-        state, ray, onSurface && traced, transmitted, skip))
+        state, ray, onSurface && traced, transmitted, skip,
+        (scene.materials[key(scene, instance, light)].opaque & 4) != 0 ? 0 : SHADOWS)) // A light casting none: past all
         return float3(0, 0, 0);
     density = solidAngle(probability, lightNormal, shadow);
     return transmitted * shade(scene, instance, light, side * (1 - along), side * along, lightNormal, direction,
