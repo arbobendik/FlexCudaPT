@@ -222,6 +222,14 @@ def exported(depsgraph=None):  # An exporter stand-in, the scene piped into its 
     Viewport.engine.start(exporter, depsgraph or bpy.context.evaluated_depsgraph_get())
     return exporter
 
+def repiped(exporter, depsgraph):  # The exporter's scene piped anew from the depsgraph, its slots kept
+    exporter.visible, exporter.requests = (), io.BytesIO()
+    Viewport.engine.start(exporter, depsgraph)
+
+def updated(depsgraph, id, **flags):  # A depsgraph stand-in updating the id alone, with the flags given
+    return types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+        updates=[types.SimpleNamespace(id=id, **flags)])
+
 # EEVEE's specular shader resolves to a surface of its base color with a dielectric's specular reflection, not black
 specular = bpy.data.materials.new('specular').node_tree
 specular.links.new(specular.nodes.new('ShaderNodeEeveeSpecular').outputs[0],
@@ -874,8 +882,7 @@ exporter = exported(depsgraph)
 reference.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=reference)]))
+Viewport.engine.start(exporter, updated(depsgraph, reference))
 assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.SCENE, 'reference coordinates update'
 collection = bpy.data.collections.new('instance source')
 member = bpy.data.objects.new('instance member', ob.data)
@@ -884,19 +891,16 @@ instance = bpy.data.objects.new('instancer', None)
 scene.collection.objects.link(instance)
 instance.instance_type, instance.instance_collection = 'COLLECTION', collection
 bpy.context.view_layer.update()
-exporter.visible, exporter.requests = (), io.BytesIO()
-Viewport.engine.start(exporter, depsgraph)
+repiped(exporter, depsgraph)
 slot = next(i for i, item in enumerate(depsgraph.object_instances)
     if item.is_instance and item.object.original == member)
 exporter.requests = io.BytesIO()  # Its transform where it is, as an update pipes it
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
+Viewport.engine.start(exporter, updated(depsgraph, instance))
 before = numpy.frombuffer(exporter.requests.getvalue(), 'f')[-21:-9].copy()  # Its transform's rows, before its adjugate
 instance.location.x = 1
 bpy.context.view_layer.update()
 exporter.requests = io.BytesIO()
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=instance)]))
+Viewport.engine.start(exporter, updated(depsgraph, instance))
 assert tuple(numpy.frombuffer(exporter.requests.getvalue(), 'I', count=4)) == (flex.UPDATE, 1,
     *exporter.slots[slot][:2]), 'instancer update'
 after = numpy.frombuffer(exporter.requests.getvalue(), 'f')[-21:-9]
@@ -911,8 +915,7 @@ bm.to_mesh(twisted.data)
 twist = twisted.modifiers.new('twist', 'SIMPLE_DEFORM')
 twist.deform_axis, twist.angle = 'X', 0.6
 bpy.context.view_layer.update()
-exporter.visible, exporter.requests = (), io.BytesIO()
-Viewport.engine.start(exporter, depsgraph)
+repiped(exporter, depsgraph)
 tables = lambda piped, at: 4 + 44 * int(numpy.frombuffer(piped, 'I', count=1, offset=at)[0])  # Hair's, at at
 def generated_of(piped, i):  # Generated coordinates of the mesh entry of instance i, by the scene's instance table
     header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
@@ -936,8 +939,7 @@ for primitive in (bpy.ops.curve.primitive_bezier_curve_add, bpy.ops.object.text_
     made.append(bpy.context.object)
 made[0].data.extrude = 0.1
 bpy.context.view_layer.update()
-exporter.visible, exporter.requests = (), io.BytesIO()
-Viewport.engine.start(exporter, depsgraph)
+repiped(exporter, depsgraph)
 piped, kinds = exporter.requests.getvalue(), set()
 for i, item in enumerate(depsgraph.object_instances):
     if item.object.original in made and item.object.type == 'MESH':
@@ -957,8 +959,7 @@ for item in counting.object_instances:
     if item.object.type == 'MESH':
         rendered += len(item.object.to_mesh().loop_triangles)
         item.object.to_mesh_clear()
-exporter.visible, exporter.requests = (), io.BytesIO()
-Viewport.engine.start(exporter, counting)
+repiped(exporter, counting)
 assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=9)[8] == rendered > 0, 'curves piped once'
 bpy.context.window.scene = scene
 for ob in made: ob.hide_render = True
@@ -991,14 +992,12 @@ assert max(scales) - min(scales) < 1e-4 * flex.stretch(points, uv), 'scale of sl
 noise = edge.id_data.nodes.new('ShaderNodeTexNoise')
 noise.inputs['Scale'].default_value = 50
 edge.id_data.links.new(noise.outputs['Color'], edge.inputs['Emission Color'])
-depsgraph, exporter = bpy.context.evaluated_depsgraph_get(), types.SimpleNamespace(visible=(), requests=io.BytesIO())
-Viewport.engine.start(exporter, depsgraph)
+exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
 bakes = numpy.frombuffer(exporter.requests.getvalue(), 'I', count=6)[5]
 assert bakes == len(getattr(exporter, 'placed', ())) > 0, 'bakes'
 bpy.data.objects['edge'].location.x, exporter.requests = 0.1, io.BytesIO()
 bpy.context.view_layer.update()
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=bpy.data.objects['edge'])]))
+Viewport.engine.start(exporter, updated(depsgraph, bpy.data.objects['edge']))
 assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.UPDATE, 'motion bakes nothing'
 # A value edited, its linked duplicate beside it, steps go anew: the duplicate's rows are the plane's, as exported,
 # where main gave it a row of its own and exported anew
@@ -1155,9 +1154,7 @@ exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
 exponent.inputs[1].default_value, exporter.requests = 2, io.BytesIO()
 material.update_tag()  # Its value edited, as Blender's editors tag it, and the scene evaluated with it
 depsgraph = bpy.context.evaluated_depsgraph_get()
-Viewport.engine.start(exporter, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=material, is_updated_geometry=False,
-    is_updated_transform=False)]))
+Viewport.engine.start(exporter, updated(depsgraph, material, is_updated_geometry=False, is_updated_transform=False))
 steps = exporter.requests.getvalue()
 count = struct.unpack('<2I', steps[:8])[1]
 first, width = struct.unpack('<2I', steps[8 + 16 * count:16 + 16 * count])
@@ -1335,9 +1332,7 @@ Viewport.engine.start(export, bpy.context.evaluated_depsgraph_get())
 links.new(read.outputs['Color'], bump.inputs['Height'])
 links.new(other.outputs['Color'], nodes['Principled BSDF'].inputs['Base Color'])
 depsgraph, export.requests = bpy.context.evaluated_depsgraph_get(), io.BytesIO()
-Viewport.engine.start(export, types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-    object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=tree, is_updated_geometry=False,
-    is_updated_transform=False)]))
+Viewport.engine.start(export, updated(depsgraph, tree, is_updated_geometry=False, is_updated_transform=False))
 assert export.shape[2][sixteen, read.extension][2] >> 26 & 3 == 0, '16-bit heights swapped'
 assert [stored(image) for image in (sixteen, halves)] == [0, 0], '16-bit heights differentiated'
 bump.inputs['Distance'].default_value, bumped.camera.data.ortho_scale, sun.rotation_euler.z = 1, 2 * 32 / size, \
@@ -2143,14 +2138,12 @@ scene.flex_samples, scene.flex_restir = 1024, True
 spot = lights['spot'][0]
 for other, _ in lights.values(): other.hide_render = other != spot
 bpy.context.view_layer.update()
-depsgraph, exporter = bpy.context.evaluated_depsgraph_get(), types.SimpleNamespace(visible=(), requests=io.BytesIO())
+exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
 exporter.start = lambda depsgraph: Viewport.engine.start(exporter, depsgraph)  # Anew, as an update can
-exporter.start(depsgraph)
 for vector, kind in ((spot.location, flex.UPDATE), (spot.rotation_euler, flex.SCENE)):
     vector.x, exporter.requests = 0.5, io.BytesIO()
     bpy.context.view_layer.update()
-    exporter.start(types.SimpleNamespace(scene_eval=depsgraph.scene_eval,
-        object_instances=depsgraph.object_instances, updates=[types.SimpleNamespace(id=spot)]))
+    exporter.start(updated(depsgraph, spot))
     assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == kind, ('spot update', kind)
 # A spread of 0, Blender's parallel beam, renders as 5 degrees: under the footprint, inside its edge by the reach of 5
 # degrees and a pixel, the disk's exitance P / A within 5%; past the footprint 5.5% of the light, none past the reach
