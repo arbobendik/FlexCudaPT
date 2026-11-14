@@ -110,3 +110,72 @@ static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 t
     fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
     return sampleHair(hookScene(), fiber, in_dir, random_state);
 }
+static __device__ unsigned fcptLayers(FKHit hit) {
+    return hookScene().materials[key(hookScene(), nativeHit(hit))].layers;
+}
+// Its size: stored negative, it marks an extinction drawn exactly
+static __device__ float fcptMajorant(unsigned filling) {
+    return fabsf(hookScene().instances[owner(hookScene(), filling)].majorant);
+}
+// Whether varying media are compiled in: the renderer's own constant, which folds the walk's code for them
+static __device__ bool fcptVaryingUsed() { return used(MEDIUM); }
+static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
+    const Medium medium = cameraMedium(hookScene(), direction, distance, *filling);
+    return {medium.scatter, medium.extinction};
+}
+static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance,
+    unsigned* random_state, float3* weight, float3* glowed, float3* scatter, float3* extinction, unsigned depth,
+    unsigned lobe, bool camera) {
+    Medium medium = {*scatter, *extinction};
+    const float along = track(hookScene(), medium, filling, origin, dir, distance, *random_state, *weight, *glowed,
+        Ray{camera, false, lobe, float(depth), distance});
+    *scatter = medium.scatter, *extinction = medium.extinction;
+    return along;
+}
+static __device__ float3 fcptHitPosition(FKHit hit) {
+    return hitPosition(hookScene(), hookScene().vertices, nativeHit(hit));
+}
+static __device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, unsigned triangle) {
+    const Corners corner = corners(hookScene().vertices, hookScene().instances[instance], triangle);
+    return makeMatrix<float, 3, 3>(corner[0], corner[1], corner[2]);
+}
+// The light tree's nodes as FlexLight's texels: x whether a leaf (0 a node, 1 a triangle, 2 a point light, none here),
+// a leaf's y its instance and z its triangle within it, which a node's leave meaningless, w unused; a node's second
+// child, the first following it
+static __device__ LightNode fcptLightBounds(unsigned n) { return hookScene().lights[n]; }
+static __device__ uint4 fcptLightNode(unsigned n) {
+    const LightNode& node = hookScene().lights[n];
+    return make_uint4(node.leaf, node.instance, node.child - hookScene().instances[node.instance].first, 0);
+}
+static __device__ unsigned fcptLightSecond(unsigned n) { return hookScene().lights[n].child; }
+// A light's slot, its triangle's number, whose trail of 64 bits is x low and y high; none of a strand, which no light
+// sampling picks
+static __device__ unsigned fcptLightSlot(FKHit hit) {
+    return STRAND(hookScene(), hit.instance_index) ? NONE : key(hookScene(), nativeHit(hit));
+}
+static __device__ uint4 fcptLightTrail(unsigned j) {
+    const unsigned long long trail = hookScene().trails[j];
+    return make_uint4(unsigned(trail), unsigned(trail >> 32), 0, 0);
+}
+static __device__ bool fcptSlotLeaf(unsigned n, unsigned j) {
+    const Hit light = owned(hookScene(), j);
+    return hookScene().lights[n].child == light.triangle && hookScene().lights[n].instance == light.instance;
+}
+// FK: point lights, which the renderer has none of; no node names one
+static __device__ FKLight fcptLight(unsigned index) { return {}; }
+static __device__ unsigned fcptTriangleOffset(unsigned instance) { return hookScene().instances[instance].first; }
+static __device__ float3 fcptCalculatePointLightContrib(unsigned index) { return make_float3(0, 0, 0); }
+// The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
+// b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
+// world always shades. Its luminance CDF none (FK: sky sampling, which the renderer has none of until it samples its
+// world by a luminance CDF), nor an ambient color without a world
+static __device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe) {
+    return environment(hookScene(), dir, Ray{false, false, lobe, float(depth + 2u), 0});
+}
+static __device__ float4 fcptEnvironmentCdf(uint2 cell) { return make_float4(0, 0, 0, 0); }
+static __device__ uint2 fcptEnvironmentCdfSize() { return make_uint2(0, 0); }
+static __device__ uint2 fcptEnvironmentMapSize() { return make_uint2(2, 2); }
+static __device__ float3 fcptAmbient() { return make_float3(0, 0, 0); }
+static __device__ unsigned fcptMaxBounces() { return hookScene().settings.bounces; }
+static __device__ FKHit fcptReservoirHit(Reservoir r) { return {r.rc.uv, r.rc.instance, r.rc.triangle, 0, 0}; }
+static __device__ void fcptWithReservoirHit(Reservoir* r, const FKHit* hit) { r->rc = nativeHit(*hit); }
