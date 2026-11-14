@@ -845,34 +845,9 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
 
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026), paths in primary sample space
 
-// How a path ends: next event estimation, emissive surface or environment
-constexpr unsigned END_NEE = 0u;
-constexpr unsigned END_EMIT = 1u;
-constexpr unsigned END_ENV = 2u;
-
-// Reconnection vertex: none (pure random replay), triangle hit, NEE light vertex or environment direction
-constexpr unsigned RC_NONE = 0u;
-constexpr unsigned RC_SURFACE = 1u;
-constexpr unsigned RC_LIGHT = 2u;
-constexpr unsigned RC_ENV = 3u;
-
-// Bit offsets of the packed path description
-constexpr unsigned PATH_END = 0u;
-constexpr unsigned PATH_K = 5u;
-constexpr unsigned PATH_RC = 10u;
-constexpr unsigned PATH_TYPE = 12u;
-constexpr unsigned PATH_LOBE_PREV = 15u;
-constexpr unsigned PATH_LOBE = 17u;
-constexpr unsigned PATH_NEE = 19u;
-
 // Random streams besides the per vertex ones
-constexpr unsigned STREAM_NEE = 64u;
-constexpr unsigned STREAM_RR = 128u;
 constexpr unsigned STREAM_JITTER = 192u;
 constexpr unsigned STREAM_SELECT = 193u;
-constexpr unsigned STREAM_COVERAGE = 256u;
-constexpr unsigned STREAM_MEDIUM = 320u;
-constexpr unsigned STREAM_CAMERA = 384u;  // Of what the medium the camera is in absorbs to the first hit
 
 // Camera and primary hit of a pixel
 struct Domain {
@@ -881,10 +856,6 @@ struct Domain {
     Hit hit;
     float width, spread;
 };
-
-__device__ unsigned extractBits(unsigned path, unsigned offset, unsigned count) {
-    return path >> offset & ((1u << count) - 1u);
-}
 
 // Nearest hit of a ray within far and its distance, NONE on a miss
 // Rays start past near; leaving the skipped triangle, back by near, to keep triangles there
@@ -1018,11 +989,6 @@ __device__ float3 smoothNormal(const Scene& scene, Hit hit) {
     if (STRAND(scene, hit.instance)) return faceNormal(scene, hit);
     const Corners normals = cornerNormals(scene.normals, scene.instances[hit.instance], hit.triangle);
     return normalize(normals[0] * (1 - hit.uv.x - hit.uv.y) + normals[1] * hit.uv.x + normals[2] * hit.uv.y);
-}
-
-// Whether a direction leaves a face to the other side than reflecting or refracting the incoming direction does
-__device__ bool wrongSide(float3 in_dir, bool refracted, float3 out_dir, float3 face) {
-    return (dot(in_dir, face) < 0 != refracted) != (dot(out_dir, face) > 0);
 }
 
 // Uniform point of the aperture, squeezed horizontally by ratio
