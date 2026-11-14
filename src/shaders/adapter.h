@@ -15,7 +15,8 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
     bool viewed);
 static __device__ float3 fcptShadowTransmittance(FKRay ray, float l);
 static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
-    unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left);
+    unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left,
+    FKHit light);
 static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir, unsigned depth,
     float length);
 static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width, unsigned layer,
@@ -25,6 +26,7 @@ static __device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 
 static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, unsigned random_state);
 static __device__ unsigned fcptLayers(FKHit hit);
 static __device__ float fcptMajorant(unsigned filling);
+static __device__ bool fcptVaryingUsed();
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
 static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance, unsigned* random_state,
     float3* weight, float3* glowed, float3* scatter, float3* extinction, unsigned depth, unsigned lobe, bool camera);

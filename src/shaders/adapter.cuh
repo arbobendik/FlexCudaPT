@@ -25,17 +25,21 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
 static __device__ float3 fcptShadowTransmittance(FKRay ray, float l) { return make_float3(0, 0, 0); }
 // Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone width
 static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
-    unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left) {
+    unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left,
+    FKHit light) {
     float3 transmitted;
     return occluded(hookScene(), ray.origin, ray.unit_direction, l, Medium{make_float3(0, 0, 0), extinction}, filling,
         random_state, Ray{depth == 0, false, lobe, float(depth), length, width}, surface, transmitted,
-        left.instance_index != NONE ? key(hookScene(), nativeHit(left)) : NONE) ? make_float3(0, 0, 0) : transmitted;
+        left.instance_index != NONE ? key(hookScene(), nativeHit(left)) : NONE,  // A light casting none: past all
+        light.instance_index != NONE && hookScene().materials[key(hookScene(), nativeHit(light))].opaque & 4 ? 0 : SHADOWS)
+        ? make_float3(0, 0, 0) : transmitted;
 }
 // A shaded surface as the walk takes it, unfaced, its material as the walk's BSDF takes it, absorbing nothing (FK's walk
 // keeps FlexLight's absorption; the renderer's media absorb); shading takes no random number
 static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surface& surface, float3 position,
     unsigned random_state) {
     const float3 face = faceNormal(scene, at);
+    const bool enclosed = encloses(scene, surface, at.instance);
     // Opaque surfaces leave by their smooth surface's height, none under the margin over the face; those transmitting
     // light and strands by the traced lift's offset, as the renderer's own walk lifted them
     const bool traced = surface.transparency > 0 || STRAND(scene, at.instance);
@@ -49,8 +53,8 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
         used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
         used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, false, random_state, surface.coverage,
-        encloses(scene, surface, at.instance), {volume(surface).scatter, volume(surface).extinction},
-        fills(scene, at.instance, at.triangle), surface.hair};
+        enclosed, enclosed ? FKMedium{volume(surface).scatter, volume(surface).extinction} : FKMedium{},
+        enclosed ? fills(scene, at.instance, at.triangle) : NONE, surface.hair};
 }
 // A light sample's emission as sampleLight shades it: its emission program, toward the triangle's face, for no ray a
 // bounce past the vertex sampling it
@@ -88,6 +92,8 @@ static __device__ unsigned fcptLayers(FKHit hit) { return hookScene().materials[
 static __device__ float fcptMajorant(unsigned filling) {  // Its size: stored negative, it marks an extinction drawn exactly
     return fabsf(hookScene().instances[owner(hookScene(), filling)].majorant);
 }
+// Whether varying media are compiled in: the renderer's own constant, which folds the walk's code for them
+static __device__ bool fcptVaryingUsed() { return used(MEDIUM); }
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
     const Medium medium = cameraMedium(hookScene(), direction, distance, *filling);
     return {medium.scatter, medium.extinction};
