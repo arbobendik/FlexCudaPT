@@ -2076,6 +2076,56 @@ for device in ('OPTIX', 'VULKAN'):
     assert numpy.allclose(watched(sky_drawn, kept, edit), sky_drawn(Viewport(), depsgraph), atol=2e-3), \
         ('kept sky viewport', device)
 
+# A thin slab of a medium scattering 0.01 of what crosses it and absorbing nothing, lit from below by a parallel sun 30
+# degrees off the straight-up view of an orthographic camera above, scatters it once: its radiance follows its phase
+# function, Henyey-Greenstein's at g 0.6 over the isotropic one's 4 pi p(cos 30 degrees) = 3.52 times, on both backends
+scene = new('phase', 16, 1024, (0, 0, 0))
+slab = bpy.data.meshes.new('phase slab')
+bm = bmesh.new()
+bmesh.ops.create_cube(bm, size=1)
+bm.to_mesh(slab)
+slab.materials.append(medium := bpy.data.materials.new('phase slab'))
+medium.node_tree.nodes.remove(medium.node_tree.nodes['Principled BSDF'])
+scatterer = medium.node_tree.nodes.new('ShaderNodeVolumeScatter')
+scatterer.inputs['Density'].default_value = 0.1
+medium.node_tree.links.new(scatterer.outputs[0], medium.node_tree.nodes['Material Output'].inputs['Volume'])
+add(slab, (0, 0, 0)).scale = (10, 10, 0.1)
+scene.camera = add(bpy.data.cameras.new('phase'), (0, 0, 1))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 1
+beam = add(bpy.data.lights.new('phase sun', 'SUN'), (0, 0, -1), (math.pi * 5 / 6, 0, 0))  # Shining up 30 degrees off
+beam.data.energy, beam.data.angle = 100, 0
+due = (1 - 0.6 ** 2) / (1 + 0.6 ** 2 - 2 * 0.6 * math.cos(math.pi / 6)) ** 1.5
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    lit = []
+    for g in (0, 0.6):
+        scatterer.inputs['Anisotropy'].default_value = g
+        lit.append(render(scene, 16).mean())
+    assert numpy.isclose(lit[1] / lit[0], due, rtol=0.05), ('henyey-greenstein', device, lit, due)
+# Inside a closed emitter of radiance 1 filled by a medium absorbing nothing and scattering forward at g 0.9, every
+# pixel reads 1, the furnace's, as the phase function's sampling and its evaluation weigh alike; so at the slider's
+# ends, g 1 and -1, which the exporter keeps short of the delta they are
+scene = new('phase furnace', 16, 256, (0, 0, 0))
+box = bpy.data.meshes.new('phase furnace')
+bm = bmesh.new()
+bmesh.ops.create_cube(bm, size=2)
+bm.to_mesh(box)
+box.materials.append(walls := bpy.data.materials.new('phase furnace'))
+walls.node_tree.nodes.remove(walls.node_tree.nodes['Principled BSDF'])
+thick = walls.node_tree.nodes.new('ShaderNodeVolumeScatter')
+thick.inputs['Density'].default_value = 1
+walls.node_tree.links.new(walls.node_tree.nodes.new('ShaderNodeEmission').outputs[0],
+    walls.node_tree.nodes['Material Output'].inputs['Surface'])
+walls.node_tree.links.new(thick.outputs[0], walls.node_tree.nodes['Material Output'].inputs['Volume'])
+add(box, (0, 0, 0))
+scene.camera, scene.flex_bounces = add(bpy.data.cameras.new('phase furnace'), (0, 0, 0)), 64
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    for thick.inputs['Anisotropy'].default_value in (0.9, 1, -1):
+        seen = render(scene, 16)
+        assert numpy.isfinite(seen).all() and numpy.isclose(seen.mean(), 1, rtol=0.02), \
+            ('phase furnace', device, thick.inputs['Anisotropy'].default_value)
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')

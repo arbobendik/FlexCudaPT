@@ -95,7 +95,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level}  # MEDIUM and
+    'HAIR': lambda level: level, 'PHASE': lambda g: g}  # MEDIUM and
 # CURVES steps past every program's end, of a scene whose media vary from point to point, so the renderer tracks those
 # it fills alone, and of one with strands
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
@@ -407,8 +407,8 @@ def summarize(expression, table, scales):
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
         not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
-        'ANISOTROPIC', 'HAIR') or any(part[2] is None for part in parts) else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(
-        part[2] for part in parts)
+        'ANISOTROPIC', 'HAIR', 'PHASE') or any(part[2] is None for part in parts) else READ_COSTS[kind] if read \
+        else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
     need = max([0, *(part[4] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
@@ -696,7 +696,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR') and OPS[name] \
+    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE') and OPS[name] \
         and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
@@ -1404,6 +1404,9 @@ def resolve(socket, groups=()):
         glossy = between(anisotropy, -0.99, 0.99)
         anisotropy = nonzero(anisotropy) and ('ANISOTROPIC', ('DIVIDE', ('MULTIPLY', glossy, ('SUBTRACT', 2,
             absolute(glossy))), -0.9) if node.type in ('BSDF_GLOSSY', 'BSDF_GLASS') else between(anisotropy, 0, 1)) or 0
+        if node.type in VOLUMES:  # A volume's is its phase's Henyey-Greenstein asymmetry, short of ±1, where its
+            g = fold(between(get('Anisotropy', 0), -0.999, 0.999))  # density is 0 / 0; none at 0 nor of another phase
+            anisotropy = g if nonzero(g) and getattr(node, 'phase', 'HENYEY_GREENSTEIN') == 'HENYEY_GREENSTEIN' else 0
         # Transmitting and refracting by the share of the energy not metallic, as Cycles' shaders mix it. A volume
         # shader's Alpha is its Draine phase's α, which covers nothing
         alpha = 1 if hasattr(node, 'phase') else get('Alpha', 1)
@@ -1452,6 +1455,7 @@ def shade(material, program):
     filled = resolve(output.inputs['Volume']) if output.inputs['Volume'].is_linked else None
     SIDE['volume'] = False
     volume, glow = (filled[10:13], filled[4]) if filled else (surface[10:13], 0)
+    phase = filled and nonzero(filled[16]) and ('PHASE', filled[16])  # Its phase's asymmetry, marked, else none
     MEDIA[material] = *volume, glow
     if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
         height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
@@ -1468,10 +1472,11 @@ def shade(material, program):
     metallic, share = base[2], base[5]
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
-    # The base layer transmits the surface's translucent color diffusely and carries its sheen and anisotropy, a coat
-    # over it none; each filled by its volume's emission
+    # The base layer transmits the surface's translucent color diffusely and carries its sheen, anisotropy and hair, a
+    # coat over it none; each filled by its volume's emission and its phase's asymmetry, after a hair of none
+    hair = lambda layer: tuple(surface[20:]) if layer is base else ()
     attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow,
-        *(surface[20:] if layer is base else ())] for layer in layers]
+        *((hair(layer) or (0,)) + (phase,) if phase else hair(layer))] for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1738,6 +1743,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
             # them out
+            if len(surface) == 22 and not marks(surface[21], 'PHASE'): surface = surface[:21]  # Its phase's asymmetry
             if len(surface) == 21 and not marks(surface[20], 'HAIR'): surface = surface[:20]  # Its hair too
             if len(surface) == 20 and not nonzero(surface[19]): surface = surface[:19]  # Its volume's emission too
             if len(surface) == 19 and not marks(surface[16], 'ANISOTROPIC'): surface = surface[:16]
