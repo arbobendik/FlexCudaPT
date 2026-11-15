@@ -3056,6 +3056,60 @@ for seen, offset, roughness, scene.flex_samples in ((0, 0, 0.3, 256), (85, 2, 0.
             ('enclosed hair', seen, roughness, device, ways)
 preferences.device = 'OPTIX'
 
+# A thin closed emissive shell lights a wall as its outward faces do: a 4 x 4 sheet shaded smooth, emitting 1 and
+# hidden from the camera, solidified 0.05 or 0.2 thick, gives a white diffuse wall 1.5 before it what its front and
+# rims send (by quadrature of cos cos / pi r^2 over them), within 2% on both backends. The end of a shadow ray at a
+# sampled light is not lifted along the light's smooth normal, which on such a shell carried its back face's light
+# through the front, a third over
+scene = opened('emissive slab', (0, 0, 0))
+scene.flex_denoise = False
+def surfaced(name, node):  # A material of the shader node alone
+    material = bpy.data.materials.new(name)
+    nodes = material.node_tree.nodes
+    nodes.remove(nodes['Principled BSDF'])
+    shader = nodes.new(node)
+    material.node_tree.links.new(shader.outputs[0], nodes['Material Output'].inputs['Surface'])
+    return material, shader
+def gridded(name, size, material, location, rotation):  # A square of side 2 size, of the material
+    data, bm = bpy.data.meshes.new(name), bmesh.new()
+    bmesh.ops.create_grid(bm, size=size)
+    bm.to_mesh(data), bm.free()
+    data.materials.append(material)
+    return add(data, location, rotation)
+slab = gridded('emissive slab', 2, surfaced('glow', 'ShaderNodeEmission')[0], (0, 0, 0), (-math.pi / 2, 0, 0))
+slab.data.shade_smooth()
+slab.visible_camera = False  # Its face toward the wall at y = 0, solidified behind it
+matte, diffuse = surfaced('matte', 'ShaderNodeBsdfDiffuse')
+diffuse.inputs['Color'].default_value = (0.8, 0.8, 0.8, 1)
+gridded('slab wall', 6, matte, (0, 1.5, 0), (math.pi / 2, 0, 0))
+scene.camera = add(bpy.data.cameras.new('emissive slab'), (0, -3, 0), (math.pi / 2, 0, 0))
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 8
+c = (numpy.arange(SIZE) + 0.5) / SIZE * 8 - 4
+x, z = (a.ravel() for a in numpy.meshgrid(c, c))
+wall = numpy.column_stack((x, numpy.full(x.size, 1.5), z))
+def sent(t):  # The wall's mean radiance from the slab's faces of radiance 1 facing it, its back face turned away
+    faces = [((-2, 0, -2), (4, 0, 0), (0, 0, 4), (0, 1, 0))]
+    faces += [(o, u, (0, t, 0), n) for o, u, n in (((2, -t, -2), (0, 0, 4), (1, 0, 0)),
+        ((-2, -t, -2), (0, 0, 4), (-1, 0, 0)), ((-2, -t, 2), (4, 0, 0), (0, 0, 1)),
+        ((-2, -t, -2), (4, 0, 0), (0, 0, -1)))]
+    irradiance = numpy.zeros(len(wall))
+    for o, u, v, n in faces:
+        s, w = numpy.meshgrid((numpy.arange(32) + 0.5) / 32, (numpy.arange(32) + 0.5) / 32)
+        points = numpy.array(o) + s.reshape(-1, 1) * u + w.reshape(-1, 1) * numpy.array(v)
+        d = points[None] - wall[:, None]
+        r2 = (d * d).sum(2)
+        cosines = numpy.maximum(-d[..., 1], 0) * numpy.maximum(-(d @ numpy.array(n)), 0) / r2
+        irradiance += (cosines / r2).sum(1) * numpy.linalg.norm(numpy.cross(u, v)) / 32 ** 2
+    return 0.8 / math.pi * irradiance.mean()
+for thickness in (0.05, 0.2):
+    slab.modifiers.clear()
+    slab.modifiers.new('solid', 'SOLIDIFY').thickness = thickness
+    for device in ('OPTIX', 'VULKAN'):
+        wall_mean = render_on(device).mean()
+        assert abs(wall_mean / sent(thickness) - 1) < 0.02, ('emissive slab', thickness, device, float(wall_mean),
+            sent(thickness))
+preferences.device = 'OPTIX'
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
