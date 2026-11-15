@@ -65,7 +65,8 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
         used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
         used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, false, random_state, surface.coverage,
-        enclosed, enclosed ? FKMedium{volume(surface).scatter, volume(surface).extinction} : FKMedium{},
+        enclosed, enclosed ? FKMedium{volume(surface).scatter, volume(surface).extinction, volume(surface).g}
+        : FKMedium{},
         enclosed ? fills(scene, at.instance, at.triangle) : NONE, surface.hair};
 }
 // A light sample's emission as the renderer's light sampling shaded it: its emission program toward the triangle's
@@ -121,15 +122,15 @@ static __device__ float fcptMajorant(unsigned filling) {
 static __device__ bool fcptVaryingUsed() { return used(MEDIUM); }
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
     const Medium medium = cameraMedium(hookScene(), direction, distance, *filling);
-    return {medium.scatter, medium.extinction};
+    return {medium.scatter, medium.extinction, medium.g};
 }
 static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance,
-    unsigned* random_state, float3* weight, float3* glowed, float3* scatter, float3* extinction, unsigned depth,
-    unsigned lobe, bool camera) {
-    Medium medium = {*scatter, *extinction};
+    unsigned* random_state, float3* weight, float3* glowed, float3* scatter, float3* extinction, float* g,
+    unsigned depth, unsigned lobe, bool camera) {
+    Medium medium = {*scatter, *extinction, *g};
     const float along = track(hookScene(), medium, filling, origin, dir, distance, *random_state, *weight, *glowed,
         Ray{camera, false, lobe, float(depth), distance});
-    *scatter = medium.scatter, *extinction = medium.extinction;
+    *scatter = medium.scatter, *extinction = medium.extinction, *g = medium.g;
     return along;
 }
 static __device__ float3 fcptHitPosition(FKHit hit) {
