@@ -95,9 +95,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level, 'PHASE': lambda g: g}  # MEDIUM and
-# CURVES steps past every program's end, of a scene whose media vary from point to point, so the renderer tracks those
-# it fills alone, and of one with strands
+    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None}  # MEDIUM,
+# CURVES and WORLD steps past every program's end, of a scene whose media vary from point to point, so the renderer
+# tracks those it fills alone, of one with strands, and of one whose world's volume has any extinction
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -2091,6 +2091,17 @@ class Flex(bpy.types.RenderEngine):
                 instances[k][3][:21].astype('f')))))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
+        SIDE['volume'] = True  # Its volume, a homogeneous medium everywhere outside the volumes, which views take
+        linked = world and world.inputs['Volume'].is_linked
+        filled = [fold(part) for part in resolve(world.inputs['Volume'])] if linked else BLACK
+        SIDE['volume'] = False
+        absorption, density, scatter = (numpy.resize(numpy.asarray(part, 'f'), 3) if not isinstance(part, tuple) else
+            None for part in filled[10:13])
+        if any(part is None for part in (absorption, density, scatter)) or nonzero(filled[4]) \
+                or isinstance(filled[16], tuple):
+            raise ValueError(f"Flex: the volume of world '{scene.world.name}' varies or emits; a world's volume must "
+                'be homogeneous and emit nothing')
+        self.outside = *scatter * density, *(scatter + 1 - absorption) * density, float(numpy.resize(filled[16], 1)[0])
         world = program(resolve(world.inputs['Surface']) if world else BLACK)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
@@ -2138,7 +2149,7 @@ class Flex(bpy.types.RenderEngine):
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
-            ('CURVES', sum(map(len, hairs)))) if any]
+            ('CURVES', sum(map(len, hairs))), ('WORLD', any(self.outside[3:6]))) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
                     self.hairs or any(  # textures, and hair tables,
@@ -2224,11 +2235,12 @@ class Flex(bpy.types.RenderEngine):
         # odd number of times, its first triangle of a material filling it, or none
         medium = next((self.slots[i][0] + first for i, (tree, first) in self.volumes.items()
             if inside(tree, matrix.translation - back * near)), 2 ** 32 - 1)
-        # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the camera's origin and its
-        # ray direction per NDC x, per NDC y and at the center (orthographic: the rays' offsets), then the thin lens and
-        # whether orthographic, and the near and far planes' depths.
-        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
-            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
+        # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the world's medium (its
+        # scattering and extinction coefficients and phase asymmetry), the camera's origin and its ray direction per NDC
+        # x, per NDC y and at the center (orthographic: the rays' offsets), then the thin lens and whether orthographic,
+        # and the near and far planes' depths.
+        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I27f', REQUEST, *sampling, launches, width, height,
+            *settings, medium, *self.outside, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
         self.requests.flush()
         # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
         answer = self.answers.read(12)

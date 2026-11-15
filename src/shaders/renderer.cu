@@ -1086,6 +1086,16 @@ __device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y
 // default; of one varying from point to point, those where it was entered, carried beside the key of its material,
 // whose owner is the instance it fills, else NONE
 struct Medium { float3 scatter, extinction; float g; };
+// The world's, outside every volume: none, folded, without a world volume
+__device__ Medium world(const Scene& scene) {
+    return used(WORLD) ? Medium{scene.settings.world_scatter, scene.settings.world_extinction, scene.settings.world_g}
+        : Medium{};
+}
+// Whether the world's medium lies between the camera and the sky, which a ray missing all then crosses in the walk
+__device__ bool hazy(const Scene& scene) {
+    const float3 e = scene.settings.world_extinction;
+    return used(WORLD) && (e.x > 0 || e.y > 0 || e.z > 0);
+}
 // Of the volume filling the inside of a surface, behind its faces
 __device__ Medium volume(const Surface& surface) {
     return {surface.scatter * surface.density,
@@ -1200,7 +1210,7 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
                 .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
                 const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? Medium{} : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                medium = leaves ? world(scene) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
         }
@@ -1215,7 +1225,7 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
 // first triangle of the volume's instance; filling, its material's key if varying, else NONE
 __device__ __forceinline__ Medium cameraMedium(const Scene& scene, float3 direction, float distance, unsigned& filling) {
     const Hit held = scene.settings.medium == NONE ? Hit{NONE} : owned(scene, scene.settings.medium);
-    const Medium medium = held.triangle == NONE ? Medium{} : volume(shade(scene, held.instance, held.triangle, 0, 0,
+    const Medium medium = held.triangle == NONE ? world(scene) : volume(shade(scene, held.instance, held.triangle, 0, 0,
         cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
         Ray{true, false, LOBE_NONE, 0.0f, distance}));
     filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
@@ -1334,11 +1344,12 @@ __device__ SampleBSDF sampleHair(const Scene& scene, const Surface& surface, flo
 // The walk as direct callables that the passes call, one per replay, its branches on it folded away: FlexKernels' walk
 // through the adapter's hooks, each compiled as a function of its own, where OptiX would compile it into each pass
 // calling it, its state spilled around each of its traces there. Their records hold the scene the hooks read: the first
-// pass's, the pass's; then the shift's, the pass's and the anchor's
+// pass's, the pass's; then the shift's, the pass's and the anchor's. A miss's instance is NONE, by which FK tells it,
+// where traverse() leaves it 0
 #define WALK_CALLABLE(name, replay) extern "C" __device__ Shift name(const Domain* dom, const Reservoir* r, \
     float scale, Selection* sel) { \
-    return walk_hook(FKDomain{dom->x0, dom->x1, {dom->hit.uv, dom->hit.instance, dom->hit.triangle, 0, \
-        length(dom->x1 - dom->x0)}, dom->width, dom->spread}, *r, replay, scale, sel); \
+    return walk_hook(FKDomain{dom->x0, dom->x1, {dom->hit.uv, dom->hit.triangle == NONE ? NONE : dom->hit.instance, \
+        dom->hit.triangle, 0, length(dom->x1 - dom->x0)}, dom->width, dom->spread}, *r, replay, scale, sel); \
 }
 WALK_CALLABLE(__direct_callable__first, false)
 WALK_CALLABLE(__direct_callable__walk, true)
@@ -1352,7 +1363,7 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
     const Domain dom = pixelDomain(scene, camera, pixel, size, r.seed);
-    if (dom.hit.triangle == NONE) {
+    if (dom.hit.triangle == NONE && !hazy(scene)) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
     return WALK(scene, dom, r, true, 0.0f, sel);
@@ -1513,7 +1524,7 @@ extern "C" __global__ void __raygen__initial() {
         Reservoir r = {};
         r.seed = stream(pixel_seed, i);
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        if (dom.hit.triangle != NONE) {
+        if (dom.hit.triangle != NONE || hazy(scene)) {  // A miss crosses the world's medium to the sky in the walk
             WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
         } else {
             seen = seen + environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})

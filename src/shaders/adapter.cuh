@@ -120,6 +120,13 @@ static __device__ float fcptMajorant(unsigned filling) {
 }
 // Whether varying media are compiled in: the renderer's own constant, which folds the walk's code for them
 static __device__ bool fcptVaryingUsed() { return used(MEDIUM); }
+// Whether the world has a volume: the renderer's own constant, which folds the walk's code for it
+static __device__ __forceinline__ bool fcptOutsideUsed() { return used(WORLD); }
+// The world's medium, which a ray leaving every volume enters
+static __device__ FKMedium fcptOutsideMedium() {
+    const Medium medium = world(hookScene());
+    return {medium.scatter, medium.extinction, medium.g};
+}
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
     const Medium medium = cameraMedium(hookScene(), direction, distance, *filling);
     return {medium.scatter, medium.extinction, medium.g};

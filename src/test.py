@@ -2071,6 +2071,35 @@ for device in ('OPTIX', 'VULKAN'):
         assert numpy.isfinite(seen).all() and numpy.isclose(seen.mean(), 1, rtol=0.02), \
             ('phase furnace', device, thick.inputs['Anisotropy'].default_value)
 
+# The world's volume fills everything outside the volumes, from the camera's near plane on, where its rays start, as
+# they do through any volume: absorbing (0.1, 0.2, 0.3) per unit length, an emitter of radiance 1 two units off reads
+# exp(-(2 - clip start) (0.1, 0.2, 0.3)); the sky of 1 behind it, past infinite medium, reads 0 where it absorbs and 1
+# in a channel it leaves clear, the rays missing all crossing the medium too; a world of density 0 renders as one of no
+# volume, exactly
+scene = new('world volume', 16, 64, (1, 1, 1))
+scene.camera = add(bpy.data.cameras.new('world volume'), (0, 0, 0))
+scene.camera.data.angle = 0.1
+target = plane('world target', 0, size=4)
+target.inputs['Base Color'].default_value, target.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+target.inputs['Emission Strength'].default_value = 1
+bpy.data.objects['world target'].location.z = -2
+haze = scene.world.node_tree.nodes.new('ShaderNodeVolumeAbsorption')
+haze.inputs['Color'].default_value = (0.9, 0.8, 0.7, 1)
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    bpy.data.objects['world target'].hide_render = True
+    clear = render(scene, 16)
+    scene.world.node_tree.links.new(haze.outputs[0], scene.world.node_tree.nodes['World Output'].inputs['Volume'])
+    for color, density, hidden, due in (((0.9, 0.8, 0.7), 1, False, numpy.exp(-(2 - scene.camera.data.clip_start)
+            * numpy.array((0.1, 0.2, 0.3)))),
+            ((0.9, 0.8, 0.7), 1, True, (0, 0, 0)), ((0, 1, 1), 1, True, (0, 1, 1)), ((0.9, 0.8, 0.7), 0, True, None)):
+        haze.inputs['Color'].default_value, haze.inputs['Density'].default_value = (*color, 1), density
+        bpy.data.objects['world target'].hide_render = hidden
+        seen = render(scene, 16)
+        assert numpy.array_equal(seen, clear) if due is None else numpy.allclose(seen.mean((0, 1)), due, atol=0.02), \
+            ('world volume', device, color, density, hidden, seen.mean((0, 1)))
+    scene.world.node_tree.links.remove(scene.world.node_tree.nodes['World Output'].inputs['Volume'].links[0])
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')

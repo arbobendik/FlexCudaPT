@@ -29,8 +29,9 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE }; // MEDIUM and CURVES no
-// program takes: a scene's varying media and strands; PHASE marks a volume's Henyey-Greenstein asymmetry
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD }; // MEDIUM, CURVES
+// and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
+// Henyey-Greenstein asymmetry
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -48,7 +49,10 @@ struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info 
     uint key; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle, instance; float2 uv; };
-struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
+struct Settings {
+    uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; float3 world_scatter, world_extinction;
+    float world_g;
+};
 static const int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
@@ -1140,7 +1144,13 @@ float3 environment(Scene* scene, float3 direction, Ray ray) {
 // default; of one varying from point to point, those where it was entered, carried beside the key of its material,
 // whose owner is the instance it fills, else NONE
 struct Medium { float3 scatter, extinction; float g = 0; };
-static const Medium NO_MEDIUM = {float3(0), float3(0), 0};
+// The world's, outside every volume: none, folded, without a world volume
+Medium world(Scene* scene) {
+    return used(WORLD) ? Medium(scene.settings.world_scatter, scene.settings.world_extinction, scene.settings.world_g)
+        : Medium(float3(0, 0, 0), float3(0, 0, 0), 0);
+}
+// Whether the world's medium lies between the camera and the sky, which a ray missing all then crosses in the walk
+bool hazy(Scene* scene) { return used(WORLD) && any(scene.settings.world_extinction > 0); }
 // Of the volume filling the inside of a surface, behind its faces
 Medium volume(Surface surface) {
     return Medium(surface.scatter * surface.density,
@@ -1256,7 +1266,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
                 : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
                 const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                medium = leaves ? world(scene) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
         }
@@ -1272,7 +1282,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 [ForceInline] Medium cameraMedium(Scene* scene, float3 direction, float distance, out uint filling) {
     const Hit held = scene.settings.medium == NONE ? Hit(NONE, NONE, float2(0, 0))
         : owned(scene, scene.settings.medium);
-    const Medium medium = held.triangle == NONE ? NO_MEDIUM : volume(shade(scene, held.instance, held.triangle, 0,
+    const Medium medium = held.triangle == NONE ? world(scene) : volume(shade(scene, held.instance, held.triangle, 0,
         0, cornerNormals(scene.normals, scene.instances[held.instance], held.triangle)[0], direction,
         Ray(true, false, LOBE_NONE, 0.0f, distance)));
     filling = held.triangle == NONE ? NONE : fills(scene, held.instance, held.triangle);
@@ -1380,6 +1390,13 @@ struct VkScene : IScene {
     bool varyingUsed() { return used(MEDIUM); }
     // Whether hair is compiled in: the renderer's own constant, which folds the walk's code for it
     bool hairUsed() { return used(HAIR); }
+    // Whether the world has a volume: the renderer's own constant, which folds the walk's code for it
+    bool outsideUsed() { return used(WORLD); }
+    // The world's medium, which a ray leaving every volume enters
+    FKMedium outsideMedium() {
+        const Medium medium = fcpt.world(scene);
+        return {medium.scatter, medium.extinction, medium.g};
+    }
     FKMedium cameraMedium(float3 direction, float distance, out uint filling) {
         const Medium medium = fcpt.cameraMedium(scene, direction, distance, filling);
         return {medium.scatter, medium.extinction, medium.g};
@@ -1573,7 +1590,7 @@ Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
         return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
     }
     const Domain dom = pixelDomain(scene, camera, pixel, size, r.seed);
-    if (dom.hit.triangle == NONE) {
+    if (dom.hit.triangle == NONE && !hazy(scene)) {
         return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
     }
     return walkHooks<true>(VkScene(scene), dom, r, 0.0f, sel);
@@ -1722,7 +1739,7 @@ void initial(uint3 p, uint3 size, Scene* scene) {
         Reservoir r = {};
         r.seed = stream(pixel_seed, i);
         const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        if (dom.hit.triangle != NONE) {
+        if (dom.hit.triangle != NONE || hazy(scene)) {  // A miss crosses the world's medium to the sky in the walk
             walkHooks<false>(VkScene(scene), dom, r, 1.0f / scene.settings.paths, initial);
         } else {
             seen = seen + environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0))
@@ -1858,7 +1875,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 // What OptiX's header holds: the number the Vulkan host's optixSbtRecordPackHeader gives the raygen program of a pass,
 // by its place in renderer.h's PROGRAMS
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 656; // As renderer.h's, from one record to the next
+static const uint RECORD_STRIDE = 688; // As renderer.h's, from one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 

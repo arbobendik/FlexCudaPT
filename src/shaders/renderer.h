@@ -18,15 +18,16 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE }; // MEDIUM and CURVES no
-// program takes: a scene's varying media and strands; PHASE marks a volume's Henyey-Greenstein asymmetry
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD }; // MEDIUM, CURVES
+// and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
+// Henyey-Greenstein asymmetry
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 656;
+constexpr unsigned RECORD_STRIDE = 688;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -85,7 +86,13 @@ struct Shift { float3 f; float jac; };
 // Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, the
 // spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample, and
 // a triangle of the volume the camera is in, or none
-struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
+// Of a view: its ReSTIR settings, bounces, paths, denoising and the volume the camera is in; then the world's
+// homogeneous medium outside every volume, its scattering and extinction coefficients and phase asymmetry, none by
+// default
+struct Settings {
+    unsigned restir, decorrelation, neighbors, bounces, paths, denoise, medium; float3 world_scatter, world_extinction;
+    float world_g;
+};
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle of the meshes, in their own space: three vertices, normals, generated points, points in their object,
