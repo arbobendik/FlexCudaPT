@@ -3,6 +3,7 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <map>
@@ -229,8 +230,11 @@ template <class F> CUresult run(F record) {
     vkEndCommandBuffer(vulkan.commands);
     const VkSubmitInfo submit{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1,
         .pCommandBuffers = &vulkan.commands};
-    if (VkResult result = vkQueueSubmit(vulkan.queue, 1, &submit, vulkan.fence)) return result;
-    if (VkResult result = vkWaitForFences(vulkan.device, 1, &vulkan.fence, VK_TRUE, UINT64_MAX)) return result;
+    // A failure named as CHECK names one, the caller's CHECK then ending the renderer
+    if (VkResult result = vkQueueSubmit(vulkan.queue, 1, &submit, vulkan.fence))
+        return std::fprintf(stderr, "vkQueueSubmit failed (%d)\n", result), result;
+    if (VkResult result = vkWaitForFences(vulkan.device, 1, &vulkan.fence, VK_TRUE, UINT64_MAX))
+        return std::fprintf(stderr, "vkWaitForFences failed (%d)\n", result), result;
     return vkResetFences(vulkan.device, 1, &vulkan.fence);
 }
 
