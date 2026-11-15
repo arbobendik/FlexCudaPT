@@ -5661,34 +5661,28 @@ __device__ float3  hairDirection(float3  in_dir_13, float3  t_6, uint p_6, float
     return _S1357;
 }
 
-__device__ float3  shadowLift(float3  light_n_0, float light_offset_0, float3  start_3, float3  end_1)
-{
-    float _S1358 = sign_0(dot_0(light_n_0, start_3 - end_1));
-    return light_n_0 * make_float3 (_S1358 * light_offset_0);
-}
-
 __device__ float3  occluderTransmittance(float3  toward_1, float3  n_14, BSDFMaterial material_22, float coverage_1)
 {
-    float3  _S1359;
+    float3  _S1358;
     if((material_22.ior) == 1.0f)
     {
-        float3  _S1360 = straightThrough(toward_1, n_14, material_22);
-        _S1359 = _S1360;
+        float3  _S1359 = straightThrough(toward_1, n_14, material_22);
+        _S1358 = _S1359;
     }
     else
     {
-        _S1359 = make_float3 (0.0f);
+        _S1358 = make_float3 (0.0f);
     }
-    return _S1359 * make_float3 (coverage_1) + make_float3 (1.0f - coverage_1);
+    return _S1358 * make_float3 (coverage_1) + make_float3 (1.0f - coverage_1);
 }
 
 __device__ void offerShifted(Selection * sel_3, Reservoir r_3, Shift shifted_0, float mis_0)
 {
     Reservoir candidate_10 = r_3;
-    float3  _S1361 = shifted_0.f / make_float3 (shifted_0.jac);
-    (&candidate_10)->f = _S1361;
-    float _S1362 = r_3.jac * shifted_0.jac;
-    (&candidate_10)->jac = _S1362;
+    float3  _S1360 = shifted_0.f / make_float3 (shifted_0.jac);
+    (&candidate_10)->f = _S1360;
+    float _S1361 = r_3.jac * shifted_0.jac;
+    (&candidate_10)->jac = _S1361;
     offer(sel_3, candidate_10, make_float3 (mis_0) * shifted_0.f * make_float3 (r_3.w));
     return;
 }
@@ -5696,11 +5690,11 @@ __device__ void offerShifted(Selection * sel_3, Reservoir r_3, Shift shifted_0, 
 __device__ Reservoir finalize(Selection sel_4, float c_1)
 {
     Reservoir r_4 = sel_4.r;
-    float _S1363 = rgb_to_greyscale((&r_4)->f);
-    float _S1364 = sel_4.w_sum / _S1363;
-    bool _S1365 = _S1363 > 0.0f;
-    float _S1366 = _slang_select(_S1365, _S1364,0.0f);
-    (&r_4)->w = _S1366;
+    float _S1362 = rgb_to_greyscale((&r_4)->f);
+    float _S1363 = sel_4.w_sum / _S1362;
+    bool _S1364 = _S1362 > 0.0f;
+    float _S1365 = _slang_select(_S1364, _S1363,0.0f);
+    (&r_4)->w = _S1365;
     (&r_4)->c = c_1;
     return r_4;
 }
@@ -5712,15 +5706,15 @@ static __device__ float interpolate_0(float a_6, float b_9, float t_7)
 
 __device__ float confidenceCap(float duplicated_0)
 {
-    float _S1367 = interpolate_0(20.0f, 1.0f, (F32_pow((duplicated_0), (0.10000000149011612f))));
-    return _S1367;
+    float _S1366 = interpolate_0(20.0f, 1.0f, (F32_pow((duplicated_0), (0.10000000149011612f))));
+    return _S1366;
 }
 
 __device__ float2  temporalWeights(float c_2, float p_c_0, float c_t_0, float p_t_0, float g_previous_0, float g_current_0)
 {
-    float _S1368 = c_2 * p_c_0;
-    float _S1369 = c_t_0 * p_t_0;
-    return make_float2 (_S1368 / (_S1368 + c_t_0 * g_previous_0), _S1369 / (_S1369 + c_2 * g_current_0));
+    float _S1367 = c_2 * p_c_0;
+    float _S1368 = c_t_0 * p_t_0;
+    return make_float2 (_S1367 / (_S1367 + c_t_0 * g_previous_0), _S1368 / (_S1368 + c_2 * g_current_0));
 }
 
 __device__ float pairShare(float c_n_0, float c_pair_0, float c_sum_0)
@@ -5740,18 +5734,18 @@ __device__ float canonicalWeight(float share_1, float c_pair_2, float p_c_1, flo
 
 __device__ Shift walk_hook(Domain dom_2, Reservoir r_5, bool replay_2, float scale_2, Selection * sel_5)
 {
-    Domain _S1370 = dom_2;
-    Reservoir _S1371 = r_5;
-    Shift _S1372 = walk_0(&_S1370, &_S1371, replay_2, scale_2, sel_5);
-    return _S1372;
+    Domain _S1369 = dom_2;
+    Reservoir _S1370 = r_5;
+    Shift _S1371 = walk_0(&_S1369, &_S1370, replay_2, scale_2, sel_5);
+    return _S1371;
 }
 
 __device__ Shift shift_hook(Domain dom_3, Reservoir r_6)
 {
-    Domain _S1373 = dom_3;
-    Reservoir _S1374 = r_6;
-    Shift _S1375 = shift_0(&_S1373, &_S1374);
-    return _S1375;
+    Domain _S1372 = dom_3;
+    Reservoir _S1373 = r_6;
+    Shift _S1374 = shift_0(&_S1372, &_S1373);
+    return _S1374;
 }
 
 #undef Matrix
