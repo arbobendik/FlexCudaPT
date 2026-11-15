@@ -5,7 +5,7 @@
 #undef Matrix
 struct FKHit { float2 uv; unsigned instance_index, triangle_index, is_point_light; float distance; };
 struct FKRay { float3 origin, unit_direction; };
-struct FKMedium { float3 scatter, extinction; };
+struct FKMedium { float3 scatter, extinction; float g; };
 struct FKSurface {
     float3 smooth_n, geometry_n; float geometry_offset; BSDFMaterial material; bool skip; unsigned random_state;
     float coverage; bool encloses; FKMedium volume; unsigned fills; float3 hair;
@@ -32,8 +32,8 @@ static __device__ float fcptMajorant(unsigned filling);
 static __device__ bool fcptVaryingUsed();
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
 static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance,
-    unsigned* random_state, float3* weight, float3* glowed, float3* scatter, float3* extinction, unsigned depth,
-    unsigned lobe, bool camera);
+    unsigned* random_state, float3* weight, float3* glowed, float3* scatter, float3* extinction, float* g,
+    unsigned depth, unsigned lobe, bool camera);
 static __device__ float3 fcptHitPosition(FKHit hit);
 static __device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, unsigned triangle);
 static __device__ LightNode fcptLightBounds(unsigned n);

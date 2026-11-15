@@ -21,13 +21,13 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR }; // MEDIUM and CURVES no program takes: a
-// scene's varying media and strands
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE }; // MEDIUM and CURVES no
+// program takes: a scene's varying media and strands; PHASE marks a volume's Henyey-Greenstein asymmetry
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent, glow, hair;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase;
 };
 static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
@@ -760,7 +760,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f,
         used(ANISOTROPIC) && top > 18 ? stack[16].x : 0,
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
-        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0));
+        used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0),
+        used(PHASE) && top > 21 ? stack[21].x : 0);
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1097,13 +1098,13 @@ float3 environment(Scene* scene, float3 direction, Ray ray) {
         point, -direction, false, ray, info).emissive;
 }
 
-// Scattering and extinction coefficients of a medium, none by default
-struct Medium { float3 scatter, extinction; };
-static const Medium NO_MEDIUM = {float3(0), float3(0)};
+// Scattering and extinction coefficients and Henyey-Greenstein g of a medium, none by default
+struct Medium { float3 scatter, extinction; float g = 0; };
+static const Medium NO_MEDIUM = {float3(0), float3(0), 0};
 // Of the volume filling the inside of a surface, behind its faces
 Medium volume(Surface surface) {
     return Medium(surface.scatter * surface.density,
-        (surface.scatter + float3(1, 1, 1) - surface.absorption) * surface.density);
+        (surface.scatter + float3(1, 1, 1) - surface.absorption) * surface.density, surface.phase);
 }
 // Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
 uint fills(Scene* scene, uint instance, uint triangle) {
@@ -1257,7 +1258,7 @@ FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, ui
     const bool passes = surface.transparency > 0 || used(TRANSLUCENT) && rgb_to_greyscale(surface.translucent) > 0;
     return {surface.normal, face, hair || passes ? 0.0f : geometryOffsetAt(scene, at, face, position), material, false,
         random_state,
-        surface.coverage, enclosed, {filled.scatter, filled.extinction},
+        surface.coverage, enclosed, {filled.scatter, filled.extinction, filled.g},
         enclosed ? fills(scene, at.instance, at.triangle) : NONE, surface.hair};
 }
 struct VkScene : IScene {
@@ -1321,15 +1322,15 @@ struct VkScene : IScene {
     bool hairUsed() { return used(HAIR); }
     FKMedium cameraMedium(float3 direction, float distance, out uint filling) {
         const Medium medium = fcpt.cameraMedium(scene, direction, distance, filling);
-        return {medium.scatter, medium.extinction};
+        return {medium.scatter, medium.extinction, medium.g};
     }
     float trackMedium(uint filling, float3 origin, float3 dir, float distance, inout uint random_state,
-        inout float3 weight, inout float3 glowed, inout float3 scatter, inout float3 extinction, uint depth, uint lobe,
-        bool camera) {
-        Medium medium = Medium(scatter, extinction);
+        inout float3 weight, inout float3 glowed, inout float3 scatter, inout float3 extinction, inout float g,
+        uint depth, uint lobe, bool camera) {
+        Medium medium = Medium(scatter, extinction, g);
         const float along = track(scene, medium, filling, origin, dir, distance, random_state, weight, glowed,
             Ray(camera, false, lobe, float(depth), distance));
-        scatter = medium.scatter, extinction = medium.extinction;
+        scatter = medium.scatter, extinction = medium.extinction, g = medium.g;
         return along;
     }
     float3 hitPosition(FKHit hit) { return fcpt.hitPosition(scene, scene.vertices, nativeHit(hit)); }
