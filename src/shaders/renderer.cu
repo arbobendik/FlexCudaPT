@@ -551,6 +551,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(TRANSLUCENT) break;
         CASE(SHEEN) break;
         CASE(ANISOTROPIC) break;
+        CASE(PHASE) break;
         CASE(HAIR) top[-1] = normalize(transform(scene, tbn.rows[0], 1, info)) * top[-1].x; break; // Its fiber
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
@@ -729,7 +730,8 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         used(ANISOTROPIC) && top - stack > 18 ? stack[17].x : 0,
         used(ANISOTROPIC) && top - stack > 18 ? stack[18] : make_float3(0, 0, 0),
         used(MEDIUM) && top - stack > 19 ? stack[19] : make_float3(0, 0, 0),
-        used(HAIR) && top - stack > 20 ? stack[20] : make_float3(0, 0, 0)};
+        used(HAIR) && top - stack > 20 ? stack[20] : make_float3(0, 0, 0),
+        used(PHASE) && top - stack > 21 ? stack[21].x : 0};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics, as Cycles'
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -1080,13 +1082,14 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
 }
 
 __device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y), expf(a.z)); }
-// Scattering and extinction coefficients of a homogeneous medium, none by default; of one varying from point to point,
-// those where it was entered, carried beside the key of its material, whose owner is the instance it fills, else NONE
-struct Medium { float3 scatter, extinction; };
+// Scattering and extinction coefficients of a homogeneous medium and its phase's Henyey-Greenstein asymmetry, none by
+// default; of one varying from point to point, those where it was entered, carried beside the key of its material,
+// whose owner is the instance it fills, else NONE
+struct Medium { float3 scatter, extinction; float g; };
 // Of the volume filling the inside of a surface, behind its faces
 __device__ Medium volume(const Surface& surface) {
     return {surface.scatter * surface.density,
-        (surface.scatter + make_float3(1, 1, 1) - surface.absorption) * surface.density};
+        (surface.scatter + make_float3(1, 1, 1) - surface.absorption) * surface.density, surface.phase};
 }
 // Of the volume behind a face of an instance's triangle: of one varying, its material's key, else NONE
 __device__ unsigned fills(const Scene& scene, unsigned instance, unsigned triangle) {
