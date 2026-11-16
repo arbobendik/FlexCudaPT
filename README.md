@@ -23,15 +23,16 @@ node trees resolve to a smooth, normal mapped or bumped normal, albedo, metallic
 IOR per hit, with coat, sheen (the Sheen BSDF's Ashikhmin distribution as Ashikhmin's velvet), anisotropy, translucency,
 subsurface scattering, Principled Hair or the old Hair BSDF, and the Toon BSDF as reciprocal toon lobes, diffuse or
 glossy, and their volumes to media that absorb, scatter by their Henyey-Greenstein anisotropy and emit, constant or
-varying by their node trees and, in a smoke simulation's domain, by its density, color, flame, heat and temperature
-grids as Principled Volume's attributes, Volume Info and Attribute nodes read them. The world's volume fills the scene,
-homogeneous and emitting nothing, and lights emit by their node trees. A world that varies by direction is sampled
-toward its bright parts, as lights are, unless Sample World Light is off in its Flex panel of the world properties.
-Script nodes' OSL computes values by arithmetic and math; a script using what Flex does not translate yet (branches,
-loops, globals, closures, textures) is refused by name. Panoramic cameras, OpenVDB volumes and true displacement are not
-supported; displacement shades as a bump. Max samples, max bounces, paths per sample and, with OptiX, denoising are set
-in the Flex panel of the render properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation, the number of
-spatial neighbors and the reuse of the last view's samples up to a camera jump.
+varying by their node trees and, in a smoke simulation's domain or a volume object, by their grids (a smoke domain's
+density, color, flame, heat and temperature, a volume object's float grids) as Principled Volume's attributes, Volume
+Info and Attribute nodes read them. The world's volume fills the scene, homogeneous and emitting nothing, and lights
+emit by their node trees. A world that varies by direction is sampled toward its bright parts, as lights are, unless
+Sample World Light is off in its Flex panel of the world properties. Script nodes' OSL computes values by arithmetic and
+math; a script using what Flex does not translate yet (branches, loops, globals, closures, textures) is refused by name.
+Panoramic cameras, a volume object's vector grids and true displacement are not supported; displacement shades as a
+bump. Max samples, max bounces, paths per sample and, with OptiX, denoising are set in the Flex panel of the render
+properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation, the number of spatial neighbors and the reuse
+of the last view's samples up to a camera jump.
 Camera properties include Cycles' depth of field and aperture settings, used in final renders and rendered camera views.
 The extension's preferences choose OptiX or Vulkan, which traces with ray queries on any GPU that has them and does not
 denoise. `make test` installs the build into Blender resources of its own and renders scenes headlessly with OptiX and
