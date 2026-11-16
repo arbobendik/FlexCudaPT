@@ -1807,6 +1807,93 @@ for settings.use_adaptive_domain in (False, True):
             preferences.device, seen, quarters(due))
     preferences.device = device
 bpy.context.window.scene = shown
+# A fire's domain, its inflow of smoke colored (1, 0.5, 0.25) and of fire, seen straight down over the domain, per
+# quarter of the view as the CPU reads its grids linearly: through Volume Info's color and density into a Volume
+# Absorption of 4 times the density, against a white sky, exp(-4 (1 - color) x density integrated down it) per channel,
+# its color unpremultiplied by its density once both are read; against a black sky, Volume Info's flame as a Principled
+# Volume's emission strength, the flame integrated down it, and a Principled Volume's blackbody at 1000 K times its
+# temperature grid, in luminance sigma T^4 / pi times Blender's 1e-6 integrated down it
+def burning():  # Its names its own, apart from the rows after it
+    fire = opened('fire', (1, 1, 1))
+    fire.render.resolution_x = fire.render.resolution_y = 16
+    fire.flex_samples = 1024
+    fire.camera = bpy.data.objects.new('fire', bpy.data.cameras.new('fire'))
+    fire.collection.objects.link(fire.camera)  # Over the domain, its inflow in the lower right quarter
+    fire.camera.location, fire.camera.data.type, fire.camera.data.ortho_scale = (0, 0, 2), 'ORTHO', 2
+    for name, size in (('fire domain', 2), ('fire inflow', 0.4)):
+        bm = bmesh.new()
+        bmesh.ops.create_cube(bm, size=size)
+        bm.to_mesh(mesh := bpy.data.meshes.new(name))
+        fire.collection.objects.link(bpy.data.objects.new(name, mesh))
+    domain, inflow = bpy.data.objects['fire domain'], bpy.data.objects['fire inflow']
+    inflow.parent, inflow.location, inflow.hide_render = domain, (0.4, -0.4, -0.6), True
+    settings = domain.modifiers.new('fluid', 'FLUID')
+    settings.fluid_type = 'DOMAIN'
+    settings = settings.domain_settings
+    settings.domain_type, settings.resolution_max, settings.cache_type = 'GAS', 32, 'REPLAY'
+    settings.cache_directory = bpy.app.tempdir + 'fire'
+    flow = inflow.modifiers.new('fluid', 'FLUID')
+    flow.fluid_type = 'FLOW'
+    flow.flow_settings.flow_type, flow.flow_settings.flow_behavior = 'BOTH', 'INFLOW'
+    flow.flow_settings.smoke_color = (1, 0.5, 0.25)
+    for frame in range(1, 9): fire.frame_set(frame)
+    evaluated = domain.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    grids = evaluated.modifiers['fluid'].domain_settings
+    n = numpy.array(grids.domain_resolution)
+    low, high = numpy.array(evaluated.bound_box).min(0), numpy.array(evaluated.bound_box).max(0)
+    inverse = numpy.array(evaluated.matrix_world.inverted())
+    u = (numpy.arange(96) + 0.5) / 96 * 2 - 1  # Down 96 x 96 points across the view at 200 depths, as T^4 needs
+    view = numpy.stack(numpy.broadcast_arrays(u[None, :, None], u[:, None, None], (numpy.arange(200) + 0.5) / 100 - 1),
+        -1)
+    g = (view @ inverse[:3, :3].T + inverse[:3, 3] - low) / (high - low)
+    inside = ((g >= 0) & (g <= 1)).all(-1)
+    x = g * n - 0.5
+    i = numpy.floor(x).astype(int)
+    linear = lambda values: sum(numpy.prod([numpy.where(c >> k & 1, x[..., k] - i[..., k], 1 - x[..., k] + i[..., k])
+        for k in range(3)], 0) * values.reshape(n[::-1])[tuple(numpy.clip(i[..., k] + (c >> k & 1), 0, n[k] - 1)
+        for k in (2, 1, 0))] for c in range(8)) * inside
+    rgba = numpy.array(grids.color_grid).reshape(-1, 4)
+    alpha = linear(rgba[:, 3])
+    color = numpy.stack([numpy.divide(linear(rgba[:, k]), alpha, out=numpy.zeros_like(alpha), where=alpha > 0)
+        for k in range(3)], -1)
+    density = linear(numpy.array(grids.density_grid))
+    temperature = 1000 * numpy.maximum(linear(numpy.array(grids.temperature_grid)), 0)
+    dues = {'absorbed': numpy.exp(-4 * ((1 - color) * density[..., None]).sum(2) / 100),
+        'flame': linear(numpy.array(grids.flame_grid)).sum(-1)[..., None] / 100,
+        'blackbody': (5.670374419e-8 * 1e-6 / math.pi * temperature ** 4).sum(-1)[..., None] / 100}
+    for name, due in dues.items():
+        domain.data.materials.clear()
+        domain.data.materials.append(material := bpy.data.materials.new(name))
+        nodes, links = material.node_tree.nodes, material.node_tree.links
+        nodes.remove(nodes['Principled BSDF'])
+        info, output = nodes.new('ShaderNodeVolumeInfo'), nodes['Material Output'].inputs['Volume']
+        if name == 'absorbed':
+            absorber, scaled = nodes.new('ShaderNodeVolumeAbsorption'), nodes.new('ShaderNodeMath')
+            scaled.operation, scaled.inputs[1].default_value = 'MULTIPLY', 4
+            links.new(info.outputs['Color'], absorber.inputs['Color'])
+            links.new(info.outputs['Density'], scaled.inputs[0])
+            links.new(scaled.outputs[0], absorber.inputs['Density'])
+            links.new(absorber.outputs[0], output)
+        else:
+            volume = nodes.new('ShaderNodeVolumePrincipled')
+            volume.inputs['Density'].default_value = 0
+            if name == 'flame': links.new(info.outputs['Flame'], volume.inputs['Emission Strength'])
+            else:
+                volume.inputs['Blackbody Intensity'].default_value = 1
+                volume.inputs['Temperature'].default_value = 1000
+            links.new(volume.outputs[0], output)
+        fire.world.node_tree.nodes['Background'].inputs['Color'].default_value = (*[float(name == 'absorbed')] * 3, 1)
+        due = numpy.stack([quarters(due[..., k]) for k in range(due.shape[-1])], -1)
+        assert due.max() > 0.01, (name, due)
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            seen = render(fire, 16)
+            seen = numpy.stack([quarters(seen[..., k]) for k in range(3)], -1)
+            if name != 'absorbed': seen = (seen @ numpy.array((0.2126, 0.7152, 0.0722)))[..., None]
+            tolerance = 0.02 if name == 'absorbed' else 0.04 * due.max()  # Of its transmittance, or of its glow
+            assert numpy.abs(seen - due).max() < tolerance, ('fire', name, preferences.device, seen, due)
+        preferences.device = device
+    bpy.context.window.scene = shown
+burning()
 # A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
 # 2002 fit it, from 4000 K to past 12000 K: a Blackbody node seen on an emitter of strength 1, its table filtered as
 # each backend filters it
