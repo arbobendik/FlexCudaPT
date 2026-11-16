@@ -30,6 +30,7 @@ static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 t
 static __device__ unsigned fcptLayers(FKHit hit);
 static __device__ float fcptMajorant(unsigned filling);
 static __device__ bool fcptVaryingUsed();
+static __device__ FKMedium fcptOutsideMedium(FKHit hit);
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling);
 static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 dir, float distance,
     unsigned* random_state, float3* weight, float3* glowed, float3* scatter, float3* extinction, float* g,

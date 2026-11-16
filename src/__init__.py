@@ -95,9 +95,9 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level, 'PHASE': lambda g: g}  # MEDIUM and
-# CURVES steps past every program's end, of a scene whose media vary from point to point, so the renderer tracks those
-# it fills alone, and of one with strands
+    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None}  # MEDIUM,
+# CURVES and WORLD steps past every program's end, of a scene whose media vary from point to point, so the renderer
+# tracks those it fills alone, of one with strands, and of one whose world has a volume
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1539,6 +1539,7 @@ class Flex(bpy.types.RenderEngine):
         self.varying = set()  # Of those, the ones whose volume varies: their bounds, made where they are, made anew
         self.volumes = {}  # Of each instance exported filling a volume, by its index: its triangles' BVH in the world and
         # its first triangle of a material filling it
+        self.box = 2 ** 32 - 1  # The instance of the world's box, none without a world volume
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
         self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
         # unit's place (first texel of tiles, key, texture, program's hint and steps, value); texels piped before bakes
@@ -2220,11 +2221,11 @@ class Flex(bpy.types.RenderEngine):
         # odd number of times, its first triangle of a material filling it, or none
         medium = next((self.slots[i][0] + first for i, (tree, first) in self.volumes.items()
             if inside(tree, matrix.translation - back * near)), 2 ** 32 - 1)
-        # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the camera's origin and its
-        # ray direction per NDC x, per NDC y and at the center (orthographic: the rays' offsets), then the thin lens and
-        # whether orthographic, and the near and far planes' depths.
-        self.requests.write(struct.pack(f'<3I2f{4 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
-            *settings, medium, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
+        # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the world's box, the
+        # camera's origin and its ray direction per NDC x, per NDC y and at the center (orthographic: the rays'
+        # offsets), then the thin lens and whether orthographic, and the near and far planes' depths.
+        self.requests.write(struct.pack(f'<3I2f{5 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
+            *settings, medium, self.box, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
         self.requests.flush()
         # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
         answer = self.answers.read(12)
