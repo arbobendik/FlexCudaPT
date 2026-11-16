@@ -1987,6 +1987,42 @@ def volumed():  # Volume objects
         empty.name, 'density')
     assert values.tolist() == [0] and size.tolist() == [1, 1, 1] and left() == kept, ('empty grid', values, kept, left())
     bpy.data.objects.remove(empty)
+    # A grid of two spheres of radius 0.05 6 apart at voxels of 0.01, 609^3 over its active box, stops the render naming
+    # its extent before its lattice is made: its few voxels read, their box measured
+    wide = bpy.data.node_groups.new('grid wide', 'GeometryNodeTree')
+    wide.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    line, spheres = wide.nodes.new('GeometryNodeMeshLine'), wide.nodes.new('GeometryNodePointsToVolume')
+    line.inputs['Count'].default_value, line.inputs['Offset'].default_value = 2, (6, 6, 6)
+    spheres.inputs['Resolution Mode'].default_value, spheres.inputs['Voxel Size'].default_value = 'Size', 0.01
+    spheres.inputs['Radius'].default_value = 0.05
+    wide.links.new(line.outputs[0], spheres.inputs['Points'])
+    wide.links.new(spheres.outputs[0], wide.nodes.new('NodeGroupOutput').inputs[0])
+    made.collection.objects.link(spread := bpy.data.objects.new('grid wide', bpy.data.volumes.new('grid wide')))
+    spread.modifiers.new('grid wide', 'NODES').node_group = wide
+    points = read(spread.evaluated_get(bpy.context.evaluated_depsgraph_get()), 'density')
+    index = numpy.column_stack((points['x'], points['y'], points['z']))
+    message = module['oversized'](spread.name, 'density', (index + points['extent'][:, None]).max(0) - index.min(0))
+    assert message and "'grid wide' spans 609 x 609 x 609 voxels" in message, ('wide grid', message)
+    bpy.data.objects.remove(spread)
+    # A volume object no Volume output fills, of no material or of a surface's, exports as Principled Volume's defaults
+    # fill it, byte for byte, its box's surface passing all light
+    alone, filled = opened('grid default', (1, 1, 1)), bpy.data.node_groups.new('grid default', 'GeometryNodeTree')
+    filled.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    unit, assigned = filled.nodes.new('GeometryNodeVolumeCube'), filled.nodes.new('GeometryNodeSetMaterial')
+    filled.links.new(unit.outputs[0], assigned.inputs['Geometry'])
+    filled.links.new(assigned.outputs[0], filled.nodes.new('NodeGroupOutput').inputs[0])
+    alone.collection.objects.link(plain := bpy.data.objects.new('grid default', bpy.data.volumes.new('grid default')))
+    plain.modifiers.new('grid default', 'NODES').node_group = filled
+    default = bpy.data.materials.new('grid default')
+    default.node_tree.nodes.remove(default.node_tree.nodes['Principled BSDF'])
+    default.node_tree.links.new(default.node_tree.nodes.new('ShaderNodeVolumePrincipled').outputs[0],
+        default.node_tree.nodes['Material Output'].inputs['Volume'])
+    piped = []
+    for material in (None, bpy.data.materials.new('grid surface'), default):
+        assigned.inputs['Material'].default_value = material
+        piped.append(exported().requests.getvalue())
+    assert piped[0] == piped[1] == piped[2], ('default volume', [len(bytes) for bytes in piped])
+    bpy.context.window.scene = made
     evaluated = volume.evaluated_get(bpy.context.evaluated_depsgraph_get())
     # The render's 32^3 grid's bounds, half a voxel of 2 / 31 past its outermost centres at ±1, not the viewport's 8^3
     low, high = numpy.full(3, -1 - 1 / 31), numpy.full(3, 1 + 1 / 31)
