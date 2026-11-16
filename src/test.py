@@ -2776,9 +2776,46 @@ for preferences.device in ('OPTIX', 'VULKAN'):
 sheened.inputs['Base Color'].default_value, sheened.inputs['IOR'].default_value = (1, 1, 1, 1), 1
 sheened.inputs['Sheen Weight'].default_value, sheened.inputs['Sheen Roughness'].default_value = 1, 0.5
 sheened.id_data.links.new(sheened.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
-furnace = render().mean(-1)[cosine > 0.15].mean()
-print('SHEEN furnace', furnace, flush=True)
-assert 0.99 <= furnace <= 1.002, 'sheen furnace'
+# The furnace twice, sized by 16 independent renders (the sphere alone in a different cell of a 4 x 4 canvas each): with
+# ReSTIR, as the scenes render, within 3 SD of one image, 0.014, of 1, which guards against reuse adding or losing
+# light; without it, where one image spreads 0.0005, within 0.0015 of the 0.9992 those renders read, which guards
+# the lobe's energy itself
+for preferences.device in ('OPTIX', 'VULKAN'):
+    furnaces = []
+    for scene.flex_restir in (True, False): furnaces.append(render().mean(-1)[cosine > 0.15].mean())
+    print('SHEEN furnace', preferences.device, 'ReSTIR on and off', furnaces, flush=True)
+    assert abs(furnaces[0] - 1) <= 0.014 and abs(furnaces[1] - 0.9992) <= 0.0015, ('sheen furnace',
+        preferences.device, furnaces)
+scene.flex_restir, preferences.device = True, device
+# The Sheen BSDF's Ashikhmin distribution, white on the same sphere: at each view cosine its
+# albedo, D G / (4 cos) by midpoint quadrature over the hemisphere, of its roughness s, the node's Roughness;
+# at s 0.6 almost none straight on and most of it toward the rim, on both backends; each pixel's over its area, as
+# the sheen's, the sky's 1 past the rim; each ring within 3 SD of one image, as 16 independent renders (the sphere
+# alone in a different cell of a 4 x 4 canvas each) spread
+def velveted():  # The Sheen BSDF's Ashikhmin distribution
+    def albedo(mu, s):  # D = exp(-cot² h / s²) / (pi s² sin⁴ h), G = min(1, 2 cos h min(cos v, cos l) / |v·h|)
+        view = numpy.array((math.sqrt(1 - mu * mu), 0, mu))
+        half = light + view
+        half /= numpy.linalg.norm(half, axis=-1, keepdims=True)
+        cos2 = half[..., 2] ** 2
+        d = numpy.exp(-cos2 / (1 - cos2) / s ** 2) / (math.pi * s ** 2 * (1 - cos2) ** 2)
+        g = numpy.minimum(1, 2 * half[..., 2] / numpy.abs(half @ view) * numpy.minimum(mu, light[..., 2]))
+        return (d * g / (4 * mu) * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512)
+    sheen.distribution = 'ASHIKHMIN'
+    sheened.id_data.links.new(sheen.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+    cosines = numpy.maximum(numpy.linspace(0, 1, 33), 1e-3)
+    for s in (0.6, 1):
+        sheen.inputs['Roughness'].default_value = s
+        due = numpy.interp(cosine, cosines, [albedo(mu, s) for mu in cosines])
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            seen = render().mean(-1)
+            for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+                ring = (cosine > low) & (cosine <= high)
+                print('VELVET', s, preferences.device, 'at cosines', low, high, seen[ring].mean(), 'albedo',
+                    due[ring].mean(), flush=True)
+                assert numpy.isclose(seen[ring].mean(), due[ring].mean(), rtol=0.03), ('velvet albedo', s, low)
+    preferences.device = device
+velveted()
 
 # Anisotropy under the white sky, seen in parallel at cosine 0.3 along x, on two rectangles 1 / 0.3 long along x, so
 # that each covers a square of the view: a white metal of roughness 0.5 and Principled Anisotropic 1 about Blender's
