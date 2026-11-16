@@ -1,7 +1,7 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, tempfile
 import hashlib, time, types, _cycles
-import threading
+import sys, threading
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -1586,6 +1586,10 @@ MEDIA = {}  # Of each material shade() resolved, its volume's absorption, densit
 GRIDS = {}  # Of the fluid domain shaded, its name and its grids by Cycles' attribute names
 media_key = lambda material: (material, GRIDS[None]) if GRIDS else material  # MEDIA's key, a domain's its own
 GRID_WAIT = 120  # Seconds a render's job waits for the main thread to read a volume's grids, as a script holds it
+def reading():  # Whether this thread is within a grid's read, whose temporary IDs have Blender update a viewport within
+    frame = sys._getframe(1)
+    while frame and frame.f_code is not lattice.__code__: frame = frame.f_back
+    return bool(frame)
 def on_main(f, volume):  # f() on the main thread, where reading a grid makes IDs; from a render's job handed over by a
     if threading.current_thread() is threading.main_thread(): return f()  # timer and waited for
     done, out = threading.Event(), []
@@ -1648,6 +1652,16 @@ def volume_grid(ob, name, frame, lattices):  # Its lattice at the point of its i
     values, low, size = lattices[ob.name, name][1]
     point = transform(ob.data.grids[name].matrix_object.inverted(), ('OBJECT',))
     return Grid(values, size.tolist(), ('DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size))
+def boxed(ob):  # The box a volume's bounds span, as the export reads a mesh: per corner of its 12 triangles its
+    # vertex, flat normal and texture space point, a tangent along a face, no UVs or colors
+    low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
+    corners = numpy.array([(i & 1, i >> 1 & 1, i >> 2) for i in range(8)], 'f')  # Faces of -z, z, -y, y, -x, x
+    faces = numpy.array(((0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)))
+    vertex, n = faces[:, (0, 1, 2, 0, 2, 3)].ravel(), 36
+    normal = numpy.repeat(numpy.array([[0, 0, -1], [0, 0, 1], [0, -1, 0], [0, 1, 0], [-1, 0, 0], [1, 0, 0]], 'f'), 6, 0)
+    tangent = numpy.repeat(numpy.array([[1, 0, 0, 1]] * 4 + [[0, 1, 0, 1]] * 2, 'f'), 6, 0).reshape(-1, 3, 4)
+    return (low + corners * (high - low)).ravel(), vertex, numpy.arange(n), numpy.zeros(n // 3, 'i'), normal.ravel(), \
+        numpy.zeros(2 * n, 'f'), tangent, numpy.zeros((n, 4), 'f'), corners, ((low + high) / 2, (high - low) / 2)
 def fluid(ob, frame, lattices):  # Of a gas domain or a volume object, its name, grids' names and how a grid is read
     if ob.type == 'VOLUME':
         ob.data.grids.load()
@@ -2176,7 +2190,8 @@ class Flex(bpy.types.RenderEngine):
                 and not (instance.parent.instance_type == 'COLLECTION' and ob.name in members(
                 instance.parent.instance_collection))) or not (instance.is_instance or ob.show_instancer_for_render) \
                 and (ob.particle_systems or ob.instance_type in ('VERTS', 'FACES')) or not instance.is_instance \
-                and ob.parent and ob.parent.instance_type in ('VERTS', 'FACES') or ob.type not in {'MESH', 'LIGHT'} \
+                and ob.parent and ob.parent.instance_type in ('VERTS', 'FACES') \
+                or ob.type not in {'MESH', 'LIGHT', 'VOLUME'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
             if box and not (ob.type == 'LIGHT' and ob.data.type == 'SUN'): held(instance, ob)
@@ -2196,7 +2211,9 @@ class Flex(bpy.types.RenderEngine):
                 # its mesh and materials piped once
                 record(i, instance, ob, entries[key])
                 continue
-            if ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
+            if ob.type == 'VOLUME':  # Its box's, apart from Blender's data, which the export leaves as it is
+                sealing, (co, vertex, loops, index, normal, uv, tangent, color, orco, space) = False, boxed(ob)
+            elif ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
                 sealing = closed(ob, mesh)  # Read while the evaluated mesh lives
                 # Generated coordinates of the undeformed mesh, through the orco layer Cycles reads, which the mesh
@@ -2247,6 +2264,7 @@ class Flex(bpy.types.RenderEngine):
                     attribute.data.foreach_get('color', values.ravel())
                     color = values[vertex] if attribute.domain == 'POINT' else values
                 ob.to_mesh_clear()
+            if ob.type != 'LIGHT':
                 positions = transformed(co.reshape(-1, 3)[vertex[loops]], instance.matrix_world).reshape(-1, 3, 3)
                 if (filled := numpy.flatnonzero(numpy.isin(index, [k for k, slot in enumerate(ob.material_slots)
                         if slot.material and (output := slot.material.node_tree.get_output_node('CYCLES'))
@@ -2612,6 +2630,7 @@ class Flex(bpy.types.RenderEngine):
         self.end_result(result)
 
     def view_update(self, context, depsgraph):
+        if reading(): return  # Of the IDs a grid's read makes, within the export reading it
         self.restart()
         self.start(depsgraph)
 
