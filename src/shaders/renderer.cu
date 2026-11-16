@@ -505,12 +505,16 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
-#ifdef EXTENDED // Whether an instance holds strands
+#ifdef EXTENDED // Whether an instance holds strands; a camera with its panorama
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
+#define VIEW(camera) camera, camera##Projection
+#define VIEWING(camera) const Camera& camera, const Projection& camera##Projection
 #else // Nor varying media and strands
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
     && used(code))
 #define STRAND(scene, i) false
+#define VIEW(camera) camera
+#define VIEWING(camera) const Camera& camera
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
@@ -1030,7 +1034,7 @@ __device__ float2 aperture(const Lens& lens, unsigned state) {
 }
 
 // Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray
-__device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixel, uint3 size, unsigned seed) {
+__device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, uint3 size, unsigned seed) {
     unsigned state = stream(seed, STREAM_JITTER);
     const float x = pixel % size.x + random(state);
     const float y = pixel / size.x + random(state);
@@ -1330,12 +1334,12 @@ WALK_CALLABLE(__direct_callable__walk, true)
     !(replay) ? 0 : &(scene) == (const Scene*)optixGetSbtDataPointer() ? 1 : 2, &(dom), &(r), scale, &(sel))
 
 // The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
-__device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
+__device__ Shift shift(const Scene& scene, VIEWING(camera), int pixel, uint3 size, const Reservoir& r) {
     Selection sel;
     if (r.w <= 0.0f) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
-    const Domain dom = pixelDomain(scene, camera, pixel, size, r.seed);
+    const Domain dom = pixelDomain(scene, VIEW(camera), pixel, size, r.seed);
     if (dom.hit.triangle == NONE) {
         return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
     }
@@ -1343,7 +1347,7 @@ __device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint
 }
 
 // Pixel coordinates a camera sees a position at
-__device__ float2 project(const Camera& camera, float3 position, uint3 size) {
+__device__ float2 project(VIEWING(camera), float3 position, uint3 size) {
     const float3 d = position - camera.origin;
     if (camera.lens.ortho)
         return make_float2((1 + dot(d - camera.z, camera.x) / dot(camera.x, camera.x)) * 0.5f * size.x,
@@ -1367,17 +1371,17 @@ __device__ int previousValid(const Scene& scene, float2 q, uint3 size) {
 
 // Backprojection of the camera motion, or the dual motion vector of the surface previously seen there (Sec. 6.4)
 __device__ int temporalNeighbor(const Scene& scene, uint3 p, uint3 size, const Domain& dom) {
-    const float2 q = project(scene.previousCamera, dom.x1, size);
+    const float2 q = project(VIEW(scene.previousCamera), dom.x1, size);
     const int index = previousValid(scene, q, size);
     if (index < 0) {
         return -1;
     }
-    const Domain previous = pixelDomain(scene, scene.previousCamera, index, size, scene.previous[index].seed);
+    const Domain previous = pixelDomain(scene, VIEW(scene.previousCamera), index, size, scene.previous[index].seed);
     if (previous.hit.instance == dom.hit.instance
         && length(previous.x1 - dom.x1) <= length(dom.x1 - dom.x0) * 8.0f / size.x) {
         return index;
     }
-    const float2 moved = project(scene.camera, previous.x1, size);
+    const float2 moved = project(VIEW(scene.camera), previous.x1, size);
     return previousValid(scene, make_float2(p.x + floorf(q.x) + 1.0f - moved.x, p.y + floorf(q.y) + 1.0f - moved.y),
         size);
 }
@@ -1491,7 +1495,7 @@ extern "C" __global__ void __raygen__initial() {
     for (unsigned i = 0u; i < scene.settings.paths; i++) {
         Reservoir r = {};
         r.seed = stream(pixel_seed, i);
-        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
+        const Domain dom = pixelDomain(scene, VIEW(scene.camera), index, size, r.seed);
         if (dom.hit.triangle != NONE) {
             WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
         } else {
@@ -1515,13 +1519,16 @@ extern "C" __global__ void __raygen__denoise() {
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
     const float4 sum = scene.accumulation[index];
     scene.mean[index] = make_float4(sum.x / sum.w, sum.y / sum.w, sum.z / sum.w, 1.0f);
-    const Domain dom = pixelDomain(scene, scene.camera, index, size, index);
+    const Domain dom = pixelDomain(scene, VIEW(scene.camera), index, size, index);
     const Camera& last = scene.denoisedCamera;
+#ifdef EXTENDED
+    const Projection& lastProjection = scene.denoisedCameraProjection;
+#endif
     const unsigned seen = dom.hit.triangle == NONE ? NONE : key(scene, dom.hit);
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
         : hitPosition(scene, scene.previousVertices, dom.hit);
-    const float2 then = project(last, before, size);
-    scene.flow[index] = project(scene.camera, dom.x1, size) - then;
+    const float2 then = project(VIEW(last), before, size);
+    scene.flow[index] = project(VIEW(scene.camera), dom.x1, size) - then;
     const int x = int(floorf(then.x)), y = int(floorf(then.y));
     const float3 back = cross(last.x, last.y);
     scene.trust[index] = dot(back, before - last.origin) * dot(back, last.z) > 0.0f && x >= 0 && y >= 0
@@ -1543,7 +1550,7 @@ extern "C" __global__ void __raygen__temporal() {
     const Scene& before = scene.frame == 0u ? *(const Scene*)((const char*)&scene - 2 * RECORD_STRIDE) : scene;
     int q = scene.previous[index].c > 0.0f ? int(index) : -1;
     if (!still) {
-        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
+        const Domain dom = pixelDomain(scene, VIEW(scene.camera), index, size, r.seed);
         q = dom.hit.triangle == NONE ? -1 : temporalNeighbor(before, p, size, dom);
     }
     if (q >= 0) {
@@ -1551,8 +1558,9 @@ extern "C" __global__ void __raygen__temporal() {
         // Optionally lower the confidence cap where the previous frame duplicated samples (Sec. 5), this biases the estimate
         const float duplicated = scene.settings.decorrelation ? scene.duplication[q] : 0.0f;
         const float c_t = fminf(temporal.c, confidenceCap(duplicated));
-        const Shift to_current = still ? Shift{temporal.f, 1.0f} : shift(scene, scene.camera, index, size, temporal);
-        const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(before, scene.previousCamera, q, size, r);
+        const Shift to_current = still ? Shift{temporal.f, 1.0f}
+            : shift(scene, VIEW(scene.camera), index, size, temporal);
+        const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(before, VIEW(scene.previousCamera), q, size, r);
         const float p_c = rgb_to_greyscale(r.f);
         const float p_t = rgb_to_greyscale(temporal.f);
         Selection sel = {};
