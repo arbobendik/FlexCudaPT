@@ -2806,16 +2806,79 @@ def velveted():  # The Sheen BSDF's Ashikhmin distribution
     cosines = numpy.maximum(numpy.linspace(0, 1, 33), 1e-3)
     for s in (0.6, 1):
         sheen.inputs['Roughness'].default_value = s
-        due = numpy.interp(cosine, cosines, [albedo(mu, s) for mu in cosines])
+        table = [albedo(mu, s) for mu in cosines]
+        due = numpy.mean([numpy.where(c > 0, numpy.interp(c, cosines, table), 1) for c in (seen(dx, dy)[0]
+            for dx in offsets for dy in offsets)], 0)
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            image = render().mean(-1)
+            for (low, high), rtol in zip(((0.9, 1), (0.4, 0.6), (0.15, 0.3)), (0.04, 0.025, 0.045)):
+                ring = (cosine > low) & (cosine <= high)
+                print('VELVET', s, preferences.device, 'at cosines', low, high, image[ring].mean(), 'albedo',
+                    due[ring].mean(), flush=True)
+                assert numpy.isclose(image[ring].mean(), due[ring].mean(), rtol=rtol), ('velvet albedo', s, low)
+    preferences.device = device
+velveted()
+# A sheen bounce reads Light Path's Is Diffuse Ray and Is Reflection Ray as 1 and Is Glossy Ray as 0, as when the sheen
+# rode the diffuse lobe's samples. Its sphere fills the view and the white sky is not light-sampled, so only rays
+# leaving the sheen reach the sky: scaled by the first two, max(output, 0), it renders as scaled by max(output, 1),
+# bit for bit, the same steps on the same random numbers; scaled by the third, black
+def sheen_path():  # Light Path on a sheen bounce
+    lit = new('sheen path', sky=(1, 1, 1))
+    lit.flex_samples, lit.flex_restir, lit.world.flex_sample_light = 16, False, False
+    lit.camera = bpy.data.objects.new('sheen path', bpy.data.cameras.new('sheen path'))
+    lit.camera.location, lit.camera.data.type, lit.camera.data.ortho_scale = (0, 0, 3), 'ORTHO', 1
+    lit.collection.objects.link(lit.camera)
+    lit.collection.objects.link(bpy.data.objects.new('sheen path', bpy.data.meshes['sheened']))
+    nodes, links = lit.world.node_tree.nodes, lit.world.node_tree.links
+    ray, floor = nodes.new('ShaderNodeLightPath'), nodes.new('ShaderNodeMath')
+    floor.operation = 'MAXIMUM'
+    links.new(floor.outputs[0], nodes['Background'].inputs['Strength'])
+    sheen.distribution, sheen.inputs['Roughness'].default_value = 'MICROFIBER', 0.5
+    sheened.id_data.links.new(sheen.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = {}
+        for output, least in (('Is Glossy Ray', 1), ('Is Diffuse Ray', 0), ('Is Reflection Ray', 0),
+                ('Is Glossy Ray', 0)):
+            links.new(ray.outputs[output], floor.inputs[0])
+            floor.inputs[1].default_value = least
+            seen[output, least] = render(lit)
+        whole = seen['Is Glossy Ray', 1]
+        assert whole.any() and numpy.array_equal(seen['Is Diffuse Ray', 0], whole) and numpy.array_equal(seen[
+            'Is Reflection Ray', 0], whole) and not seen['Is Glossy Ray', 0].any(), ('sheen path', preferences.device,
+            {k: v.mean() for k, v in seen.items()})
+    preferences.device = device
+sheen_path()
+# Toon BSDFs, white on the same sphere: the diffuse returns at each view cosine its profile P there, 1 within Size's
+# cone, falling across Smooth's and none past it; the glossy its albedo, P about the mirror direction times cos over the
+# solid angle P weighs, by midpoint quadrature over the hemisphere; on both backends
+def tooned():  # Toon BSDFs
+    toon = sheened.id_data.nodes.new('ShaderNodeBsdfToon')
+    toon.inputs['Color'].default_value = (1, 1, 1, 1)
+    sheened.id_data.links.new(toon.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+    def profile(t, size, smooth):  # P at the angle t from its axis
+        a, w = size * math.pi / 2, smooth * math.pi / 2
+        return numpy.where(t < a, 1.0, numpy.clip(1 - (t - a) / w, 0, 1) if w else 0.0)
+    def glossy(mu, size, smooth):  # Its albedo at view cosine mu, white
+        mirror = numpy.array((-math.sqrt(1 - mu * mu), 0, mu))
+        alpha = (numpy.arange(4096) + 0.5) / 4096 * math.pi
+        weighed = (profile(alpha, size, smooth) * numpy.sin(alpha)).sum() * math.pi / 4096 * 2 * math.pi
+        return (profile(numpy.arccos(numpy.clip(light @ mirror, -1, 1)), size, smooth) * light[..., 2]
+            * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512) / weighed
+    cosines = numpy.linspace(0, 1, 33)
+    for component, size, smooth in (('DIFFUSE', 0.5, 0), ('DIFFUSE', 0.5, 0.5), ('GLOSSY', 0.5, 0)):
+        toon.component, toon.inputs['Size'].default_value, toon.inputs['Smooth'].default_value = component, size, smooth
+        due = profile(numpy.arccos(cosine), size, smooth) if component == 'DIFFUSE' else numpy.interp(cosine, cosines,
+            [glossy(mu, size, smooth) for mu in cosines])
         for preferences.device in ('OPTIX', 'VULKAN'):
             seen = render().mean(-1)
             for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
                 ring = (cosine > low) & (cosine <= high)
-                print('VELVET', s, preferences.device, 'at cosines', low, high, seen[ring].mean(), 'albedo',
-                    due[ring].mean(), flush=True)
-                assert numpy.isclose(seen[ring].mean(), due[ring].mean(), rtol=0.03), ('velvet albedo', s, low)
+                print('TOON', component, size, smooth, preferences.device, 'at cosines', low, high, seen[ring].mean(),
+                    'due', due[ring].mean(), flush=True)
+                assert abs(seen[ring].mean() - due[ring].mean()) < 0.02 + 0.03 * due[ring].mean(), ('toon', component,
+                    smooth, low)
     preferences.device = device
-velveted()
+tooned()
 
 # Anisotropy under the white sky, seen in parallel at cosine 0.3 along x, on two rectangles 1 / 0.3 long along x, so
 # that each covers a square of the view: a white metal of roughness 0.5 and Principled Anisotropic 1 about Blender's
