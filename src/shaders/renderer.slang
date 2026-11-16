@@ -1306,8 +1306,6 @@ struct VkScene : IScene {
         }
         return FKHit(hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance);
     }
-    // No environment CDF
-    float3 shadowTransmittance(FKRay ray, float l) { return float3(0, 0, 0); }
     // Transmittance toward the light, zero if blocked
     float3 shadowTransmittanceIn(FKRay ray, float l, float3 extinction, uint filling, uint random_state, uint depth,
         uint lobe, bool surface, float length, float width, FKHit left, FKHit light) {
