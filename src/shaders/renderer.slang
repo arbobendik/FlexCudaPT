@@ -45,6 +45,12 @@ struct Hit { uint triangle, instance; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 static const int PAIRING_SIZES[] = {254, 230, 210};
 static const uint QUEUE_HEADER = 3 + 2 * 40; // The shift queue's dispatch size, jobs per bin and jobs written per bin
+// The passes by their indices in renderer.h's PROGRAMS
+static const uint PASS_INITIAL = 0, PASS_TEMPORAL = 1, PASS_COUNT = 2, PASS_PREPASS = 3, PASS_SHIFT = 4,
+    PASS_SPATIAL = 5, PASS_DUPLICATES = 6, PASS_BAKE = 7, PASS_LIGHTS = 8;
+// Workgroups of a launch one high per row of them, the least count in x Vulkan guarantees, as FlexKernels' queue
+// decodes them and optix_stubs.h dispatches them
+static const uint ROW_GROUPS = 65535;
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
     float2* uvs; float4* colors; float4* tangents; Instance* instances; float4* attributes; float* passes;
@@ -1703,23 +1709,6 @@ int temporalNeighbor(Scene* scene, uint3 p, uint3 size, Domain dom) {
         size);
 }
 
-// Index of the partner of p in reuse texture t, randomly flipped, transposed and offset every frame (Sec. 3.2),
-// -1 off the image
-int partner(Scene* scene, uint3 p, uint3 size, uint t) {
-    const int texture = PAIRING_SIZES[t];
-    const uint random = hash(scene.frame * 3u + t);
-    const int flip_x = (random & 1u) != 0u ? -1 : 1;
-    const int flip_y = (random & 2u) != 0u ? -1 : 1;
-    const bool transpose = (random & 4u) != 0u;
-    const int x = (rem(int(transpose ? p.y : p.x) * flip_x + int((random >> 8u) & 255u), texture) + texture) % texture;
-    const int y = (rem(int(transpose ? p.x : p.y) * flip_y + int((random >> 16u) & 255u), texture) + texture) % texture;
-    int8_t* delta = scene.pairing[t] + 2 * (y * texture + x);
-    const int qx = int(p.x) + (transpose ? delta[1] * flip_y : delta[0] * flip_x);
-    const int qy = int(p.y) + (transpose ? delta[0] * flip_x : delta[1] * flip_y);
-    const bool valid = qx >= 0 && qy >= 0 && qx < int(size.x) && qy < int(size.y);
-    return valid ? qy * int(size.x) + qx : -1;
-}
-
 // A texel of the bake the frame numbers, its top bit the pass: the albedo the program's surface takes there
 // Tiles of 16 x 16 texels over a triangle's UVs: owned by one triangle in the first pass, padding baked
 // texels in the second
@@ -1891,56 +1880,6 @@ void temporal(uint3 p, uint3 size, Scene* scene) {
     scene.temporal[index] = r;
 }
 
-// Paired shifts (Sec. 3): the pixel's sample into the domain of its partner in the reuse texture of the launch's layer
-void shifts(uint3 p, uint3 size, Scene* scene) {
-    const uint index = p.y * size.x + p.x;
-    const int q = partner(scene, p, size, p.z);
-    scene.shifts[3 * index + p.z] = q < 0 ? Shift(float3(0.0f, 0.0f, 0.0f), 0.0f)
-        : shift(scene, scene.camera, q, size, scene.temporal[index]);
-}
-
-// Paired spatial reuse with pairwise MIS (Sec. 3) and shading with vector-valued weights (Sec. 6.3)
-void spatial(uint3 p, uint3 size, Scene* scene) {
-    const uint index = p.y * size.x + p.x;
-    const Reservoir r = scene.temporal[index];
-    float count = 0.0f;
-    float c_sum = r.c;
-    for (uint t = 0u; t < scene.settings.neighbors; t++) {
-        const int q = partner(scene, p, size, t);
-        if (q >= 0) {
-            count += 1.0f;
-            c_sum += scene.temporal[q].c;
-        }
-    }
-    // Confidence of the current pixel is split evenly across the pairs
-    const float c_pair = r.c / max(count, 1.0f);
-    const float p_c = rgb_to_greyscale(r.f);
-    float canonical_mis = count == 0.0f ? 1.0f : 0.0f;
-    Selection sel = {};
-    sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 2u);
-    for (uint t = 0u; t < scene.settings.neighbors; t++) {
-        const int q = partner(scene, p, size, t);
-        if (q >= 0) {
-            const Reservoir neighbor = scene.temporal[q];
-            const Shift to_here = scene.shifts[3 * q + t];
-            const Shift to_there = scene.shifts[3 * index + t];
-            // Pair's share of all confidence (Sec. 3.2)
-            const float share = (neighbor.c + c_pair) / c_sum;
-            if (p_c > 0.0f) {
-                // Pairwise MIS weight of the canonical sample, g_there its target shifted to the neighbor
-                canonical_mis += share * c_pair * p_c / (c_pair * p_c + neighbor.c * rgb_to_greyscale(to_there.f));
-            }
-            // Pairwise MIS weight of the neighbor's sample, g_here its target shifted to the current pixel
-            const float p_n = rgb_to_greyscale(neighbor.f);
-            offerShifted(sel, neighbor, to_here,
-                share * neighbor.c * p_n / (neighbor.c * p_n + c_pair * rgb_to_greyscale(to_here.f)));
-        }
-    }
-    offerShifted(sel, r, Shift(r.f, 1.0f), canonical_mis);
-    scene.previous[index] = finalize(sel, c_sum);
-    scene.accumulation[index] = scene.accumulation[index] + float4(sel.color, 0);
-}
-
 // Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
 void duplicates(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
@@ -1963,20 +1902,25 @@ static const uint RECORD_STRIDE = 704; // From one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
-// The launch's raygen program at its index; a group's threads in a row for launches one high
+// The launch's raygen program at its index; a group's threads in a row for launches one high, its workgroups in rows of
+// ROW_GROUPS
 void run(uint3 thread, uint3 group, uint index) {
     const uint3 size = uint3(launch.width, launch.height, launch.depth);
-    const uint3 p = size.y == 1 && size.z == 1 ? uint3(group.x * 64 + index, 0, 0) : thread;
-    if (any(p >= size)) return;
+    const uint3 p = size.y == 1 && size.z == 1 ? uint3((group.y * ROW_GROUPS + group.x) * 64 + index, 0, 0) : thread;
     Scene* scene = &launch.record.scene;
+    // The spatial round's count and queue: every invocation of a workgroup, past the image too, which have no job,
+    // for their barriers
+    if (launch.record.program == PASS_COUNT) return restir_count(VkScene(scene), thread, index);
+    if (launch.record.program == PASS_PREPASS) return restir_prepass(VkScene(scene), thread, index);
+    if (any(p >= size)) return;
     switch (launch.record.program) {
-        case 0: initial(p, size, scene); break;
-        case 1: temporal(p, size, scene); break;
-        case 2: shifts(p, size, scene); break;
-        case 3: spatial(p, size, scene); break;
-        case 4: duplicates(p, size, scene); break;
-        case 5: if (used(BAKED)) bake(p, scene); break; // Only for scenes that bake
-        case 6: lights(p, scene); break;
+        case PASS_INITIAL: initial(p, size, scene); break;
+        case PASS_TEMPORAL: temporal(p, size, scene); break;
+        case PASS_SHIFT: restir_shift(VkScene(scene), uint3(group.xy, 0), index); break; // Jobs of the queue, 64 a bin
+        case PASS_SPATIAL: restir_spatial(VkScene(scene), thread); break;
+        case PASS_DUPLICATES: duplicates(p, size, scene); break;
+        case PASS_BAKE: if (used(BAKED)) bake(p, scene); break; // Only for scenes that bake
+        case PASS_LIGHTS: lights(p, scene); break;
         default: denoise(p, size, scene); break;
     }
 }
