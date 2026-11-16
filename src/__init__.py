@@ -77,9 +77,9 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
     return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
 
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
-# emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD and SKY steps past every program's end,
-# of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of one with strands, of
-# one whose world has a volume, and of one whose world it samples by its luminance
+# emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD, SKY and PANORAMA steps past every
+# program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of one
+# with strands, of one whose world has a volume, of one whose world it samples by its luminance and of a panoramic camera
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
@@ -101,7 +101,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
-    'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b)}
+    'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1812,6 +1812,16 @@ def sampling(scene, follows):
     return scene.flex_samples, scene.flex_reuse_samples if reuse else scene.flex_samples, \
         scene.flex_jump_distance if follows else -1, math.cos(scene.flex_jump_angle)
 
+PANORAMAS = ('EQUIRECTANGULAR', 'EQUIANGULAR_CUBEMAP_FACE', 'MIRRORBALL', 'FISHEYE_EQUIDISTANT', 'FISHEYE_EQUISOLID',
+    'FISHEYE_LENS_POLYNOMIAL', 'CENTRAL_CYLINDRICAL')  # Blender's panoramas, numbered from 1 in the renderer
+
+def panorama(camera):  # A camera's panorama: its number, 0 for none, range of directions over u and v, and shift
+    data = camera and camera.type == 'CAMERA' and camera.data
+    if data and data.type == 'CUSTOM': raise ValueError('Flex: custom cameras need OSL, which Flex does not run')
+    if not data or data.type != 'PANO': return 0, *[0.0] * 6
+    raise ValueError(f"Flex: the {data.bl_rna.properties['panorama_type'].enum_items[data.panorama_type].name} "
+        'panorama is not supported')
+
 def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blades, rotation and anamorphic ratio
     if camera is None or camera.type != 'CAMERA' or camera.data.type != 'PERSP' or not camera.data.dof.use_dof:
         return 0, 0, 0, 0, 1
@@ -1859,6 +1869,7 @@ class Flex(bpy.types.RenderEngine):
         self.volumes = {}  # Of each instance exported filling a volume, by its index: its triangles' BVH in the world and
         # its first triangle of a material filling it
         self.box = 2 ** 32 - 1  # The instance of the world's box, none without a world volume
+        self.panoramic = False  # Whether the scene's camera is panoramic, which a step tells the renderer
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
         self.kept = {}  # Of the scene last piped, the rows a later export may take again, by their keys
         self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
@@ -1902,7 +1913,11 @@ class Flex(bpy.types.RenderEngine):
         lattices = vars(self).setdefault('lattices', {})
         if any(update.is_updated_geometry and (isinstance(update.id, bpy.types.Volume) or getattr(update.id, 'type', '')
                 == 'VOLUME') for update in depsgraph.updates): lattices.clear()
-        same = visible == self.visible and not references & changed
+        viewer = depsgraph.scene_eval.camera
+        panoramic = bool(viewer and viewer.type == 'CAMERA' and viewer.data.type == 'PANO')
+        if panoramic and device() == 'VULKAN':  # Its descent on Vulkan hangs NVIDIA's driver 620.70.06
+            raise ValueError('Flex: panoramic cameras render on OptiX only, not on Vulkan')
+        same = visible == self.visible and not references & changed and panoramic == self.panoramic
         if same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
         moved = same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera, bpy.types.Object,
@@ -1919,6 +1934,7 @@ class Flex(bpy.types.RenderEngine):
             or update.is_updated_transform and not camera(update) or isinstance(update.id, bpy.types.Image))
             for update in depsgraph.updates)
         self.visible = None  # Until piped: an export that raises exports anew next
+        self.panoramic = panoramic
         scene = depsgraph.scene_eval
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
         # coordinates (the points in the mesh's texture space), object coordinates (the points in the object's space),
@@ -2576,7 +2592,7 @@ class Flex(bpy.types.RenderEngine):
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
-            ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0])) if any]
+            ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic)) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
                     self.hairs or any(  # textures, and hair tables,
@@ -2673,7 +2689,7 @@ class Flex(bpy.types.RenderEngine):
         # offsets), then the thin lens and whether orthographic, the near and far planes' depths, and its panorama.
         self.requests.write(struct.pack(f'<3I2f{5 + len(settings)}I20fI6f', REQUEST, *sampling, launches, width,
             height, *settings, medium, self.box, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far,
-            0, *[0.0] * 6))
+            *panorama(camera)))
         self.requests.flush()
         # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
         answer = self.answers.read(12)
