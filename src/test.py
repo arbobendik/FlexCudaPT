@@ -1753,6 +1753,69 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     assert abs(reused - seen[True].mean()) < 0.002, ('hidden light in fog ReSTIR', preferences.device, reused,
         seen[True].mean())
 preferences.device = device
+# A smoke simulation's domain, turned and stretched, of a pure absorber of density 20 times its density grid, seen
+# straight down against a white sky: each quarter of the view passes exp(-20 x the grid's integral down it), the grid
+# read linearly over the box its evaluated mesh spans, as the CPU reads it here; its smoke over its inflow, the grid x
+# fastest; and so again of the adaptive domain, its grid over its active box alone
+shown = bpy.context.window.scene
+smoke = opened('smoke', (1, 1, 1))
+smoke.render.resolution_x = smoke.render.resolution_y = 16
+smoke.camera = bpy.data.objects.new('smoke', bpy.data.cameras.new('smoke'))
+smoke.collection.objects.link(smoke.camera)
+smoke.camera.location.z, smoke.camera.data.type, smoke.camera.data.ortho_scale = 2, 'ORTHO', 4
+for name, size in (('smoke domain', 2), ('smoke inflow', 0.4)):
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=size)
+    bm.to_mesh(mesh := bpy.data.meshes.new(name))
+    smoke.collection.objects.link(bpy.data.objects.new(name, mesh))
+domain, inflow = bpy.data.objects['smoke domain'], bpy.data.objects['smoke inflow']
+domain.rotation_euler.z, domain.scale.y, inflow.parent, inflow.location = 0.5, 1.5, domain, (0.5, -0.5, -0.6)
+inflow.hide_render = True
+settings = domain.modifiers.new('fluid', 'FLUID')
+settings.fluid_type = 'DOMAIN'
+settings = settings.domain_settings
+settings.domain_type, settings.resolution_max, settings.cache_type = 'GAS', 32, 'REPLAY'
+flow = inflow.modifiers.new('fluid', 'FLUID')
+flow.fluid_type = 'FLOW'
+flow.flow_settings.flow_type, flow.flow_settings.flow_behavior = 'SMOKE', 'INFLOW'
+domain.data.materials.append(absorber := bpy.data.materials.new('smoke'))
+nodes = absorber.node_tree.nodes
+nodes.remove(nodes['Principled BSDF'])
+volume = nodes.new('ShaderNodeVolumePrincipled')
+volume.inputs['Color'].default_value, volume.inputs['Density'].default_value = (0, 0, 0, 1), 20
+volume.inputs['Density Attribute'].default_value = 'density'
+absorber.node_tree.links.new(volume.outputs[0], nodes['Material Output'].inputs['Volume'])
+quarters = lambda image: image.reshape(2, len(image) // 2, 2, len(image) // 2).mean((1, 3))
+u = (numpy.arange(32) + 0.5) / 32 * 4 - 2  # Down 32 x 32 points across the view at 200 depths
+world = numpy.stack(numpy.broadcast_arrays(u[None, :, None], u[:, None, None], (numpy.arange(200) + 0.5) / 100 - 1), -1)
+for settings.use_adaptive_domain in (False, True):
+    settings.cache_directory = bpy.app.tempdir + f'smoke {settings.use_adaptive_domain}'
+    for frame in range(1, 9): smoke.frame_set(frame)
+    evaluated = domain.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    inverse = numpy.array(evaluated.matrix_world.inverted())  # Turned and stretched once evaluated
+    local = world @ inverse[:3, :3].T + inverse[:3, 3]
+    grids = evaluated.modifiers['fluid'].domain_settings
+    n = numpy.array(grids.domain_resolution)
+    grid = numpy.array(grids.density_grid).reshape(n[::-1])
+    low, high = numpy.array(evaluated.bound_box).min(0), numpy.array(evaluated.bound_box).max(0)
+    weights = numpy.array([(grid.sum(tuple({0, 1, 2} - {k})) * (numpy.arange(n[2 - k]) + 0.5)).sum() / grid.sum()
+        / n[2 - k] for k in (2, 1, 0)])
+    centroid = low + weights * (high - low)
+    assert abs(centroid[:2] - (0.5, -0.5)).max() < 0.1 and centroid[2] < 0, ('smoke inflow', centroid)
+    g = (local - low) / (high - low)  # Read linearly, extended at its faces
+    inside = ((g >= 0) & (g <= 1)).all(-1)
+    x = g * n - 0.5
+    i = numpy.floor(x).astype(int)
+    read = sum(numpy.prod([numpy.where(c >> k & 1, x[..., k] - i[..., k], 1 - x[..., k] + i[..., k]) for k in range(3)],
+        0) * grid[tuple(numpy.clip(i[..., k] + (c >> k & 1), 0, n[k] - 1) for k in (2, 1, 0))] for c in range(8))
+    due = numpy.exp(-20 * (read * inside).sum(-1) / 100)
+    assert numpy.ptp(quarters(due)) > 0.05, ('smoke quarters', quarters(due))
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = quarters(render(smoke, 16).mean(2))
+        assert numpy.abs(seen - quarters(due)).max() < 0.02, ('smoke', settings.use_adaptive_domain,
+            preferences.device, seen, quarters(due))
+    preferences.device = device
+bpy.context.window.scene = shown
 # A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
 # 2002 fit it, from 4000 K to past 12000 K: a Blackbody node seen on an emitter of strength 1, its table filtered as
 # each backend filters it
