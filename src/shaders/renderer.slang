@@ -63,6 +63,9 @@ struct Scene {
     float4* hairs; // Per level of a hair table
     uint environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
     float2* environmentCdf; uint cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
+    uint* queue; // The shift queue
+    Scene* anchor; // The anchor's scene, in its record
+    uint width, height; // The image's size, which shift passes launched over their queue need
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -1844,7 +1847,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 
 // A pass's record: its raygen program's number, then its scene
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 688; // From one record to the next
+static const uint RECORD_STRIDE = 704; // From one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
