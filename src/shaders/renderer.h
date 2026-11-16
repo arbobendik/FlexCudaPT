@@ -28,9 +28,12 @@ struct Op { unsigned code; union { float3 value; struct { unsigned texel, width,
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
+// The shift queue (FlexLight's ShiftQueue): the indirect dispatch's size, then jobs per bin and jobs written per bin
+// of its 40 bins, then the jobs, bin after bin
+constexpr unsigned QUEUE_HEADER = 3 + 2 * 40;
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 688;
+constexpr unsigned RECORD_STRIDE = 704;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -124,4 +127,7 @@ struct Scene {
     // and absorptions; its lobes' weights
     unsigned environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
     float2* environmentCdf; unsigned cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
+    unsigned* queue; // The shift queue
+    const Scene* anchor; // The anchor's scene, in its record
+    unsigned width, height; // The image's size, which shift passes launched over their queue need
 };
