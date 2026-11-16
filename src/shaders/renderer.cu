@@ -1366,11 +1366,12 @@ __device__ int temporalNeighbor(const Scene& scene, uint3 p, uint3 size, const D
     if (index < 0) {
         return -1;
     }
-    const float3 previous = pixelDomain(scene, scene.previousCamera, index, size, scene.previous[index].seed).x1;
-    if (length(previous - dom.x1) <= length(dom.x1 - dom.x0) * 8.0f / size.x) {
+    const Domain previous = pixelDomain(scene, scene.previousCamera, index, size, scene.previous[index].seed);
+    if (previous.hit.instance == dom.hit.instance
+        && length(previous.x1 - dom.x1) <= length(dom.x1 - dom.x0) * 8.0f / size.x) {
         return index;
     }
-    const float2 moved = project(scene.camera, previous, size);
+    const float2 moved = project(scene.camera, previous.x1, size);
     return previousValid(scene, make_float2(p.x + floorf(q.x) + 1.0f - moved.x, p.y + floorf(q.y) + 1.0f - moved.y),
         size);
 }
