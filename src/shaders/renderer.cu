@@ -1126,6 +1126,14 @@ __device__ float3 passing(const Scene& scene, Medium medium, unsigned material, 
     return passed;
 }
 
+// Medium entered leaving a volume: the world's inside its box, else none
+__device__ Medium outside(const Scene& scene, unsigned instance) {
+    if (!used(WORLD) || scene.box == NONE || instance == scene.box) return Medium{};
+    const unsigned first = scene.instances[scene.box].first;
+    return volume(shade(scene, scene.box, first, 0, 0, cornerNormals(scene.normals, scene.instances[scene.box],
+        first)[0], make_float3(0, 0, 1), Ray{false, false, LOBE_NONE, 0.0f, 0.0f}));
+}
+
 // Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
 __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3 toward, float left, Medium medium,
     unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted, unsigned skip = NONE,
@@ -1155,7 +1163,7 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
                 .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
                 const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? Medium{} : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
         }
