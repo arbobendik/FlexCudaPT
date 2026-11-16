@@ -1695,22 +1695,40 @@ def sealed():
 
 # The material's surface as rows, one per layer from the top: the row of its surface, filled by its volume, under that
 # of a coat emitting in its place; black without an output; passing rays straight through without a surface shader
-def shade(material, program):
-    output = material.node_tree.get_output_node('CYCLES')
-    if not output: return [program(BLACK)]
-    surface = resolve(output.inputs['Surface'])  # Its volume, or the medium its subsurface scattering fills
-    SIDE['volume'] = True
-    filled = resolve(output.inputs['Volume']) if output.inputs['Volume'].is_linked else None
+class Default:  # An input at its value, linked to nothing, as resolve() reads it
+    links, is_output, enabled, id_data = (), False, True, types.SimpleNamespace(animation_data=None)
+    def __init__(self, name, type, value): self.name, self.type, self.default_value = name, type, value
+    def path_from_id(self, prop): return prop
+class Inputs(list):  # A node's inputs, by order and by name
+    def __contains__(self, name): return any(input.name == name for input in self)
+    def __getitem__(self, key): return next(i for i in self if i.name == key) if isinstance(key, str) else \
+        super().__getitem__(key)
+# The medium of a volume object that no Volume output fills: Principled Volume at its defaults, a node of which
+# Blender keeps none
+DEFAULT_VOLUME = Default('Volume', 'SHADER', None)
+DEFAULT_VOLUME.links = [types.SimpleNamespace(is_valid=True, is_muted=False, from_socket=DEFAULT_VOLUME,
+    from_node=types.SimpleNamespace(type='PRINCIPLED_VOLUME', mute=False, outputs=[DEFAULT_VOLUME], inputs=Inputs(
+    Default(*input) for input in (('Color', 'RGBA', (0.5, 0.5, 0.5, 1)), ('Color Attribute', 'STRING', ''),
+    ('Density', 'VALUE', 1), ('Density Attribute', 'STRING', 'density'), ('Anisotropy', 'VALUE', 0),
+    ('Absorption Color', 'RGBA', (0, 0, 0, 1)), ('Emission Strength', 'VALUE', 0), ('Emission Color', 'RGBA',
+    (1, 1, 1, 1)), ('Blackbody Intensity', 'VALUE', 0), ('Blackbody Tint', 'RGBA', (1, 1, 1, 1)),
+    ('Temperature', 'VALUE', 1000), ('Temperature Attribute', 'STRING', 'temperature')))))]
+def shade(material, program, filler=False):  # Of a volume object, a filler, no surface, and, where no Volume output
+    output = material and material.node_tree.get_output_node('CYCLES')  # fills it, the default volume
+    if not output and not filler: return [program(BLACK)]
+    filling = output.inputs['Volume'] if output and output.inputs['Volume'].is_linked else filler and DEFAULT_VOLUME
+    surface = resolve(output.inputs['Surface']) if output and not filler else BLACK  # Its volume, or the medium its
+    SIDE['volume'] = True  # subsurface scattering fills
+    filled = filling and resolve(filling)
     SIDE['volume'] = False
     volume, glow = (filled[10:13], filled[4]) if filled else (surface[10:13], 0)
     phase = filled and nonzero(filled[16]) and ('PHASE', filled[16])  # Its phase's asymmetry, marked, else none
     MEDIA[media_key(material)] = *volume, glow
-    if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
-        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
+    if output and output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as
+        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # Flex moves no geometry: a Bump
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
-            vector(1, 1, 0)), {}, 'NORMAL')  # along it, where the surface reads the normal
-    if output.inputs['Volume'].is_linked and not output.inputs['Surface'].is_linked:
-        surface = [*BLACK[:9], 0, *BLACK[10:]]
+            vector(1, 1, 0)), {}, 'NORMAL')  # of the height along it, where the surface reads the normal
+    if filling and (filler or not output.inputs['Surface'].is_linked): surface = [*BLACK[:9], 0, *BLACK[10:]]
     layers = [surface[:10]] if len(surface) == 19 or not surface[19] else [[*surface[19][:4], surface[4],
         *surface[19][5:]],
         [*surface[:4], 0, *surface[5:10]]]
@@ -2065,9 +2083,11 @@ class Flex(bpy.types.RenderEngine):
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
-        def shaded_row(material):  # Its row, apart for the open objects of a material with subsurface scattering
-            SEALING['asked'] = False
-            row = shade(material, program)
+        slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')  # A
+        # volume object's slots, or the one empty slot the default volume fills
+        def shaded_row(material, filler=False):  # Its row, apart for the open objects of a material with subsurface
+            SEALING['asked'] = False  # scattering
+            row = shade(material, program, filler)
             if SEALING['asked']: subsurface.add(material)
             return row
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
@@ -2266,8 +2286,8 @@ class Flex(bpy.types.RenderEngine):
                 ob.to_mesh_clear()
             if ob.type != 'LIGHT':
                 positions = transformed(co.reshape(-1, 3)[vertex[loops]], instance.matrix_world).reshape(-1, 3, 3)
-                if (filled := numpy.flatnonzero(numpy.isin(index, [k for k, slot in enumerate(ob.material_slots)
-                        if slot.material and (output := slot.material.node_tree.get_output_node('CYCLES'))
+                if (filled := numpy.flatnonzero(numpy.isin(index, [k for k, slot in enumerate(slotted(ob)) if ob.type
+                        == 'VOLUME' or slot.material and (output := slot.material.node_tree.get_output_node('CYCLES'))
                         and output.inputs['Volume'].is_linked]))).size:
                     volumes[i] = BVHTree.FromPolygons(positions.reshape(-1, 3).tolist(),
                         numpy.arange(3 * len(positions)).reshape(-1, 3).tolist()), int(filled[0])
@@ -2279,12 +2299,12 @@ class Flex(bpy.types.RenderEngine):
                 SEALING['closed'] = sealing
                 GRIDS.clear()
                 GRIDS.update(fluid(ob, scene.frame_current, lattices))
-                for slot in ob.material_slots:  # Of a material with units baked over this object's UVs or filling a
+                for slot in slotted(ob):  # Of a material with units baked over this object's UVs or filling a
                     # domain's grids, its own row
-                    if variant(slot.material) in rows and not (GRIDS and slot.material) \
+                    if variant(slot.material) in rows and not (GRIDS and (slot.material or ob.type == 'VOLUME')) \
                             or (slot.material, ob.name) in rows:
                         continue
-                    mask = numpy.isin(index, [k for k, other in enumerate(ob.material_slots)
+                    mask = numpy.isin(index, [k for k, other in enumerate(slotted(ob))
                         if other.material == slot.material])
                     t = uv[mask]
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
@@ -2293,11 +2313,11 @@ class Flex(bpy.types.RenderEngine):
                         scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
-                    row = shaded_row(slot.material)
+                    row = shaded_row(slot.material, ob.type == 'VOLUME')
                     rows[(slot.material, ob.name) if current['made'] or GRIDS else variant(slot.material)] = row
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
-                    for slot in ob.material_slots] or [rows[None]]
+                    for slot in slotted(ob)] or [rows[None]]
             # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
             if ob.type == 'LIGHT':
                 light = ob.data
@@ -2379,10 +2399,10 @@ class Flex(bpy.types.RenderEngine):
                 # points
                 inside = co.reshape(-1, 3).min(0), co.reshape(-1, 3).max(0)
                 spaced = [(k - space[0]) / (2 * space[1]) + 0.5 for k in inside]
-                kinds = [medium(ob.material_slots[k].material, {'POSITION': (positions.reshape(-1, 3).min(0),
+                kinds = [medium(slotted(ob)[k].material, {'POSITION': (positions.reshape(-1, 3).min(0),
                     positions.reshape(-1, 3).max(0)), 'OBJECT': inside, 'GENERATED': (numpy.minimum(*spaced),
-                    numpy.maximum(*spaced))}) for k in sorted(set(index.tolist())) if k < len(ob.material_slots)
-                    and ob.material_slots[k].material]
+                    numpy.maximum(*spaced))}) for k in sorted(set(index.tolist())) if k < len(slotted(ob))
+                    and (slotted(ob)[k].material or ob.type == 'VOLUME')]
                 exact = kinds and kinds[0] < 0 and kinds.count(kinds[0]) == len(kinds)  # As all its volumes are, alike
                 media = (*space[0], *space[1]), kinds[0] if exact else max([0, *map(abs, kinds)])
                 if media[1]: varying.add(i)
