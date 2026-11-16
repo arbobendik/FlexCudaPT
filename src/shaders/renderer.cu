@@ -511,9 +511,9 @@ __device__ bool used(unsigned code) {
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
 #define VIEW(camera) camera, camera##Projection
 #define VIEWING(camera) const Camera& camera, const Projection& camera##Projection
-#else // Nor varying media and strands
+#else // Nor varying media, strands and panoramas
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
-    && used(code))
+    && code != PANORAMA && used(code))
 #define STRAND(scene, i) false
 #define VIEW(camera) camera
 #define VIEWING(camera) const Camera& camera
