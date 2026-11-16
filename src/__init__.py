@@ -2712,9 +2712,10 @@ class Flex(bpy.types.RenderEngine):
             if inside(tree, matrix.translation - back * near)), 2 ** 32 - 1)
         # Request on stdin: sampling, launches, size, settings, the volume the camera is in, the world's box, the
         # camera's origin and its ray direction per NDC x, per NDC y and at the center (orthographic: the rays'
-        # offsets), then the thin lens and whether orthographic, and the near and far planes' depths.
-        self.requests.write(struct.pack(f'<3I2f{5 + len(settings)}I20f', REQUEST, *sampling, launches, width, height,
-            *settings, medium, self.box, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far))
+        # offsets), then the thin lens and whether orthographic, the near and far planes' depths, and its panorama.
+        self.requests.write(struct.pack(f'<3I2f{5 + len(settings)}I20fI6f', REQUEST, *sampling, launches, width,
+            height, *settings, medium, self.box, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far,
+            0, *[0.0] * 6))
         self.requests.flush()
         # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
         answer = self.answers.read(12)
