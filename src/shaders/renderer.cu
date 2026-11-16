@@ -509,12 +509,38 @@ __device__ bool used(unsigned code) {
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
 #define VIEW(camera) camera, camera##Projection
 #define VIEWING(camera) const Camera& camera, const Projection& camera##Projection
+#define PANORAMIC(camera) (used(PANORAMA) && camera##Projection.type != 0)
 #else // Nor varying media, strands and panoramas
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
     && code != PANORAMA && used(code))
 #define STRAND(scene, i) false
 #define VIEW(camera) camera
 #define VIEWING(camera) const Camera& camera
+#define PANORAMIC(camera) false
+#endif
+#ifdef EXTENDED // A panorama's direction at u, v of its window and back: x forward, y left, z up
+__device__ float3 panorama(const Projection& p, float u, float v) {
+    const float* r = p.range;
+    const float phi = r[0] * u + r[1], theta = r[2] * v + r[3]; // Equirectangular: longitude and polar angle
+    return make_float3(sinf(theta) * cosf(phi), sinf(theta) * sinf(phi), cosf(theta));
+}
+__device__ float2 unpanorama(const Projection& p, float3 d) {
+    const float* r = p.range;
+    const float phi = atan2f(d.y, d.x);
+    return make_float2((phi - r[1]) / r[0], (acosf(d.z / length(d)) - r[3]) / r[2]);
+}
+// From the camera's panorama frame to the world and back
+__device__ float3 world(const Camera& c, float3 d) {
+    return normalize(cross(c.y, c.x)) * d.x - normalize(c.x) * d.y + normalize(c.y) * d.z;
+}
+__device__ float3 local(const Camera& c, float3 d) {
+    return make_float3(dot(d, normalize(cross(c.y, c.x))), -dot(d, normalize(c.x)), dot(d, normalize(c.y)));
+}
+// The angle a pixel at u, v spans: the chord to the farther of its next pixels' directions, du and dv on
+__device__ float spread(const Projection& p, float u, float v, float du, float dv) {
+    const float3 d = normalize(panorama(p, u, v));
+    return fmaxf(length(normalize(panorama(p, u + du, v)) - d), length(normalize(panorama(p, u, v + dv)) - d));
+}
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
@@ -1041,6 +1067,10 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     const float3 plane = camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z;
     float3 direction = camera.lens.ortho ? normalize(cross(camera.y, camera.x)) : normalize(plane);
     float3 origin = camera.lens.ortho ? camera.origin + plane : camera.origin;
+#ifdef EXTENDED
+    const float u = x / size.x + cameraProjection.shift[0], v = 1 - y / size.y + cameraProjection.shift[1];
+    if (PANORAMIC(camera)) direction = normalize(world(camera, panorama(cameraProjection, u, v)));
+#endif
     if (camera.lens.aperture > 0) {
         const float2 point = aperture(camera.lens, state);
         const float3 offset = normalize(camera.x) * point.x + normalize(camera.y) * point.y;
@@ -1048,7 +1078,8 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
         origin = origin + offset;
     }
-    const float along = dot(direction, normalize(cross(camera.y, camera.x))); // Clipped: from the near plane to the far
+    const float along = PANORAMIC(camera) ? 1 : dot(direction, normalize(cross(camera.y, camera.x))); // Clipped: from
+    // the near plane to the far, along a panorama's rays
     origin = origin + direction * (camera.lens.near / along);
     float reach = (camera.lens.far - camera.lens.near) / along;
     const float3 start = origin;
@@ -1061,8 +1092,14 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
+#ifdef EXTENDED // A panorama's by its pixel's span
+    return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
+        camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : PANORAMIC(camera)
+        ? spread(cameraProjection, u, v, 1.0f / size.x, 1.0f / size.y) : across / length(plane)};
+#else
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
         camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : across / length(plane)};
+#endif
 }
 
 // World: equirectangular texture along the direction
@@ -1349,6 +1386,13 @@ __device__ Shift shift(const Scene& scene, VIEWING(camera), int pixel, uint3 siz
 // Pixel coordinates a camera sees a position at
 __device__ float2 project(VIEWING(camera), float3 position, uint3 size) {
     const float3 d = position - camera.origin;
+#ifdef EXTENDED
+    if (PANORAMIC(camera)) {
+        const float2 uv = unpanorama(cameraProjection, local(camera, d));
+        return make_float2((uv.x - cameraProjection.shift[0]) * size.x,
+            (1 - uv.y + cameraProjection.shift[1]) * size.y);
+    }
+#endif
     if (camera.lens.ortho)
         return make_float2((1 + dot(d - camera.z, camera.x) / dot(camera.x, camera.x)) * 0.5f * size.x,
             (1 - dot(d - camera.z, camera.y) / dot(camera.y, camera.y)) * 0.5f * size.y);
@@ -1531,8 +1575,8 @@ extern "C" __global__ void __raygen__denoise() {
     scene.flow[index] = project(VIEW(scene.camera), dom.x1, size) - then;
     const int x = int(floorf(then.x)), y = int(floorf(then.y));
     const float3 back = cross(last.x, last.y);
-    scene.trust[index] = dot(back, before - last.origin) * dot(back, last.z) > 0.0f && x >= 0 && y >= 0
-        && x < int(size.x) && y < int(size.y) && scene.previousSeen[y * size.x + x] == seen;
+    scene.trust[index] = (PANORAMIC(scene.denoisedCamera) || dot(back, before - last.origin) * dot(back, last.z) > 0.0f)
+        && x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y) && scene.previousSeen[y * size.x + x] == seen;
     scene.seen[index] = seen;
 }
 
