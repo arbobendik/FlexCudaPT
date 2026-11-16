@@ -1304,8 +1304,6 @@ struct VkScene : IScene {
         }
         return FKHit(hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance);
     }
-    // No environment CDF
-    float3 shadowTransmittance(FKRay ray, float l) { return float3(0, 0, 0); }
     // Transmittance toward the light, zero if blocked
     float3 shadowTransmittanceIn(FKRay ray, float l, float3 extinction, uint filling, uint random_state, uint depth,
         uint lobe, bool surface, float length, float width, FKHit left, FKHit light) {
@@ -1400,6 +1398,8 @@ struct VkScene : IScene {
     float3 env_map_sample(float3 dir, uint depth, uint lobe) {
         return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
     }
+    // Blender's z up
+    [ForceInline] bool zUp() { return true; }
     // Emitters emit on both sides
     [ForceInline] bool twoSided() { return true; }
     float4 environmentCdf(uint2 cell) { return float4(0, 0, 0, 0); }
