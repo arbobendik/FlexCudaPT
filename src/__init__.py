@@ -96,7 +96,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None}  # MEDIUM,
+    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None}  # MEDIUM,
 # CURVES and WORLD steps past every program's end, of a scene whose media vary from point to point, so the renderer
 # tracks those it fills alone, of one with strands, and of one whose world has a volume
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
@@ -261,7 +261,12 @@ original = lambda node: node.id_data.original.nodes[node.name] if getattr(node, 
 
 def texture(source, textures, texels):
     if isinstance(source, ImageRead): source = source.node
-    if isinstance(source, Bake): return textures[source]
+    if isinstance(source, Grid) and source not in textures:  # Halves, eight to a texel
+        textures[source] = (sum(map(len, texels)) // 4, source.size[0], source.size[1] | source.size[2] << 16,
+            numpy.full(4, source.values.mean()))
+        halves = source.values.astype(numpy.float16)
+        texels.append(numpy.concatenate((halves, numpy.zeros(-len(halves) % 8, halves.dtype))).view('f'))
+    if isinstance(source, (Grid, Bake)): return textures[source]
     ramp = source.type not in ('TEX_IMAGE', 'TEX_ENVIRONMENT')
     key = original(source) if ramp else (source.image, getattr(source, 'extension', 'REPEAT'))
     if ramp: SOURCES[key] = source  # The latest evaluated node of the table, which reading it again reads
@@ -334,6 +339,9 @@ class ImageRead:  # Samples Cycles can merge share whether their alpha is read
 
 class Bake:  # Texture the bake pass fills with a unit's value
     pass
+
+class Grid:  # A fluid domain's grid: its values, x fastest, its resolution, and its point in [0, 1] over its box
+    def __init__(self, values, size, point): self.values, self.size, self.point = values, size, point
 
 READS = ('IMAGE', 'ALPHA', 'IMAGE_LINEAR', 'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC', 'BAKED')
 # Steps affine in their operands, by which of these vary: a unit of them alone commutes with interpolating its reads
@@ -448,7 +456,7 @@ def bounds(expression, boxes, memo):
         return value, value
     if id(expression) in memo: return memo[id(expression)]
     name, *operands = expression
-    parts = [] if name in (*READS, 'UNASSOCIATE') or name in boxes else [bounds(o, boxes, memo)
+    parts = [] if name in (*READS, 'UNASSOCIATE', 'GRID') or name in boxes else [bounds(o, boxes, memo)
         for o in operands[1:3]] if name == 'NOISE' else [bounds(o, boxes, memo) for o in operands]  # A noise's range
     # whatever its point
     product = lambda a, b: (numpy.min(c := [x * y for x in a for y in b], 0), numpy.max(c, 0))
@@ -467,6 +475,7 @@ def bounds(expression, boxes, memo):
         texels = image_texels(operands[0][-1].node)
         texels = numpy.concatenate((texels[texels[:, 3] > 0, :3], numpy.zeros((1, 3))))
         box = texels.min(0), texels.max(0)
+    elif name == 'GRID': box = numpy.full(3, operands[1].values.min()), numpy.full(3, operands[1].values.max())
     elif name == 'ADD': box = parts[0][0] + parts[1][0], parts[0][1] + parts[1][1]
     elif name == 'SUBTRACT': box = parts[0][0] - parts[1][1], parts[0][1] - parts[1][0]
     elif name == 'MULTIPLY': box = product(*parts)
@@ -513,7 +522,7 @@ def bounds(expression, boxes, memo):
 # gathers its emission
 GLOW_COLLISIONS = 4
 def medium(material, boxes):
-    absorption, density, scatter, glow = MEDIA.get(material, (0, 0, 0, 0))
+    absorption, density, scatter, glow = MEDIA.get(media_key(material), (0, 0, 0, 0))
     extinction = 'SUBTRACT', ('ADD', scatter, 1), absorption  # Over the density
     # Principled Volume's, s + k max(0, 1 - s) of its color s and k = 1 - A, bounded as max(s, k + s (1 - k)): equal
     # for k in [0, 1], above it elsewhere, of s once, so tight for a constant k, where its parts bounded apart lose that
@@ -669,7 +678,7 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
         return emit(('DIVIDE', *operands) if operands[1][-1].key in alphas else operands[0], ops, textures, texels,
             alphas, uses, slots, shift, keys)
     source = operands[-1] if name in READS else None
-    payload = texture(operands.pop(), textures, texels) if name in READS else (0, 0, 0, numpy.ones(4))
+    payload = texture(operands.pop(), textures, texels) if name in (*READS, 'GRID') else (0, 0, 0, numpy.ones(4))
     # In bits 20 on of its width, log2 of how far its point moves per unit of the UVs in 64ths, by which its mip level
     # follows the ray's cone; reads not by the UVs or not affine in them, and those of UNFILTERED attributes, at level 0
     if name in ('IMAGE_LINEAR', 'ALPHA_LINEAR') and slots is not None:
@@ -1360,6 +1369,8 @@ def resolve(socket, groups=()):
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
+        if node.type == 'PRINCIPLED_VOLUME' and (grid := GRIDS.get(node.inputs['Density Attribute'].default_value)):
+            density = 'MULTIPLY', density, ('GRID', grid.point, grid)  # By its grid of that name, as Cycles'
         if node.type == 'VOLUME_COEFFICIENTS':  # Its coefficients per unit length as they are, of density 1, emitting
             absorption = 'SUBTRACT', 1, get('Absorption Coefficients')  # in a volume alone, isotropic for now
             emissive, strength = (get('Emission Coefficients'), 1) if SIDE['volume'] else (0, 0)
@@ -1441,6 +1452,18 @@ HAIRS = {}  # Of each hair table, by its entry, its first level
 FOLDED = {}  # Of each sky's folded chain, by its expression's key, its table, until a full export
 SOURCES = {}  # Of each node's table, by its original, the evaluated node it was last read from
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
+GRIDS = {}  # Of the fluid domain shaded, its name and its grids by Cycles' attribute names
+media_key = lambda material: (material, GRIDS[None]) if GRIDS else material  # MEDIA's key, a domain's its own
+def fluid(ob):  # Of a gas domain, its name and density grid, over the box its evaluated mesh spans, the adaptive one's
+    domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'
+        and m.domain_settings.domain_type == 'GAS'), None)
+    if not domain: return {}
+    values = numpy.empty(len(domain.density_grid), 'f')
+    domain.density_grid.foreach_get(values)
+    size = numpy.array(domain.domain_resolution) * (domain.noise_scale if domain.use_noise else 1)
+    low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
+    point = 'DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low
+    return {None: ob.name, 'density': Grid(values, size.tolist(), point)}
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
     SEALING['asked'] = True
@@ -1457,7 +1480,7 @@ def shade(material, program):
     SIDE['volume'] = False
     volume, glow = (filled[10:13], filled[4]) if filled else (surface[10:13], 0)
     phase = filled and nonzero(filled[16]) and ('PHASE', filled[16])  # Its phase's asymmetry, marked, else none
-    MEDIA[material] = *volume, glow
+    MEDIA[media_key(material)] = *volume, glow
     if output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as Flex moves no
         height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # geometry: a Bump of the height
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
@@ -1996,8 +2019,11 @@ class Flex(bpy.types.RenderEngine):
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
                 color = color[loops].reshape(-1, 3, 4)
                 SEALING['closed'] = sealing
-                for slot in ob.material_slots:  # Of a material with units baked over this object's UVs, its own row
-                    if variant(slot.material) in rows or (slot.material, ob.name) in rows: continue
+                GRIDS.clear()
+                GRIDS.update(fluid(ob))
+                for slot in ob.material_slots:  # Of a material with units baked over this object's UVs or filling a
+                    # domain's grids, its own row
+                    if variant(slot.material) in rows and not GRIDS or (slot.material, ob.name) in rows: continue
                     mask = numpy.isin(index, [k for k, other in enumerate(ob.material_slots)
                         if other.material == slot.material])
                     t = uv[mask]
@@ -2008,7 +2034,7 @@ class Flex(bpy.types.RenderEngine):
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
                     row = shaded_row(slot.material)
-                    rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
+                    rows[(slot.material, ob.name) if current['made'] or GRIDS else variant(slot.material)] = row
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
                     for slot in ob.material_slots] or [rows[None]]
@@ -2100,6 +2126,7 @@ class Flex(bpy.types.RenderEngine):
                 exact = kinds and kinds[0] < 0 and kinds.count(kinds[0]) == len(kinds)  # As all its volumes are, alike
                 media = (*space[0], *space[1]), kinds[0] if exact else max([0, *map(abs, kinds)])
                 if media[1]: varying.add(i)
+            GRIDS.clear()
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
         if box:
@@ -2150,7 +2177,8 @@ class Flex(bpy.types.RenderEngine):
             for row in layers], textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
             starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4  # the images they read apart, by their index,
-            read = {texel for code, texel, _, height in ops if [*OPS][code] in READS and not height >> 28 & 1}  # in 31
+            read = {texel for code, texel, _, height in ops if [*OPS][code] in (*READS, 'GRID')  # in 31
+                and not height >> 28 & 1}
             image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
                 for k, (first, entry) in enumerate(zip(starts, texels))]  # shares its first with the next: no image
@@ -2172,7 +2200,8 @@ class Flex(bpy.types.RenderEngine):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
             def relocated(ops):  # Of their reads' and tiles' firsts, those piped apart flagged
                 return [(code, at[texel][0], width, height | at[texel][1] << 30 | form(texel))
-                    if (code == 0 or [*OPS][code] in READS) and not height >> 28 & 1 else (code, texel, width, height)
+                    if (code == 0 or [*OPS][code] in (*READS, 'GRID')) and not height >> 28 & 1
+                    else (code, texel, width, height)
                     for code, texel, width, height in ops]
             ops[:], aside[0][:] = relocated(ops), relocated(aside[0])
             placed = [(at[tile][0], key, unit, (hint, relocated(steps)), value)
