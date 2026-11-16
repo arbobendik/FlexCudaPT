@@ -59,6 +59,8 @@ struct Scene {
     float4* points; uint* segments; // Strands: their points and radius, per segment its first point and strand,
     float4* strands; // per strand its first point, point count and random number, its root's UV and color
     float4* hairs; // Per level of a hair table
+    uint environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
+    float2* environmentCdf; uint cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -1647,7 +1649,19 @@ void bake(uint3 p, Scene* scene) {
 }
 
 // Mean emission over the triangle's UVs and generated coordinates
+// Its frame's bit 30 set, the world instead at each texel center of a band of rows of its grid, from the frame's row
+// phi = 2 * PI * (x + 0.5) / environmentWidth, theta = PI * (y + 0.5) / environmentHeight
+// direction = (-sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta))
+// => u = 0.5 - atan2(direction.y, direction.x) / (2 * PI) = phi / (2 * PI), v = 1 - theta / PI, row 0 the zenith
 void lights(uint3 p, Scene* scene) {
+    if ((scene.frame >> 30 & 1) != 0) {
+        const float phi = 2 * PI * (p.x + 0.5f) / scene.environmentWidth;
+        const float theta = PI * ((scene.frame & 0xFFFFFF) + p.y + 0.5f) / scene.environmentHeight;
+        const float3 c = environment(scene, float3(-sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta)),
+            Ray(false, false, LOBE_NONE, 2, 0)); // At the depth and lobe its sky samples see it
+        scene.bakeTexels[p.y * scene.environmentWidth + p.x] = asuint(float4(c, 0));
+        return;
+    }
     const uint triangle = p.x;
     const float emitted = scene.materials[triangle].emitted;
     const Hit light = owned(scene, triangle);
@@ -1820,7 +1834,7 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 
 // A pass's record: its raygen program's number, then its scene
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 656; // From one record to the next
+static const uint RECORD_STRIDE = 688; // From one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 

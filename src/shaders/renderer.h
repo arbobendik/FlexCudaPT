@@ -28,7 +28,7 @@ constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "
     "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 656;
+constexpr unsigned RECORD_STRIDE = 688;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
@@ -120,4 +120,6 @@ struct Scene {
     float4* strands; // per strand its first point, point count and random number, its root's UV and color
     float4* hairs; // Per level of a hair table: R's width and coat, offset, its rows' image; its slices, rows, columns
     // and absorptions; its lobes' weights
+    unsigned environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
+    float2* environmentCdf; unsigned cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
 };
