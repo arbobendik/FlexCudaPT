@@ -9,7 +9,8 @@ struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near, far; 
 struct Camera { float3 origin, x, y, z; Lens lens; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
-// combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there.
+// combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there, or a
+// point in [0, 1] over a grid's box with the grid's value there.
 // An animated value passes as it is, left to the program by frame rather than baked.
 enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT, MAXIMUM, LOGARITHM,
     MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, GENERATED, NOISE, IMAGE_CUBIC, ALPHA_CUBIC,
@@ -18,7 +19,7 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD }; // MEDIUM, CURVES
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID }; // MEDIUM, CURVES
 // and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
 // Henyey-Greenstein asymmetry
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };

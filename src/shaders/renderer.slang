@@ -21,7 +21,7 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD }; // MEDIUM, CURVES
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID }; // MEDIUM, CURVES
 // and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
 // Henyey-Greenstein asymmetry
 struct Op { Code code; float3 value; };
@@ -555,7 +555,7 @@ struct Point {
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
 #ifndef EXTENDED // Nor varying media and strands
-#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && used(code))
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
@@ -642,6 +642,22 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 c[k] = float3(f16tof32(h.x), f16tof32(h.x >> 16), f16tof32(h.y));
             }
             stack[top - 1] = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
+        } break;
+        CASE(GRID) { // A grid's voxels, halves eight to a texel, read linearly at its point in [0, 1], faces extended
+            const int n[3] = {int(asuint(op.value.y)), int(asuint(op.value.z) & 0xFFFF), int(asuint(op.value.z) >> 16)};
+            const float3 g = stack[top - 1];
+            const float x = g.x * n[0] - 0.5f, y = g.y * n[1] - 0.5f, z = g.z * n[2] - 0.5f;
+            const int i = int(floor(x)), j = int(floor(y)), k = int(floor(z));
+            float c = 0;
+            for (int m = 0; m < 8; ++m) {
+                const int a = min(max(i + (m & 1), 0), n[0] - 1), b = min(max(j + (m >> 1 & 1), 0), n[1] - 1);
+                const int d = min(max(k + (m >> 2), 0), n[2] - 1);
+                const uint t = uint((d * n[1] + b) * n[0] + a);
+                const uint word = scene.texels[asuint(op.value.x) + t / 8][t / 2 % 4];
+                c += ((m & 1) != 0 ? x - i : 1 - (x - i)) * ((m & 2) != 0 ? y - j : 1 - (y - j))
+                    * ((m & 4) != 0 ? z - k : 1 - (z - k)) * f16tof32(t % 2 == 0 ? word : word >> 16);
+            }
+            stack[top - 1] = float3(c, c, c);
         } break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
