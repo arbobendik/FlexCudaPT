@@ -1705,8 +1705,8 @@ def fogged(name, scale, size=16):  # A black world's scene, no bounces, its came
     return made
 # The camera's own segment scatters: a sun of 4 pi straight down reaches depth t through 1 + t
 murk = fogged('fogged camera', (1, 1, 1))
-murk.collection.objects.link(sun := bpy.data.objects.new('fogged sun', bpy.data.lights.new('fogged sun', 'SUN')))
-sun.data.angle, sun.data.energy = 0, 4 * math.pi
+murk.collection.objects.link(shine := bpy.data.objects.new('fogged sun', bpy.data.lights.new('fogged sun', 'SUN')))
+shine.data.angle, shine.data.energy = 0, 4 * math.pi
 due = math.exp(-0.99) * (math.exp(-0.02) - math.exp(-2)) / 2  # Of exp(0.01 - t) / (4 pi) 4 pi exp(-1 - t) on [0.01, 1]
 for preferences.device in ('OPTIX', 'VULKAN'):
     seen = [render(murk, 16) for murk.flex_restir in (False, True)]
@@ -1756,8 +1756,8 @@ smoke.camera.location.z, smoke.camera.data.type, smoke.camera.data.ortho_scale =
 for name, size in (('smoke domain', 2), ('smoke inflow', 0.4)):
     bm = bmesh.new()
     bmesh.ops.create_cube(bm, size=size)
-    bm.to_mesh(mesh := bpy.data.meshes.new(name))
-    smoke.collection.objects.link(bpy.data.objects.new(name, mesh))
+    bm.to_mesh(cuboid := bpy.data.meshes.new(name))
+    smoke.collection.objects.link(bpy.data.objects.new(name, cuboid))
 domain, inflow = bpy.data.objects['smoke domain'], bpy.data.objects['smoke inflow']
 domain.rotation_euler.z, domain.scale.y, inflow.parent, inflow.location = 0.5, 1.5, domain, (0.5, -0.5, -0.6)
 inflow.hide_render = True
@@ -1768,13 +1768,13 @@ settings.domain_type, settings.resolution_max, settings.cache_type = 'GAS', 32, 
 flow = inflow.modifiers.new('fluid', 'FLUID')
 flow.fluid_type = 'FLOW'
 flow.flow_settings.flow_type, flow.flow_settings.flow_behavior = 'SMOKE', 'INFLOW'
-domain.data.materials.append(absorber := bpy.data.materials.new('smoke'))
-nodes = absorber.node_tree.nodes
+domain.data.materials.append(soot := bpy.data.materials.new('smoke'))
+nodes = soot.node_tree.nodes
 nodes.remove(nodes['Principled BSDF'])
 volume = nodes.new('ShaderNodeVolumePrincipled')
 volume.inputs['Color'].default_value, volume.inputs['Density'].default_value = (0, 0, 0, 1), 20
 volume.inputs['Density Attribute'].default_value = 'density'
-absorber.node_tree.links.new(volume.outputs[0], nodes['Material Output'].inputs['Volume'])
+soot.node_tree.links.new(volume.outputs[0], nodes['Material Output'].inputs['Volume'])
 quarters = lambda image: image.reshape(2, len(image) // 2, 2, len(image) // 2).mean((1, 3))
 u = (numpy.arange(32) + 0.5) / 32 * 4 - 2  # Down 32 x 32 points across the view at 200 depths
 world = numpy.stack(numpy.broadcast_arrays(u[None, :, None], u[:, None, None], (numpy.arange(200) + 0.5) / 100 - 1), -1)
@@ -1793,12 +1793,12 @@ for settings.use_adaptive_domain in (False, True):
     centroid = low + weights * (high - low)
     assert abs(centroid[:2] - (0.5, -0.5)).max() < 0.1 and centroid[2] < 0, ('smoke inflow', centroid)
     g = (local - low) / (high - low)  # Read linearly, extended at its faces
-    inside = ((g >= 0) & (g <= 1)).all(-1)
+    spanned = ((g >= 0) & (g <= 1)).all(-1)
     x = g * n - 0.5
     i = numpy.floor(x).astype(int)
     read = sum(numpy.prod([numpy.where(c >> k & 1, x[..., k] - i[..., k], 1 - x[..., k] + i[..., k]) for k in range(3)],
         0) * grid[tuple(numpy.clip(i[..., k] + (c >> k & 1), 0, n[k] - 1) for k in (2, 1, 0))] for c in range(8))
-    due = numpy.exp(-20 * (read * inside).sum(-1) / 100)
+    due = numpy.exp(-20 * (read * spanned).sum(-1) / 100)
     assert numpy.ptp(quarters(due)) > 0.05, ('smoke quarters', quarters(due))
     for preferences.device in ('OPTIX', 'VULKAN'):
         seen = quarters(render(smoke, 16).mean(2))
