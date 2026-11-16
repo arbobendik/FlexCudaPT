@@ -1448,9 +1448,22 @@ extern "C" __global__ void __raygen__bake() {
 }
 
 // Mean emission over the triangle's UVs and generated coordinates
+// Its frame's bit 30 set, the world instead at each texel center of a band of rows of its grid, from the frame's row
+// phi = 2 * PI * (x + 0.5) / environmentWidth, theta = PI * (y + 0.5) / environmentHeight
+// direction = (-sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta))
+// => u = 0.5 - atan2(direction.y, direction.x) / (2 * PI) = phi / (2 * PI), v = 1 - theta / PI, row 0 the zenith
 extern "C" __global__ void __raygen__lights() {
     const unsigned triangle = optixGetLaunchIndex().x;
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
+    if (scene.frame >> 30 & 1) {
+        const uint3 p = optixGetLaunchIndex();
+        const float phi = 2 * PI * (p.x + 0.5f) / scene.environmentWidth;
+        const float theta = PI * ((scene.frame & 0xFFFFFF) + p.y + 0.5f) / scene.environmentHeight;
+        const float3 c = environment(scene, make_float3(-sinf(theta) * cosf(phi), sinf(theta) * sinf(phi),
+            cosf(theta)), Ray{false, false, LOBE_NONE, 2, 0}); // At the depth and lobe its sky samples see it
+        scene.bakeTexels[p.y * scene.environmentWidth + p.x] = make_float4(c.x, c.y, c.z, 0);
+        return;
+    }
     Material& material = scene.materials[triangle];
     const Hit light = owned(scene, triangle);
     if (!(material.emitted > 0) || scene.instances[light.instance].world == STRANDS) return; // Sampled by no light
