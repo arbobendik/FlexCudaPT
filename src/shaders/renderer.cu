@@ -521,12 +521,18 @@ __device__ bool used(unsigned code) {
 #ifdef EXTENDED // A panorama's direction at u, v of its window and back: x forward, y left, z up
 __device__ float3 panorama(const Projection& p, float u, float v) {
     const float* r = p.range;
+    if (p.type == 7) { // Central cylindrical: its angle about z over u, its height over v
+        const float theta = r[0] + (r[1] - r[0]) * u;
+        return make_float3(cosf(theta), sinf(theta), r[2] + (r[3] - r[2]) * v);
+    }
     const float phi = r[0] * u + r[1], theta = r[2] * v + r[3]; // Equirectangular: longitude and polar angle
     return make_float3(sinf(theta) * cosf(phi), sinf(theta) * sinf(phi), cosf(theta));
 }
 __device__ float2 unpanorama(const Projection& p, float3 d) {
     const float* r = p.range;
     const float phi = atan2f(d.y, d.x);
+    if (p.type == 7) return make_float2((phi - r[0]) / (r[1] - r[0]),
+        (d.z / sqrtf(d.x * d.x + d.y * d.y) - r[2]) / (r[3] - r[2]));
     return make_float2((phi - r[1]) / r[0], (acosf(d.z / length(d)) - r[3]) / r[2]);
 }
 // From the camera's panorama frame to the world and back
