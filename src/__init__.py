@@ -1334,6 +1334,81 @@ SOCKETS = {'float': 'NodeSocketFloat', 'int': 'NodeSocketInt', 'string': 'NodeSo
     'point': 'NodeSocketVector', 'vector': 'NodeSocketVector', 'normal': 'NodeSocketVector',
     'closure color': 'NodeSocketShader'}  # The socket of each parameter type, as Cycles' (oslquery's) make them
 
+# OSL's steps on values as the expressions the Math and Vector Math nodes make of the same operations, OSL's own where
+# it differs from theirs: mod floored, logarithms of base e by default and of FLT_MIN at most, smoothstep 1 from its
+# upper edge on
+LOWERED = {'add': 'ADD', 'sub': 'SUBTRACT', 'mul': 'MULTIPLY', 'div': 'DIVIDE', 'fmod': 'MODULO', 'min': 'MINIMUM',
+    'max': 'MAXIMUM', 'floor': 'FLOOR', 'pow': 'POWER', 'exp': 'EXPONENT', 'sin': 'SINE', 'cos': 'COSINE',
+    'tan': 'TANGENT', 'asin': 'ARCSINE', 'acos': 'ARCCOSINE', 'atan': 'ARCTANGENT', 'atan2': 'ARCTAN2', 'sinh': 'SINH',
+    'cosh': 'COSH', 'tanh': 'TANH', 'dot': 'DOT_PRODUCT', 'cross': 'CROSS_PRODUCT', 'lt': 'LESS_THAN'}
+SMOOTHSTEP = lambda e0, e1, x: ('ADD', ('MULTIPLY', (lambda t: ('MULTIPLY', ('MULTIPLY', t, t), ('SUBTRACT', 3,
+    ('MULTIPLY', t, 2))))(clamp(('DIVIDE', ('SUBTRACT', x, e0), ('SUBTRACT', e1, e0)))), ('LESS_THAN', x, e1)),
+    ('SUBTRACT', 1, ('LESS_THAN', x, e1)))
+OSL = {**{name: (lambda op: lambda *a: (op, *a))(op) for name, op in LOWERED.items()},
+    'neg': lambda a: ('SUBTRACT', 0, a), 'mod': COMPOSITES['FLOORED_MODULO'], 'abs': absolute, 'fabs': absolute,
+    'sign': COMPOSITES['SIGN'], 'ceil': COMPOSITES['CEIL'], 'trunc': COMPOSITES['TRUNC'],
+    'step': lambda e, x: ('SUBTRACT', 1, ('LESS_THAN', x, e)), 'smoothstep': SMOOTHSTEP, 'mix': mix,
+    'sqrt': COMPOSITES['SQRT'], 'inversesqrt': COMPOSITES['INVERSE_SQRT'], 'exp2': lambda a: ('POWER', 2, a),
+    **{name: (lambda base: lambda a: ('LOGARITHM', ('MAXIMUM', a, FLT_MIN), base))(base) for name, base in
+        (('log', math.e), ('log2', 2), ('log10', 10))},
+    'radians': COMPOSITES['RADIANS'], 'degrees': COMPOSITES['DEGREES'],
+    'length': length, 'distance': COMPOSITES['DISTANCE'], 'normalize': normalize, 'gt': COMPOSITES['GREATER_THAN'],
+    'le': lambda a, b: ('SUBTRACT', 1, ('LESS_THAN', b, a)), 'ge': lambda a, b: ('SUBTRACT', 1, ('LESS_THAN', a, b)),
+    'eq': lambda a, b: ('SUBTRACT', 1, ('ADD', ('LESS_THAN', a, b), ('LESS_THAN', b, a))),
+    'neq': lambda a, b: ('ADD', ('LESS_THAN', a, b), ('LESS_THAN', b, a)), 'assign': lambda a: a}
+INTS = {'assign': lambda a: a, 'add': int.__add__, 'sub': int.__sub__, 'mul': int.__mul__, 'neg': int.__neg__,
+    'div': lambda a, b: int(a / b) if b else 0, 'lt': int.__lt__, 'gt': int.__gt__, 'le': int.__le__, 'ge': int.__ge__,
+    'eq': int.__eq__, 'neq': int.__ne__}  # On constants alone, as C's
+TRIPLES = ('color', 'point', 'vector', 'normal')
+FLT_MIN = 1.1754944e-38  # OSL's logarithms clamp their argument up to it
+PROGRAMS = {}  # Of each Script node met in an export, by its pointer, its bytecode's program: compiled once an export
+
+def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
+    # on expressions in order; what that cannot express is refused by name
+    if node.as_pointer() not in PROGRAMS: PROGRAMS[node.as_pointer()] = program(oso(node))
+    symbols, steps = PROGRAMS[node.as_pointer()]
+    def refused(what):
+        raise ValueError(f"Flex: the script node '{node.name}' uses {what}, which Flex does not translate")
+    # Its inputs by name; an int parameter's fixed at export an int, as OSL's int steps on constants take it
+    given = {socket.identifier: int(numpy.ravel(fold(value))[0]) if socket.type == 'INT' and not isinstance(
+        fold(value), tuple) else value for socket, value in zip([s for s in node.inputs if s.enabled], inputs)}
+    values = {}
+    for name, (kind, type, v) in symbols.items():
+        if kind == 'param' and name in given: values[name] = given[name]
+        elif kind != 'global' and type in ('float', 'int', 'string', *TRIPLES):
+            values[name] = v if type == 'string' else (int(v[0]) if v else 0) if type == 'int' else \
+                numpy.resize(numpy.array(v or [0.0]), 3) if type in TRIPLES else (v[0] if v else 0.0)
+    for op, args, _ in steps:
+        if op == 'end': break
+        if op in ('functioncall', 'useparam'): continue
+        for name in args:
+            if name not in values: refused(f"{symbols[name][1]} {name}" if symbols[name][0] != 'global' else
+                f"the global {name}")
+        kinds, operands = [symbols[name][1] for name in args], [values[name] for name in args[1:]]
+        if op in ('if', 'for', 'while', 'dowhile', 'break', 'continue', 'return', 'exit'): refused('branches and loops')
+        # A per-hit value made an int truncates and int arithmetic is C's, refused; a comparison's int, 0 or 1, a value
+        per_hit = [k == 'int' and not isinstance(o, int) for k, o in zip(kinds[1:], operands)]
+        if op == 'assign' and kinds[0] == 'int' and not isinstance(operands[0], int) or any(per_hit) and op not in (
+                'assign', 'lt', 'gt', 'le', 'ge', 'eq', 'neq'):
+            refused('int values')
+        if op == 'compref': values[args[0]] = 'DOT_PRODUCT', operands[0], numpy.eye(3)[operands[1]]
+        elif op == 'compassign':
+            e = numpy.eye(3)[operands[0]]
+            values[args[0]] = 'ADD', ('MULTIPLY', values[args[0]], 1 - e), ('MULTIPLY', operands[1], e)
+        elif op in ('construct', *TRIPLES) and kinds[0] in TRIPLES and all(o == 'rgb' for o in operands
+                if isinstance(o, str)):  # Of 3 values or of 1, in RGB alone
+            parts = [o for o in operands if not isinstance(o, str)]
+            values[args[0]] = vector(*parts) if len(parts) == 3 else parts[0]
+        elif 'string' in kinds: refused(f'strings in {op}')
+        elif op in INTS and operands and all(isinstance(o, int) for o in operands):
+            values[args[0]] = int(INTS[op](*operands))
+        elif op in OSL and not (op in ('lt', 'gt', 'le', 'ge', 'eq', 'neq') and set(kinds[1:]) & set(TRIPLES)):
+            values[args[0]] = OSL[op](*operands)
+        else: refused(f'the step {op}')
+    return {name: values[name] if name in values else refused(f'{type} outputs') for name, (kind, type, _)
+        in symbols.items() if kind == 'oparam'}
+NODES['SCRIPT'] = lambda node, inputs, index: translated(node, inputs)[node.outputs[index].identifier]
+
 # Expression of what a socket receives, a surface for a shader: a constant, or a step followed by its operands. groups
 # are the group nodes entered on the way; a node that is muted or not resolved exactly passes its input on.
 def animated(socket):  # Whether the socket's value is keyframed or driven, which the interpreter runs per frame
@@ -1740,7 +1815,8 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
-        HAIRS.clear(), shaded or (FOLDED.clear(), SOURCES.clear())  # An update keeps each folded chain's table, its key
+        HAIRS.clear(), PROGRAMS.clear(), shaded or (FOLDED.clear(), SOURCES.clear())  # An update keeps each folded
+        # chain's table, its key
         textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
         texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
