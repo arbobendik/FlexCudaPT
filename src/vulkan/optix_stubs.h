@@ -15,6 +15,9 @@
 // What a launch pushes: the address of its record and its size
 struct Launch { CUdeviceptr record; unsigned width, height, depth; };
 constexpr unsigned WORKGROUP = 8; // Square, as renderer.slang's main runs, its threads in a row for launches one high
+// Workgroups of a launch one high per row of them, as renderer.slang's ROW_GROUPS: the least count in x Vulkan
+// guarantees
+constexpr unsigned ROW_GROUPS = 65535;
 
 // A module: its shader, op mask and the pipeline cache its pipeline is made through, read from the cache file of this
 // release's SPIR-V, keyed by its hash
@@ -170,8 +173,12 @@ inline OptixResult optixPipelineDestroy(OptixPipeline pipeline) {
 }
 
 // The stand-in's stack sizes: none here, as Vulkan has no stand-in
-inline OptixResult optixProgramGroupGetStackSize(OptixProgramGroup, OptixStackSizes*, OptixPipeline) { return OPTIX_SUCCESS; }
-inline OptixResult optixPipelineSetStackSize(OptixPipeline, unsigned, unsigned, unsigned, unsigned) { return OPTIX_SUCCESS; }
+inline OptixResult optixProgramGroupGetStackSize(OptixProgramGroup, OptixStackSizes*, OptixPipeline) {
+    return OPTIX_SUCCESS;
+}
+inline OptixResult optixPipelineSetStackSize(OptixPipeline, unsigned, unsigned, unsigned, unsigned) {
+    return OPTIX_SUCCESS;
+}
 
 inline OptixResult optixSbtRecordPackHeader(OptixProgramGroup group, void* header) {
     std::memset(header, 0, OPTIX_SBT_RECORD_HEADER_SIZE);
@@ -183,13 +190,14 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     const OptixShaderBindingTable* sbt, unsigned width, unsigned height, unsigned depth) {
     const Launch launch{sbt->raygenRecord, width, height, depth};
     const bool row = height == 1 && depth == 1;
+    const unsigned groups = (width + WORKGROUP * WORKGROUP - 1) / (WORKGROUP * WORKGROUP); // Of a row
     return run([&](VkCommandBuffer commands) {
         vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
         vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &vulkan.textures, 0,
             nullptr);
         vkCmdPushConstants(commands, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(launch), &launch);
-        vkCmdDispatch(commands, row ? (width + WORKGROUP * WORKGROUP - 1) / (WORKGROUP * WORKGROUP)
-            : (width + WORKGROUP - 1) / WORKGROUP, (height + WORKGROUP - 1) / WORKGROUP, depth);
+        if (row) vkCmdDispatch(commands, std::min(groups, ROW_GROUPS), (groups + ROW_GROUPS - 1) / ROW_GROUPS, 1);
+        else vkCmdDispatch(commands, (width + WORKGROUP - 1) / WORKGROUP, (height + WORKGROUP - 1) / WORKGROUP, depth);
     }) ? OPTIX_ERROR_LAUNCH_FAILURE : OPTIX_SUCCESS;
 }
 
@@ -214,7 +222,8 @@ inline void describe(Geometry& geometry, const OptixBuildInput& input, const Opt
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
         .vertexFormat = VK_FORMAT_R32G32B32_SFLOAT,
         .vertexData = {.deviceAddress = array.vertexBuffers ? *array.vertexBuffers : 0},
-        .vertexStride = 3 * sizeof(float), .maxVertex = array.numVertices ? array.numVertices - 1 : 0, .indexType = VK_INDEX_TYPE_NONE_KHR}}};
+        .vertexStride = 3 * sizeof(float), .maxVertex = array.numVertices ? array.numVertices - 1 : 0,
+        .indexType = VK_INDEX_TYPE_NONE_KHR}}};
     if (input.type == OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES) // Strands' segments, read on the device
         geometry.count = input.customPrimitiveArray.numPrimitives, geometry.geometry = {
             .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR, .geometryType = VK_GEOMETRY_TYPE_AABBS_KHR,

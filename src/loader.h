@@ -118,7 +118,9 @@ inline float3 operator+(float3 a, float3 b) { return {a.x + b.x, a.y + b.y, a.z 
 inline float3 operator-(float3 a, float3 b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 inline float3 operator*(float3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
 inline float dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline float3 cross(float3 a, float3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+inline float3 cross(float3 a, float3 b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
 inline float length(float3 a) { return std::sqrt(dot(a, a)); }
 inline float3 lower(float3 a, float3 b) { return {std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)}; }
 inline float3 upper(float3 a, float3 b) { return {std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)}; }
@@ -257,7 +259,9 @@ struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; s
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
     std::vector<HairTable> tables; std::vector<float4> hairs; std::future<void> baking; // Hair tables, as they bake
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
-    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header; }; // Its counts
+    // Its counts
+    struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header;
+};
 
 constexpr unsigned TEXEL_BYTES[] = {16, 4, 8, 8}; // Of a float4, an RGBA8, a half4 and a 16-bit UNORM texel
 
@@ -402,8 +406,9 @@ inline void bakeHair(double so, double v, double v0, double r0, double s, double
         for (unsigned j = 0; j < np; ++j) {
             for (int p = 0; p < 3; ++p) {
                 double m = 0; // Each centre uniform in its column: the logistic over one column's box of another
-                for (int q = -reach; q <= reach; ++q) m += histogram[p * np + (j - q + np) % np] * (logistic((q + 1) * d)
-                    - logistic((q - 1) * d)) / 2 / trim;
+                for (int q = -reach; q <= reach; ++q)
+                    m += histogram[p * np + (j - q + np) % np] * (logistic((q + 1) * d) - logistic((q - 1) * d))
+                        / 2 / trim;
                 into[4 * j + p] = m;
             }
             into[4 * j + 3] = rest / np;
@@ -411,10 +416,8 @@ inline void bakeHair(double so, double v, double v0, double r0, double s, double
     }
 }
 
-// A hair material's tables, by bakeHair at no viewer angles evenly from pole to pole, nt = 4 no rows and np = 8 no columns, as
-// running sums from 0, RGBA its lobes: its rows' (nt + 1 wide), and its columns' for each sigma in turn (np + 2 wide,
-// the last past the total by the first column's, across the seam), which the renderer reads as differences of adjacent
-// sums and samples by their search
+// Hair tables: no viewer angles, nt = 4 no rows, np = 8 no columns; RGBA lobe running sums, rows nt + 1 wide,
+// columns np + 2 wide per sigma (last = total + first, across the seam)
 struct HairTable { double v, v0, r0, s, alpha, eta; unsigned no; std::vector<float4> rows, columns; };
 // Each table's, their slices taken in turn by a worker on every core, the largest tables' first
 inline void hairTables(std::vector<HairTable>& tables, const std::vector<double>& sigmas) {
@@ -471,9 +474,8 @@ inline unsigned long long buildBVH(OptixDeviceContext context, CUdeviceptr verti
     return handle;
 }
 
-// BVH rays traverse, over instances of BVHs of triangles by their transforms, built into the buffer allocated for it
-// at its start, as Vulkan's levels start at multiples of 256, then the instances and its scratch, in place of the one it
-// held
+// Top-level BVH over the instances (BVHs of triangles by their transforms): one buffer, replacing the last, of the
+// level, then the instances (Vulkan's form on Vulkan), then its scratch
 inline unsigned long long buildInstances(OptixDeviceContext context, const std::vector<OptixInstance>& instances,
     CUdeviceptr& buffer) {
     OptixBuildInput input{.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES,

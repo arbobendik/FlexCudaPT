@@ -297,8 +297,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             hit[1].instances = scene.instances, hit[1].segments = scene.segments, hit[1].points = scene.points;
             CHECK(cuMemcpyHtoD(sbt.hitgroupRecordBase, hit, sizeof(hit))); // The strands' program reads them, loaded
             if (another) {
-                std::unique_lock lock(workers.mutex); // Until its first task ran, which OptiX's cache holding it compiles
-                workers.changed.wait(lock, [&] { // in some 0.02 s, else in some 2 s, beside the stand-in's
+                std::unique_lock lock(workers.mutex); // Until its first task ran, which OptiX's cache holding it
+                workers.changed.wait(lock, [&] { // compiles in some 0.02 s, else in some 2 s, beside the stand-in's
                     OptixModuleCompileState state;
                     CHECK(optixModuleGetCompilationState(special->module, &state));
                     return state != OPTIX_MODULE_COMPILE_STATE_NOT_STARTED;
@@ -331,12 +331,14 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     scene.bakeTexels = {};
             std::vector<Material> materials = loaded.materials;
             if (scene.count) {
-                CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));
+                CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(),
+                    materials.size() * sizeof(Material)));
                 records[PASSES - 1].data = scene;
                 CHECK(cuMemcpyHtoD(table + (PASSES - 1) * sizeof(Record), &records[PASSES - 1], sizeof(Record)));
                 const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
                 CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count, 1, 1));
-                CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
+                CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials,
+                    materials.size() * sizeof(Material)));
             }
             if (kind == SCENE && scene.environmentCdf) // The last scene's
                 release((CUdeviceptr)scene.environmentCdf), scene.environmentCdf = {},
@@ -430,10 +432,12 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
         // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs, the duplication
-        // map only for decorrelation.
+        // map only for decorrelation. The spatial round's queued shifts launch once per job the queue can hold, in
+        // groups of 64 a bin each, those past their bin's jobs returning; its count starts from an empty queue
         const unsigned restir = scene.settings.restir;
-        const unsigned depths[PASSES] = {1, restir, restir * scene.settings.neighbors, restir,
-            restir * scene.settings.decorrelation, 0};
+        const unsigned depths[PASSES] = {1, restir, restir, restir, restir, restir, restir * scene.settings.decorrelation,
+            0};
+        const unsigned jobs = (3 * pixels + 63) / 64 * 64 + 64 * 40;
         scene.width = view.width, scene.height = view.height;
         scene.anchor = (const Scene*)(table + offsetof(Record, data));
         const unsigned samples = reused ? request.reuse : request.samples;
@@ -446,8 +450,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             walk[0].data = walk[1].data = scene, walk[2].data = anchored;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
+                if (pass == PASS_COUNT) CHECK(cuMemsetD32((CUdeviceptr)scene.queue, 0, QUEUE_HEADER));
                 sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
-                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
+                CHECK(pass == PASS_SHIFT ? optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, jobs, 1, 1)
+                    : optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
         }
