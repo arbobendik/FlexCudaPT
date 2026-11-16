@@ -18,8 +18,9 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE }; // MEDIUM and CURVES no
-// program takes: a scene's varying media and strands; PHASE marks a volume's Henyey-Greenstein asymmetry
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD }; // MEDIUM, CURVES
+// and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
+// Henyey-Greenstein asymmetry
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__shift", "__raygen__spatial",
@@ -104,6 +105,7 @@ constexpr int PAIRING_SIZES[] = {254, 230, 210};
 struct Scene {
     float4* accumulation; unsigned long long handle; float3 *vertices, *normals, *generated, *objects; float2* uvs;
     float4 *colors, *tangents; Instance* instances; float4* attributes; float* passes; unsigned instanceCount;
+    unsigned box; // The instance of the world's box, NONE without
     Material* materials; LightNode* lights; unsigned long long* trails; Op* ops; float4* texels; unsigned count;
     Camera camera;
     Reservoir *previous, *initial, *temporal; float* duplication; Shift* shifts; char2* pairing[3];
