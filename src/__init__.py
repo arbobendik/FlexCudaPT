@@ -1857,8 +1857,11 @@ def panorama(camera):  # A camera's panorama: its number, 0 for none, range of d
     data = camera and camera.type == 'CAMERA' and camera.data
     if data and data.type == 'CUSTOM': raise ValueError('Flex: custom cameras need OSL, which Flex does not run')
     if not data or data.type != 'PANO': return 0, *[0.0] * 6
+    radius = data.central_cylindrical_radius
     ranges = {'EQUIRECTANGULAR': (data.longitude_min - data.longitude_max, -data.longitude_min,
-        data.latitude_min - data.latitude_max, math.pi / 2 - data.latitude_min)}
+        data.latitude_min - data.latitude_max, math.pi / 2 - data.latitude_min), 'CENTRAL_CYLINDRICAL': (
+        -data.central_cylindrical_range_u_min, -data.central_cylindrical_range_u_max,
+        data.central_cylindrical_range_v_min / radius, data.central_cylindrical_range_v_max / radius)}
     if data.panorama_type not in ranges:
         raise ValueError(f"Flex: the {data.bl_rna.properties['panorama_type'].enum_items[data.panorama_type].name} "
             'panorama is not supported')
