@@ -96,7 +96,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None}  # MEDIUM,
+    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v}  # MEDIUM,
 # CURVES and WORLD steps past every program's end, of a scene whose media vary from point to point, so the renderer
 # tracks those it fills alone, of one with strands, and of one whose world has a volume
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
@@ -421,8 +421,8 @@ def summarize(expression, table, scales):
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
         not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
-        'ANISOTROPIC', 'HAIR', 'PHASE') or any(part[2] is None for part in parts) else READ_COSTS[kind] if read \
-        else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
+        'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET') or any(part[2] is None for part in parts) else READ_COSTS[kind] \
+        if read else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
     need = max([0, *(part[4] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
@@ -713,7 +713,8 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE') and OPS[name] \
+    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET') \
+        and OPS[name] \
         and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
@@ -737,9 +738,12 @@ def nonzero(value):  # Whether a value resolved is an expression or a constant n
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
 
 def coated(a, b):  # Two surfaces of one shape: one without a coat given the other's of weight 0, so a coat mixes in by
-    # its weight, else none; one without hair a mark of none
+    # its weight, else none; one without hair or velvet a mark of none. A velvet sheen and another, one lobe, refused
+    if all(len(x) > 14 and nonzero(x[14]) for x in (a, b)) and (len(a) > 21) != (len(b) > 21):
+        raise ValueError("Flex: a material mixes a Sheen BSDF of Ashikhmin's velvet with another sheen, which Flex's "
+            'one sheen lobe cannot draw')
     def shaped(x, y):
-        x = [*x, *(None, 0)[len(x) - 19:max(len(x), len(y)) - 19]]
+        x = [*x, *(None, 0, 0)[len(x) - 19:max(len(x), len(y)) - 19]]
         if len(x) > 19 and not x[19] and len(y) > 19 and y[19]: x[19] = [*y[19][:9], 0]
         return x
     return shaped(a, b), shaped(b, a)
@@ -754,7 +758,7 @@ def joined(a, b, wa, wb):  # Two hair marks of shares wa and wb as one, their ta
     return 'HAIR', ('ADD', 1 + HAIRS[entry], (a if ea[6] > 1 else b)[1][2] if entry[6] > 1 else 0)
 
 def hairy(surface, a, b, wa, wb):  # The surface of a and b, its hair theirs joined; added, albedo and tint summed to 1
-    if len(surface) == 21:
+    if len(surface) > 20:
         surface[20] = joined(a[20], b[20], wa, wb)
         if surface[20] and wa == wb == 1: surface[1], surface[7] = (('MINIMUM', ('ADD', a[k], b[k]), 1) for k in (1, 7))
     return surface
@@ -1444,6 +1448,8 @@ def resolve(socket, groups=()):
             ('TRANSLUCENT', get('Color')) if node.type == 'BSDF_TRANSLUCENT' else 0, sheen,
             get('Roughness' if node.type == 'BSDF_SHEEN' else 'Sheen Roughness', 0.5), anisotropy,
             get('Anisotropic Rotation' if principled else 'Rotation'), get('Tangent')] + ([None, hair] if hair else [])
+        if node.type == 'BSDF_SHEEN' and node.distribution == 'ASHIKHMIN':  # Its velvet, marked, after a hair of none
+            value += [None, 0, ('VELVET', 1)]
         # A coat follows as the surface of a clear dielectric covering by its weight, emitting nothing of its own
         weight = get('Coat Weight')
         if nonzero(weight):
@@ -1523,10 +1529,14 @@ def shade(material, program):
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
     # The base layer transmits the surface's translucent color diffusely and carries its sheen, anisotropy and hair, a
-    # coat over it none; each filled by its volume's emission and its phase's asymmetry, after a hair of none
-    hair = lambda layer: tuple(surface[20:]) if layer is base else ()
-    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow,
-        *((hair(layer) or (0,)) + (phase,) if phase else hair(layer))] for layer in layers]
+    # coat over it none; each filled by its volume's emission, its phase's asymmetry and its sheen's velvet mark
+    def tail(layer):  # Its hair, phase and velvet after the glow, as far as the last there
+        marked = [surface[20] if layer is base and len(surface) > 20 else 0, phase or 0,
+            surface[21] if layer is base and len(surface) > 21 else 0]
+        while marked and not marked[-1]: marked.pop()
+        return marked
+    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow, *tail(layer)]
+        for layer in layers]
     # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
     cut = [program(attribute, emitted=False) for attribute in attributes]
     rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
@@ -1802,6 +1812,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
             # them out
+            if len(surface) == 23 and not marks(surface[22], 'VELVET'): surface = surface[:22]  # Its velvet
             if len(surface) == 22 and not marks(surface[21], 'PHASE'): surface = surface[:21]  # Its phase's asymmetry
             if len(surface) == 21 and not marks(surface[20], 'HAIR'): surface = surface[:20]  # Its hair too
             if len(surface) == 20 and not nonzero(surface[19]): surface = surface[:19]  # Its volume's emission too
