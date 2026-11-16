@@ -3538,6 +3538,53 @@ for thickness in (0.05, 0.2):
             sent(thickness))
 preferences.device = 'OPTIX'
 
+# A world of an image is sampled by its luminance, ReSTIR off and on: under a constant image of 1 a white diffuse sphere
+# filling the view reads 1; under one texel of 1000 of a 64 x 32 image, 8 rows below the zenith's, a diffuse floor of
+# albedo 0.5 seen straight down reads its radiance, its blocks spreading as little as sampling the texel leaves them
+# theta_0 = 8 * PI / 32, theta_1 = 9 * PI / 32, the texel's polar angles; its azimuths 2 * PI / 64 wide
+# E = 1000 * 2 * PI / 64 * (cos(theta_0)^2 - cos(theta_1)^2) / 2
+# => radiance = 0.5 * E / PI
+def imaged(name, pixels):  # A new scene, the window's, under a world of the float image, read Closest
+    made = opened(name)
+    h, w = pixels.shape[:2]
+    image = bpy.data.images.new(name, w, h, float_buffer=True)
+    image.pixels.foreach_set(numpy.concatenate((pixels, numpy.ones((h, w, 1))), 2).astype('f').ravel())
+    nodes = made.world.node_tree.nodes
+    texture = nodes.new('ShaderNodeTexEnvironment')
+    texture.image, texture.interpolation = image, 'Closest'
+    made.world.node_tree.links.new(texture.outputs['Color'], nodes['Background'].inputs['Color'])
+    return made
+def viewed(made, name, make, color, location, rotation):  # With a diffuse mesh, an orthographic camera at location
+    data, bm = bpy.data.meshes.new(name), bmesh.new()
+    make(bm), bm.to_mesh(data), bm.free()
+    material, shader = surfaced(name, 'ShaderNodeBsdfDiffuse')
+    shader.inputs['Color'].default_value = (*color, 1)
+    data.materials.append(material)
+    made.collection.objects.link(bpy.data.objects.new(name, data))
+    made.camera = bpy.data.objects.new(name, bpy.data.cameras.new(name))
+    made.collection.objects.link(made.camera)
+    made.camera.location, made.camera.rotation_euler, made.camera.data.type = location, rotation, 'ORTHO'
+    return made
+furnace = viewed(imaged('image furnace', numpy.ones((32, 64, 3))), 'image furnace',
+    lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=1), (1, 1, 1), (0, -3, 0),
+    (math.pi / 2, 0, 0))
+furnace.camera.data.ortho_scale, furnace.flex_bounces = 1.2, 64
+hot = numpy.zeros((32, 64, 3))
+hot[32 - 1 - 8, 10] = 1000  # Rows from the bottom
+texel = viewed(imaged('hot texel', hot), 'hot texel', lambda bm: bmesh.ops.create_grid(bm, size=1), (0.5, 0.5, 0.5),
+    (0, 0, 1), (0, 0, 0))
+texel.camera.data.ortho_scale = 1
+E = 1000 * 2 * math.pi / 64 * (math.cos(8 * math.pi / 32) ** 2 - math.cos(9 * math.pi / 32) ** 2) / 2
+for preferences.device in ('OPTIX', 'VULKAN'):
+    for furnace.flex_restir in (False, True):
+        texel.flex_restir = furnace.flex_restir
+        seen = render(furnace).mean()
+        assert abs(seen - 1) < 0.01, ('image furnace', preferences.device, furnace.flex_restir, seen)
+        seen = blocks(render(texel)).mean(2)
+        assert abs(seen.mean() / (0.5 * E / math.pi) - 1) < 0.02 and seen.std() / seen.mean() < 0.05, ('hot texel',
+            preferences.device, texel.flex_restir, seen.mean(), seen.std() / seen.mean())
+preferences.device = 'OPTIX'
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
