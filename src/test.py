@@ -1696,6 +1696,63 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     seen = render(inside).mean()
     assert abs(seen / math.exp(-0.99 ** 2 / 2) - 1) < 0.01, ('camera inside a varying volume', preferences.device, seen)
 preferences.device = device
+def fogged(name, scale, size=16):  # A black world's scene, no bounces, its camera looking down inside a white scatterer
+    made = new(name, size, 1024, (0, 0, 0))
+    made.flex_bounces, made.camera = 0, bpy.data.objects.new(name, bpy.data.cameras.new(name))
+    made.collection.objects.link(made.camera)
+    made.camera.data.type, made.camera.data.ortho_scale, made.camera.data.clip_start = 'ORTHO', 0.1, 0.01
+    mesh = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_cube(bm, size=2)
+    bm.to_mesh(mesh)
+    mesh.materials.append(fog := bpy.data.materials.new(name))
+    fog.node_tree.nodes.remove(fog.node_tree.nodes['Principled BSDF'])
+    scatter = fog.node_tree.nodes.new('ShaderNodeVolumeScatter')
+    scatter.inputs['Color'].default_value, scatter.inputs['Density'].default_value = (1, 1, 1, 1), 1
+    fog.node_tree.links.new(scatter.outputs[0], fog.node_tree.nodes['Material Output'].inputs['Volume'])
+    made.collection.objects.link(cube := bpy.data.objects.new(name, mesh))
+    cube.scale = scale
+    return made
+# The camera's own segment scatters: a sun of 4 pi straight down reaches depth t through 1 + t
+murk = fogged('fogged camera', (1, 1, 1))
+murk.collection.objects.link(sun := bpy.data.objects.new('fogged sun', bpy.data.lights.new('fogged sun', 'SUN')))
+sun.data.angle, sun.data.energy = 0, 4 * math.pi
+due = math.exp(-0.99) * (math.exp(-0.02) - math.exp(-2)) / 2  # Of exp(0.01 - t) / (4 pi) 4 pi exp(-1 - t) on [0.01, 1]
+for preferences.device in ('OPTIX', 'VULKAN'):
+    seen = [render(murk, 16) for murk.flex_restir in (False, True)]
+    means, errors = [image.mean() for image in seen], [image.mean(2).std() / 16 for image in seen]
+    assert all(abs(mean / due - 1) < 0.01 for mean in means), ('camera in a scattering fog', preferences.device, means)
+    assert abs(means[1] - means[0]) < 3 * math.hypot(*errors), ('fog ReSTIR', preferences.device, means, errors)
+preferences.device = device
+# A camera-hidden light in the fog: seen, its surface adds exp(-0.99) to the light scattered from it, hidden nothing
+murk = fogged('hidden in fog', (3, 3, 1), 64)
+murk.camera.location.z = 0.5
+murk.collection.objects.link(lamp := bpy.data.objects.new('hidden in fog', bpy.data.lights.new('hidden', 'AREA')))
+lamp.data.size, lamp.data.energy, lamp.location, lamp.rotation_euler = 2, 4 * math.pi, (0, 0, -0.5), (math.pi, 0, 0)
+# Depth t, height h = 1 - t above the square of radiance 1, scatters exp(0.01 - t) / (4 pi) of exp(-r) h / r^3 on it
+t = 0.01 + 0.99 * (numpy.arange(100)[:, None, None] + 0.5) / 100
+phi = (numpy.arange(400) + 0.5) * math.pi / 200
+low = (1 - t) / numpy.hypot(1 / numpy.maximum(abs(numpy.cos(phi)), abs(numpy.sin(phi)))[:, None], 1 - t)
+s = low + (1 - low) * (numpy.arange(100) + 0.5) / 100
+scattered = (numpy.exp(0.01 - t - (1 - t) / s).mean(2) * (1 - low[..., 0])).mean() * 0.99 / 2
+murk.flex_restir = False  # Pixels apart, within 3 of their standard errors
+for preferences.device in ('OPTIX', 'VULKAN'):
+    seen = {}
+    for hidden in (False, True):
+        lamp.visible_camera = not hidden
+        seen[hidden] = render(murk, 64).mean(2)
+        due, error = scattered + (0 if hidden else math.exp(-0.99)), seen[hidden].std() / 64
+        assert abs(seen[hidden].mean() - due) < 3 * error, ('hidden light in fog', preferences.device, hidden,
+            seen[hidden].mean(), due, error)
+    surface = seen[False] - seen[True]  # Of the same random numbers: the surface's term alone
+    assert abs(surface.mean() - math.exp(-0.99)) < 3 * surface.std() / 64, ('fog surface', preferences.device,
+        surface.mean(), surface.std() / 64)
+    murk.flex_restir = True  # Within 0.002: 3 standard errors of its difference from none, 0.00067 at 16 x 16
+    reused = render(murk, 64).mean()
+    murk.flex_restir = False
+    assert abs(reused - seen[True].mean()) < 0.002, ('hidden light in fog ReSTIR', preferences.device, reused,
+        seen[True].mean())
+preferences.device = device
 # A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
 # 2002 fit it, from 4000 K to past 12000 K: a Blackbody node seen on an emitter of strength 1, its table filtered as
 # each backend filters it
