@@ -2211,11 +2211,11 @@ class Flex(bpy.types.RenderEngine):
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         surface = resolve(world.inputs['Surface']) if world else BLACK
         # The grid the world bakes over: its largest Environment Texture's, else 1024 x 512; none where its emission is
-        # the same every way
+        # the same every way or its light is not sampled
         sizes = [tuple(node.image.size) for node in world.id_data.nodes if node.type == 'TEX_ENVIRONMENT' and node.image
             and node.image.size[0]] if world else []
-        grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if isinstance(fold(surface)[4],
-            tuple) else (0, 0)
+        grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if world and \
+            scene.world.flex_sample_light and isinstance(fold(surface)[4], tuple) else (0, 0)
         world = program(surface)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
@@ -2497,6 +2497,19 @@ class OBJECT_PT_flex_visibility(bpy.types.Panel):  # An object's visibility the 
         rays.prop(context.object, 'visible_camera', text='Camera')
         rays.prop(context.object, 'visible_shadow', text='Shadow')
 
+class WORLD_PT_flex(bpy.types.Panel):  # The world's settings of the Flex engine
+    bl_label = 'Flex'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'world'
+
+    @classmethod
+    def poll(cls, context): return context.engine == Flex.bl_idname and context.world
+
+    def draw(self, context):
+        self.layout.use_property_split = True
+        self.layout.prop(context.world, 'flex_sample_light')
+
 class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
     bl_label = 'ReSTIR'
     bl_parent_id = 'RENDER_PT_flex'
@@ -2571,7 +2584,12 @@ def release(scene, *_):  # Only once the job is done: setting it off frees the d
         scene.render.use_persistent_data = False
 HANDLERS = ((bpy.app.handlers.render_init, persist), (bpy.app.handlers.render_pre, restore),
     (bpy.app.handlers.render_complete, release), (bpy.app.handlers.render_cancel, release))
-CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir, DATA_PT_flex_light, OBJECT_PT_flex_visibility)
+# A world's: whether its light is sampled toward its bright parts, as lights are, where it varies by direction
+WORLD_PROPERTIES = {'flex_sample_light': bpy.props.BoolProperty(name='Sample World Light', description='Sample the '
+    'world toward its bright parts, as lights are; off, bounces alone reach it, faster where little of it is seen',
+    default=True, update=lambda world, _: world.update_tag())}  # Its change an update of the world, exported anew
+CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir, DATA_PT_flex_light, OBJECT_PT_flex_visibility,
+    WORLD_PT_flex)
 
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension
 def reload():
@@ -2591,6 +2609,7 @@ def register():
             start_new_session=True)  # module, once per release, a renderer of its own ending with Blender
     bpy.app.timers.register(reload, persistent=True)
     for name, prop in PROPERTIES.items(): setattr(bpy.types.Scene, name, prop)
+    for name, prop in WORLD_PROPERTIES.items(): setattr(bpy.types.World, name, prop)
     for cls in CLASSES: bpy.utils.register_class(cls)
     preferences = bpy.context.preferences.addons[__package__].preferences
     if runnable and preferences.device not in runnable: preferences.device = runnable[0]
@@ -2604,3 +2623,4 @@ def unregister():
     for name in PANELS: getattr(bpy.types, name).COMPAT_ENGINES.remove(Flex.bl_idname)
     for cls in reversed(CLASSES): bpy.utils.unregister_class(cls)
     for name in PROPERTIES: delattr(bpy.types.Scene, name)
+    for name in WORLD_PROPERTIES: delattr(bpy.types.World, name)
