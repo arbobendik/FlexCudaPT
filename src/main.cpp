@@ -2,6 +2,7 @@
 #include <optix_function_table_definition.h>
 #include <optix_stack_size.h>
 #include "loader.h"
+#include "environment.h"
 #include <cstring>
 #include <cstddef>
 #include <utility>
@@ -341,6 +342,30 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
                 CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count, 1, 1));
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
+            }
+            if (kind == SCENE) scene.environmentCdf = {}, scene.cdfWidth = scene.cdfHeight = 0; // Freed with its arrays
+            if (kind != UPDATE && scene.environmentWidth) { // The world over its grid, 64 rows a launch, and its CDF
+                const unsigned width = scene.environmentWidth, height = scene.environmentHeight;
+                LuminanceCDF luminance{width, height};
+                std::vector<float4> texels(64 * size_t(width));
+                const CUdeviceptr band = allocate(texels.size() * sizeof(float4));
+                for (unsigned row = 0; row < height; row += 64) {
+                    const unsigned span = std::min(64u, height - row);
+                    records[PASSES - 1].data = scene, records[PASSES - 1].data.bakeTexels = (float4*)band;
+                    records[PASSES - 1].data.frame = 1u << 30 | row;
+                    CHECK(cuMemcpyHtoD(table + (PASSES - 1) * sizeof(Record), &records[PASSES - 1], sizeof(Record)));
+                    const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
+                    CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, width, span, 1));
+                    CHECK(cuMemcpyDtoH(texels.data(), band, span * size_t(width) * sizeof(float4)));
+                    luminance.add(texels.data(), row, span);
+                }
+                release(band);
+                const std::vector<float2> cdf = luminance.finish();
+                const CUdeviceptr next = allocate(cdf.size() * sizeof(float2), cdf.data());
+                if (scene.environmentCdf) std::replace(loaded.arrays.begin(), loaded.arrays.end(),
+                    (CUdeviceptr)scene.environmentCdf, next), release((CUdeviceptr)scene.environmentCdf);
+                else loaded.arrays.push_back(next);
+                scene.environmentCdf = (float2*)next, scene.cdfWidth = luminance.w + 1, scene.cdfHeight = luminance.h;
             }
             unsigned long long* trails;
             LightNode* const lights = loadLights(loaded.vertices, loaded.instances, materials, trails);
