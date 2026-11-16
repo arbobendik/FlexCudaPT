@@ -120,6 +120,11 @@ static __device__ float fcptMajorant(unsigned filling) {
 }
 // Whether varying media are compiled in: the renderer's own constant, which folds the walk's code for them
 static __device__ bool fcptVaryingUsed() { return used(MEDIUM); }
+// The medium a ray leaving a volume through the face of hit enters
+static __device__ FKMedium fcptOutsideMedium(FKHit hit) {
+    const Medium medium = outside(hookScene(), hit.instance_index);
+    return {medium.scatter, medium.extinction, medium.g};
+}
 static __device__ __noinline__ FKMedium fcptCameraMedium(float3 direction, float distance, unsigned* filling) {
     const Medium medium = cameraMedium(hookScene(), direction, distance, *filling);
     return {medium.scatter, medium.extinction, medium.g};

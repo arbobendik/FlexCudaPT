@@ -246,7 +246,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // samples at most; otherwise all of the view's arrays are freed and allocated zeroed. So does the view after a new
     // scene, persisting the last one only if it has as many triangles. A persisted view starts from the reservoirs the
     // last view starting over ended with, against the scene they were traced in, and jumps by that view's camera.
-    struct View { unsigned width, height; Settings settings; Camera camera; } view{};
+    struct View { unsigned width, height; Settings settings; unsigned box; Camera camera; } view{};
     struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
     bool reused = false;
     size_t pixels = 1, reservoirs = 1; // The view's pixels, and of them those with reservoirs: one without ReSTIR
@@ -409,7 +409,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             history = history && reused;
             done = scene.frame = 0; // Random numbers repeat per view
             scene.camera = view.camera;
-            scene.settings = view.settings;
+            scene.settings = view.settings, scene.box = view.box;
             CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * pixels));
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
