@@ -1567,7 +1567,7 @@ extern "C" __global__ void __raygen__temporal() {
         const float p_c = rgb_to_greyscale(r.f);
         const float p_t = rgb_to_greyscale(temporal.f);
         Selection sel = {};
-        sel.random_state = stream(r.seed, STREAM_SELECT + 1u);
+        sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 1u);
         const float2 weights = temporalWeights(r.c, p_c, c_t, p_t, rgb_to_greyscale(to_previous.f),
             rgb_to_greyscale(to_current.f));
         offerShifted(&sel, r, Shift{r.f, 1.0f}, weights.x);
@@ -1609,7 +1609,7 @@ extern "C" __global__ void __raygen__spatial() {
     const float p_c = rgb_to_greyscale(r.f);
     float canonical_mis = count == 0.0f ? 1.0f : 0.0f;
     Selection sel = {};
-    sel.random_state = stream(scene.initial[index].seed, STREAM_SELECT + 2u);
+    sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 2u);
     for (unsigned t = 0u; t < scene.settings.neighbors; t++) {
         const int q = partner(scene, p, size, t);
         if (q >= 0) {
