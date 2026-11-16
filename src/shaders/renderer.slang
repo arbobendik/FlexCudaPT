@@ -29,8 +29,9 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE }; // MEDIUM and CURVES no
-// program takes: a scene's varying media and strands; PHASE marks a volume's Henyey-Greenstein asymmetry
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD }; // MEDIUM, CURVES
+// and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
+// Henyey-Greenstein asymmetry
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -54,6 +55,7 @@ struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
     float2* uvs; float4* colors; float4* tangents; Instance* instances; float4* attributes; float* passes;
     uint instanceCount;
+    uint box; // The instance of the world's box, NONE without
     SceneMaterial* materials; LightNode* lights; uint64_t* trails; Op* ops; uint4* texels; uint count; Camera camera;
     Reservoir* previous; Reservoir* initial; Reservoir* temporal; float* duplication; Shift* shifts; int8_t* pairing[3];
     uint frame; Camera previousCamera; Settings settings;
@@ -1225,6 +1227,15 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
     return passed;
 }
 
+// The medium a ray leaving a volume through a face of an instance enters: the world's inside its box, none past the
+// box's faces or without a world volume
+Medium outside(Scene* scene, uint instance) {
+    if (!used(WORLD) || instance == scene.box) return NO_MEDIUM;
+    const uint first = scene.instances[scene.box].first;
+    return volume(shade(scene, scene.box, first, 0, 0, cornerNormals(scene.normals, scene.instances[scene.box],
+        first)[0], float3(0, 0, 1), Ray(false, false, LOBE_NONE, 0.0f, 0.0f)));
+}
+
 // Of a shadow ray from from along toward, to the light left away, starting in medium of filling: through each layer of
 // occluders, by distance then index, passing rays straight through, where uncovered or tinted by their transparency,
 // entering the volumes of those it meets from the front and leaving them from the back; transmitted, the share of light
@@ -1256,7 +1267,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
                 : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
                 const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? NO_MEDIUM : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
         }
@@ -1378,6 +1389,11 @@ struct VkScene : IScene {
     float majorant(uint filling) { return abs(scene.instances[owner(scene, filling)].majorant); }
     // Whether varying media are compiled in: the renderer's own constant, which folds the walk's code for them
     bool varyingUsed() { return used(MEDIUM); }
+    // The medium a ray leaving a volume through the face of hit enters
+    FKMedium outsideMedium(FKHit hit) {
+        const Medium medium = outside(scene, hit.instance_index);
+        return {medium.scatter, medium.extinction, medium.g};
+    }
     // Whether hair is compiled in: the renderer's own constant, which folds the walk's code for it
     bool hairUsed() { return used(HAIR); }
     FKMedium cameraMedium(float3 direction, float distance, out uint filling) {

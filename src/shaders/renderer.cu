@@ -1166,6 +1166,15 @@ __device__ float3 passing(const Scene& scene, Medium medium, unsigned material, 
     return passed;
 }
 
+// The medium a ray leaving a volume through a face of an instance enters: the world's inside its box, none past the
+// box's faces or without a world volume
+__device__ Medium outside(const Scene& scene, unsigned instance) {
+    if (!used(WORLD) || instance == scene.box) return Medium{};
+    const unsigned first = scene.instances[scene.box].first;
+    return volume(shade(scene, scene.box, first, 0, 0, cornerNormals(scene.normals, scene.instances[scene.box],
+        first)[0], make_float3(0, 0, 1), Ray{false, false, LOBE_NONE, 0.0f, 0.0f}));
+}
+
 // Of a shadow ray from from along toward, to the light left away, starting in medium of filling: through each layer of
 // occluders, by distance then index, passing rays straight through, where uncovered or tinted by their transparency,
 // entering the volumes of those it meets from the front and leaving them from the back; transmitted, the share of light
@@ -1200,7 +1209,7 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
                 .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
                 const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? Medium{} : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
+                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
                     hit.triangle);
             }
         }
