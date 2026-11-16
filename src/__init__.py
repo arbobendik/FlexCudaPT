@@ -1590,9 +1590,12 @@ GRID_WAIT = 120  # Seconds a render's job waits for the main thread to read a vo
 def on_main(f, volume):  # f() on the main thread, where reading a grid makes IDs; from a render's job handed over by a
     if threading.current_thread() is threading.main_thread(): return f()  # timer and waited for
     done, out = threading.Event(), []
-    bpy.app.timers.register(lambda: (out.append(f()), done.set(), None)[2])
+    # The read, then a timer after it, which Blender runs in order and whether or not the read raised, ending the wait
+    bpy.app.timers.register(lambda: (out.append(f()), None)[1])
+    bpy.app.timers.register(lambda: (done.set(), None)[1])
     if not done.wait(GRID_WAIT): raise RuntimeError(f"Flex: the grids of volume '{volume}' were not read: the main "
         'thread did not answer, as while a script waits on this render')
+    if not out: raise RuntimeError(f"Flex: reading the grids of volume '{volume}' failed, as Blender's console shows")
     return out[0]
 # The evaluated grid, saved and reloaded, read per active voxel or tile (value, index, extent) by Grid To Points
 def lattice(ob, name):
