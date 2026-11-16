@@ -21,12 +21,12 @@ Select Flex as the render engine, for final renders and the viewport's rendered 
 of particle hair paths and curves objects, lights and the world through perspective and orthographic cameras. Material
 node trees resolve to a smooth, normal mapped or bumped normal, albedo, metallic, roughness, emission, transparency and
 IOR per hit, with coat, sheen (the Sheen BSDF's Ashikhmin distribution as Ashikhmin's velvet), anisotropy, translucency,
-subsurface scattering and Principled Hair or the old Hair BSDF, and their volumes to media that absorb, scatter by their
-Henyey-Greenstein anisotropy and emit, constant or varying by their node trees and, in a smoke simulation's domain, by
-its density, color, flame, heat and temperature grids as Principled Volume's attributes, Volume Info and Attribute nodes
-read them. The world's volume fills the scene, homogeneous and emitting nothing, and lights emit by their node trees. A
-world that varies by direction is sampled toward its bright parts, as lights are, unless Sample World Light is off in
-its Flex panel of the world properties.
+subsurface scattering, Principled Hair or the old Hair BSDF, and the Toon BSDF as reciprocal toon lobes, diffuse or
+glossy, and their volumes to media that absorb, scatter by their Henyey-Greenstein anisotropy and emit, constant or
+varying by their node trees and, in a smoke simulation's domain, by its density, color, flame, heat and temperature
+grids as Principled Volume's attributes, Volume Info and Attribute nodes read them. The world's volume fills the scene,
+homogeneous and emitting nothing, and lights emit by their node trees. A world that varies by direction is sampled
+toward its bright parts, as lights are, unless Sample World Light is off in its Flex panel of the world properties.
 Panoramic cameras, OpenVDB volumes, OSL scripts and true displacement are not supported; displacement shades as a bump.
 Max samples, max bounces, paths per sample and, with OptiX, denoising are set in the Flex panel of the render
 properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation, the number of spatial neighbors and the reuse
