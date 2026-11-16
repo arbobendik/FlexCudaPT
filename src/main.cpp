@@ -387,7 +387,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (!reused || std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 reused = false;
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
-                    (void*)scene.temporal, (void*)scene.shifts, (void*)anchor})
+                    (void*)scene.temporal, (void*)scene.shifts, (void*)scene.queue, (void*)anchor})
                     release((CUdeviceptr)array);
                 CHECK(munmap(sums, pixels * sizeof(float4)));
                 pixels = request.view.width * request.view.height;
@@ -443,6 +443,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         const unsigned restir = scene.settings.restir;
         const unsigned depths[PASSES] = {1, restir, restir * scene.settings.neighbors, restir,
             restir * scene.settings.decorrelation, 0};
+        scene.width = view.width, scene.height = view.height;
+        scene.anchor = (const Scene*)(table + offsetof(Record, data));
         const unsigned samples = reused ? request.reuse : request.samples;
         for (launched = 0; launched < request.launches && done < samples; ++launched, ++done, ++scene.frame) {
             for (Record& record : records) record.data = scene;

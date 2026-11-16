@@ -72,6 +72,7 @@ inline void loadView(Scene& scene, size_t pixels, size_t reservoirs) {
     scene.temporal = zeros<Reservoir>(reservoirs);
     scene.duplication = (float*)(scene.previous + reservoirs); // After the reservoirs, as the anchor keeps them
     scene.shifts = zeros<Shift>(3 * reservoirs);
+    scene.queue = zeros<unsigned>(QUEUE_HEADER + (3 * reservoirs + 63) / 64 * 64 + 64 * 40); // Its jobs, padded per bin
 }
 
 // Gaussian standard deviation with the mean distance of a 30 pixel uniform disk (Sec. 7)
