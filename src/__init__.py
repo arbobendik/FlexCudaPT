@@ -1,5 +1,6 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
-import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, time, types
+import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, tempfile
+import hashlib, time, types, _cycles
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -1306,6 +1307,33 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
 NODES |= {'TEX_ENVIRONMENT': NODES['TEX_IMAGE'], 'MIX_SHADER': NODES['MIX'], 'MIX_RGB': NODES['MIX'],
     'VECT_MATH': NODES['MATH']}
 
+def oso(node):  # A Script node's bytecode: the one its update stored, else its script compiled by Blender's own OSL
+    if node.bytecode: return node.bytecode
+    with tempfile.TemporaryDirectory() as folder:
+        source, compiled = os.path.join(folder, 'script.osl'), os.path.join(folder, 'script.oso')
+        if node.mode == 'EXTERNAL': source = bpy.path.abspath(node.filepath, library=node.id_data.library)
+        else: open(source, 'w').write(node.script.as_string())
+        if not _cycles.osl_compile(source, compiled): raise ValueError(f"Flex: the script of node '{node.name}' does not "
+            'compile')
+        return open(compiled).read()
+
+def program(text):  # Of OSO bytecode: per symbol its kind, type and values; its main code's steps, operands and jumps
+    symbols, steps, main = {}, [], False
+    for line in text.split('\n'):
+        fields, words = line.split('\t'), line.split('%')[0].split()
+        if line.startswith('code '): main = line == 'code ___main___'
+        elif fields[0] in ('param', 'oparam', 'local', 'temp', 'global', 'const'):
+            given = fields[3] if len(fields) > 3 and not fields[3].startswith('%') else ''
+            symbols[fields[2]] = fields[0], fields[1], given[1:-1] if given.startswith('"') else [*map(float,
+                given.split())]
+        elif main and words and not line.startswith('#'):
+            steps.append((words[0], [w for w in words[1:] if not w.lstrip('-').isdigit()],
+                [int(w) for w in words[1:] if w.lstrip('-').isdigit()]))
+    return symbols, steps
+SOCKETS = {'float': 'NodeSocketFloat', 'int': 'NodeSocketInt', 'string': 'NodeSocketString', 'color': 'NodeSocketColor',
+    'point': 'NodeSocketVector', 'vector': 'NodeSocketVector', 'normal': 'NodeSocketVector',
+    'closure color': 'NodeSocketShader'}  # The socket of each parameter type, as Cycles' (oslquery's) make them
+
 # Expression of what a socket receives, a surface for a shader: a constant, or a step followed by its operands. groups
 # are the group nodes entered on the way; a node that is muted or not resolved exactly passes its input on.
 def animated(socket):  # Whether the socket's value is keyframed or driven, which the interpreter runs per frame
@@ -1606,6 +1634,25 @@ class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
     bl_use_shading_nodes_custom = False  # The Shader Editor offers Blender's shading nodes, which the engine resolves
+
+    def update_script_node(self, node):  # A Script node's bytecode, compiled anew, an internal one's kept as Cycles
+        # keeps it, and its sockets: its parameters' and outputs' of the types Cycles gives them, set to their defaults
+        if node.mode == 'INTERNAL' and not (node.script and node.script.as_string().strip()): return  # As Cycles, none
+        node.bytecode = ''
+        text = oso(node)
+        if node.mode == 'INTERNAL': node.bytecode, node.bytecode_hash = text, hashlib.md5(text.encode()).hexdigest()
+        symbols, _ = program(text)
+        for sockets, kind in ((node.inputs, 'param'), (node.outputs, 'oparam')):
+            wanted = {name: (SOCKETS[type], v) for name, (k, type, v) in symbols.items() if k == kind
+                and type in SOCKETS}
+            for socket in [s for s in sockets if s.identifier not in wanted or wanted[s.identifier][0] != s.bl_idname]:
+                sockets.remove(socket)
+            for name, (idname, v) in wanted.items():
+                if name in sockets: continue
+                socket = sockets.new(idname, name, identifier=name)
+                if v and kind == 'param': socket.default_value = (*v, 1) if idname == 'NodeSocketColor' else v \
+                    if idname in ('NodeSocketVector', 'NodeSocketString') else int(v[0]) if idname == 'NodeSocketInt' \
+                    else v[0]
 
     def __init__(self, source):  # Blender calls it twice: with the engine it made, then with this instance itself
         super().__init__(source)
