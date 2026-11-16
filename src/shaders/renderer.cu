@@ -508,7 +508,8 @@ __device__ bool used(unsigned code) {
 #ifdef EXTENDED // Whether an instance holds strands
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
 #else // Nor varying media and strands
-#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && used(code))
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
+    && used(code))
 #define STRAND(scene, i) false
 #endif
 #define CASE(code) case code: if (!used(code)) break;
@@ -604,6 +605,21 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                     __half2float(__ushort_as_half(h.z)));
             }
             top[-1] = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
+        } break;
+        CASE(GRID) { // A grid's voxels, halves, read linearly at its point in [0, 1] over its box, faces extended
+            const int n[3] = {int(op->width), int(op->height & 0xFFFF), int(op->height >> 16)};
+            const float3 g = top[-1];
+            const float x = g.x * n[0] - 0.5f, y = g.y * n[1] - 0.5f, z = g.z * n[2] - 0.5f;
+            const int i = int(floorf(x)), j = int(floorf(y)), k = int(floorf(z));
+            const unsigned short* h = (const unsigned short*)(scene.texels + op->texel);
+            float c = 0;
+            for (int m = 0; m < 8; ++m) {
+                const int a = min(max(i + (m & 1), 0), n[0] - 1), b = min(max(j + (m >> 1 & 1), 0), n[1] - 1);
+                const int d = min(max(k + (m >> 2), 0), n[2] - 1);
+                c += (m & 1 ? x - i : 1 - (x - i)) * (m & 2 ? y - j : 1 - (y - j)) * (m & 4 ? z - k : 1 - (z - k))
+                    * __half2float(__ushort_as_half(h[(d * n[1] + b) * n[0] + a]));
+            }
+            top[-1] = make_float3(c, c, c);
         } break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
