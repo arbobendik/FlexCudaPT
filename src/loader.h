@@ -546,12 +546,11 @@ template <typename T> std::vector<T> read(size_t count) { // Piped in
 constexpr float IDENTITY_ROWS[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
 constexpr float IDENTITY_ADJUGATE[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
-// Scene piped in by the extension into scene, in place of the one of arrays: triangle, step, texel, baked texel, bake,
-// mesh triangle, instance and image counts and the steps, which its module compiles from as the rest loads; then the
-// meshes' arrays, the instances, the texels, the programs of its bakes, which the bake pass fills the baked texels
-// after those piped with, and each image's float4 count and its texels. The meshes keep their own space, those of
-// instances in world space untransformed. The vertices last denoised stay the previous ones while the meshes' triangle
-// count does, others are freed.
+// Scene piped in, replacing arrays: header (triangles, steps, texels, baked texels, bakes, mesh triangles, instances,
+// images), the steps (the module compiles meanwhile), mesh arrays, instances, texels, bake programs (the bake pass
+// writes baked texels after the piped ones), per image its float4 count and texels, instancer attributes, the world's
+// grid. Meshes in their own space, instanced ones' in world space as is; the last denoised vertices kept as previous
+// while the triangle count is
 inline void loadSteps(Scene& scene, Loaded& loaded) {
     for (CUdeviceptr array : loaded.arrays) release(array);
     for (auto [object, filtering, data, bytes] : loaded.textures) {
@@ -625,7 +624,6 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     loaded.materials.push_back(table[meshes]);
     scene.instances = upload(instances), scene.instanceCount = instances.size();
     scene.materials = upload(loaded.materials);
-    scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
     std::vector<float4> texels(header.texels + header.baked), only(header.only); // Those only bakes read apart
     receive(texels.data(), sizeof(float4), header.texels);
     receive(only.data(), sizeof(float4), header.only);
@@ -638,6 +636,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     unsigned attributes; // Instancer attributes, float4 each, each instance's info naming its first
     receive(&attributes, sizeof(unsigned), 1);
     scene.attributes = upload(read<float4>(attributes));
+    receive(&scene.environmentWidth, sizeof(unsigned), 2);
     scene.handle = buildScene(context, scene.vertices, instances, loaded.meshes, OPTIX_BUILD_OPERATION_BUILD,
         loaded.top, loaded);
     loaded.baking.wait(); // The hair tables baked as the rest loaded: each level's rows' and columns' images after them
@@ -653,16 +652,15 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     if (3 * meshes != corners) release((CUdeviceptr)scene.previousVertices), scene.previousVertices = scene.vertices;
     loaded.arrays = {(CUdeviceptr)scene.normals, (CUdeviceptr)scene.generated, (CUdeviceptr)scene.objects,
         (CUdeviceptr)scene.uvs, (CUdeviceptr)scene.colors, (CUdeviceptr)scene.tangents, (CUdeviceptr)scene.instances,
-        (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
-        (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
+        (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels,
+        (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
         (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds, (CUdeviceptr)scene.strands,
         (CUdeviceptr)scene.hairs};
 }
 
-// The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
-// materials' values changed, an animated one's by frame; then the tables the programs read, rebuilt, each as its first
-// texel and texel count and its texels, until a count of 0; then per program its first step and light power hint,
-// until a first of 2^32 - 1, which the materials of the programs take; then the bakes to run again
+// All steps anew (materials' values changed, or animated by frame): count, steps; tables (first texel, count,
+// texels) until count 0; per program first step and light power hint until first = 2^32 - 1; bakes to rerun; the
+// world's grid again, or none (kept)
 inline void updateSteps(Scene& scene, Loaded& loaded) {
     unsigned count;
     receive(&count, sizeof(count), 1);
@@ -679,6 +677,7 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
     for (Material& material : loaded.materials) material.emitted = hints.at(material.program);
     receive(&count, sizeof(count), 1);
     loaded.rebakes = read<unsigned>(count);
+    receive(&scene.environmentWidth, sizeof(unsigned), 2);
     if (count) // Those bakes' programs and texels for their pass alone, as a scene's
         loaded.bakeOps = allocate((loaded.ops.size() - loaded.rows) * sizeof(Op), loaded.ops.data() + loaded.rows),
         scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
