@@ -2742,6 +2742,37 @@ def velveted():  # Its names its own, apart from the rows after it
                 assert numpy.isclose(seen[ring].mean(), due[ring].mean(), rtol=0.03), ('velvet albedo', s, low)
     preferences.device = device
 velveted()
+# Toon BSDFs, white on the same sphere: the diffuse returns at each view cosine its profile P there, 1 within Size's
+# cone, falling across Smooth's and none past it; the glossy its albedo, P about the mirror direction times cos over the
+# solid angle P weighs, by midpoint quadrature over the hemisphere; on both backends
+def tooned():  # Its names its own, apart from the rows after it
+    toon = sheened.id_data.nodes.new('ShaderNodeBsdfToon')
+    toon.inputs['Color'].default_value = (1, 1, 1, 1)
+    sheened.id_data.links.new(toon.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+    def profile(t, size, smooth):  # P at the angle t from its axis
+        a, w = size * math.pi / 2, smooth * math.pi / 2
+        return numpy.where(t < a, 1.0, numpy.clip(1 - (t - a) / w, 0, 1) if w else 0.0)
+    def glossy(mu, size, smooth):  # Its albedo at view cosine mu, white
+        mirror = numpy.array((-math.sqrt(1 - mu * mu), 0, mu))
+        alpha = (numpy.arange(4096) + 0.5) / 4096 * math.pi
+        weighed = (profile(alpha, size, smooth) * numpy.sin(alpha)).sum() * math.pi / 4096 * 2 * math.pi
+        return (profile(numpy.arccos(numpy.clip(light @ mirror, -1, 1)), size, smooth) * light[..., 2]
+            * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512) / weighed
+    cosines = numpy.linspace(0, 1, 33)
+    for component, size, smooth in (('DIFFUSE', 0.5, 0), ('DIFFUSE', 0.5, 0.5), ('GLOSSY', 0.5, 0)):
+        toon.component, toon.inputs['Size'].default_value, toon.inputs['Smooth'].default_value = component, size, smooth
+        due = profile(numpy.arccos(cosine), size, smooth) if component == 'DIFFUSE' else numpy.interp(cosine, cosines,
+            [glossy(mu, size, smooth) for mu in cosines])
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            seen = render().mean(-1)
+            for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+                ring = (cosine > low) & (cosine <= high)
+                print('TOON', component, size, smooth, preferences.device, 'at cosines', low, high, seen[ring].mean(),
+                    'due', due[ring].mean(), flush=True)
+                assert abs(seen[ring].mean() - due[ring].mean()) < 0.02 + 0.03 * due[ring].mean(), ('toon', component,
+                    smooth, low)
+    preferences.device = device
+tooned()
 
 # Anisotropy under the white sky, seen in parallel at cosine 0.3 along x, on two rectangles 1 / 0.3 long along x, so
 # that each covers a square of the view: a white metal of roughness 0.5 and Principled Anisotropic 1 about Blender's
