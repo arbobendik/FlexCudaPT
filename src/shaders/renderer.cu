@@ -583,6 +583,13 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
             const float3 forward = normalize(cross(c.y, c.x));
             const float3 q = c.lens.ortho ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its
             // image plane
+#ifdef EXTENDED
+            if (op->code == WINDOW && PANORAMIC(scene.camera)) {
+                const float2 uv = unpanorama(scene.cameraProjection, local(c, d));
+                *top++ = make_float3(uv.x, uv.y, 0);
+                break;
+            }
+#endif
             *top++ = op->code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
