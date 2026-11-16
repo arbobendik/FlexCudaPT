@@ -2,7 +2,7 @@
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
 import bpy, bmesh, bpy_extras.object_utils, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref, zlib
-from mathutils import Color, Matrix
+from mathutils import Color, Matrix, Vector
 
 SIZE = 64
 COLOR = (0.8, 0.2, 0.1)
@@ -3343,6 +3343,73 @@ with offscreen.bind():
 drawn = lit(drawn)
 assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (0.4 * SIZE / 3) ** 2, \
     f'ortho viewport {drawn}'
+
+# A panoramic camera sees each direction at its u and v: a sphere of radius 0.5 glowing 10 units off, its light's
+# centroid within half a pixel of its center's, the white world 1 elsewhere, on OptiX. Equirectangular, u and v
+# its longitude to the right and latitude over their ranges; central cylindrical, its angle to the right and the height
+# it crosses a cylinder of the radius at over theirs
+scene = opened('panorama', (1, 1, 1))
+scene.render.resolution_x, scene.render.resolution_y, scene.flex_samples = 128, 64, 16
+scene.camera = add(bpy.data.cameras.new('panorama'), (0, 0, 0), (math.pi / 2, 0, 0))  # Forward y, left -x, up z
+lens = scene.camera.data
+lens.type, lens.longitude_min, lens.longitude_max = 'PANO', -math.pi / 2, math.pi
+lens.latitude_min, lens.latitude_max = -math.pi / 4, math.pi / 2
+lens.central_cylindrical_range_u_min, lens.central_cylindrical_range_u_max = -2, 2
+lens.central_cylindrical_range_v_min, lens.central_cylindrical_range_v_max, lens.central_cylindrical_radius = -0.5, 1, 2
+glow = shape('panorama glow', lambda bm: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=0.5), (0, 0, 0))
+glow.inputs['Base Color'].default_value, glow.inputs['Emission Strength'].default_value = (0, 0, 0, 1), 10
+right, up = math.radians(40), math.radians(20)
+for kind, d, uv in (('EQUIRECTANGULAR', (math.cos(up) * math.cos(right), -math.cos(up) * math.sin(right),
+        math.sin(up)), ((right + math.pi / 2) / (1.5 * math.pi), (up + math.pi / 4) / (0.75 * math.pi))),
+        ('CENTRAL_CYLINDRICAL', (math.cos(1), -math.sin(1), 0.15), (3 / 4, 0.8 / 1.5))):
+    lens.panorama_type = kind
+    bpy.data.objects['panorama glow'].location = 10 * Vector((-d[1], d[0], d[2])).normalized()
+    preferences.device = 'OPTIX'
+    bpy.ops.render.render(scene=scene.name, write_still=True)
+    seen = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(64, 128, 4)[..., :3].mean(2) - 1
+    at = numpy.array(uv) * (128, 64)
+    x, y = numpy.meshgrid(numpy.arange(128) + 0.5, numpy.arange(64) + 0.5)
+    centroid = numpy.array(((seen * x).sum(), (seen * y).sum())) / seen.sum()
+    assert numpy.hypot(*(centroid - at)) < 0.5 and abs(seen[numpy.hypot(x - at[0], y - at[1]) > 6]).max() < 1e-5, \
+        ('panorama', kind, centroid, at)
+# On Vulkan a panoramic camera is refused by name: its export raises before a scene is piped, so nothing is traced
+preferences.device, traced, trace = 'VULKAN', [], flex.Flex.trace
+flex.Flex.trace = lambda self, *args: traced.append(True) or trace(self, *args)
+reported, stderr = io.StringIO(), sys.stderr
+sys.stderr = reported
+try: bpy.ops.render.render(scene=scene.name)
+except RuntimeError as error: print(error, file=reported)
+sys.stderr, flex.Flex.trace, preferences.device = stderr, trace, device
+assert 'Flex: panoramic cameras render on OptiX only, not on Vulkan' in reported.getvalue() and not traced, \
+    ('panorama on Vulkan', reported.getvalue()[-300:], traced)
+
+# An animation's frame reusing the last one's reservoirs reprojects them through its panorama: an equirectangular
+# camera turned 5 degrees between frames renders the second within 1% of that frame alone, on OptiX
+scene = opened('turned panorama')
+scene.render.resolution_x, scene.render.resolution_y = 64, 32
+scene.flex_samples, scene.flex_reuse_samples, scene.flex_reuse, scene.flex_denoise = 256, 192, True, False
+scene.frame_start, scene.frame_end = 1, 2
+scene.camera = add(bpy.data.cameras.new('turned panorama'), (0, -4, 3))
+scene.camera.data.type, scene.camera.data.panorama_type = 'PANO', 'EQUIRECTANGULAR'
+keys(scene.camera, 'rotation_euler', (0.93, 0, 0), (0.93, 0, math.radians(5)))
+turned = shape('turned cube', lambda bm: bmesh.ops.create_cube(bm, size=1), (0.8, 0, 0.5))
+ground = shape('turned floor', lambda bm: bmesh.ops.create_grid(bm, size=3), (0, 0, 0))
+for bsdf, color in ((turned, (0.8, 0.1, 0.1, 1)), (ground, (0.8, 0.8, 0.8, 1))):
+    bsdf.inputs['Base Color'].default_value, bsdf.inputs['Roughness'].default_value = color, 1
+add(bpy.data.lights.new('turned sun', 'SUN'), (0, 0, 0), (0.8, 0, 0.6)).data.energy = 3
+counts, trace = [], flex.Flex.trace
+flex.Flex.trace = lambda self, *args: (traced := trace(self, *args), counts.append(int(traced[1][0, 0, 3])))[0]
+preferences.device = 'OPTIX'
+scene.frame_set(1)
+bpy.ops.render.render(animation=True, scene=scene.name)
+frame = numpy.array(bpy.data.images.load(scene.render.frame_path(frame=2)).pixels).reshape(-1, 4)[:, :3]
+reused = counts[-1]
+scene.frame_set(2)
+bpy.ops.render.render(scene=scene.name, write_still=True)
+alone = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(-1, 4)[:, :3]
+assert reused == 192 and abs(frame.mean() / alone.mean() - 1) < 0.01, ('turned panorama', reused, frame.mean(),
+    alone.mean())
+preferences.device, flex.Flex.trace = device, trace
 
 # Flex offers Blender's shading nodes, shows the panels whose settings it reads, hides those it ignores, and draws its
 # own of what it reads of a light, of an object's visibility and of a world, each property one the export reads
