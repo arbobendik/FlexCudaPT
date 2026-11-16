@@ -1906,6 +1906,96 @@ def burning():  # Its names its own, apart from the rows after it
         preferences.device = device
     bpy.context.window.scene = shown
 burning()
+# A volume object of a grid its geometry nodes make, a Volume Cube of density 1.5 + x + y / 2 over [-1, 1]^3 at 32^3 in
+# renders and 8^3 in the viewport (by Is Viewport: a render reads its own), turned and stretched, a pure absorber of its
+# Principled Volume's density 2 times that grid, seen straight down against a white sky: each quarter of the view passes
+# exp(-2 x the density's integral down it), which the grid, linear in its voxels, holds exactly; its density extended
+# past the outermost voxels' centers out to its bounds
+def volumed():  # Its names its own, apart from the rows after it
+    made = opened('grid', (1, 1, 1))
+    made.render.resolution_x = made.render.resolution_y = 16
+    made.camera = bpy.data.objects.new('grid', bpy.data.cameras.new('grid'))
+    made.collection.objects.link(made.camera)
+    made.camera.location.z, made.camera.data.type, made.camera.data.ortho_scale = 2, 'ORTHO', 4
+    made.collection.objects.link(volume := bpy.data.objects.new('grid', bpy.data.volumes.new('grid')))
+    volume.rotation_euler.z, volume.scale.y = 0.5, 1.5
+    tree = bpy.data.node_groups.new('grid', 'GeometryNodeTree')
+    tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    cube, position, field = (tree.nodes.new(kind) for kind in ('GeometryNodeVolumeCube', 'GeometryNodeInputPosition',
+        'ShaderNodeVectorMath'))
+    field.operation, field.inputs[1].default_value = 'DOT_PRODUCT', (1, 0.5, 0)
+    add = tree.nodes.new('ShaderNodeMath')
+    add.inputs[1].default_value = 1.5
+    tree.links.new(position.outputs[0], field.inputs[0]), tree.links.new(field.outputs['Value'], add.inputs[0])
+    tree.links.new(add.outputs[0], cube.inputs['Density'])
+    resolution, viewport = tree.nodes.new('GeometryNodeSwitch'), tree.nodes.new('GeometryNodeIsViewport')
+    resolution.input_type, resolution.inputs['False'].default_value, resolution.inputs['True'].default_value = 'INT', 32, 8
+    tree.links.new(viewport.outputs[0], resolution.inputs['Switch'])
+    for k in 'XYZ': tree.links.new(resolution.outputs[0], cube.inputs['Resolution ' + k])
+    cube.inputs['Min'].default_value, cube.inputs['Max'].default_value = (-1, -1, -1), (1, 1, 1)
+    tree.links.new(cube.outputs[0], (material := tree.nodes.new('GeometryNodeSetMaterial')).inputs['Geometry'])
+    tree.links.new(material.outputs[0], tree.nodes.new('NodeGroupOutput').inputs[0])
+    volume.modifiers.new('grid', 'NODES').node_group = tree
+    material.inputs['Material'].default_value = absorber = bpy.data.materials.new('grid')
+    nodes = absorber.node_tree.nodes
+    nodes.remove(nodes['Principled BSDF'])
+    principled = nodes.new('ShaderNodeVolumePrincipled')
+    principled.inputs['Color'].default_value, principled.inputs['Density'].default_value = (0, 0, 0, 1), 2
+    principled.inputs['Density Attribute'].default_value = 'density'
+    absorber.node_tree.links.new(principled.outputs[0], nodes['Material Output'].inputs['Volume'])
+    def caught(change):  # A depsgraph stand-in of the updates the change makes, as Blender tells them
+        updates = []
+        handler = lambda scene, graph: updates.extend(types.SimpleNamespace(id=u.id, **{k: getattr(u, k) for k in
+            ('is_updated_geometry', 'is_updated_transform', 'is_updated_shading')}) for u in graph.updates)
+        bpy.app.handlers.depsgraph_update_post.append(handler)
+        change(), bpy.context.view_layer.update(), bpy.app.handlers.depsgraph_update_post.remove(handler)
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        return types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+            updates=updates)
+    # The viewport's export reads a grid once: not again for the updates its read makes, nor once its volume moved,
+    # but once its geometry changed
+    reads, read = [], module['lattice']
+    module['lattice'] = lambda *args: (reads.append(args[1]), read(*args))[1]
+    exporter = exported()
+    repiped(exporter, own := caught(lambda: None))
+    repiped(exporter, moved := caught(lambda: setattr(volume, 'location', (0, 0, 0.1))))
+    assert reads == ['density'] and own.updates and [(u.is_updated_transform, u.is_updated_geometry) for u in
+        moved.updates if u.id.original == volume] == [(True, False)], 'grid kept'
+    repiped(exporter, caught(lambda: setattr(add.inputs[1], 'default_value', 1.5)))
+    module['lattice'], volume.location = read, (0, 0, 0)
+    assert reads == ['density'] * 2, ('grid read anew', reads)
+    # A grid without an active voxel, a Volume Cube of density 0, reads as one voxel of 0, no medium, leaving nothing
+    blank = bpy.data.node_groups.new('grid blank', 'GeometryNodeTree')
+    blank.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    (zero := blank.nodes.new('GeometryNodeVolumeCube')).inputs['Density'].default_value = 0
+    blank.links.new(zero.outputs[0], blank.nodes.new('NodeGroupOutput').inputs[0])
+    made.collection.objects.link(empty := bpy.data.objects.new('grid blank', bpy.data.volumes.new('grid blank')))
+    empty.modifiers.new('grid blank', 'NODES').node_group = blank
+    left = lambda: [len(ids) for ids in (bpy.data.scenes, bpy.data.objects, bpy.data.volumes, bpy.data.meshes,
+        bpy.data.node_groups, os.listdir(bpy.app.tempdir))]  # IDs and temporary files
+    kept = left()
+    values, low, size = module['dense'](read(empty.evaluated_get(bpy.context.evaluated_depsgraph_get()), 'density'),
+        empty.name, 'density')
+    assert values.tolist() == [0] and size.tolist() == [1, 1, 1] and left() == kept, ('empty grid', values, kept, left())
+    bpy.data.objects.remove(empty)
+    evaluated = volume.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    # The render's 32^3 grid's bounds, half a voxel of 2 / 31 past its outermost centres at ±1, not the viewport's 8^3
+    low, high = numpy.full(3, -1 - 1 / 31), numpy.full(3, 1 + 1 / 31)
+    inverse = numpy.array(evaluated.matrix_world.inverted())
+    u = (numpy.arange(32) + 0.5) / 32 * 4 - 2  # Down 32 x 32 points across the view at 200 depths
+    depth = (numpy.arange(200) + 0.5) / 200 * 3 - 1.5
+    view = numpy.stack(numpy.broadcast_arrays(u[None, :, None], u[:, None, None], depth), -1)
+    local = view @ inverse[:3, :3].T + inverse[:3, 3]
+    inside = ((local >= low) & (local <= high)).all(-1)
+    clamped = numpy.clip(local, -1, 1)
+    due = numpy.exp(-2 * ((1.5 + clamped[..., 0] + clamped[..., 1] / 2) * inside).sum(-1) * 3 / 200)
+    assert numpy.ptp(quarters(due)) > 0.1, ('grid quarters', quarters(due))
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = quarters(render(made, 16).mean(2))
+        assert numpy.abs(seen - quarters(due)).max() < 0.02, ('volume grid', preferences.device, seen, quarters(due))
+    preferences.device = device
+    bpy.context.window.scene = shown
+volumed()
 # A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
 # 2002 fit it, from 4000 K to past 12000 K: a Blackbody node seen on an emitter of strength 1, its table filtered as
 # each backend filters it
