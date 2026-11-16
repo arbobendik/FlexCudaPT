@@ -439,10 +439,12 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
         // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs, the duplication
-        // map only for decorrelation.
+        // map only for decorrelation. The spatial round's queued shifts launch once per job the queue can hold, in
+        // groups of 64 a bin each, those past their bin's jobs returning; its count starts from an empty queue
         const unsigned restir = scene.settings.restir;
-        const unsigned depths[PASSES] = {1, restir, restir * scene.settings.neighbors, restir,
-            restir * scene.settings.decorrelation, 0};
+        const unsigned depths[PASSES] = {1, restir, restir, restir, restir, restir, restir * scene.settings.decorrelation,
+            0};
+        const unsigned jobs = (3 * pixels + 63) / 64 * 64 + 64 * 40;
         scene.width = view.width, scene.height = view.height;
         scene.anchor = (const Scene*)(table + offsetof(Record, data));
         const unsigned samples = reused ? request.reuse : request.samples;
@@ -455,8 +457,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             walk[0].data = walk[1].data = scene, walk[2].data = anchored;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
+                if (pass == PASS_COUNT) CHECK(cuMemsetD32((CUdeviceptr)scene.queue, 0, QUEUE_HEADER));
                 sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
-                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
+                CHECK(pass == PASS_SHIFT ? optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, jobs, 1, 1)
+                    : optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
         }
