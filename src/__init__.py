@@ -2208,7 +2208,14 @@ class Flex(bpy.types.RenderEngine):
                 instances[k][3][:21].astype('f')))))
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
-        world = program(resolve(world.inputs['Surface']) if world else BLACK)
+        surface = resolve(world.inputs['Surface']) if world else BLACK
+        # The grid the world bakes over: its largest Environment Texture's, else 1024 x 512; none where its emission is
+        # the same every way
+        sizes = [tuple(node.image.size) for node in world.id_data.nodes if node.type == 'TEX_ENVIRONMENT' and node.image
+            and node.image.size[0]] if world else []
+        grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if isinstance(fold(surface)[4],
+            tuple) else (0, 0)
+        world = program(surface)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
             for row in layers], textures
@@ -2277,7 +2284,10 @@ class Flex(bpy.types.RenderEngine):
                 return self.start(depsgraph)
             # Then per table its first texel, width and texels, until a width of 0, those only bakes read flagged in bit
             # 31, and with bakes to run again their images, as piped, and tiles; per program its first step and light
-            # power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again
+            # power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again; then the
+            # world's grid where the world or a node group changed, else none, its last bake kept
+            regrid = grid if any(isinstance(update.id, (bpy.types.World, bpy.types.NodeTree))
+                for update in depsgraph.updates) else (0, 0)
             def anew(key):  # An image only bakes read, read again as piped
                 texture(types.SimpleNamespace(type='TEX_IMAGE', image=key[0], extension=key[1]), {}, data := [])
                 return data
@@ -2288,7 +2298,7 @@ class Flex(bpy.types.RenderEngine):
             self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for first,
                 width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
                 numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
-                numpy.array(again, 'I')))
+                numpy.array(again, 'I'), struct.pack('<2I', *regrid)))
             return
         self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
@@ -2305,7 +2315,8 @@ class Flex(bpy.types.RenderEngine):
         # the point and segment counts, per point its position and radius, per segment its first point and strand and
         # its bounds, per strand its first point, point count, random number, root's UV and color, and per segment its
         # strand's material; then the texels and the programs of the bakes; then each image's width and height, RGBA8
-        # in its bit 26, and its texels; the hair tables' count and entries after the steps, baked as the rest loads
+        # in its bit 26, and its texels; the hair tables' count and entries after the steps, baked as the rest loads;
+        # last the instancer attributes and the world's grid
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
             struct.pack('<I', len(HAIRS)), numpy.array([*HAIRS], 'f'),
@@ -2318,7 +2329,7 @@ class Flex(bpy.types.RenderEngine):
             numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
-            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes))
+            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
