@@ -83,8 +83,9 @@ inline int memoryType(uint32_t bits, VkMemoryPropertyFlags flags, VkMemoryProper
 inline CUresult create(VkDeviceSize bytes, VkMemoryPropertyFlags flags, VkBuffer& buffer, VkDeviceMemory& memory,
     VkMemoryPropertyFlags preferred = 0) {
     const VkBufferCreateInfo info{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = bytes,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+        | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR
         | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR};
     if (VkResult result = vkCreateBuffer(vulkan.device, &info, nullptr, &buffer)) return result;
     VkMemoryRequirements requirements;
@@ -150,8 +151,8 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
     VkPhysicalDeviceFeatures2 features{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &vulkan12,
         .features = {.shaderInt64 = VK_TRUE, .shaderInt16 = VK_TRUE}};
     const VkDeviceCreateInfo info{.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
-        .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue, .enabledExtensionCount = uint32_t(std::size(extensions)),
-        .ppEnabledExtensionNames = extensions};
+        .queueCreateInfoCount = 1, .pQueueCreateInfos = &queue,
+        .enabledExtensionCount = uint32_t(std::size(extensions)), .ppEnabledExtensionNames = extensions};
     VkFormatProperties floats;  // Float images filtered linearly, which Vulkan leaves optional
     vkGetPhysicalDeviceFormatProperties(vulkan.physical, VK_FORMAT_R32G32B32A32_SFLOAT, &floats);
     if (!(floats.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
@@ -213,8 +214,8 @@ inline CUresult cuCtxCreate(CUcontext* context, void*, unsigned, int) {
 }
 
 inline void barrier(VkPipelineStageFlags stage, VkAccessFlags access) {
-    const VkMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
-        .dstAccessMask = access};
+    const VkMemoryBarrier barrier{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = access};
     vkCmdPipelineBarrier(vulkan.commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, stage, 0, 1, &barrier, 0, nullptr, 0,
         nullptr);
 }
