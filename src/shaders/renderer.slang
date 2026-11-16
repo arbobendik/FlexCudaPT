@@ -1765,7 +1765,7 @@ void temporal(uint3 p, uint3 size, Scene* scene) {
         const float p_c = rgb_to_greyscale(r.f);
         const float p_t = rgb_to_greyscale(temporal.f);
         Selection sel = {};
-        sel.random_state = stream(r.seed, STREAM_SELECT + 1u);
+        sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 1u);
         // Temporal MIS weights, p_t->c = g_previous the previous sample shifted here, p_c->t = g_current
         // m_c = c * p_c / (c * p_c + c_t * p_t->c)
         // m_t = c_t * p_t / (c_t * p_t + c * p_c->t)
@@ -1803,7 +1803,7 @@ void spatial(uint3 p, uint3 size, Scene* scene) {
     const float p_c = rgb_to_greyscale(r.f);
     float canonical_mis = count == 0.0f ? 1.0f : 0.0f;
     Selection sel = {};
-    sel.random_state = stream(scene.initial[index].seed, STREAM_SELECT + 2u);
+    sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 2u);
     for (uint t = 0u; t < scene.settings.neighbors; t++) {
         const int q = partner(scene, p, size, t);
         if (q >= 0) {
