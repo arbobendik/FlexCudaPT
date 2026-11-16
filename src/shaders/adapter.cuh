@@ -212,17 +212,18 @@ static __device__ bool fcptCurrentDomain(int2 p, FKDomain* dom) {
 }
 static __device__ bool fcptStoredDomainInitial(int2 p, unsigned seed, FKDomain* dom) {
     if (!onImage(p)) return false;
-    *dom = fkDomain(pixelDomain(hookScene(), hookScene().camera, pixelIndex(p), imageSize(), seed));
+    *dom = fkDomain(pixelDomain(hookScene(), VIEW(hookScene().camera), pixelIndex(p), imageSize(), seed));
     return dom->hit.instance_index != NONE;
 }
 static __device__ bool fcptStoredDomainTemporal(int2 p, unsigned seed, FKDomain* dom) {
     return fcptStoredDomainInitial(p, seed, dom);
 }
 static __device__ FKDomain fcptPreviousDomain(int2 q, unsigned seed) {
-    return fkDomain(pixelDomain(previousScene(), hookScene().previousCamera, pixelIndex(q), imageSize(), seed));
+    return fkDomain(pixelDomain(previousScene(), VIEW(hookScene().previousCamera), pixelIndex(q), imageSize(), seed));
 }
 static __device__ float2 fcptPixelOf(float3 position, bool previous) {
-    return project(previous ? hookScene().previousCamera : hookScene().camera, position, imageSize());
+    return previous ? project(VIEW(hookScene().previousCamera), position, imageSize())
+        : project(VIEW(hookScene().camera), position, imageSize());
 }
 // Within a view the camera and the scene stay, so every sample keeps its domain; a view's first frame reuses the
 // anchor's, whose scene it shifts into

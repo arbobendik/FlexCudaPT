@@ -507,12 +507,16 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
 }
-#ifdef EXTENDED // Whether an instance holds strands
+#ifdef EXTENDED // Whether an instance holds strands; a camera with its panorama
 #define STRAND(scene, i) (scene.instances[i].world == STRANDS)
+#define VIEW(camera) camera, camera##Projection
+#define VIEWING(camera) const Camera& camera, const Projection& camera##Projection
 #else // Nor varying media and strands
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
     && used(code))
 #define STRAND(scene, i) false
+#define VIEW(camera) camera
+#define VIEWING(camera) const Camera& camera
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // Surface the program resolves to at the point
@@ -1023,7 +1027,7 @@ __device__ float2 aperture(const Lens& lens, unsigned state) {
 }
 
 // Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray
-__device__ Domain pixelDomain(const Scene& scene, const Camera& camera, int pixel, uint3 size, unsigned seed) {
+__device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, uint3 size, unsigned seed) {
     unsigned state = stream(seed, STREAM_JITTER);
     const float x = pixel % size.x + random(state);
     const float y = pixel / size.x + random(state);
@@ -1322,7 +1326,7 @@ WALK_CALLABLE(__direct_callable__first, false)
 WALK_CALLABLE(__direct_callable__walk, true)
 
 // Pixel coordinates a camera sees a position at
-__device__ float2 project(const Camera& camera, float3 position, uint3 size) {
+__device__ float2 project(VIEWING(camera), float3 position, uint3 size) {
     const float3 d = position - camera.origin;
     if (camera.lens.ortho)
         return make_float2((1 + dot(d - camera.z, camera.x) / dot(camera.x, camera.x)) * 0.5f * size.x,
@@ -1439,13 +1443,16 @@ extern "C" __global__ void __raygen__denoise() {
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
     const float4 sum = scene.accumulation[index];
     scene.mean[index] = make_float4(sum.x / sum.w, sum.y / sum.w, sum.z / sum.w, 1.0f);
-    const Domain dom = pixelDomain(scene, scene.camera, index, size, index);
+    const Domain dom = pixelDomain(scene, VIEW(scene.camera), index, size, index);
     const Camera& last = scene.denoisedCamera;
+#ifdef EXTENDED
+    const Projection& lastProjection = scene.denoisedCameraProjection;
+#endif
     const unsigned seen = dom.hit.triangle == NONE ? NONE : key(scene, dom.hit);
     const float3 before = dom.hit.triangle == NONE ? last.origin + dom.x1 - dom.x0
         : hitPosition(scene, scene.previousVertices, dom.hit);
-    const float2 then = project(last, before, size);
-    scene.flow[index] = project(scene.camera, dom.x1, size) - then;
+    const float2 then = project(VIEW(last), before, size);
+    scene.flow[index] = project(VIEW(scene.camera), dom.x1, size) - then;
     const int x = int(floorf(then.x)), y = int(floorf(then.y));
     const float3 back = cross(last.x, last.y);
     scene.trust[index] = dot(back, before - last.origin) * dot(back, last.z) > 0.0f && x >= 0 && y >= 0
