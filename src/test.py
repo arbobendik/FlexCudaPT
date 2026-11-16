@@ -3660,6 +3660,46 @@ for preferences.device in ('OPTIX', 'VULKAN'):
             preferences.device, texel.flex_restir, seen.mean(), seen.std() / seen.mean())
 preferences.device = 'OPTIX'
 
+# A Script node's value outputs export as the same graph of Math and Vector Math nodes does, byte for byte: its OSL
+# compiled by Blender's own compiler, its sockets made from its parameters, its main code run on expressions
+def scripted():  # OSL scripts
+    shown, osl = bpy.context.window.scene, opened('osl')
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('scripted'))
+    osl.collection.objects.link(bpy.data.objects.new('scripted', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('scripted'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    x = nodes.new('ShaderNodeSeparateXYZ')
+    links.new(nodes.new('ShaderNodeTexCoord').outputs['Generated'], x.inputs[0])
+    (text := bpy.data.texts.new('ramp.osl')).write('shader ramp(float Fac = 0.5, color A = color(1, 0, 0),\n'
+        '    color B = color(0, 0, 1), output color Color = 0) {\n    float t = clamp(Fac * 2 - 0.5, 0, 1);\n'
+        '    Color = mix(A, B, t) * pow(t, 2.2) + sin(Fac);\n}\n')
+    script = nodes.new('ShaderNodeScript')
+    script.script = text
+    Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+    assert [s.identifier for s in script.inputs] == ['Fac', 'A', 'B'] and [s.identifier for s in script.outputs] \
+        == ['Color'] and script.bytecode, 'script compiled'
+    links.new(x.outputs['X'], script.inputs['Fac'])
+    links.new(script.outputs['Color'], nodes['Principled BSDF'].inputs['Base Color'])
+    piped = exported().requests.getvalue()
+    nodes.remove(script)
+    def math(operation, a, b, vector=False):  # A Math or Vector Math node's output, its operands linked or set
+        node = nodes.new('ShaderNodeVectorMath' if vector else 'ShaderNodeMath')
+        node.operation = operation
+        for socket, operand in zip(node.inputs, (a, b)):
+            if isinstance(operand, bpy.types.NodeSocket): links.new(operand, socket)
+            else: socket.default_value = operand
+        return node.outputs[0]
+    t = math('MAXIMUM', math('MINIMUM', math('SUBTRACT', math('MULTIPLY', x.outputs['X'], 2), 0.5), 1), 0)
+    mixed = math('ADD', math('MULTIPLY', (1, 0, 0), math('SUBTRACT', 1, t), True), math('MULTIPLY', (0, 0, 1), t,
+        True), True)
+    color = math('ADD', math('MULTIPLY', mixed, math('POWER', t, 2.2), True), math('SINE', x.outputs['X'], 0), True)
+    links.new(color, nodes['Principled BSDF'].inputs['Base Color'])
+    assert exported().requests.getvalue() == piped, 'script as nodes'
+    bpy.context.window.scene = shown
+scripted()
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
