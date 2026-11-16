@@ -2947,7 +2947,7 @@ assert all(abs(n - area) < 0.1 * area for n in drawn[:2]) and drawn[2] > 0.5 * (
     f'ortho viewport {drawn}'
 
 # Flex offers Blender's shading nodes, shows the panels whose settings it reads, hides those it ignores, and draws its
-# own of what it reads of a light and of an object's visibility, each property one the export reads
+# own of what it reads of a light, of an object's visibility and of a world, each property one the export reads
 assert getattr(flex.Flex, 'bl_use_shading_nodes_custom', True) is False, 'shading nodes offered'
 shown = lambda name: flex.Flex.bl_idname in getattr(bpy.types, name).COMPAT_ENGINES
 assert all(map(shown, ('RENDER_PT_format', 'RENDER_PT_color_management', 'RENDER_PT_post_processing',
@@ -2971,6 +2971,18 @@ for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size'
     assert 'temperature' in drawn(flex.DATA_PT_flex_light, light=light), ('temperature read', kind)
 assert drawn(flex.OBJECT_PT_flex_visibility, object=bpy.data.objects[0]) == ['hide_viewport', 'hide_render',
     'visible_camera', 'visible_shadow'], 'visibility read'
+assert drawn(flex.WORLD_PT_flex, world=bpy.data.worlds[0]) == ['flex_sample_light'], 'world read'
+# A world of an image is sampled while its switch is on, its grid and SKY step piped; off, its export pipes neither, as
+# a constant world's
+unsampled = opened('unsampled world')
+lookup = unsampled.world.node_tree.nodes.new('ShaderNodeTexEnvironment')
+lookup.image = bpy.data.images.new('unsampled world', 4, 2, float_buffer=True)
+unsampled.world.node_tree.links.new(lookup.outputs['Color'], unsampled.world.node_tree.nodes['Background'].inputs[0])
+for unsampled.world.flex_sample_light, sampled in ((True, (4, 2)), (False, (0, 0))):
+    piped = exported().requests.getvalue()
+    codes = numpy.frombuffer(piped, '<u4', struct.unpack_from('<11I', piped)[2] * 4, 44)[::4]
+    assert struct.unpack('<2I', piped[-8:]) == sampled and ([*flex.OPS].index('SKY') in codes) == (sampled[0] > 0), \
+        ('world sampled', unsampled.world.flex_sample_light)
 
 # Camera rays start at the clip start: an emitter shows through a perspective camera past a black plane nearer than it.
 # And they start in the volume there, not the camera's: in an absorbing cube with the near plane below it, through
