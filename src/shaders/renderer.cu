@@ -1379,24 +1379,6 @@ __device__ int temporalNeighbor(const Scene& scene, uint3 p, uint3 size, const D
         size);
 }
 
-// Index of the partner of p in reuse texture t, randomly flipped, transposed and offset every frame (Sec. 3.2),
-// -1 off the image
-__device__ int partner(const Scene& scene, uint3 p, uint3 size, unsigned t) {
-    const int sizes[] = {PAIRING_SIZES[0], PAIRING_SIZES[1], PAIRING_SIZES[2]};
-    const int texture = sizes[t];
-    const unsigned random = hash(scene.frame * 3u + t);
-    const int flip_x = (random & 1u) != 0u ? -1 : 1;
-    const int flip_y = (random & 2u) != 0u ? -1 : 1;
-    const bool transpose = (random & 4u) != 0u;
-    const int x = ((int(transpose ? p.y : p.x) * flip_x + int((random >> 8u) & 255u)) % texture + texture) % texture;
-    const int y = ((int(transpose ? p.x : p.y) * flip_y + int((random >> 16u) & 255u)) % texture + texture) % texture;
-    const char2 delta = scene.pairing[t][y * texture + x];
-    const int qx = int(p.x) + (transpose ? delta.y * flip_y : delta.x * flip_x);
-    const int qy = int(p.y) + (transpose ? delta.x * flip_x : delta.y * flip_y);
-    const bool valid = qx >= 0 && qy >= 0 && qx < int(size.x) && qy < int(size.y);
-    return valid ? qy * int(size.x) + qx : -1;
-}
-
 // A texel of the bake the frame numbers, its top bit the pass: the albedo the program's surface takes there
 // Tiles of 16 x 16 texels over a triangle's UVs: owned by one triangle in the first pass, padding baked
 // texels in the second
@@ -1581,58 +1563,15 @@ extern "C" __global__ void __raygen__temporal() {
     scene.temporal[index] = r;
 }
 
-// Paired shifts (Sec. 3): the pixel's sample into the domain of its partner in the reuse texture of the launch's layer
+// The spatial round of FlexKernels' shift queue: each pixel's jobs counted per bin, then queued bin after bin, then
+// run over the queue, a launch index its job; then paired spatial reuse (Sec. 3)
+extern "C" __global__ void __raygen__count() { restir_count_hook(optixGetLaunchIndex(), 0); }
+extern "C" __global__ void __raygen__prepass() { restir_prepass_hook(optixGetLaunchIndex(), 0); }
 extern "C" __global__ void __raygen__shift() {
-    const uint3 p = optixGetLaunchIndex();
-    const uint3 size = optixGetLaunchDimensions();
-    const unsigned index = p.y * size.x + p.x;
-    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    const int q = partner(scene, p, size, p.z);
-    scene.shifts[3 * index + p.z] = q < 0 ? Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f}
-        : shift(scene, scene.camera, q, size, scene.temporal[index]);
+    const unsigned i = optixGetLaunchIndex().x;
+    restir_shift_hook(make_uint3(i / 64, 0, 0), i % 64);
 }
-
-// Paired spatial reuse with pairwise MIS (Sec. 3) and shading with vector-valued weights (Sec. 6.3)
-extern "C" __global__ void __raygen__spatial() {
-    const uint3 p = optixGetLaunchIndex();
-    const uint3 size = optixGetLaunchDimensions();
-    const unsigned index = p.y * size.x + p.x;
-    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    const Reservoir r = scene.temporal[index];
-    float count = 0.0f;
-    float c_sum = r.c;
-    for (unsigned t = 0u; t < scene.settings.neighbors; t++) {
-        const int q = partner(scene, p, size, t);
-        if (q >= 0) {
-            count += 1.0f;
-            c_sum += scene.temporal[q].c;
-        }
-    }
-    // Confidence of the current pixel is split evenly across the pairs
-    const float c_pair = r.c / fmaxf(count, 1.0f);
-    const float p_c = rgb_to_greyscale(r.f);
-    float canonical_mis = count == 0.0f ? 1.0f : 0.0f;
-    Selection sel = {};
-    sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 2u);
-    for (unsigned t = 0u; t < scene.settings.neighbors; t++) {
-        const int q = partner(scene, p, size, t);
-        if (q >= 0) {
-            const Reservoir neighbor = scene.temporal[q];
-            const Shift to_here = scene.shifts[3 * q + t];
-            const Shift to_there = scene.shifts[3 * index + t];
-            const float share = pairShare(neighbor.c, c_pair, c_sum);
-            if (p_c > 0.0f) {
-                canonical_mis += canonicalWeight(share, c_pair, p_c, neighbor.c, rgb_to_greyscale(to_there.f));
-            }
-            offerShifted(&sel, neighbor, to_here,
-                neighborWeight(share, neighbor.c, rgb_to_greyscale(neighbor.f), c_pair, rgb_to_greyscale(to_here.f)));
-        }
-    }
-    offerShifted(&sel, r, Shift{r.f, 1.0f}, canonical_mis);
-    scene.previous[index] = finalize(sel, c_sum);
-    float4& sum = scene.accumulation[index];
-    sum = make_float4(sum.x + sel.color.x, sum.y + sel.color.y, sum.z + sel.color.z, sum.w);
-}
+extern "C" __global__ void __raygen__spatial() { restir_spatial_hook(optixGetLaunchIndex()); }
 
 // Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
 extern "C" __global__ void __raygen__duplicates() {
