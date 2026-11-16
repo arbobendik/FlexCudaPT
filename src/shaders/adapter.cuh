@@ -64,7 +64,8 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
         used(TRANSLUCENT) ? surface.translucent : make_float3(0, 0, 0),
         used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-        used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, false, random_state, surface.coverage,
+        used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0), used(VELVET) ? surface.velvet : 0}, false,
+        random_state, surface.coverage,
         enclosed, enclosed ? FKMedium{volume(surface).scatter, volume(surface).extinction, volume(surface).g}
         : FKMedium{},
         enclosed ? fills(scene, at.instance, at.triangle) : NONE, surface.hair};
