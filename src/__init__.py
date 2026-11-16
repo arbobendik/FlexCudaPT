@@ -1857,8 +1857,12 @@ def panorama(camera):  # A camera's panorama: its number, 0 for none, range of d
     data = camera and camera.type == 'CAMERA' and camera.data
     if data and data.type == 'CUSTOM': raise ValueError('Flex: custom cameras need OSL, which Flex does not run')
     if not data or data.type != 'PANO': return 0, *[0.0] * 6
-    raise ValueError(f"Flex: the {data.bl_rna.properties['panorama_type'].enum_items[data.panorama_type].name} "
-        'panorama is not supported')
+    ranges = {'EQUIRECTANGULAR': (data.longitude_min - data.longitude_max, -data.longitude_min,
+        data.latitude_min - data.latitude_max, math.pi / 2 - data.latitude_min)}
+    if data.panorama_type not in ranges:
+        raise ValueError(f"Flex: the {data.bl_rna.properties['panorama_type'].enum_items[data.panorama_type].name} "
+            'panorama is not supported')
+    return PANORAMAS.index(data.panorama_type) + 1, *ranges[data.panorama_type], data.shift_x, data.shift_y
 
 def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blades, rotation and anamorphic ratio
     if camera is None or camera.type != 'CAMERA' or camera.data.type != 'PERSP' or not camera.data.dof.use_dof:
