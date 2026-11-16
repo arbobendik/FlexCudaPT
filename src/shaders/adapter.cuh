@@ -189,3 +189,131 @@ static __device__ float3 fcptAmbient() { return make_float3(0, 0, 0); }
 static __device__ unsigned fcptMaxBounces() { return hookScene().settings.bounces; }
 static __device__ FKHit fcptReservoirHit(Reservoir r) { return {r.rc.uv, r.rc.instance, r.rc.triangle, 0, 0}; }
 static __device__ void fcptWithReservoirHit(Reservoir* r, const FKHit* hit) { r->rc = nativeHit(*hit); }
+// Reuse-pass hooks: a pixel's domain is its seed's camera ray (pixelDomain); none off the image or on a miss
+static __device__ unsigned pixelIndex(int2 p) { return p.y * hookScene().width + p.x; }
+static __device__ bool onImage(int2 p) {
+    return p.x >= 0 && p.y >= 0 && p.x < int(hookScene().width) && p.y < int(hookScene().height);
+}
+static __device__ FKDomain fkDomain(const Domain& dom) {
+    return {dom.x0, dom.x1, {dom.hit.uv, dom.hit.triangle == NONE ? NONE : dom.hit.instance, dom.hit.triangle, 0,
+        length(dom.x1 - dom.x0)}, dom.width, dom.spread};
+}
+static __device__ Domain nativeDomain(const FKDomain& dom) {
+    return {dom.x0, dom.x1, nativeHit(dom.hit), dom.width, dom.spread};
+}
+// The scene the previous frame traced: the anchor's on a view's first frame, which reuses its reservoirs
+static __device__ const Scene& previousScene() { return hookScene().frame == 0 ? *hookScene().anchor : hookScene(); }
+static __device__ uint3 imageSize() { return make_uint3(hookScene().width, hookScene().height, 1); }
+// Every pixel on the image is current, a miss keeping its confidence; the passes draw its domain from the seed
+static __device__ bool fcptCurrentDomain(int2 p, FKDomain* dom) {
+    *dom = {};
+    dom->hit.instance_index = NONE;
+    return onImage(p);
+}
+static __device__ bool fcptStoredDomainInitial(int2 p, unsigned seed, FKDomain* dom) {
+    if (!onImage(p)) return false;
+    *dom = fkDomain(pixelDomain(hookScene(), hookScene().camera, pixelIndex(p), imageSize(), seed));
+    return dom->hit.instance_index != NONE;
+}
+static __device__ bool fcptStoredDomainTemporal(int2 p, unsigned seed, FKDomain* dom) {
+    return fcptStoredDomainInitial(p, seed, dom);
+}
+static __device__ FKDomain fcptPreviousDomain(int2 q, unsigned seed) {
+    return fkDomain(pixelDomain(previousScene(), hookScene().previousCamera, pixelIndex(q), imageSize(), seed));
+}
+static __device__ float2 fcptPixelOf(float3 position, bool previous) {
+    return project(previous ? hookScene().previousCamera : hookScene().camera, position, imageSize());
+}
+// Within a view the scene stays; a view's first frame reuses the anchor's, whose scene it shifts into
+static __device__ bool fcptSceneUnchanged() { return hookScene().frame > 0; }
+static __device__ bool fcptPreviousScenes() { return true; }
+// The walk as the callables run it: generating, or replaying in this scene or the previous frame's
+static __device__ Shift fcptWalk(FKDomain dom, Reservoir r, bool replay, float scale, Selection* sel) {
+    const Domain native = nativeDomain(dom);
+    return optixDirectCall<Shift>(replay ? 1 : 0, &native, &r, scale, sel);
+}
+static __device__ Shift fcptShiftPrevious(FKDomain dom, Reservoir r) {
+    if (r.w <= 0.0f) return Shift{make_float3(0, 0, 0), 0};
+    const Domain native = nativeDomain(dom);
+    Selection sel{};
+    return optixDirectCall<Shift>(hookScene().frame == 0 ? 2 : 1, &native, &r, 0.0f, &sel);
+}
+static __device__ uint2 fcptRenderSize() { return make_uint2(hookScene().width, hookScene().height); }
+static __device__ unsigned fcptFrame() { return hookScene().frame; }
+static __device__ unsigned fcptSamples() { return hookScene().settings.paths; }
+static __device__ unsigned fcptRestirNeighbours() { return hookScene().settings.neighbors; }
+static __device__ unsigned fcptRestirDecorrelation() { return hookScene().settings.decorrelation; }
+static __device__ int4 fcptPairing(int2 texel, unsigned t) {
+    const int sizes[] = {PAIRING_SIZES[0], PAIRING_SIZES[1], PAIRING_SIZES[2]};
+    const char2 delta = hookScene().pairing[t][texel.y * sizes[t] + texel.x];
+    return make_int4(delta.x, delta.y, 0, 0);
+}
+static __device__ Reservoir fcptLoadReservoirInitial(int2 p) { return hookScene().initial[pixelIndex(p)]; }
+static __device__ Reservoir fcptLoadReservoirTemporal(int2 p) { return hookScene().temporal[pixelIndex(p)]; }
+static __device__ Reservoir fcptLoadReservoirPrevious(int2 q) { return hookScene().previous[pixelIndex(q)]; }
+// A reservoir's layer 0 as the passes read it: seed, path, unbiased contribution weight, confidence
+static __device__ uint4 fcptReservoirPrevious(int2 q, unsigned layer) {
+    const Reservoir& r = hookScene().previous[pixelIndex(q)];
+    return make_uint4(r.seed, r.path, __float_as_uint(r.w), __float_as_uint(r.c));
+}
+static __device__ uint4 fcptReservoirTemporal(int2 q, unsigned layer) {
+    const Reservoir& r = hookScene().temporal[pixelIndex(q)];
+    return make_uint4(r.seed, r.path, __float_as_uint(r.w), __float_as_uint(r.c));
+}
+static __device__ void fcptStoreReservoirInitial(int2 p, Reservoir r, FKHit x1) {
+    if (onImage(p)) hookScene().initial[pixelIndex(p)] = r;
+}
+static __device__ void fcptStoreReservoirTemporal(int2 p, Reservoir r, FKHit x1) {
+    if (onImage(p)) hookScene().temporal[pixelIndex(p)] = r;
+}
+static __device__ void fcptStoreReservoirPrevious(int2 p, Reservoir r, FKHit x1) {
+    if (onImage(p)) hookScene().previous[pixelIndex(p)] = r;
+}
+// No layer stored beside the reservoir: its primary hit is drawn again from the sample's seed
+static __device__ void fcptStorePreviousLayer(int2 p, unsigned layer, uint4 value) {}
+static __device__ uint4 fcptDuplication(int2 q) {
+    return make_uint4(__float_as_uint(hookScene().duplication[pixelIndex(q)]), 0, 0, 0);
+}
+static __device__ void fcptStoreDuplication(int2 p, uint4 value) {
+    if (onImage(p)) hookScene().duplication[pixelIndex(p)] = __uint_as_float(value.x);
+}
+static __device__ uint4 shiftTexel(const Shift& shift) {
+    return make_uint4(__float_as_uint(shift.f.x), __float_as_uint(shift.f.y), __float_as_uint(shift.f.z),
+        __float_as_uint(shift.jac));
+}
+static __device__ Shift texelShift(uint4 v) {
+    return {make_float3(__uint_as_float(v.x), __uint_as_float(v.y), __uint_as_float(v.z)), __uint_as_float(v.w)};
+}
+// The temporal round's shifts, which the renderer's temporal pass makes itself
+static __device__ uint4 fcptTemporalShift(int2 p, unsigned layer) { return make_uint4(0, 0, 0, 0); }
+static __device__ void fcptStoreTemporalShift(int2 p, unsigned layer, uint4 value) {}
+static __device__ uint4 fcptShiftData(int2 p, unsigned layer) {
+    return shiftTexel(hookScene().shifts[3 * pixelIndex(p) + layer]);
+}
+static __device__ void fcptStoreShiftData(int2 p, unsigned layer, uint4 value) {
+    if (onImage(p)) hookScene().shifts[3 * pixelIndex(p) + layer] = texelShift(value);
+}
+static __device__ bool fcptRestirUsed() { return hookScene().settings.restir; }
+// The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
+static __device__ void fcptMissed(int2 p, FKDomain dom, float scale) {
+    const float3 seen = environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0}) * scale;
+    float4& sum = hookScene().accumulation[pixelIndex(p)];
+    sum = make_float4(sum.x + seen.x, sum.y + seen.y, sum.z + seen.z, sum.w);
+}
+// Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
+static __device__ void fcptAddColor(int2 p, float4 color) {
+    float4& sum = hookScene().accumulation[pixelIndex(p)];
+    sum = make_float4(sum.x + color.x, sum.y + color.y, sum.z + color.z, sum.w + color.w);
+}
+// The queue by global atomics, FlexKernels' CUDA branch
+static __device__ unsigned fcptQueueCountAdd(unsigned bin, unsigned jobs) {
+    return atomicAdd(hookScene().queue + 3 + bin, jobs);
+}
+static __device__ unsigned fcptQueueCountLoad(unsigned bin) { return hookScene().queue[3 + bin]; }
+static __device__ unsigned fcptQueueCursorAdd(unsigned bin, unsigned jobs) {
+    return atomicAdd(hookScene().queue + 43 + bin, jobs);
+}
+static __device__ void fcptQueueJobStore(unsigned index, unsigned job) { hookScene().queue[QUEUE_HEADER + index] = job; }
+// The indirect dispatch's size, which launches over the whole queue leave unread
+static __device__ void fcptQueueDispatchStore(unsigned x, unsigned y, unsigned z) {}
+static __device__ unsigned fcptQueuedShifts(unsigned index) { return hookScene().queue[index]; }

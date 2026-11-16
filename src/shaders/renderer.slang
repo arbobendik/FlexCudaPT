@@ -44,6 +44,7 @@ static const uint NONE = ~0u;
 struct Hit { uint triangle, instance; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 static const int PAIRING_SIZES[] = {254, 230, 210};
+static const uint QUEUE_HEADER = 3 + 2 * 40; // The shift queue's dispatch size, jobs per bin and jobs written per bin
 struct Scene {
     float4* accumulation; uint64_t handle; float3* vertices; float3* normals; float3* generated; float3* objects;
     float2* uvs; float4* colors; float4* tangents; Instance* instances; float4* attributes; float* passes;
@@ -1432,7 +1433,118 @@ struct VkScene : IScene {
         fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
         return fcpt.sampleHair(scene, fiber, in_dir, random_state);
     }
+    // Reuse-pass hooks: a pixel's domain is its seed's camera ray (pixelDomain); none off the image or on a miss
+    uint index(int2 p) { return p.y * scene.width + p.x; }
+    bool onImage(int2 p) { return all(p >= int2(0)) && p.x < int(scene.width) && p.y < int(scene.height); }
+    // The scene the previous frame traced: the anchor's on a view's first frame, which reuses its reservoirs
+    Scene* previousScene() { return scene.frame == 0 ? scene.anchor : scene; }
+    uint2 renderSize() { return uint2(scene.width, scene.height); }
+    uint frame() { return scene.frame; }
+    // Camera matrices the passes ask for, unused: pixelOf draws each camera ray
+    float3x3 viewMatrix() { return float3x3(float3(0), float3(0), float3(0)); }
+    float3 cameraPosition() { return float3(0); }
+    float3x3 prevViewMatrix() { return float3x3(float3(0), float3(0), float3(0)); }
+    float3 prevCameraPosition() { return float3(0); }
+    int4 pairing(int2 texel, uint t) {
+        int8_t* delta = scene.pairing[t] + 2 * (texel.y * PAIRING_SIZES[t] + texel.x);
+        return int4(delta[0], delta[1], 0, 0);
+    }
+    // A reservoir's layer 0 as the passes read it: seed, path, unbiased contribution weight, confidence
+    uint4 reservoirPrevious(int2 q, uint layer) {
+        const Reservoir r = scene.previous[index(q)];
+        return uint4(r.seed, r.path, asuint(r.w), asuint(r.c));
+    }
+    FKDomain previousDomain(int2 q, uint seed) {
+        return fkDomain(pixelDomain(previousScene(), scene.previousCamera, index(q), uint3(renderSize(), 1), seed));
+    }
+    uint restirNeighbours() { return scene.settings.neighbors; }
+    Reservoir loadReservoirPrevious(int2 q) { return scene.previous[index(q)]; }
+    Reservoir loadReservoirInitial(int2 p) { return scene.initial[index(p)]; }
+    Reservoir loadReservoirTemporal(int2 p) { return scene.temporal[index(p)]; }
+    bool storedDomainInitial(int2 p, uint seed, out FKDomain dom) {
+        dom = {};
+        if (!onImage(p)) return false;
+        dom = fkDomain(pixelDomain(scene, scene.camera, index(p), uint3(renderSize(), 1), seed));
+        return dom.hit.instance_index != NONE;
+    }
+    bool storedDomainTemporal(int2 p, uint seed, out FKDomain dom) { return storedDomainInitial(p, seed, dom); }
+    // Within a view the scene stays; a view's first frame reuses the anchor's, whose scene it shifts into
+    bool sceneUnchanged() { return scene.frame > 0; }
+    bool previousScenes() { return true; }
+    Shift shiftPrevious(FKDomain dom, Reservoir r) {
+        Selection sel = {};
+        if (r.w <= 0.0f) return Shift(float3(0, 0, 0), 0.0f);
+        return walkDomain<true>(VkScene(previousScene()), dom, r, 0.0f, sel);
+    }
+    Shift walkCallable(FKDomain dom, Reservoir r, bool replay, float scale, inout Selection sel) {
+        return replay ? walkDomain<true>(this, dom, r, scale, sel) : walkDomain<false>(this, dom, r, scale, sel);
+    }
+    float2 pixelOf(float3 position, bool previous) {
+        return project(previous ? scene.previousCamera : scene.camera, position, uint3(renderSize(), 1));
+    }
+    // The queue by the workgroup's counts in shared memory, FlexKernels' branch outside CUDA
+    uint queueCountAdd(uint bin, uint jobs) {
+        uint old;
+        InterlockedAdd(scene.queue[3 + bin], jobs, old);
+        return old;
+    }
+    uint queueCountLoad(uint bin) { return scene.queue[3 + bin]; }
+    uint queueCursorAdd(uint bin, uint jobs) {
+        uint old;
+        InterlockedAdd(scene.queue[43 + bin], jobs, old);
+        return old;
+    }
+    void queueJobStore(uint index, uint job) { scene.queue[QUEUE_HEADER + index] = job; }
+    // The indirect dispatch's size, which launches over the whole queue leave unread
+    void queueDispatchStore(uint x, uint y, uint z) {}
+    uint queuedShifts(uint index) { return scene.queue[index]; }
+    // Every pixel on the image is current, a miss keeping its confidence; the passes draw its domain from the seed
+    bool currentDomain(int2 p, out FKDomain dom) {
+        dom = {};
+        dom.hit.instance_index = NONE;
+        return onImage(p);
+    }
+    uint samples() { return scene.settings.paths; }
+    uint restirDecorrelation() { return scene.settings.decorrelation; }
+    void storeReservoirInitial(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.initial[index(p)] = r; }
+    void storeReservoirTemporal(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.temporal[index(p)] = r; }
+    void storeReservoirPrevious(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.previous[index(p)] = r; }
+    // No layer stored beside the reservoir: its primary hit is drawn again from the sample's seed
+    void storePreviousLayer(int2 p, uint layer, uint4 value) {}
+    uint4 duplication(int2 q) { return uint4(asuint(scene.duplication[index(q)]), 0, 0, 0); }
+    void storeDuplication(int2 p, uint4 value) { if (onImage(p)) scene.duplication[index(p)] = asfloat(value.x); }
+    // The temporal round's shifts, which the renderer's temporal pass makes itself
+    uint4 temporalShift(int2 p, uint layer) { return uint4(0); }
+    void storeTemporalShift(int2 p, uint layer, uint4 value) {}
+    uint4 shiftData(int2 p, uint layer) {
+        const Shift shift = scene.shifts[3 * index(p) + layer];
+        return uint4(asuint(shift.f), asuint(shift.jac));
+    }
+    void storeShiftData(int2 p, uint layer, uint4 value) {
+        if (onImage(p)) scene.shifts[3 * index(p) + layer] = Shift(asfloat(value.xyz), asfloat(value.w));
+    }
+    uint4 reservoirTemporal(int2 q, uint layer) {
+        const Reservoir r = scene.temporal[index(q)];
+        return uint4(r.seed, r.path, asuint(r.w), asuint(r.c));
+    }
+    // Temporal output, background and color store: no pass here calls them
+    uint isTemporal() { return 0; }
+    float3x3 invViewMatrix() { return float3x3(float3(0), float3(0), float3(0)); }
+    void storeColor(int2 p, uint layer, float4 color) {}
+    bool restirUsed() { return scene.settings.restir != 0; }
+    // The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
+    void missed(int2 p, FKDomain dom, float scale) {
+        scene.accumulation[index(p)] += float4(environment(scene, normalize(dom.x1 - dom.x0),
+            Ray(true, false, LOBE_NONE, 1, 0)) * scale, 0);
+    }
+    // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
+    void addColor(int2 p, float4 color) { scene.accumulation[index(p)] += color; }
 };
+// The walk's domain of a renderer's domain, a miss of no instance
+FKDomain fkDomain(Domain dom) {
+    return FKDomain(dom.x0, dom.x1, FKHit(dom.hit.uv, dom.hit.triangle == NONE ? NONE : dom.hit.instance,
+        dom.hit.triangle, 0, length(dom.x1 - dom.x0)), dom.width, dom.spread);
+}
 
 // Running sums of a hair table level's rows (image 0) or columns (1), RGBA by lobe, filtered at x and y
 float4 hairSums(Scene* scene, float4* record, uint image, float x, float y) {
@@ -1871,11 +1983,15 @@ void run(uint3 thread, uint3 group, uint index) {
 }
 }
 
-// The walk through the scene hooks
+// The walk through the scene hooks, of the renderer's domain or the walk's
 [noinline] Shift walkHooks<let REPLAY: bool>(fcpt.VkScene scene, fcpt.Domain dom, Reservoir r, float scale,
     inout Selection sel) {
-    return walk(scene, FKDomain(dom.x0, dom.x1, FKHit(dom.hit.uv, dom.hit.instance, dom.hit.triangle, 0,
-        length(dom.x1 - dom.x0)), dom.width, dom.spread), r, REPLAY, scale, sel);
+    return walkDomain<REPLAY>(scene, FKDomain(dom.x0, dom.x1, FKHit(dom.hit.uv, dom.hit.instance, dom.hit.triangle, 0,
+        length(dom.x1 - dom.x0)), dom.width, dom.spread), r, scale, sel);
+}
+[noinline] Shift walkDomain<let REPLAY: bool>(fcpt.VkScene scene, FKDomain dom, Reservoir r, float scale,
+    inout Selection sel) {
+    return walk(scene, dom, r, REPLAY, scale, sel);
 }
 
 // The entry point
