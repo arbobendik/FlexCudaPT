@@ -27,10 +27,11 @@ varying by their node trees and, in a smoke simulation's domain, by its density,
 grids as Principled Volume's attributes, Volume Info and Attribute nodes read them. The world's volume fills the scene,
 homogeneous and emitting nothing, and lights emit by their node trees. A world that varies by direction is sampled
 toward its bright parts, as lights are, unless Sample World Light is off in its Flex panel of the world properties.
-Panoramic cameras, OpenVDB volumes, OSL scripts and true displacement are not supported; displacement shades as a bump.
-Max samples, max bounces, paths per sample and, with OptiX, denoising are set in the Flex panel of the render
-properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation, the number of spatial neighbors and the reuse
-of the last view's samples up to a camera jump.
+Script nodes' OSL computes values by arithmetic and math; a script using what Flex does not translate yet (branches,
+loops, globals, closures, textures) is refused by name. Panoramic cameras, OpenVDB volumes and true displacement are not
+supported; displacement shades as a bump. Max samples, max bounces, paths per sample and, with OptiX, denoising are set
+in the Flex panel of the render properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation, the number of
+spatial neighbors and the reuse of the last view's samples up to a camera jump.
 Camera properties include Cycles' depth of field and aperture settings, used in final renders and rendered camera views.
 The extension's preferences choose OptiX or Vulkan, which traces with ray queries on any GPU that has them and does not
 denoise. `make test` installs the build into Blender resources of its own and renders scenes headlessly with OptiX and
