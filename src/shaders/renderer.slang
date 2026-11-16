@@ -21,9 +21,10 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET };
-// MEDIUM, CURVES and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
-// Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin distribution
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY };
+// MEDIUM, CURVES, WORLD and SKY no program takes: a scene's varying media, strands, world volume and world sampled by
+// its luminance; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
+// distribution
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -1400,8 +1401,12 @@ struct VkScene : IScene {
     float3 env_map_sample(float3 dir, uint depth, uint lobe) {
         return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
     }
-    float4 environmentCdf(uint2 cell) { return float4(0, 0, 0, 0); }
-    uint2 environmentCdfSize() { return uint2(0, 0); }
+    // Its luminance CDF by cell, (cdf, share), the marginal in the last column; none where the world is not sampled
+    float4 environmentCdf(uint2 cell) {
+        const float2 c = scene.environmentCdf[cell.y * scene.cdfWidth + cell.x];
+        return float4(c, 0, 0);
+    }
+    uint2 environmentCdfSize() { return used(SKY) ? uint2(scene.cdfWidth, scene.cdfHeight) : uint2(0, 0); }
     uint2 environmentMapSize() { return uint2(2, 2); }
     float3 ambient() { return float3(0, 0, 0); }
     uint maxBounces() { return scene.settings.bounces; }

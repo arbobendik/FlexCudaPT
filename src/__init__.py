@@ -96,9 +96,10 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v}  # MEDIUM,
-# CURVES and WORLD steps past every program's end, of a scene whose media vary from point to point, so the renderer
-# tracks those it fills alone, of one with strands, and of one whose world has a volume
+    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
+    'SKY': None}  # MEDIUM, CURVES, WORLD and SKY steps past every program's end, of a scene whose media vary from point
+# to point, so the renderer tracks those it fills alone, of one with strands, of one whose world has a volume, and of
+# one whose world it samples by its luminance
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -2263,7 +2264,7 @@ class Flex(bpy.types.RenderEngine):
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
-            ('CURVES', sum(map(len, hairs))), ('WORLD', box)) if any]
+            ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0])) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
                     self.hairs or any(  # textures, and hair tables,
