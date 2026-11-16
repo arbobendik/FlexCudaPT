@@ -171,13 +171,18 @@ static __device__ unsigned fcptTriangleOffset(unsigned instance) { return hookSc
 static __device__ float3 fcptCalculatePointLightContrib(unsigned index) { return make_float3(0, 0, 0); }
 // The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
 // b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
-// world always shades. Its luminance CDF none (FK: sky sampling, which the renderer has none of until it samples its
-// world by a luminance CDF), nor an ambient color without a world
+// world always shades. No ambient color without a world
 static __device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe) {
     return environment(hookScene(), dir, Ray{false, false, lobe, float(depth + 2u), 0});
 }
-static __device__ float4 fcptEnvironmentCdf(uint2 cell) { return make_float4(0, 0, 0, 0); }
-static __device__ uint2 fcptEnvironmentCdfSize() { return make_uint2(0, 0); }
+// Its luminance CDF by cell, (cdf, share), the marginal in the last column; none where the world is not sampled
+static __device__ float4 fcptEnvironmentCdf(uint2 cell) {
+    const float2 c = hookScene().environmentCdf[cell.y * hookScene().cdfWidth + cell.x];
+    return make_float4(c.x, c.y, 0, 0);
+}
+static __device__ uint2 fcptEnvironmentCdfSize() {
+    return used(SKY) ? make_uint2(hookScene().cdfWidth, hookScene().cdfHeight) : make_uint2(0, 0);
+}
 static __device__ uint2 fcptEnvironmentMapSize() { return make_uint2(2, 2); }
 static __device__ float3 fcptAmbient() { return make_float3(0, 0, 0); }
 static __device__ unsigned fcptMaxBounces() { return hookScene().settings.bounces; }
