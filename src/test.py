@@ -2908,11 +2908,11 @@ for kind, read in (('POINT', ['shadow_soft_size']), ('SPOT', ['shadow_soft_size'
     light = bpy.data.lights.new(kind, kind)
     if kind == 'AREA': light.shape = 'RECTANGLE'
     assert drawn(flex.DATA_PT_flex_light, light=light) == ['type', 'color', 'use_temperature', 'energy', 'exposure',
-        'normalize', *read], ('light read', kind)
+        'normalize', *read, 'use_shadow'], ('light read', kind)
     light.use_temperature = True
     assert 'temperature' in drawn(flex.DATA_PT_flex_light, light=light), ('temperature read', kind)
 assert drawn(flex.OBJECT_PT_flex_visibility, object=bpy.data.objects[0]) == ['hide_viewport', 'hide_render',
-    'visible_camera'], 'visibility read'
+    'visible_camera', 'visible_shadow'], 'visibility read'
 
 # Camera rays start at the clip start: an emitter shows through a perspective camera past a black plane nearer than it.
 # And they start in the volume there, not the camera's: in an absorbing cube with the near plane below it, through
