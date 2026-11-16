@@ -7,6 +7,7 @@ from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 from bpy_extras import anim_utils
 
 SUN_DISTANCE = 1e5
+BOX_MARGIN = 0.01  # Of the world's box past what it holds: of their extent's diagonal, floored at 1
 SUN_MIN_ANGLE = 1e-4  # Blender's parallel sun of angle 0 as the smallest disk, which delivers the same irradiance
 SPREAD_ZERO = math.radians(5)  # An area light's spread of 0, a parallel beam no light sample meets, as 5 degrees
 VIEWPORT_SAMPLES = 4  # Per redraw
@@ -1483,6 +1484,14 @@ def shade(material, program):
     # Light sampling reads the emission alone: the top layer's, its colors associated as in that layer's program
     return [(*rows[0], program([*BLACK[:4], layers[0][4], *BLACK[5:]], [*layers[0], *volume])[1]), *rows[1:]]
 
+class Boxed:  # The world as its box's material: its volume, behind faces passing rays straight
+    def __init__(self, world):
+        bare = types.SimpleNamespace(links=(), type='SHADER', is_output=False, is_linked=False)
+        inputs = {'Surface': bare, 'Volume': world.node_tree.get_output_node('CYCLES').inputs['Volume'],
+            'Displacement': bare}
+        self.name, self.pass_index = world.name, 0
+        self.node_tree = types.SimpleNamespace(get_output_node=lambda target: types.SimpleNamespace(inputs=inputs))
+
 def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
     bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
         matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
@@ -1869,6 +1878,20 @@ class Flex(bpy.types.RenderEngine):
             points.append(p)
             hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
             record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
+        output = scene.world and scene.world.node_tree.get_output_node('CYCLES')
+        SIDE['volume'] = True  # The world's volume, boxed where it has any extinction, (s + 1 - a) d
+        filled = output and output.inputs['Volume'].is_linked and resolve(output.inputs['Volume'])
+        SIDE['volume'] = False
+        box = not moved and filled and nonzero(fold(('MULTIPLY', ('SUBTRACT', ('ADD', filled[12], 1), filled[10]),
+            filled[11]))) and Boxed(scene.world)
+        # Of what the box holds: the camera's near-plane center, where its rays and its medium's test start
+        corners = [scene.camera.matrix_world @ Vector((0, 0, -scene.camera.data.clip_start))] if box and scene.camera \
+            else []
+        def held(instance, ob):  # An object's bounds, a light's by its size
+            light = ob.type == 'LIGHT' and ob.data
+            r = light and max(light.shadow_soft_size, getattr(light, 'size', 0), getattr(light, 'size_y', 0), 0.01)
+            corners.extend([instance.matrix_world.translation + Vector((x, y, z)) * r for x in (-1, 1) for y in (-1, 1)
+                for z in (-1, 1)] if light else [instance.matrix_world @ Vector(c) for c in ob.bound_box])
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -1878,7 +1901,9 @@ class Flex(bpy.types.RenderEngine):
                     record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
-                if ob.type == 'CURVES': continue
+                if ob.type == 'CURVES':
+                    box and not (ob.hide_render and not instance.is_instance) and held(instance, ob)
+                    continue
             # Hidden from renders as Blender's are: an object by its setting, though particles' and geometry nodes'
             # instances of it are kept, nested in collection instances too, whose members it isn't; an instancer of
             # particles, vertices or faces unless shown in renders; and the children a vertex or face instancer
@@ -1891,6 +1916,7 @@ class Flex(bpy.types.RenderEngine):
                 and ob.parent and ob.parent.instance_type in ('VERTS', 'FACES') or ob.type not in {'MESH', 'LIGHT'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
+            if box and not (ob.type == 'LIGHT' and ob.data.type == 'SUN'): held(instance, ob)
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
                 SEALING['closed'] = closed(ob, ob.data)
                 for slot in ob.material_slots:  # Of those the last export cut, not its linked duplicates'
@@ -2076,10 +2102,39 @@ class Flex(bpy.types.RenderEngine):
                 if media[1]: varying.add(i)
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
+        if box:
+            rows[box] = shaded_row(box)
+        if box and not shaded:  # A margin past all it holds; its triangles in the world, generated points over it
+            low, high = numpy.min(corners, 0), numpy.max(corners, 0)
+            margin = BOX_MARGIN * max(numpy.linalg.norm(high - low), 1)
+            low, high = low - margin, high + margin
+            cube = bmesh.new()
+            bmesh.ops.create_cube(cube, size=1, matrix=Matrix.LocRotScale(Vector((low + high) / 2), None,
+                Vector(high - low)))
+            bmesh.ops.triangulate(cube, faces=cube.faces[:])
+            cube.normal_update()
+            positions = numpy.array([[vertex.co for vertex in face.verts] for face in cube.faces], 'f')
+            normals = numpy.array([[face.normal] * 3 for face in cube.faces], 'f')
+            entry, index = (sum(map(len, columns[0])), len(positions), True), numpy.zeros(len(positions), 'i')
+            for column, array in zip(columns, (positions, normals, (positions - low) / (high - low), positions,
+                *(numpy.zeros((len(positions), 3, n), 'f') for n in (2, 4, 4)), index)): column.append(array)
+            ob = types.SimpleNamespace(name=box.name, type='MESH', visible_camera=True, visible_shadow=True,
+                color=(1, 1, 1, 1), pass_index=0, material_slots=[types.SimpleNamespace(material=box)])
+            materials.append(tabled([rows[box]], ob)[index])
+            if (kind := medium(box, {'POSITION': (low, high), 'OBJECT': (low, high), 'GENERATED': (numpy.zeros(3),
+                    numpy.ones(3))})):
+                raise ValueError(f"Flex: the volume of world '{box.name}' varies or emits; a world's volume must be "
+                    'homogeneous and emit nothing')
+            i = -2 ** 31  # Apart from the objects' indices and their strands'
+            volumes[i] = BVHTree.FromPolygons(positions.reshape(-1, 3).tolist(),
+                numpy.arange(len(positions) * 3).reshape(-1, 3).tolist()), 0
+            record(i, types.SimpleNamespace(is_instance=False, matrix_world=Matrix.Identity(4)), ob, entry,
+                media=((*(low + high) / 2, *(high - low) / 2), kind))
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene, its
         # object's info and its transform's rows and adjugate
         if moved:
-            if varying or not all(self.slots.get(i, ())[1:] == (count, key) for i, count, key in slots):
+            if varying or self.box != 2 ** 32 - 1 or not all(self.slots.get(i, ())[1:] == (count, key)
+                    for i, count, key in slots):  # Or the world's box, which what moved may leave
                 self.visible = None
                 return self.start(depsgraph)
             self.volumes.update(volumes)
@@ -2136,7 +2191,7 @@ class Flex(bpy.types.RenderEngine):
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
-            ('CURVES', sum(map(len, hairs)))) if any]
+            ('CURVES', sum(map(len, hairs))), ('WORLD', box)) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
                     self.hairs or any(  # textures, and hair tables,
@@ -2173,7 +2228,7 @@ class Flex(bpy.types.RenderEngine):
         self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
-        self.volumes, self.varying = volumes, varying
+        self.volumes, self.varying, self.box = volumes, varying, len(slots) - 1 if box else 2 ** 32 - 1
         self.cuts, self.placed, self.piped = cuts, placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
