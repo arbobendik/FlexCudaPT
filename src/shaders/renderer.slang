@@ -21,14 +21,14 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     ROTATE, EQUIRECTANGULAR, MIRROR_BALL, POSITION, INCOMING, BACKFACING, DIELECTRIC,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
-    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID }; // MEDIUM, CURVES
-// and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
-// Henyey-Greenstein asymmetry
+    TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET };
+// MEDIUM, CURVES and WORLD no program takes: a scene's varying media, strands and world volume; PHASE marks a volume's
+// Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin distribution
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
-    float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase;
+    float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase, velvet;
 };
 static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
@@ -574,6 +574,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(SHEEN) break;
         CASE(ANISOTROPIC) break;
         CASE(PHASE) break;
+        CASE(VELVET) break;
         CASE(HAIR) stack[top - 1] = normalize(transform(scene, tbn[0], 1, info)) * stack[top - 1].x; break; // Its fiber
         CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
         CASE(GENERATED) stack[top++] = at.generated; break;
@@ -779,7 +780,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[15].x : 0.5f, used(ANISOTROPIC) && top > 18 ? stack[16].x : 0,
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
         used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0),
-        used(PHASE) && top > 21 ? stack[21].x : 0);
+        used(PHASE) && top > 21 ? stack[21].x : 0, used(VELVET) && top > 22 ? stack[22].x : 0);
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1277,7 +1278,7 @@ FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, ui
         used(SPECULAR) ? surface.level : 1, used(TRANSLUCENT) ? surface.translucent : float3(0, 0, 0),
         used(SHEEN) ? surface.sheen : float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-        used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0)};
+        used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0), used(VELVET) ? surface.velvet : 0};
     const bool enclosed = encloses(scene, surface, at.instance);  // The medium it fills, only where it encloses one
     const Medium filled = enclosed ? volume(surface) : Medium(float3(0, 0, 0), float3(0, 0, 0));
     const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0;  // Its fiber, which rays leave from the vertex
