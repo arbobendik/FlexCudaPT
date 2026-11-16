@@ -22,9 +22,10 @@ of particle hair paths and curves objects, lights and the world through perspect
 node trees resolve to a smooth, normal mapped or bumped normal, albedo, metallic, roughness, emission, transparency and
 IOR per hit, with coat, sheen, anisotropy, translucency, subsurface scattering and Principled Hair or the old Hair BSDF,
 and their volumes to media that absorb, scatter by their Henyey-Greenstein anisotropy and emit, constant or varying by
-their node trees. The world's volume fills the scene, homogeneous and emitting nothing, and lights emit by their node
-trees. Panoramic cameras, OpenVDB volumes, OSL scripts and true displacement are not supported; displacement shades as
-a bump. Max samples, max bounces, paths per sample and, with OptiX, denoising are set in the Flex panel of the render
+their node trees and, in a smoke simulation's domain, by the density grid their Principled Volume's Density Attribute
+names. The world's volume fills the scene, homogeneous and emitting nothing, and lights emit by their node trees.
+Panoramic cameras, OpenVDB volumes, OSL scripts and true displacement are not supported; displacement shades as a bump.
+Max samples, max bounces, paths per sample and, with OptiX, denoising are set in the Flex panel of the render
 properties; its ReSTIR subpanel toggles ReSTIR, its biased decorrelation, the number of spatial neighbors and the reuse
 of the last view's samples up to a camera jump.
 Camera properties include Cycles' depth of field and aperture settings, used in final renders and rendered camera views.
