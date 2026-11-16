@@ -14,6 +14,8 @@ namespace fcpt {
 struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near, far; }; // Orthographic: rays along
 // z's normal; near, far: depths rays start and end at
 struct Camera { float3 origin, x, y, z; Lens lens; };
+// A panorama: its number, 0 for none, the range of directions over u and v and the shift of its window
+struct Projection { uint type; float range[4], shift[2]; };
 [UnscopedEnum] enum Code : uint { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY, DOT_PRODUCT,
     MAXIMUM, LOGARITHM, MULTIPLY_ADD, IMAGE_LINEAR, ALPHA_LINEAR, DIVIDE, SNAP, GENERATED, NOISE, IMAGE_CUBIC,
     ALPHA_CUBIC, POWER, EXPONENT, MINIMUM, LESS_THAN, FLOOR, MODULO, SINE, COSINE, TANGENT, ARCSINE, ARCCOSINE,
@@ -77,6 +79,7 @@ struct Scene {
     uint* queue; // The shift queue
     Scene* anchor; // The anchor's scene, in its record
     uint width, height; // The image's size, which shift passes launched over their queue need
+    Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];

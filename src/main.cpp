@@ -252,14 +252,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     Tier* special = nullptr; // The module of the scene's op set, launches taking it once compiled
     Tier* interim = nullptr; // Its stand-in's, standing in without a generic until it is
     std::vector<Tier*> retiring; // Those of earlier op sets, compiling still or awaiting their end
-    // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
-    // number launched, memory used and peak in MiB, the sums left in the shared file if any were. A new view starts
-    // over: it persists the last one if it has its size and settings and its camera did not jump, move farther than
-    // distance or turn further than the angle of cosine, keeping its reservoirs and denoised sequence and tracing reuse
-    // samples at most; otherwise all of the view's arrays are freed and allocated zeroed. So does the view after a new
-    // scene, persisting the last one only if it has as many triangles. A persisted view starts from the reservoirs the
-    // last view starting over ended with, against the scene they were traced in, and jumps by that view's camera.
-    struct View { unsigned width, height; Settings settings; unsigned box; Camera camera; } view{};
+    // Request -> launched, memory used, peak (MiB); sums in the shared file. A view persists the last on equal size,
+    // settings, triangles and a camera within distance and cosine, else restarts zeroed, from the last restart's state
+    struct View { unsigned width, height; Settings settings; unsigned box; Camera camera; Projection projection; }
+        view{};
     struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
     bool reused = false;
     size_t pixels = 1, reservoirs = 1; // The view's pixels, and of them those with reservoirs: one without ReSTIR
@@ -271,6 +267,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     CUdeviceptr anchor = allocate(0), anchorTop = allocate(0);
     std::map<unsigned, Mesh> anchorMeshes;
     Camera anchorCamera{};
+    Projection anchorProjection{};
     scene.anchorVertices = (float3*)allocate(0), scene.anchorNormals = (float3*)allocate(0);
     scene.anchorLights = (LightNode*)allocate(0), scene.anchorTrails = (unsigned long long*)allocate(0);
     // Its instances then, for a view's first temporal pass; kept over a scene of instances moved only
@@ -392,7 +389,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             const Camera &last = anchorCamera, &next = request.view.camera;
             reused = !stale && length(next.origin - last.origin) <= request.distance
                 && dot(next.z, last.z) >= request.cosine * length(next.z) * length(last.z)
-                && !std::memcmp(&next.lens, &last.lens, sizeof(Lens));
+                && !std::memcmp(&next.lens, &last.lens, sizeof(Lens))
+                && !std::memcmp(&request.view.projection, &anchorProjection, sizeof(Projection));
             if (!reused || std::memcmp(&view, &request.view, offsetof(View, camera))) {
                 reused = false;
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
@@ -406,7 +404,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
                 CHECK(sums == MAP_FAILED);
                 anchor = (CUdeviceptr)zeros<char>(reservoirs * (sizeof(Reservoir) + sizeof(float)));
-                anchorCamera = request.view.camera;
+                anchorCamera = request.view.camera, anchorProjection = request.view.projection;
                 if (!request.view.settings.restir) { // Without ReSTIR no anchor's scene, as before the first view
                     for (CUdeviceptr array : {(CUdeviceptr)scene.anchorVertices, (CUdeviceptr)scene.anchorNormals,
                         (CUdeviceptr)scene.anchorLights, (CUdeviceptr)scene.anchorTrails, anchorTop,
@@ -437,12 +435,12 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             } else {
                 CHECK(cuMemcpyDtoD((CUdeviceptr)scene.previous, anchor,
                     reservoirs * (sizeof(Reservoir) + sizeof(float))));
-                scene.previousCamera = anchorCamera;
+                scene.previousCamera = anchorCamera, scene.previousCameraProjection = anchorProjection;
             }
             view = request.view;
             history = history && reused;
             done = scene.frame = 0; // Random numbers repeat per view
-            scene.camera = view.camera;
+            scene.camera = view.camera, scene.cameraProjection = view.projection;
             scene.settings = view.settings, scene.box = view.box;
             CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * pixels));
         }
@@ -474,7 +472,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, shifts ? jobs[pass == PASS_SHIFT]
                     : view.width, shifts ? 1 : view.height, shifts ? 1 : depths[pass]));
             }
-            scene.previousCamera = scene.camera;
+            scene.previousCamera = scene.camera, scene.previousCameraProjection = scene.cameraProjection;
         }
         if (!reused && launched && done == samples && view.settings.restir) {
             CHECK(cuMemcpyDtoD(anchor, (CUdeviceptr)scene.previous, pixels * (sizeof(Reservoir) + sizeof(float))));
@@ -528,7 +526,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             std::swap(scene.seen, scene.previousSeen);
             if (scene.previousVertices != scene.vertices) release((CUdeviceptr)scene.previousVertices);
             scene.previousVertices = scene.vertices;
-            scene.denoisedCamera = scene.camera;
+            scene.denoisedCamera = scene.camera, scene.denoisedCameraProjection = scene.cameraProjection;
             history = true;
         }
         CHECK(cuMemcpyDtoH(sums, result, pixels * sizeof(float4)));
