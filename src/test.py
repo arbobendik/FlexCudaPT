@@ -2071,6 +2071,63 @@ for device in ('OPTIX', 'VULKAN'):
         assert numpy.isfinite(seen).all() and numpy.isclose(seen.mean(), 1, rtol=0.02), \
             ('phase furnace', device, thick.inputs['Anisotropy'].default_value)
 
+# The world's volume fills a box around the objects, the lights but a sun, and the camera's near plane, BOX_MARGIN m
+# of their extent's diagonal past them. Absorbing s = (0.1, 0.2, 0.3) per unit length from the near plane at clip
+# start c on:
+#   emitter of radiance 1 two units off: exp(-(2 - c) s)
+#   sky of 1 past the box's far face, d = 10 + m - c off: exp(-d s), 1 in a channel it leaves clear
+#   past a unit of fog of 0.5 per unit length it holds, the world's medium again: exp(-(1 - c) s - 0.5)
+#   a view moved out of the box, above it, meets the medium at its face, m past the near plane: exp(-(2 - c + m) s)
+# and a world of density 0 renders as one of no volume, exactly
+scene = new('world box', 16, 64, (1, 1, 1))
+scene.camera = add(bpy.data.cameras.new('world box'), (0, 0, 0))
+scene.camera.data.angle = 0.1
+target = plane('world target', 0, size=4)
+target.inputs['Base Color'].default_value, target.inputs['Emission Color'].default_value = (0, 0, 0, 1), (1, 1, 1, 1)
+target.inputs['Emission Strength'].default_value = 1
+bpy.data.objects['world target'].location.z = -2
+plane('world far', 0, size=4).inputs['Base Color'].default_value = (0, 0, 0, 1)
+bpy.data.objects['world far'].location.z, bpy.data.objects['world far'].visible_camera = -10, False
+fog = shape('world fog', lambda bm: bmesh.ops.create_cube(bm, size=1), (0, 0, -1)).id_data
+fog.links.remove(fog.nodes['Material Output'].inputs['Surface'].links[0])
+absorber = fog.nodes.new('ShaderNodeVolumeAbsorption')
+absorber.inputs['Color'].default_value = (0.5, 0.5, 0.5, 1)
+fog.links.new(absorber.outputs[0], fog.nodes['Material Output'].inputs['Volume'])
+haze = scene.world.node_tree.nodes.new('ShaderNodeVolumeAbsorption')
+s, c = numpy.array((0.1, 0.2, 0.3)), scene.camera.data.clip_start
+m = flex.BOX_MARGIN * max(numpy.linalg.norm((4, 4, 10 - c)), 1)
+d = 10 + m - c
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    bpy.data.objects['world target'].hide_render = bpy.data.objects['world fog'].hide_render = True
+    clear = render(scene, 16)
+    scene.world.node_tree.links.new(haze.outputs[0], scene.world.node_tree.nodes['World Output'].inputs['Volume'])
+    for color, density, shown, due in (((0.9, 0.8, 0.7), 1, ('world target',), numpy.exp(-(2 - c) * s)),
+            ((0.9, 0.8, 0.7), 1, (), numpy.exp(-d * s)), ((0, 1, 1), 1, (), (numpy.exp(-d), 1, 1)),
+            ((0.9, 0.8, 0.7), 1, ('world target', 'world fog'), numpy.exp(-(1 - c) * s - 0.5)),
+            ((0.9, 0.8, 0.7), 0, (), None)):
+        haze.inputs['Color'].default_value, haze.inputs['Density'].default_value = (*color, 1), density
+        for name in ('world target', 'world fog'): bpy.data.objects[name].hide_render = name not in shown
+        seen = render(scene, 16)
+        assert numpy.array_equal(seen, clear) if due is None else numpy.allclose(seen.mean((0, 1)), due, atol=0.01), \
+            ('world box', device, color, density, shown, seen.mean((0, 1)))
+    haze.inputs['Density'].default_value, bpy.data.objects['world target'].hide_render = 1, False
+    bpy.context.window.scene = scene
+    depsgraph, outside = bpy.context.evaluated_depsgraph_get(), Viewport()
+    context = types.SimpleNamespace(region=region, region_data=types.SimpleNamespace(view_matrix=Matrix.Translation(
+        (0, 0, -5)), window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE),
+        view_perspective='CAMERA'), space_data=types.SimpleNamespace(camera=scene.camera, clip_end=1000))
+    with offscreen.bind():
+        gpu.matrix.load_matrix(Matrix.Identity(4))
+        gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+        outside.view_update(context, depsgraph)
+        outside.view_draw(context, depsgraph)
+        while outside.__dict__.pop('redraw', False): outside.view_draw(context, depsgraph)
+        drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+    assert numpy.allclose(drawn[..., :3].mean((0, 1)), numpy.exp(-(2 - c + m) * s), atol=0.01), \
+        ('world box outside', device, drawn[..., :3].mean((0, 1)))
+    scene.world.node_tree.links.remove(scene.world.node_tree.nodes['World Output'].inputs['Volume'].links[0])
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')
