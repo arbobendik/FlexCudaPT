@@ -1,6 +1,7 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, tempfile
 import hashlib, time, types, _cycles
+import threading
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
 from mathutils.bvhtree import BVHTree
@@ -1586,25 +1587,91 @@ SOURCES = {}  # Of each node's table, by its original, the evaluated node it was
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
 GRIDS = {}  # Of the fluid domain shaded, its name and its grids by Cycles' attribute names
 media_key = lambda material: (material, GRIDS[None]) if GRIDS else material  # MEDIA's key, a domain's its own
-def fluid(ob):  # Of a gas domain, its name, settings and the point over the box its evaluated mesh spans, the adaptive
-    domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'  # one's
+GRID_WAIT = 120  # Seconds a render's job waits for the main thread to read a volume's grids, as a script holds it
+def on_main(f, volume):  # f() on the main thread, where reading a grid makes IDs; from a render's job handed over by a
+    if threading.current_thread() is threading.main_thread(): return f()  # timer and waited for
+    done, out = threading.Event(), []
+    bpy.app.timers.register(lambda: (out.append(f()), done.set(), None)[2])
+    if not done.wait(GRID_WAIT): raise RuntimeError(f"Flex: the grids of volume '{volume}' were not read: the main "
+        'thread did not answer, as while a script waits on this render')
+    return out[0]
+# The evaluated grid, saved and reloaded, read per active voxel or tile (value, index, extent) by Grid To Points
+def lattice(ob, name):
+    # Its own file: Blender caches volumes by path
+    path = os.path.join(bpy.app.tempdir, f'flex grid {time.time_ns()}.vdb')
+    ob.data.grids.save(path)
+    scene, tree = bpy.data.scenes.new('flex grid'), bpy.data.node_groups.new('flex grid', 'GeometryNodeTree')
+    (source := bpy.data.objects.new('flex grid', bpy.data.volumes.new('flex grid'))).data.filepath = path
+    tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    info, get, points, verts, out = (tree.nodes.new(t) for t in ('GeometryNodeObjectInfo', 'GeometryNodeGetNamedGrid',
+        'GeometryNodeGridToPoints', 'GeometryNodePointsToVertices', 'NodeGroupOutput'))
+    info.inputs['Object'].default_value, get.inputs['Name'].default_value = source, name
+    tree.links.new(info.outputs['Geometry'], get.inputs['Volume'])
+    tree.links.new(get.outputs['Grid'], points.inputs[0])
+    geometry = points.outputs['Points']
+    for field, kind in (('Value', 'FLOAT'), ('X', 'INT'), ('Y', 'INT'), ('Z', 'INT'), ('Extent', 'INT')):
+        store = tree.nodes.new('GeometryNodeStoreNamedAttribute')
+        store.data_type, store.inputs['Name'].default_value = kind, field.lower()
+        tree.links.new(geometry, store.inputs['Geometry']), tree.links.new(points.outputs[field], store.inputs['Value'])
+        geometry = store.outputs['Geometry']
+    tree.links.new(geometry, verts.inputs['Points']), tree.links.new(verts.outputs['Mesh'], out.inputs[0])
+    holder = bpy.data.objects.new('flex grid', bpy.data.meshes.new('flex grid'))
+    scene.collection.objects.link(holder)
+    holder.modifiers.new('flex grid', 'NODES').node_group = tree
+    scene.view_layers[0].update()
+    evaluated = holder.evaluated_get(scene.view_layers[0].depsgraph).data
+    count = len(evaluated.vertices)  # None of a grid without an active voxel, read as one voxel of 0: no medium
+    read = {field: numpy.zeros(max(count, 1), kind) + (field == 'extent')
+        for field, kind in (('value', 'f'), ('x', 'i'), ('y', 'i'), ('z', 'i'), ('extent', 'i'))}
+    for field, values in (read.items() if count else ()): evaluated.attributes[field].data.foreach_get('value', values)
+    mesh, volume = holder.data, source.data
+    bpy.data.objects.remove(holder), bpy.data.meshes.remove(mesh), bpy.data.node_groups.remove(tree)
+    bpy.data.objects.remove(source), bpy.data.volumes.remove(volume), bpy.data.scenes.remove(scene), os.remove(path)
+    return read
+def dense(read, volume, name):  # The voxels and tiles read, dense over their active index box, in the caller's thread
+    index = numpy.column_stack((read['x'], read['y'], read['z']))
+    low, size = index.min(0), (index + read['extent'][:, None]).max(0) - index.min(0)
+    values = numpy.zeros(size[::-1], 'f')
+    one, (x, y, z) = read['extent'] == 1, (index - low).T
+    values[z[one], y[one], x[one]] = read['value'][one]  # Voxels at once, then tiles, whose voxels all hold its value
+    for k in numpy.flatnonzero(~one):
+        e = read['extent'][k]
+        values[z[k]:z[k] + e, y[k]:y[k] + e, x[k]:x[k] + e] = read['value'][k]
+    return values.ravel(), low, size
+# index = matrix_object⁻¹ · p, voxel k centred at index k, dense cell k − low centred at (k − low + 0.5) / size
+# => point = (index − low + 0.5) / size
+def volume_grid(ob, name, frame, lattices):
+    if lattices.get((ob.name, name), (None,))[0] != frame:  # Read anew on another frame
+        lattices[ob.name, name] = frame, dense(on_main(lambda: lattice(ob, name), ob.name), ob.name, name)
+    values, low, size = lattices[ob.name, name][1]
+    point = transform(ob.data.grids[name].matrix_object.inverted(), ('OBJECT',))
+    return Grid(values, size.tolist(), ('DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size))
+def fluid(ob, frame, lattices):  # Of a gas domain or a volume object, its name, grids' names and how a grid is read
+    if ob.type == 'VOLUME':
+        ob.data.grids.load()
+        return {None: ob.name, 'names': [g.name for g in ob.data.grids if g.data_type == 'FLOAT'],
+            'read': lambda name: [volume_grid(ob, name, frame, lattices)]}
+    domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'
         and m.domain_settings.domain_type == 'GAS'), None)
     if not domain: return {}
+    # The box the evaluated (adaptive) domain spans
     low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
-    return {None: ob.name, 'domain': domain, 'point': ('DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low)}
-def grid(name, kind):  # Of the domain shaded, its grid of that name, read once, as a float, a color or an alpha
-    if name not in ('density', 'flame', 'heat', 'temperature', 'color') or not GRIDS: return None
-    domain = GRIDS['domain']
-    if name not in GRIDS:  # Heat at the simulation's resolution, the others at the noise's too; color as RGBA,
-        values = numpy.empty(len(getattr(domain, name + '_grid')), 'f')  # its RGB premultiplied by its alpha
+    point = 'DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low
+    # Heat at the simulation's resolution, the others at the noise's; color as RGBA, RGB premultiplied
+    def read(name):
+        values = numpy.empty(len(getattr(domain, name + '_grid')), 'f')
         getattr(domain, name + '_grid').foreach_get(values)
         size = (numpy.array(domain.domain_resolution) * (domain.noise_scale if domain.use_noise and name != 'heat'
             else 1)).tolist()
-        alpha = name == 'color' and Grid(values[3::4], size, GRIDS['point'])
-        GRIDS[name] = [Grid(values[k::4], size, GRIDS['point'], alpha) for k in range(3)] + [alpha] if alpha \
-            else [Grid(values, size, GRIDS['point'])]
-    reads = [('GRID', GRIDS['point'], channel) for channel in GRIDS[name]]
-    if name != 'color': return reads[0] if kind != 'alpha' else 1
+        alpha = name == 'color' and Grid(values[3::4], size, point)
+        return [Grid(values[k::4], size, point, alpha) for k in range(3)] + [alpha] if alpha \
+            else [Grid(values, size, point)]
+    return {None: ob.name, 'names': ('density', 'flame', 'heat', 'temperature', 'color'), 'read': read}
+def grid(name, kind):  # Of the domain or volume shaded, its grid of that name, read once, as a float, color or alpha
+    if not GRIDS or name not in GRIDS['names']: return None
+    if name not in GRIDS: GRIDS[name] = GRIDS['read'](name)
+    reads = [('GRID', channel.point, channel) for channel in GRIDS[name]]
+    if name != 'color' or len(reads) == 1: return reads[0] if kind != 'alpha' else 1
     color = vector(*(('DIVIDE', read, reads[3]) for read in reads[:3]))  # Interpolated, then unpremultiplied
     return reads[3] if kind == 'alpha' else color if kind == 'color' else ('DOT_PRODUCT', color, numpy.full(3, 1 / 3))
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
@@ -1775,6 +1842,10 @@ class Flex(bpy.types.RenderEngine):
         references = {node.object.name for tree in trees if tree for node in tree.nodes
             if node.type == 'TEX_COORD' and node.object}
         changed = {update.id.name for update in depsgraph.updates}
+        # Kept: each volume grid read and its frame; read anew on another frame or once a volume's geometry changed
+        lattices = vars(self).setdefault('lattices', {})
+        if any(update.is_updated_geometry and (isinstance(update.id, bpy.types.Volume) or getattr(update.id, 'type', '')
+                == 'VOLUME') for update in depsgraph.updates): lattices.clear()
         same = visible == self.visible and not references & changed
         if same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
@@ -2189,10 +2260,12 @@ class Flex(bpy.types.RenderEngine):
                 color = color[loops].reshape(-1, 3, 4)
                 SEALING['closed'] = sealing
                 GRIDS.clear()
-                GRIDS.update(fluid(ob))
+                GRIDS.update(fluid(ob, scene.frame_current, lattices))
                 for slot in ob.material_slots:  # Of a material with units baked over this object's UVs or filling a
                     # domain's grids, its own row
-                    if variant(slot.material) in rows and not GRIDS or (slot.material, ob.name) in rows: continue
+                    if variant(slot.material) in rows and not (GRIDS and slot.material) \
+                            or (slot.material, ob.name) in rows:
+                        continue
                     mask = numpy.isin(index, [k for k, other in enumerate(ob.material_slots)
                         if other.material == slot.material])
                     t = uv[mask]
