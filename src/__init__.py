@@ -2397,6 +2397,7 @@ class DATA_PT_flex_light(bpy.types.Panel):  # A light's settings the engine read
                 'AREA': ('shape', 'size', 'size_y', 'spread')}[light.type]):
             if (name != 'size_y' or light.shape in {'RECTANGLE', 'ELLIPSE'}) \
                 and (name != 'temperature' or light.use_temperature): self.layout.prop(light, name)
+        self.layout.prop(light, 'use_shadow', text='Cast Shadow')
 
 class OBJECT_PT_flex_visibility(bpy.types.Panel):  # An object's visibility the engine reads
     bl_label = 'Visibility'
@@ -2412,7 +2413,9 @@ class OBJECT_PT_flex_visibility(bpy.types.Panel):  # An object's visibility the 
         shown = self.layout.column(heading='Show In')
         shown.prop(context.object, 'hide_viewport', text='Viewports', toggle=False, invert_checkbox=True)
         shown.prop(context.object, 'hide_render', text='Renders', toggle=False, invert_checkbox=True)
-        self.layout.column(heading='Ray Visibility').prop(context.object, 'visible_camera', text='Camera')
+        rays = self.layout.column(heading='Ray Visibility')
+        rays.prop(context.object, 'visible_camera', text='Camera')
+        rays.prop(context.object, 'visible_shadow', text='Shadow')
 
 class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
     bl_label = 'ReSTIR'
