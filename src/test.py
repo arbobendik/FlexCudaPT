@@ -2715,6 +2715,33 @@ sheened.id_data.links.new(sheened.outputs[0], sheened.id_data.get_output_node('C
 furnace = render().mean(-1)[cosine > 0.15].mean()
 print('SHEEN furnace', furnace, flush=True)
 assert 0.99 <= furnace <= 1.002, 'sheen furnace'
+# Ashikhmin's velvet, the Sheen BSDF's Ashikhmin distribution, white on the same sphere: at each view cosine its
+# albedo, D G / (4 cos) by midpoint quadrature over the hemisphere, of its roughness s, the node's Roughness;
+# at s 0.6 almost none straight on and most of it toward the rim, on both backends
+def velveted():  # Its names its own, apart from the rows after it
+    def albedo(mu, s):  # D = exp(-cot² h / s²) / (pi s² sin⁴ h), G = min(1, 2 cos h min(cos v, cos l) / |v·h|)
+        view = numpy.array((math.sqrt(1 - mu * mu), 0, mu))
+        half = light + view
+        half /= numpy.linalg.norm(half, axis=-1, keepdims=True)
+        cos2 = half[..., 2] ** 2
+        d = numpy.exp(-cos2 / (1 - cos2) / s ** 2) / (math.pi * s ** 2 * (1 - cos2) ** 2)
+        g = numpy.minimum(1, 2 * half[..., 2] / numpy.abs(half @ view) * numpy.minimum(mu, light[..., 2]))
+        return (d * g / (4 * mu) * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512)
+    sheen.distribution = 'ASHIKHMIN'
+    sheened.id_data.links.new(sheen.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+    cosines = numpy.maximum(numpy.linspace(0, 1, 33), 1e-3)
+    for s in (0.6, 1):
+        sheen.inputs['Roughness'].default_value = s
+        due = numpy.interp(cosine, cosines, [albedo(mu, s) for mu in cosines])
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            seen = render().mean(-1)
+            for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+                ring = (cosine > low) & (cosine <= high)
+                print('VELVET', s, preferences.device, 'at cosines', low, high, seen[ring].mean(), 'albedo',
+                    due[ring].mean(), flush=True)
+                assert numpy.isclose(seen[ring].mean(), due[ring].mean(), rtol=0.03), ('velvet albedo', s, low)
+    preferences.device = device
+velveted()
 
 # Anisotropy under the white sky, seen in parallel at cosine 0.3 along x, on two rectangles 1 / 0.3 long along x, so
 # that each covers a square of the view: a white metal of roughness 0.5 and Principled Anisotropic 1 about Blender's
