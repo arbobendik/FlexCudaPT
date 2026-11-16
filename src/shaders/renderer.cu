@@ -723,7 +723,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         used(ANISOTROPIC) && top - stack > 18 ? stack[18] : make_float3(0, 0, 0),
         used(MEDIUM) && top - stack > 19 ? stack[19] : make_float3(0, 0, 0),
         used(HAIR) && top - stack > 20 ? stack[20] : make_float3(0, 0, 0),
-        used(PHASE) && top - stack > 21 ? stack[21].x : 0};
+        used(PHASE) && top - stack > 21 ? stack[21].x : 0, used(VELVET) && top - stack > 22 ? stack[22].x : 0};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
