@@ -21,9 +21,6 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
     }
     return {hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance};
 }
-// FK: the sky's shadow toward a sample of the environment's CDF, which the renderer has none of until it samples its
-// world by a luminance CDF
-static __device__ float3 fcptShadowTransmittance(FKRay ray, float l) { return make_float3(0, 0, 0); }
 // Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone
 // width
 static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
