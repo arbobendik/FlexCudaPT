@@ -340,8 +340,12 @@ class ImageRead:  # Samples Cycles can merge share whether their alpha is read
 class Bake:  # Texture the bake pass fills with a unit's value
     pass
 
-class Grid:  # A fluid domain's grid: its values, x fastest, its resolution, and its point in [0, 1] over its box
-    def __init__(self, values, size, point): self.values, self.size, self.point = values, size, point
+class Grid:  # A fluid domain's grid: its values, x fastest, its resolution, and its point in [0, 1] over its box; of a
+    # color channel premultiplied by its alpha grid, that grid and the range of its straight values where alpha is not 0
+    def __init__(self, values, size, point, over=None):
+        self.values, self.size, self.point, self.over = values, size, point, over
+        if over: self.straight = tuple(numpy.full(3, f(numpy.append(values[over.values > 0] / over.values[over.values
+            > 0], 0))) for f in (numpy.min, numpy.max))
 
 READS = ('IMAGE', 'ALPHA', 'IMAGE_LINEAR', 'ALPHA_LINEAR', 'IMAGE_CUBIC', 'ALPHA_CUBIC', 'BAKED')
 # Steps affine in their operands, by which of these vary: a unit of them alone commutes with interpolating its reads
@@ -476,6 +480,8 @@ def bounds(expression, boxes, memo):
         texels = numpy.concatenate((texels[texels[:, 3] > 0, :3], numpy.zeros((1, 3))))
         box = texels.min(0), texels.max(0)
     elif name == 'GRID': box = numpy.full(3, operands[1].values.min()), numpy.full(3, operands[1].values.max())
+    elif name == 'DIVIDE' and isinstance(operands[0], tuple) and operands[0][0] == 'GRID' and operands[0][2].over:
+        box = operands[0][2].straight  # A premultiplied grid over its alpha: a blend of its straight values, or 0
     elif name == 'ADD': box = parts[0][0] + parts[1][0], parts[0][1] + parts[1][1]
     elif name == 'SUBTRACT': box = parts[0][0] - parts[1][1], parts[0][1] - parts[1][0]
     elif name == 'MULTIPLY': box = product(*parts)
@@ -1276,9 +1282,13 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'HAIR_INFO': lambda node, inputs, index: ('HAIR_INFO', index),
     'ATTRIBUTE': lambda node, inputs, index: ('UV',) if node.attribute_name == 'surface_uv_coordinate' and index < 2
         else instanced(node.attribute_name, index) if node.attribute_type == 'INSTANCER'
+        else read if node.attribute_type == 'GEOMETRY' and (read := grid(node.attribute_name, ('color', 'color',
+        'float', 'alpha')[index])) is not None
         else (('VERTEX_COLOR',), ('VERTEX_COLOR',), ('DOT_PRODUCT', ('VERTEX_COLOR',),
         numpy.full(3, 1 / 3)), ('VERTEX_ALPHA',))[index] if node.attribute_type == 'GEOMETRY' and any(
         node.attribute_name in mesh.color_attributes for mesh in bpy.data.meshes) else resolve(node.outputs[index]),
+    'VOLUME_INFO': lambda node, inputs, index: grid(('color', 'density', 'flame', 'temperature')[index],  # A fluid
+        'color' if index == 0 else 'float') or 0,  # domain's grids by name; 0 elsewhere
     'LIGHT_PATH': lambda node, inputs, index: ('LIGHT_PATH', index)
         if index in (0, 1, 2, 3, 5, 6, 8, 9) else resolve(node.outputs[index]),
     'TEX_NOISE': noise, 'TEX_WHITE_NOISE': white_noise, 'TEX_GRADIENT': gradient, 'TEX_CHECKER': checker,
@@ -1366,11 +1376,13 @@ def resolve(socket, groups=()):
             HAIRS.setdefault(entry, sum(other[6] for other in HAIRS))
             hair = 'HAIR', ('ADD', 1 + HAIRS[entry], ('MINIMUM', 15, ('FLOOR', ('MULTIPLY', 16, ('POWER', random, 0.5))))
                 if entry[6] > 1 else 0)
+        if node.type == 'PRINCIPLED_VOLUME' and (read := grid(node.inputs['Color Attribute'].default_value, 'color')):
+            scatter = 'MULTIPLY', scatter, read  # Its scattering color times its grid of that name
         if node.type == 'PRINCIPLED_VOLUME':  # Absorbs what it does not scatter by the absorption color, not its root
             absorption = 'SUBTRACT', 1, ('MULTIPLY', ('SUBTRACT', 1, absorption),
                 ('MAXIMUM', 0, ('SUBTRACT', 1, scatter)))
-        if node.type == 'PRINCIPLED_VOLUME' and (grid := GRIDS.get(node.inputs['Density Attribute'].default_value)):
-            density = 'MULTIPLY', density, ('GRID', grid.point, grid)  # By its grid of that name, as Cycles'
+        if node.type == 'PRINCIPLED_VOLUME' and (read := grid(node.inputs['Density Attribute'].default_value, 'float')):
+            density = 'MULTIPLY', density, read  # Its density times its grid of that name
         if node.type == 'VOLUME_COEFFICIENTS':  # Its coefficients per unit length as they are, of density 1, emitting
             absorption = 'SUBTRACT', 1, get('Absorption Coefficients')  # in a volume alone, isotropic for now
             emissive, strength = (get('Emission Coefficients'), 1) if SIDE['volume'] else (0, 0)
@@ -1379,6 +1391,8 @@ def resolve(socket, groups=()):
         # density, none at 0 K or below; on a surface nothing
         if node.type == 'PRINCIPLED_VOLUME' and SIDE['volume']:
             emissive, strength, t = get('Emission Color'), get('Emission Strength'), ('MAXIMUM', 0, get('Temperature'))
+            if read := grid(node.inputs['Temperature Attribute'].default_value, 'float'):  # Times its grid, 0 or more
+                t = 'MAXIMUM', 0, ('MULTIPLY', get('Temperature'), ('MAXIMUM', 0, read))
             if nonzero(intensity := get('Blackbody Intensity')):
                 radiance = 'MULTIPLY', STEFAN_BOLTZMANN * BLACKBODY_UNIT / math.pi, ('POWER', t, 4)
                 emissive = 'ADD', ('MULTIPLY', emissive, strength), ('MULTIPLY', ('MULTIPLY', get('Blackbody Tint'),
@@ -1454,16 +1468,27 @@ SOURCES = {}  # Of each node's table, by its original, the evaluated node it was
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
 GRIDS = {}  # Of the fluid domain shaded, its name and its grids by Cycles' attribute names
 media_key = lambda material: (material, GRIDS[None]) if GRIDS else material  # MEDIA's key, a domain's its own
-def fluid(ob):  # Of a gas domain, its name and density grid, over the box its evaluated mesh spans, the adaptive one's
-    domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'
+def fluid(ob):  # Of a gas domain, its name, settings and the point over the box its evaluated mesh spans, the adaptive
+    domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'  # one's
         and m.domain_settings.domain_type == 'GAS'), None)
     if not domain: return {}
-    values = numpy.empty(len(domain.density_grid), 'f')
-    domain.density_grid.foreach_get(values)
-    size = numpy.array(domain.domain_resolution) * (domain.noise_scale if domain.use_noise else 1)
     low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
-    point = 'DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low
-    return {None: ob.name, 'density': Grid(values, size.tolist(), point)}
+    return {None: ob.name, 'domain': domain, 'point': ('DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low)}
+def grid(name, kind):  # Of the domain shaded, its grid of that name, read once, as a float, a color or an alpha
+    if name not in ('density', 'flame', 'heat', 'temperature', 'color') or not GRIDS: return None
+    domain = GRIDS['domain']
+    if name not in GRIDS:  # Heat at the simulation's resolution, the others at the noise's too; color as RGBA,
+        values = numpy.empty(len(getattr(domain, name + '_grid')), 'f')  # its RGB premultiplied by its alpha
+        getattr(domain, name + '_grid').foreach_get(values)
+        size = (numpy.array(domain.domain_resolution) * (domain.noise_scale if domain.use_noise and name != 'heat'
+            else 1)).tolist()
+        alpha = name == 'color' and Grid(values[3::4], size, GRIDS['point'])
+        GRIDS[name] = [Grid(values[k::4], size, GRIDS['point'], alpha) for k in range(3)] + [alpha] if alpha \
+            else [Grid(values, size, GRIDS['point'])]
+    reads = [('GRID', GRIDS['point'], channel) for channel in GRIDS[name]]
+    if name != 'color': return reads[0] if kind != 'alpha' else 1
+    color = vector(*(('DIVIDE', read, reads[3]) for read in reads[:3]))  # Interpolated, then unpremultiplied
+    return reads[3] if kind == 'alpha' else color if kind == 'color' else ('DOT_PRODUCT', color, numpy.full(3, 1 / 3))
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
     SEALING['asked'] = True
