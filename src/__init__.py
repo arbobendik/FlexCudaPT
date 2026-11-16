@@ -1632,9 +1632,14 @@ def lattice(ob, name):
     bpy.data.objects.remove(holder), bpy.data.meshes.remove(mesh), bpy.data.node_groups.remove(tree)
     bpy.data.objects.remove(source), bpy.data.volumes.remove(volume), bpy.data.scenes.remove(scene), os.remove(path)
     return read
+GRID_CELLS = 512 ** 3  # Most voxels of a volume's grid over its active index box, which renders dense
+oversized = lambda volume, name, size: (size.prod() > GRID_CELLS or size[2] >= 4096) and (f"Flex: the grid '{name}' "
+    f"of volume '{volume}' spans {size[0]} x {size[1]} x {size[2]} voxels; Flex renders at most {GRID_CELLS} over a "
+    "grid's active box, fewer than 4096 deep")  # A grid step packs its depth in 12 bits
 def dense(read, volume, name):  # The voxels and tiles read, dense over their active index box, in the caller's thread
     index = numpy.column_stack((read['x'], read['y'], read['z']))
     low, size = index.min(0), (index + read['extent'][:, None]).max(0) - index.min(0)
+    if message := oversized(volume, name, size): raise ValueError(message)
     values = numpy.zeros(size[::-1], 'f')
     one, (x, y, z) = read['extent'] == 1, (index - low).T
     values[z[one], y[one], x[one]] = read['value'][one]  # Voxels at once, then tiles, whose voxels all hold its value
