@@ -2329,8 +2329,8 @@ scene.camera.data.angle = 0.01
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), (0.0112, 0.0230, 0.0441), rtol=0.02), ('zenith sky', device)
-# Through RGB curves, the sky's colour chain read as one table of it, the same: the curves at the zenith's colour, as
-# Blender's own curve evaluator takes them, the combined curve first
+# Through RGB curves, the sky's colour chain the same: the curves at the zenith's colour, as Blender's own curve evaluator
+# takes them, the combined curve first
 curves = scene.world.node_tree.nodes.new('ShaderNodeRGBCurve')
 curves.mapping.curves[3].points.new(0.02, 0.3)
 links = scene.world.node_tree.links
@@ -2341,11 +2341,19 @@ due = [curves.mapping.evaluate(curves.mapping.curves[c], curves.mapping.evaluate
     for c, value in enumerate((0.0112, 0.0230, 0.0441))]
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
-    assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('folded sky', device, due)
-# A value edited in a material whose emission is a folded sky chain pipes steps alone, the chain's table kept, as in a
-# material without one, where a table made anew would count as a new texture and export the scene anew; also after
-# Blender copied the material anew in between, as new data makes it do, its nodes at new addresses: tables are keyed by
-# the original nodes, read from the evaluated
+    assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('curved sky', device, due)
+# Grazing the horizon, the same model: a view 0.1 degrees wide, 0.15 degrees up and 94 degrees from a sun 2 degrees up,
+# at turbidity 9 and ground albedo 0, holds the formula's mean over the view, (0.0027952, 0.0015028, 0.00047345),
+# evaluated apart from Flex
+links.new(dome.outputs['Color'], scene.world.node_tree.nodes['Background'].inputs['Color'])
+dome.turbidity, dome.ground_albedo, dome.sun_direction = 9, 0, (math.cos(math.radians(2)), 0, math.sin(math.radians(2)))
+scene.camera.rotation_euler = (math.pi / 2 + math.radians(0.15), 0, math.radians(4))
+scene.camera.data.sensor_width, scene.camera.data.lens = 1, 0.5 / math.tan(math.radians(0.05))
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.allclose(render().mean((0, 1)), (0.0027952, 0.0015028, 0.00047345), rtol=0.02), ('grazing sky', device)
+# A value edited in a material whose emission is a sky's colour chain pipes steps alone, as in a material without one;
+# also after Blender copied the material anew in between, as new data makes it do, its nodes at new addresses
 bpy.context.window.scene = scene
 glowing, material = plane('glowing', 0), bpy.data.materials['glowing']
 glow, gamma = material.node_tree.nodes.new('ShaderNodeTexSky'), material.node_tree.nodes.new('ShaderNodeGamma')
@@ -2365,8 +2373,9 @@ def churned(material):  # Of a value edited in the material after Blender copied
     for group in [group for group in bpy.data.node_groups if group.name.startswith('churn')]:
         bpy.data.node_groups.remove(group)
     return numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0]
-assert churned(material) == flex.STEPS, 'value beside a folded sky'
-# So beside a live color ramp, which the update reads again from the material's evaluated copy
+assert churned(material) == flex.STEPS, 'value beside a sky'
+# So beside a live color ramp, whose table is keyed by the original node and read again from the material's evaluated
+# copy, where a table made anew would count as a new texture and export the scene anew
 ramped, material = plane('ramped', 0), bpy.data.materials['ramped']
 facing, ramp = material.node_tree.nodes.new('ShaderNodeLayerWeight'), material.node_tree.nodes.new('ShaderNodeValToRGB')
 ramp.color_ramp.elements[1].color, ramped.inputs['Emission Strength'].default_value = (0.2, 0.5, 0.9, 1), 1
@@ -2375,6 +2384,38 @@ material.node_tree.links.new(ramp.outputs['Color'], ramped.inputs['Emission Colo
 assert churned(material) == flex.STEPS, 'value beside a color ramp'
 assert all(node.id_data.is_evaluated for node in module['SOURCES'].values() if isinstance(node, bpy.types.Node)), \
     'tables read from evaluated nodes'
+# A kept engine under a sky, an emitter of its colour edited between two F12s, pipes steps alone, which the renderer
+# reads as piped: its second F12 is a new engine's; so a kept viewport's draw after the same edit
+scene.camera.location, scene.camera.rotation_euler = (0, 0, 3), (0, 0, 0)
+scene.camera.data.sensor_width, scene.camera.data.lens = 36, 50
+material = bpy.data.materials['glowing']
+roughness = material.node_tree.nodes['Principled BSDF'].inputs['Roughness']
+depsgraph = bpy.context.evaluated_depsgraph_get()
+context = types.SimpleNamespace(region=region, region_data=types.SimpleNamespace(view_matrix=scene.camera.matrix_world
+    .inverted(), window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA'),
+    space_data=types.SimpleNamespace(camera=scene.camera, clip_end=1000))
+def sky_drawn(viewport, updated):  # The viewport's draw to its sample limit once updated by the depsgraph given
+    with offscreen.bind():
+        gpu.matrix.load_matrix(Matrix.Identity(4))
+        gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+        viewport.view_update(context, updated)
+        viewport.view_draw(context, bpy.context.evaluated_depsgraph_get())
+        while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, bpy.context.evaluated_depsgraph_get())
+        return numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    scene.render.use_persistent_data, roughness.default_value = True, 0.5
+    render()
+    sky_drawn(kept := Viewport(), bpy.context.evaluated_depsgraph_get())
+    roughness.default_value = 0.6
+    shown = render()
+    scene.render.use_persistent_data = False
+    assert numpy.allclose(shown, render(), atol=2e-3), ('kept sky', device)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    edit = types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+        updates=[types.SimpleNamespace(id=material, is_updated_geometry=False, is_updated_transform=False)])
+    assert numpy.allclose(sky_drawn(kept, edit), sky_drawn(Viewport(), depsgraph), atol=2e-3), ('kept sky viewport',
+        device)
 
 # A thin slab of a medium scattering 0.01 of what crosses it and absorbing nothing, lit from below by a parallel sun 30
 # degrees off the straight-up view of an orthographic camera above, scatters it once: its radiance follows its phase
