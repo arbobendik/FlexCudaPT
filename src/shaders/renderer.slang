@@ -1472,12 +1472,14 @@ struct VkScene : IScene {
         return dom.hit.instance_index != NONE;
     }
     bool storedDomainTemporal(int2 p, uint seed, out FKDomain dom) { return storedDomainInitial(p, seed, dom); }
-    // Within a view the scene stays; a view's first frame reuses the anchor's, whose scene it shifts into
+    // Within a view the camera and the scene stay, so every sample keeps its domain; a view's first frame reuses the
+    // anchor's, whose scene it shifts into
     bool sceneUnchanged() { return scene.frame > 0; }
     bool previousScenes() { return true; }
     Shift shiftPrevious(FKDomain dom, Reservoir r) {
         Selection sel = {};
-        if (r.w <= 0.0f) return Shift(float3(0, 0, 0), 0.0f);
+        // Nothing to shift, or nothing seen there
+        if (r.w <= 0.0f || dom.hit.instance_index == NONE) return Shift(float3(0, 0, 0), 0.0f);
         return walkDomain<true>(VkScene(previousScene()), dom, r, 0.0f, sel);
     }
     Shift walkCallable(FKDomain dom, Reservoir r, bool replay, float scale, inout Selection sel) {
@@ -1517,15 +1519,23 @@ struct VkScene : IScene {
     void storePreviousLayer(int2 p, uint layer, uint4 value) {}
     uint4 duplication(int2 q) { return uint4(asuint(scene.duplication[index(q)]), 0, 0, 0); }
     void storeDuplication(int2 p, uint4 value) { if (onImage(p)) scene.duplication[index(p)] = asfloat(value.x); }
-    // The temporal round's shifts, which the renderer's temporal pass makes itself
-    uint4 temporalShift(int2 p, uint layer) { return uint4(0); }
-    void storeTemporalShift(int2 p, uint layer, uint4 value) {}
     uint4 shiftData(int2 p, uint layer) {
         const Shift shift = scene.shifts[3 * index(p) + layer];
         return uint4(asuint(shift.f), asuint(shift.jac));
     }
     void storeShiftData(int2 p, uint layer, uint4 value) {
         if (onImage(p)) scene.shifts[3 * index(p) + layer] = Shift(asfloat(value.xyz), asfloat(value.w));
+    }
+    // The temporal round's shifts in the spatial round's first two slots and its neighbours, a pixel index, -1 for
+    // none, in the third: all three free until the spatial round's prepass rewrites them
+    uint4 temporalShift(int2 p, uint layer) { return shiftData(p, layer); }
+    void storeTemporalShift(int2 p, uint layer, uint4 value) { storeShiftData(p, layer, value); }
+    void storeTemporalNeighbor(int2 p, int2 q) {
+        if (onImage(p)) scene.shifts[3 * index(p) + 2].f.x = asfloat(q.x < 0 ? -1 : int(index(q)));
+    }
+    int2 loadTemporalNeighbor(int2 p) {
+        const int q = asint(scene.shifts[3 * index(p) + 2].f.x);
+        return q < 0 ? int2(-1) : int2(q % int(scene.width), q / int(scene.width));
     }
     uint4 reservoirTemporal(int2 q, uint layer) {
         const Reservoir r = scene.temporal[index(q)];
