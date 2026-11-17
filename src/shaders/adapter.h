@@ -84,6 +84,8 @@ static __device__ uint4 fcptDuplication(int2 q);
 static __device__ void fcptStoreDuplication(int2 p, uint4 value);
 static __device__ uint4 fcptTemporalShift(int2 p, unsigned layer);
 static __device__ void fcptStoreTemporalShift(int2 p, unsigned layer, uint4 value);
+static __device__ void fcptStoreTemporalNeighbor(int2 p, int2 q);
+static __device__ int2 fcptLoadTemporalNeighbor(int2 p);
 static __device__ uint4 fcptShiftData(int2 p, unsigned layer);
 static __device__ void fcptStoreShiftData(int2 p, unsigned layer, uint4 value);
 static __device__ bool fcptRestirUsed();
