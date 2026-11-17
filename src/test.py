@@ -2946,7 +2946,7 @@ assert numpy.allclose(kept, folded, atol=2e-3), ('values computed again past the
 
 # Sheen under the white sky, on a sphere seen from 10 away: alone, a Sheen BSDF of roughness 0.5 returns at each
 # view cosine its albedo there, by midpoint quadrature over the hemisphere, rising toward the rim where a diffuse stays
-# flat; over the Principled BSDF's white diffuse by weight 1, at most and within 1% of what it receives
+# flat; over the Principled BSDF's white diffuse by weight 1, what it receives, held as below
 scene = new('sheen')
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
 scene.camera = add(bpy.data.cameras.new('sheen'), (0, 0, 10))
@@ -2977,20 +2977,33 @@ def seen(dx, dy):
 cosine, offsets = seen(0, 0)[0], (numpy.arange(16) + 0.5) / 16 - 0.5
 # Each pixel's albedo over its area, as the renderer's box filter jitters its rays; its ring by its centre's cosine
 expected = numpy.mean([seen(dx, dy)[1] for dx in offsets for dy in offsets], 0)
-pixels = render().mean(-1)
-for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
-    ring = (cosine > low) & (cosine <= high)
-    print('SHEEN at cosines', low, high, pixels[ring].mean(), 'albedo', expected[ring].mean(), flush=True)
-    assert numpy.isclose(pixels[ring].mean(), expected[ring].mean(), rtol=0.03), 'sheen albedo'
+for preferences.device in ('OPTIX', 'VULKAN'):
+    pixels = render().mean(-1)
+    for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+        ring = (cosine > low) & (cosine <= high)
+        print('SHEEN', preferences.device, 'at cosines', low, high, pixels[ring].mean(), 'albedo',
+            expected[ring].mean(), flush=True)
+        assert numpy.isclose(pixels[ring].mean(), expected[ring].mean(), rtol=0.03), ('sheen albedo',
+            preferences.device)
 sheened.inputs['Base Color'].default_value, sheened.inputs['IOR'].default_value = (1, 1, 1, 1), 1
 sheened.inputs['Sheen Weight'].default_value, sheened.inputs['Sheen Roughness'].default_value = 1, 0.5
 sheened.id_data.links.new(sheened.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
-furnace = render().mean(-1)[cosine > 0.15].mean()
-print('SHEEN furnace', furnace, flush=True)
-assert 0.99 <= furnace <= 1.002, 'sheen furnace'
+# The furnace twice, sized by 16 independent renders (the sphere alone in a different cell of a 4 x 4 canvas each): with
+# ReSTIR, as the scenes render, within 3 SD of one image, 0.014, of 1, which guards against reuse adding or losing
+# light; without it, where one image spreads 0.0005, within 0.0015 of the 0.9992 those renders read, which guards
+# the lobe's energy itself
+for preferences.device in ('OPTIX', 'VULKAN'):
+    furnaces = []
+    for scene.flex_restir in (True, False): furnaces.append(render().mean(-1)[cosine > 0.15].mean())
+    print('SHEEN furnace', preferences.device, 'ReSTIR on and off', furnaces, flush=True)
+    assert abs(furnaces[0] - 1) <= 0.014 and abs(furnaces[1] - 0.9992) <= 0.0015, ('sheen furnace',
+        preferences.device, furnaces)
+scene.flex_restir, preferences.device = True, device
 # Ashikhmin's velvet, the Sheen BSDF's Ashikhmin distribution, white on the same sphere: at each view cosine its
 # albedo, D G / (4 cos) by midpoint quadrature over the hemisphere, of its roughness s, the node's Roughness;
-# at s 0.6 almost none straight on and most of it toward the rim, on both backends
+# at s 0.6 almost none straight on and most of it toward the rim, on both backends; each pixel's over its area, as
+# the sheen's, the sky's 1 past the rim; each ring within 3 SD of one image, as 16 independent renders (the sphere
+# alone in a different cell of a 4 x 4 canvas each) spread
 def velveted():  # Its names its own, apart from the rows after it
     def albedo(mu, s):  # D = exp(-cot² h / s²) / (pi s² sin⁴ h), G = min(1, 2 cos h min(cos v, cos l) / |v·h|)
         view = numpy.array((math.sqrt(1 - mu * mu), 0, mu))
@@ -3005,16 +3018,48 @@ def velveted():  # Its names its own, apart from the rows after it
     cosines = numpy.maximum(numpy.linspace(0, 1, 33), 1e-3)
     for s in (0.6, 1):
         sheen.inputs['Roughness'].default_value = s
-        due = numpy.interp(cosine, cosines, [albedo(mu, s) for mu in cosines])
+        table = [albedo(mu, s) for mu in cosines]
+        due = numpy.mean([numpy.where(c > 0, numpy.interp(c, cosines, table), 1) for c in (seen(dx, dy)[0]
+            for dx in offsets for dy in offsets)], 0)
         for preferences.device in ('OPTIX', 'VULKAN'):
-            seen = render().mean(-1)
-            for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+            image = render().mean(-1)
+            for (low, high), rtol in zip(((0.9, 1), (0.4, 0.6), (0.15, 0.3)), (0.04, 0.025, 0.045)):
                 ring = (cosine > low) & (cosine <= high)
-                print('VELVET', s, preferences.device, 'at cosines', low, high, seen[ring].mean(), 'albedo',
+                print('VELVET', s, preferences.device, 'at cosines', low, high, image[ring].mean(), 'albedo',
                     due[ring].mean(), flush=True)
-                assert numpy.isclose(seen[ring].mean(), due[ring].mean(), rtol=0.03), ('velvet albedo', s, low)
+                assert numpy.isclose(image[ring].mean(), due[ring].mean(), rtol=rtol), ('velvet albedo', s, low)
     preferences.device = device
 velveted()
+# A sheen bounce reads Light Path's Is Diffuse Ray and Is Reflection Ray as 1 and Is Glossy Ray as 0, as when the sheen
+# rode the diffuse lobe's samples. Its sphere fills the view and the white sky is not light-sampled, so only rays
+# leaving the sheen reach the sky: scaled by the first two, max(output, 0), it renders as scaled by max(output, 1),
+# bit for bit, the same steps on the same random numbers; scaled by the third, black
+def sheen_path():  # Its names its own, apart from the rows after it
+    lit = new('sheen path', sky=(1, 1, 1))
+    lit.flex_samples, lit.flex_restir, lit.world.flex_sample_light = 16, False, False
+    lit.camera = bpy.data.objects.new('sheen path', bpy.data.cameras.new('sheen path'))
+    lit.camera.location, lit.camera.data.type, lit.camera.data.ortho_scale = (0, 0, 3), 'ORTHO', 1
+    lit.collection.objects.link(lit.camera)
+    lit.collection.objects.link(bpy.data.objects.new('sheen path', bpy.data.meshes['sheened']))
+    nodes, links = lit.world.node_tree.nodes, lit.world.node_tree.links
+    ray, floor = nodes.new('ShaderNodeLightPath'), nodes.new('ShaderNodeMath')
+    floor.operation = 'MAXIMUM'
+    links.new(floor.outputs[0], nodes['Background'].inputs['Strength'])
+    sheen.distribution, sheen.inputs['Roughness'].default_value = 'MICROFIBER', 0.5
+    sheened.id_data.links.new(sheen.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = {}
+        for output, least in (('Is Glossy Ray', 1), ('Is Diffuse Ray', 0), ('Is Reflection Ray', 0),
+                ('Is Glossy Ray', 0)):
+            links.new(ray.outputs[output], floor.inputs[0])
+            floor.inputs[1].default_value = least
+            seen[output, least] = render(lit)
+        whole = seen['Is Glossy Ray', 1]
+        assert whole.any() and numpy.array_equal(seen['Is Diffuse Ray', 0], whole) and numpy.array_equal(seen[
+            'Is Reflection Ray', 0], whole) and not seen['Is Glossy Ray', 0].any(), ('sheen path', preferences.device,
+            {k: v.mean() for k, v in seen.items()})
+    preferences.device = device
+sheen_path()
 # Toon BSDFs, white on the same sphere: the diffuse returns at each view cosine its profile P there, 1 within Size's
 # cone, falling across Smooth's and none past it; the glossy its albedo, P about the mirror direction times cos over the
 # solid angle P weighs, by midpoint quadrature over the hemisphere; on both backends
