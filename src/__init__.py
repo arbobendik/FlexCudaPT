@@ -1831,7 +1831,7 @@ class Flex(bpy.types.RenderEngine):
     def __init__(self, source):  # Blender calls it twice: with the engine it made, then with this instance itself
         super().__init__(source)
         if source is self: return
-        self.visible = ()  # Names of the instances the renderer was last started on
+        self.visible = None  # Names of the instances the renderer was last started on, none before
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
         self.varying = set()  # Of those, the ones whose volume varies: their bounds, made where they are, made anew
         self.volumes = {}  # Of each instance exported filling a volume, by its index: its triangles' BVH in the world and
@@ -1891,7 +1891,7 @@ class Flex(bpy.types.RenderEngine):
             and not update.id.modifiers and data.get(getattr(update.id.data, 'original', None)) is False)
         shaded = same and self.shape and len(depsgraph.updates) and not moved and all(not (geometric(update)
             or update.is_updated_transform or isinstance(update.id, bpy.types.Image)) for update in depsgraph.updates)
-        self.visible = visible
+        self.visible = None  # Until piped: an export that raises exports anew next
         scene = depsgraph.scene_eval
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
         # coordinates (the points in the mesh's texture space), object coordinates (the points in the object's space),
@@ -2194,7 +2194,7 @@ class Flex(bpy.types.RenderEngine):
             bm = bmesh.new()
             if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
                 if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
-                    if ~i not in self.slots: return self.start(setattr(self, 'visible', None) or depsgraph)
+                    if ~i not in self.slots: return self.start(depsgraph)
                     record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
@@ -2442,13 +2442,13 @@ class Flex(bpy.types.RenderEngine):
         if moved:
             if varying or self.box != 2 ** 32 - 1 or not all(self.slots.get(i, ())[1:] == (count, key)
                     for i, count, key in slots):  # Or the world's box, which what moved may leave
-                self.visible = None
                 return self.start(depsgraph)
             self.volumes.update(volumes)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
                 *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:41].astype('f'),
                 instances[k][3][:21].astype('f')))))
+            self.visible = visible
             return
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         surface = resolve(world.inputs['Surface']) if world else BLACK
@@ -2515,7 +2515,6 @@ class Flex(bpy.types.RenderEngine):
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
-                self.visible = None
                 return self.start(depsgraph)
             read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
             tables = {key: [] for key, entry in textures.items()
@@ -2524,6 +2523,7 @@ class Flex(bpy.types.RenderEngine):
             means = {key: texture(SOURCES[key], {}, tables[key])[3] for key in tables}
             if any((means[key] != textures[key][3]).any() for key in tables):
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
+                self.visible = visible  # Its steps again, as the same scene's
                 return self.start(depsgraph)
             # Then per table its first texel, width and texels, until a width of 0, those only bakes read flagged in bit
             # 31, and with bakes to run again their images, as piped, and tiles; per program its first step and light
@@ -2542,6 +2542,7 @@ class Flex(bpy.types.RenderEngine):
                 width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
                 numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
                 numpy.array(again, 'I'), struct.pack('<2I', *regrid)))
+            self.visible = visible
             return
         self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
@@ -2573,6 +2574,7 @@ class Flex(bpy.types.RenderEngine):
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
+        self.visible = visible
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
@@ -2655,6 +2657,7 @@ class Flex(bpy.types.RenderEngine):
         self.start(depsgraph)
 
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
+        if self.visible is None: return  # No scene piped to trace
         region = context.region
         scene = depsgraph.scene
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
