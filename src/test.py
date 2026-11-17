@@ -235,9 +235,10 @@ def repiped(exporter, depsgraph):  # The exporter's scene piped anew from the de
     exporter.visible, exporter.requests = (), io.BytesIO()
     Viewport.engine.start(exporter, depsgraph)
 
-def updated(depsgraph, id, **flags):  # A depsgraph stand-in updating the id alone, with the flags given
+def updated(depsgraph, id, **flags):  # A depsgraph stand-in updating the id alone, moved, unless the flags given say
     return types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
-        updates=[types.SimpleNamespace(id=id, **flags)])
+        updates=[types.SimpleNamespace(id=id, **{'is_updated_geometry': False, 'is_updated_transform': True,
+        'is_updated_shading': False, **flags})])
 
 # EEVEE's specular shader resolves to a surface of its base color with a dielectric's specular reflection, not black
 specular = bpy.data.materials.new('specular').node_tree
