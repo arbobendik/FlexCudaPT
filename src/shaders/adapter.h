@@ -22,6 +22,7 @@ static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 ori
     unsigned layer, unsigned depth, unsigned lobe, float3 dir);
 struct SampleBSDF;  // FlexKernels' sampled BSDF, which the hair hooks hand back
 static __device__ __forceinline__ bool fcptHairUsed();
+static __device__ __forceinline__ bool fcptDispersionUsed();
 static __device__ __forceinline__ constexpr bool fcptShadowFirst();
 static __device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir);
 static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 tint, float3 in_dir,
