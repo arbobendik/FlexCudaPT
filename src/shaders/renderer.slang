@@ -24,15 +24,18 @@ struct Projection { uint type; float range[4], shift[2]; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT };
-// MEDIUM, CURVES, WORLD and SKY no program takes: a scene's varying media, strands, world volume and world sampled by
-// its luminance; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
-// distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third
+    TOON, SELECT, PANORAMA, DISPERSION };
+// MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
+// sampled by its luminance and panoramic camera (CUDA's alone; its place kept, so the codes after it agree with the
+// exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
+// distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
+// DISPERSION a transmission's IOR spread by wavelength
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
     float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase, velvet; float3 toon;
+    float dispersion;
 };
 static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
@@ -807,7 +810,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
         used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0),
         used(PHASE) && top > 21 ? stack[21].x : 0, used(VELVET) && top > 22 ? stack[22].x : 0,
-        used(TOON) && top > 23 ? stack[23] : float3(0, 0, 0));
+        used(TOON) && top > 23 ? stack[23] : float3(0, 0, 0), used(DISPERSION) && top > 24 ? stack[24].x : 0);
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
