@@ -1318,19 +1318,23 @@ def oso(node):  # A Script node's bytecode: the one its update stored, else its 
             'compile')
         return open(compiled).read()
 
-def program(text):  # Of OSO bytecode: per symbol its kind, type and values; its main code's steps, operands and jumps
-    symbols, steps, main = {}, [], False
+def program(text):  # Of OSO bytecode: per symbol its kind, type and values; its main code's steps, operands and jumps,
+    # and the number of its first step, as jumps number the steps of every code section in order
+    symbols, steps, main, first, count = {}, [], False, 0, 0
     for line in text.split('\n'):
         fields, words = line.split('\t'), line.split('%')[0].split()
-        if line.startswith('code '): main = line == 'code ___main___'
+        if line.startswith('code '):
+            main = line == 'code ___main___'
+            if main: first = count
         elif fields[0] in ('param', 'oparam', 'local', 'temp', 'global', 'const'):
             given = fields[3] if len(fields) > 3 and not fields[3].startswith('%') else ''
             symbols[fields[2]] = fields[0], fields[1], given[1:-1] if given.startswith('"') else [*map(float,
                 given.split())]
-        elif main and words and not line.startswith('#'):
-            steps.append((words[0], [w for w in words[1:] if not w.lstrip('-').isdigit()],
+        elif line.startswith('\t') and words:
+            count += 1
+            if main: steps.append((words[0], [w for w in words[1:] if not w.lstrip('-').isdigit()],
                 [int(w) for w in words[1:] if w.lstrip('-').isdigit()]))
-    return symbols, steps
+    return symbols, steps, first
 SOCKETS = {'float': 'NodeSocketFloat', 'int': 'NodeSocketInt', 'string': 'NodeSocketString', 'color': 'NodeSocketColor',
     'point': 'NodeSocketVector', 'vector': 'NodeSocketVector', 'normal': 'NodeSocketVector',
     'closure color': 'NodeSocketShader'}  # The socket of each parameter type, as Cycles' (oslquery's) make them
@@ -1363,11 +1367,12 @@ INTS = {'assign': lambda a: a, 'add': int.__add__, 'sub': int.__sub__, 'mul': in
 TRIPLES = ('color', 'point', 'vector', 'normal')
 FLT_MIN = 1.1754944e-38  # OSL's logarithms clamp their argument up to it
 PROGRAMS = {}  # Of each Script node met in an export, by its pointer, its bytecode's program: compiled once an export
+LOOPS = 1024  # Iterations a loop unrolls at most
 
 def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
     # on expressions in order; what that cannot express is refused by name
     if node.as_pointer() not in PROGRAMS: PROGRAMS[node.as_pointer()] = program(oso(node))
-    symbols, steps = PROGRAMS[node.as_pointer()]
+    symbols, steps, first = PROGRAMS[node.as_pointer()]
     def refused(what):
         raise ValueError(f"Flex: the script node '{node.name}' uses {what}, which Flex does not translate")
     given = dict(zip([socket.identifier for socket in node.inputs if socket.enabled], inputs))
@@ -1377,35 +1382,58 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
         elif kind != 'global' and type in ('float', 'int', 'string', *TRIPLES):
             values[name] = v if type == 'string' else (int(v[0]) if v else 0) if type == 'int' else \
                 numpy.resize(numpy.array(v or [0.0]), 3) if type in TRIPLES else (v[0] if v else 0.0)
-    for op, args, _ in steps:
-        if op == 'end': break
-        if op in ('functioncall', 'useparam'): continue
-        for name in args:
-            if name not in values: refused(f"{symbols[name][1]} {name}" if symbols[name][0] != 'global' else
-                f"the global {name}")
-        kinds, operands = [symbols[name][1] for name in args], [values[name] for name in args[1:]]
-        if op in ('if', 'for', 'while', 'dowhile', 'break', 'continue', 'return', 'exit'): refused('branches and loops')
-        # A per-hit value made an int truncates and int arithmetic is C's, refused; a comparison's int, 0 or 1, a value
-        per_hit = [k == 'int' and not isinstance(o, int) for k, o in zip(kinds[1:], operands)]
-        if op == 'assign' and kinds[0] == 'int' and not isinstance(operands[0], int) or any(per_hit) and op not in (
-                'assign', 'lt', 'gt', 'le', 'ge', 'eq', 'neq'):
-            refused('int values')
-        if op == 'compref': values[args[0]] = 'DOT_PRODUCT', operands[0], numpy.eye(3)[operands[1]]
-        elif op == 'compassign':
-            e = numpy.eye(3)[operands[0]]
-            values[args[0]] = 'ADD', ('MULTIPLY', values[args[0]], 1 - e), ('MULTIPLY', operands[1], e)
-        elif op in ('construct', *TRIPLES) and kinds[0] in TRIPLES and all(o == 'rgb' for o in operands
-                if isinstance(o, str)):  # Of 3 values or of 1, in RGB alone
-            parts = [o for o in operands if not isinstance(o, str)]
-            values[args[0]] = vector(*parts) if len(parts) == 3 else parts[0]
-        elif 'string' in kinds: refused(f'strings in {op}')
-        elif op in INTS and operands and all(isinstance(o, int) for o in operands):
-            values[args[0]] = int(INTS[op](*operands))
-        elif op in OSL and not (op in ('lt', 'gt', 'le', 'ge', 'eq', 'neq') and set(kinds[1:]) & set(TRIPLES)):
-            values[args[0]] = OSL[op](*operands)
-        else: refused(f'the step {op}')
-    return {name: values[name] if name in values else refused(f'{type} outputs') for name, (kind, type, _)
+    def known(name):  # Whether a value fixed at export is not 0, None for one that varies per hit
+        value = fold(values[name])
+        return None if isinstance(value, tuple) else bool(numpy.any(value))
+    def run(start, stop):  # Steps start to stop as OSL runs them: an if by its condition, loops unrolled; 'break' or
+        k = start  # 'continue' where one ends them early
+        while k < stop:
+            at, (op, args, jumps) = k, steps[k - first]
+            k = jumps[-1] if op in ('if', 'for', 'while', 'dowhile') else k + 1
+            if op in ('break', 'continue'): return op
+            if op == 'if' and known(args[0]) is not None:
+                ended = run(at + 1, jumps[0]) if known(args[0]) else run(jumps[0], jumps[1])
+                if ended: return ended
+            elif op == 'if': refused('an if on a value that varies per hit')
+            elif op in ('for', 'while', 'dowhile'):  # Init, then condition, body and step, the body first in dowhile's
+                run(at + 1, jumps[0])
+                for count in range(LOOPS + 1):
+                    if op != 'dowhile' or count:
+                        run(jumps[0], jumps[1])
+                        if known(args[0]) is None: refused('loops whose count varies per hit')
+                        if not known(args[0]): break
+                        if count == LOOPS: refused(f'loops of more than {LOOPS} iterations')
+                    if run(jumps[1], jumps[2]) == 'break': break
+                    run(jumps[2], jumps[3])
+            if op in ('if', 'for', 'while', 'dowhile', 'functioncall', 'useparam', 'end'): continue
+            for name in args:
+                if name not in values: refused(f"{symbols[name][1]} {name}" if symbols[name][0] != 'global' else
+                    f"the global {name}")
+            kinds, operands = [symbols[name][1] for name in args], [values[name] for name in args[1:]]
+            if op in ('return', 'exit'): refused('return or exit')
+            # Per-hit values made ints truncate and int arithmetic is C's, refused; a comparison's int, 0 or 1, a value
+            per_hit = [k == 'int' and not isinstance(o, int) for k, o in zip(kinds[1:], operands)]
+            if op == 'assign' and kinds[0] == 'int' and not isinstance(operands[0], int) or any(per_hit) and op not in (
+                    'assign', 'lt', 'gt', 'le', 'ge', 'eq', 'neq'):
+                refused('int values')
+            if op == 'compref': values[args[0]] = 'DOT_PRODUCT', operands[0], numpy.eye(3)[operands[1]]
+            elif op == 'compassign':
+                e = numpy.eye(3)[operands[0]]
+                values[args[0]] = 'ADD', ('MULTIPLY', values[args[0]], 1 - e), ('MULTIPLY', operands[1], e)
+            elif op in ('construct', *TRIPLES) and kinds[0] in TRIPLES and all(o == 'rgb' for o in operands
+                    if isinstance(o, str)):  # Of 3 values or of 1, in RGB alone
+                parts = [o for o in operands if not isinstance(o, str)]
+                values[args[0]] = vector(*parts) if len(parts) == 3 else parts[0]
+            elif 'string' in kinds: refused(f'strings in {op}')
+            elif op in INTS and operands and all(isinstance(o, int) for o in operands):
+                values[args[0]] = int(INTS[op](*operands))
+            elif op in OSL and not (op in ('lt', 'gt', 'le', 'ge', 'eq', 'neq') and set(kinds[1:]) & set(TRIPLES)):
+                values[args[0]] = OSL[op](*operands)
+            else: refused(f'the step {op}')
+    run(first, first + len(steps))
+    outputs = {name: values[name] if name in values else refused(f'{type} outputs') for name, (kind, type, _)
         in symbols.items() if kind == 'oparam'}
+    return outputs
 NODES['SCRIPT'] = lambda node, inputs, index: translated(node, inputs)[node.outputs[index].identifier]
 
 # Expression of what a socket receives, a surface for a shader: a constant, or a step followed by its operands. groups
@@ -1825,7 +1853,7 @@ class Flex(bpy.types.RenderEngine):
         node.bytecode = ''
         text = oso(node)
         if node.mode == 'INTERNAL': node.bytecode, node.bytecode_hash = text, hashlib.md5(text.encode()).hexdigest()
-        symbols, _ = program(text)
+        symbols = program(text)[0]
         for sockets, kind in ((node.inputs, 'param'), (node.outputs, 'oparam')):
             wanted = {name: (SOCKETS[type], v) for name, (k, type, v) in symbols.items() if k == kind
                 and type in SOCKETS}
