@@ -3826,6 +3826,68 @@ def scripted():  # OSL scripts
     bpy.context.window.scene = shown
 scripted()
 
+# A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
+# row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
+# its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
+# what seven escapes leave: the light the coat lets in returns from the base and leaves through the coat's underside
+# but for its internal diffuse reflectance, each round trip two bounces, F + (1 - F)(1 - R^7)
+scene = new('coat', sky=(1, 1, 1))
+scene.camera = add(bpy.data.cameras.new('coat'), (0, 0, 10))
+scene.camera.data.angle, scene.flex_restir, scene.flex_bounces = 2 * math.atan(0.12), False, 16
+coat = shape('coat', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=128, v_segments=64, radius=1), (0, 0, 0))
+bpy.data.meshes['coat'].shade_smooth()
+for name, value in (('Base Color', (0, 0, 0, 1)), ('Specular IOR Level', 0), ('Coat Weight', 1), ('Coat IOR', 1.5),
+        ('Coat Roughness', 0)):
+    coat.inputs[name].default_value = value
+def cosines(dx, dy):  # Of the rays through each pixel's point dx, dy off its centre, the view cosine on the sphere or 0
+    u, v = (((numpy.arange(SIZE) + 0.5 + d) / SIZE * 2 - 1) * 0.12 for d in (dx, dy))
+    ray = numpy.stack([*numpy.meshgrid(u, v), -numpy.ones((SIZE, SIZE))], -1)
+    ray /= numpy.linalg.norm(ray, axis=-1, keepdims=True)
+    reach = (10 * ray[..., 2]) ** 2 - 99
+    hit = numpy.array((0, 0, 10)) + (-10 * ray[..., 2] - numpy.sqrt(numpy.clip(reach, 0, None)))[..., None] * ray
+    return numpy.where(reach > 0, -(hit * ray).sum(-1), 0)
+def fresnel(c, eta=1.5):  # Unpolarized, into IOR eta relative, 1 at grazing as the sky past the rim and past TIR
+    g2 = eta * eta - 1 + c * c
+    g = numpy.sqrt(numpy.maximum(g2, 0))
+    return numpy.where(g2 > 0, 0.5 * ((g - c) / (g + c)) ** 2 * (1 + ((c * (g + c) - 1) / (c * (g - c) + 1)) ** 2), 1)
+offsets = (numpy.arange(16) + 0.5) / 16 - 0.5
+facing, coated = cosines(0, 0), numpy.mean([fresnel(cosines(dx, dy)) for dx in offsets for dy in offsets], 0)
+pixels = render().mean(-1)
+for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+    ring = (facing > low) & (facing <= high)
+    print('COAT at cosines', low, high, pixels[ring].mean(), 'Fresnel', coated[ring].mean(), flush=True)
+    assert numpy.isclose(pixels[ring].mean(), coated[ring].mean(), rtol=0.03), 'coat reflectance'
+coat.inputs['Base Color'].default_value = (1, 1, 1, 1)
+angles = (numpy.arange(4096) + 0.5) / 4096 * math.pi / 2  # The underside's diffuse reflectance, by quadrature
+inner = (fresnel(numpy.cos(angles), 1 / 1.5) * numpy.sin(2 * angles)).sum() * math.pi / 2 / 4096
+escaped = numpy.mean([(1 - (1 - fresnel(cosines(dx, dy))) * inner ** 7) for dx in offsets for dy in offsets], 0)
+furnace = render().mean(-1)[facing > 0.15].mean()
+print('COAT furnace', furnace, 'derived', escaped[facing > 0.15].mean(), flush=True)
+assert abs(furnace - escaped[facing > 0.15].mean()) < 5e-4, 'coat furnace'  # One image's SD 9e-5
+# A Ray Portal BSDF with neither position nor direction linked lets rays on as they were, tinted by its color: in front
+# of the white sky it reads that color. The Refraction BSDF renders as the Glass BSDF, with Fresnel reflection, which a
+# surface needs to keep the light it does not transmit: a closed sphere of it under the white sky is the glass one
+scene = new('portal', samples=64, sky=(1, 1, 1))
+scene.camera = add(bpy.data.cameras.new('portal view'), (0, 0, 1))
+scene.camera.data.angle, scene.flex_restir = 0.5, False
+portal = shape('portal', lambda bm: bmesh.ops.create_grid(bm, size=1), (0, 0, 0)).id_data
+gate = portal.nodes.new('ShaderNodeBsdfRayPortal')
+gate.inputs['Color'].default_value = (0.8, 0.4, 0.2, 1)
+portal.links.new(gate.outputs[0], portal.get_output_node('CYCLES').inputs['Surface'])
+assert numpy.allclose(render().mean((0, 1)), (0.8, 0.4, 0.2), rtol=0.01), 'ray portal'
+bpy.data.objects['portal'].hide_render, scene.camera.location.z, scene.flex_bounces = True, 4, 16
+spheres = shape('refraction', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=1),
+    (0, 0, 0)).id_data
+bpy.data.meshes['refraction'].shade_smooth()
+renders = []
+for kind in ('ShaderNodeBsdfRefraction', 'ShaderNodeBsdfGlass'):
+    shader = spheres.nodes.new(kind)
+    shader.inputs['Roughness'].default_value, shader.inputs['IOR'].default_value = 0, 1.5
+    spheres.links.new(shader.outputs[0], spheres.get_output_node('CYCLES').inputs['Surface'])
+    renders.append(render())
+print('REFRACTION furnace', renders[0][24:40, 24:40].mean(), flush=True)
+assert numpy.array_equal(*renders) and 0.99 <= renders[0][24:40, 24:40].mean() <= 1.002, 'refraction as glass'
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
