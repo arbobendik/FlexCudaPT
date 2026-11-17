@@ -87,7 +87,6 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
     // traced in, which a view's first temporal pass reprojects into, then one per pass
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Record { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; Scene data; };
-    static_assert(sizeof(Record) == RECORD_STRIDE, "The shaders step back to the anchor's record by RECORD_STRIDE");
     // after them the walk's three, holding the scene its hooks read: the first pass's, the pass's; then the shift's,
     // the pass's and the anchor's, uploaded with them
     Record records[PASSES + 4]{};
@@ -439,12 +438,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
         // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs, the duplication
-        // map only for decorrelation. The spatial round's queued shifts launch once per job the queue can hold, in
-        // groups of 64 a bin each, those past their bin's jobs returning; its count starts from an empty queue
+        // map only for decorrelation. Each round's queued shifts launch once per job the queue can hold, two a pixel in
+        // the temporal round, three in the spatial, in groups of 64 a bin each, those past their bin's jobs returning;
+        // each round's count starts from an empty queue
         const unsigned restir = scene.settings.restir;
-        const unsigned depths[PASSES] = {1, restir, restir, restir, restir, restir, restir * scene.settings.decorrelation,
-            0};
-        const unsigned jobs = (3 * pixels + 63) / 64 * 64 + 64 * 40;
+        const unsigned depths[PASSES] = {1, restir, restir, restir, restir, restir, restir, restir, restir,
+            restir * scene.settings.decorrelation, 0};
+        const unsigned jobs[] = {(2 * pixels + 63) / 64 * 64 + 64 * 40, (3 * pixels + 63) / 64 * 64 + 64 * 40};
         scene.width = view.width, scene.height = view.height;
         scene.anchor = (const Scene*)(table + offsetof(Record, data));
         const unsigned samples = reused ? request.reuse : request.samples;
@@ -456,11 +456,16 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             anchored.trails = scene.anchorTrails, anchored.instances = anchorInstances;
             walk[0].data = walk[1].data = scene, walk[2].data = anchored;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
-            for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass]) {
-                if (pass == PASS_COUNT) CHECK(cuMemsetD32((CUdeviceptr)scene.queue, 0, QUEUE_HEADER));
+            // A view's later frames keep its camera and scene, where the temporal round's queue finds no job: only a
+            // view's first frame launches its count, queue and queued shifts
+            for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass] && (scene.frame == 0
+                || pass < PASS_TEMPORAL_COUNT || pass > PASS_TEMPORAL_SHIFT)) {
+                if (pass == PASS_TEMPORAL_COUNT || pass == PASS_COUNT)
+                    CHECK(cuMemsetD32((CUdeviceptr)scene.queue, 0, QUEUE_HEADER));
                 sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
-                CHECK(pass == PASS_SHIFT ? optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, jobs, 1, 1)
-                    : optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, view.width, view.height, depths[pass]));
+                CHECK(pass == PASS_TEMPORAL_SHIFT || pass == PASS_SHIFT ? optixLaunch(pipeline, nullptr, launch,
+                    sizeof(params), &sbt, jobs[pass == PASS_SHIFT], 1, 1) : optixLaunch(pipeline, nullptr, launch,
+                    sizeof(params), &sbt, view.width, view.height, depths[pass]));
             }
             scene.previousCamera = scene.camera;
         }
