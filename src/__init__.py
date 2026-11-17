@@ -65,10 +65,13 @@ def from_hsl(c):  # HSL to RGB, as Cycles'
     n = numpy.clip((abs(h * 6 - 3) - 1, 2 - abs(h * 6 - 2), 2 - abs(h * 6 - 4)), 0, 1)
     return (n - 0.5) * (1 - abs(2 * l - 1)) * s + l
 
-def equirectangular(d):  # Image coordinates of a direction, as Cycles'
+# Image coordinates (u, v) of a direction, as Cycles'; with rows, v sky()'s row instead, row k of 129 at elevation
+# fraction e = 2 v - 1, clamped at the horizon: e = (k / 128)^3 => k = 128 max(e, 0)^(1/3), at (k + 0.5) / 129
+def equirectangular(d, rows=0):
     d = numpy.resize(d, 3)
-    return numpy.array((0.5 - math.atan2(d[1], d[0]) / (2 * math.pi), 0.5 + math.atan2(d[2], math.hypot(*d[:2]))
-        / math.pi, 0))
+    v = 0.5 + math.atan2(d[2], math.hypot(*d[:2])) / math.pi
+    v = (0.5 + 128 * max(2 * v - 1, 0) ** (1 / 3)) / 129 if numpy.resize(rows, 3)[0] else v
+    return numpy.array((0.5 - math.atan2(d[1], d[0]) / (2 * math.pi), v, 0))
 
 def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cycles'
     d = numpy.resize(d, 3)
@@ -175,8 +178,10 @@ def rebuilt(mapping):
 # and Bezier point over the cube root of the sun's elevation
 HOSEK_WILKIE = numpy.load(os.path.join(os.path.dirname(__file__), 'hosek_wilkie.npy'))
 
-def sky(node, width=512, height=256):  # A Hosek-Wilkie sky node's radiance along the directions an equirectangular
-    # image's texels read, rows up from the nadir; below the horizon the horizon's, in scene linear as Blender's node
+# A Hosek-Wilkie sky node's radiance in scene linear as Blender's node, at the directions of an equirectangular image's
+# columns and of rows from the horizon up, uniform in the cube root of the elevation, where the radiance turns fastest;
+# below the horizon the horizon's, where EQUIRECTANGULAR's rows clamp its read
+def sky(node, width=512, height=129):
     sun = numpy.array(node.sun_direction) / numpy.linalg.norm(node.sun_direction)
     x = (max(math.asin(sun[2]), 0) / (math.pi / 2)) ** (1 / 3)
     t, a = min(max(node.turbidity, 1), 10), node.ground_albedo
@@ -185,7 +190,7 @@ def sky(node, width=512, height=256):  # A Hosek-Wilkie sky node's radiance alon
         for j, wt in ((low - 1, low + 1 - t), (low, t - low))) \
         @ (numpy.array((1, 5, 10, 10, 5, 1)) * (1 - x) ** numpy.arange(5, -1, -1) * x ** numpy.arange(6))
     phi, up = numpy.meshgrid((0.5 - (numpy.arange(width) + 0.5) / width) * 2 * math.pi,
-        ((numpy.arange(height) + 0.5) / height - 0.5) * math.pi)
+        (numpy.arange(height) / (height - 1)) ** 3 * math.pi / 2)
     cos_theta = numpy.maximum(numpy.sin(up), math.sin(0.001))  # Of the zenith angle, at most 90 degrees less 0.001
     gamma = numpy.arccos(numpy.clip(numpy.cos(up) * (numpy.cos(phi) * sun[0] + numpy.sin(phi) * sun[1])
         + numpy.sin(up) * sun[2], -1, 1))
@@ -689,6 +694,7 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
             alphas, uses, slots, shift, keys)
     source = operands[-1] if name in READS else None
     payload = texture(operands.pop(), textures, texels) if name in (*READS, 'GRID') else (0, 0, 0, numpy.ones(4))
+    if name == 'EQUIRECTANGULAR' and len(operands) > 1: payload = operands.pop(), 0, 0, numpy.ones(4)  # Its rows'
     # In bits 20 on of its width, log2 of how far its point moves per unit of the UVs in 64ths, by which its mip level
     # follows the ray's cone; reads not by the UVs or not affine in them, and those of UNFILTERED attributes, at level 0
     if name in ('IMAGE_LINEAR', 'ALPHA_LINEAR') and slots is not None:
@@ -1267,7 +1273,7 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
     'BLACKBODY': lambda node, inputs, index: blackbody(inputs[0], node),
     'TEX_SKY': lambda node, inputs, index: ('IMAGE_LINEAR', ('EQUIRECTANGULAR', point_of(node, inputs[0],
-        ('POSITION',))), node) if node.sky_type == 'HOSEK_WILKIE' else 0,  # Along its direction, as an environment's;
+        ('POSITION',)), 1), node) if node.sky_type == 'HOSEK_WILKIE' else 0,  # Along its direction, sky()'s rows;
     # other skies black
     'WAVELENGTH': wavelength,
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
