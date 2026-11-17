@@ -1432,13 +1432,14 @@ def resolve(socket, groups=()):
         sheen = get('Sheen Weight')
         sheen = ('SHEEN', get('Color')) if node.type == 'BSDF_SHEEN' else nonzero(sheen) and ('SHEEN', ('MULTIPLY',
             sheen, get('Sheen Tint', 1))) or 0
-        # Its anisotropy, Principled's and the Metallic BSDF's by their aspect, the Glossy BSDF's mapped onto it, the
-        # sign swapping the axes, as Cycles maps both; turned about the normal from the tangent, marked where there is one
+        # Its anisotropy, Principled's and the Metallic BSDF's by their aspect, the Glossy and Glass BSDFs' mapped onto
+        # it, the sign swapping the axes, as Cycles maps both; turned about the normal from the tangent, marked where
+        # there is one
         principled = node.type == 'BSDF_PRINCIPLED'
         anisotropy = get('Anisotropic' if principled else 'Anisotropy')
         glossy = between(anisotropy, -0.99, 0.99)
         anisotropy = nonzero(anisotropy) and ('ANISOTROPIC', ('DIVIDE', ('MULTIPLY', glossy, ('SUBTRACT', 2,
-            absolute(glossy))), -0.9) if node.type == 'BSDF_GLOSSY' else between(anisotropy, 0, 1)) or 0
+            absolute(glossy))), -0.9) if node.type in ('BSDF_GLOSSY', 'BSDF_GLASS') else between(anisotropy, 0, 1)) or 0
         if node.type in VOLUMES:  # A volume's is its phase's Henyey-Greenstein asymmetry, short of ±1, where its
             g = fold(between(get('Anisotropy', 0), -0.999, 0.999))  # density is 0 / 0; none at 0 nor of another phase
             anisotropy = g if nonzero(g) and getattr(node, 'phase', 'HENYEY_GREENSTEIN') == 'HENYEY_GREENSTEIN' else 0
