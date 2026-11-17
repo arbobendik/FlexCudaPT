@@ -20,10 +20,10 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON };
+    TOON, SELECT };
 // MEDIUM, CURVES, WORLD and SKY no program takes: a scene's varying media, strands, world volume and world sampled by
 // its luminance; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
-// distribution, TOON a toon lobe
+// distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them: the spatial round's count, queue
 // and queued shifts before the spatial pass
