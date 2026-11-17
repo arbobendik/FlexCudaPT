@@ -1772,34 +1772,6 @@ void lights(uint3 p, Scene* scene) {
     scene.materials[triangle].emitted = max(mean, emitted * 0.001f);
 }
 
-// Initial candidates: path trees of the pixel's primary hits, and the radiance seen right there
-void initial(uint3 p, uint3 size, Scene* scene) {
-    const uint index = p.y * size.x + p.x;
-    const uint pixel_seed = stream(hash(scene.frame), index);
-    Selection initial = {};
-    initial.random_state = stream(pixel_seed, STREAM_SELECT);
-    initial.sums = scene.settings.restir == 0;
-    // The pixel's own seed even without a sample, its domain for later passes
-    initial.r.seed = stream(pixel_seed, 0u);
-    float3 seen = float3(0.0f, 0.0f, 0.0f);
-    for (uint i = 0u; i < scene.settings.paths; i++) {
-        Reservoir r = {};
-        r.seed = stream(pixel_seed, i);
-        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        if (dom.hit.triangle != NONE) {
-            walkHooks<false>(VkScene(scene), dom, r, 1.0f / scene.settings.paths, initial);
-        } else {
-            seen = seen + environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0))
-                / scene.settings.paths;
-        }
-    }
-    // What the walks saw at their first hits through the camera's medium, which they add up unresampled
-    seen = seen + initial.glow / scene.settings.paths;
-    if (scene.settings.restir != 0) scene.initial[index] = finalize(initial, 1.0f);
-    const float3 radiance = scene.settings.restir != 0 ? seen : seen + initial.color;
-    scene.accumulation[index] = scene.accumulation[index] + float4(radiance, 1);
-}
-
 // Denoiser input and guides of the pixel, and the motion of what it sees since the last denoised frame
 void denoise(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
@@ -1867,7 +1839,7 @@ void run(uint3 thread, uint3 group, uint index) {
     if (launch.record.program == PASS_PREPASS) return restir_prepass(VkScene(scene), thread, index);
     if (any(p >= size)) return;
     switch (launch.record.program) {
-        case PASS_INITIAL: initial(p, size, scene); break;
+        case PASS_INITIAL: restir_initial(VkScene(scene), thread); break;
         case PASS_SHIFT: restir_shift(VkScene(scene), uint3(group.xy, 0), index); break; // Jobs of the queue, 64 a bin
         case PASS_SPATIAL: restir_spatial(VkScene(scene), thread); break;
         case PASS_DUPLICATES: duplicates(p, size, scene); break;
@@ -1878,12 +1850,7 @@ void run(uint3 thread, uint3 group, uint index) {
 }
 }
 
-// The walk through the scene hooks, of the renderer's domain or the walk's
-[noinline] Shift walkHooks<let REPLAY: bool>(fcpt.VkScene scene, fcpt.Domain dom, Reservoir r, float scale,
-    inout Selection sel) {
-    return walkDomain<REPLAY>(scene, FKDomain(dom.x0, dom.x1, FKHit(dom.hit.uv, dom.hit.instance, dom.hit.triangle, 0,
-        length(dom.x1 - dom.x0)), dom.width, dom.spread), r, scale, sel);
-}
+// The walk through the scene hooks, of the walk's domain
 [noinline] Shift walkDomain<let REPLAY: bool>(fcpt.VkScene scene, FKDomain dom, Reservoir r, float scale,
     inout Selection sel) {
     return walk(scene, dom, r, REPLAY, scale, sel);
