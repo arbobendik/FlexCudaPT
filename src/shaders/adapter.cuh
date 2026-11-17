@@ -224,7 +224,8 @@ static __device__ FKDomain fcptPreviousDomain(int2 q, unsigned seed) {
 static __device__ float2 fcptPixelOf(float3 position, bool previous) {
     return project(previous ? hookScene().previousCamera : hookScene().camera, position, imageSize());
 }
-// Within a view the scene stays; a view's first frame reuses the anchor's, whose scene it shifts into
+// Within a view the camera and the scene stay, so every sample keeps its domain; a view's first frame reuses the
+// anchor's, whose scene it shifts into
 static __device__ bool fcptSceneUnchanged() { return hookScene().frame > 0; }
 static __device__ bool fcptPreviousScenes() { return true; }
 // The walk as the callables run it: generating, or replaying in this scene or the previous frame's
@@ -233,7 +234,8 @@ static __device__ Shift fcptWalk(FKDomain dom, Reservoir r, bool replay, float s
     return optixDirectCall<Shift>(replay ? 1 : 0, &native, &r, scale, sel);
 }
 static __device__ Shift fcptShiftPrevious(FKDomain dom, Reservoir r) {
-    if (r.w <= 0.0f) return Shift{make_float3(0, 0, 0), 0};
+    // Nothing to shift, or nothing seen there
+    if (r.w <= 0.0f || dom.hit.instance_index == NONE) return Shift{make_float3(0, 0, 0), 0};
     const Domain native = nativeDomain(dom);
     Selection sel{};
     return optixDirectCall<Shift>(hookScene().frame == 0 ? 2 : 1, &native, &r, 0.0f, &sel);
@@ -284,14 +286,24 @@ static __device__ uint4 shiftTexel(const Shift& shift) {
 static __device__ Shift texelShift(uint4 v) {
     return {make_float3(__uint_as_float(v.x), __uint_as_float(v.y), __uint_as_float(v.z)), __uint_as_float(v.w)};
 }
-// The temporal round's shifts, which the renderer's temporal pass makes itself
-static __device__ uint4 fcptTemporalShift(int2 p, unsigned layer) { return make_uint4(0, 0, 0, 0); }
-static __device__ void fcptStoreTemporalShift(int2 p, unsigned layer, uint4 value) {}
 static __device__ uint4 fcptShiftData(int2 p, unsigned layer) {
     return shiftTexel(hookScene().shifts[3 * pixelIndex(p) + layer]);
 }
 static __device__ void fcptStoreShiftData(int2 p, unsigned layer, uint4 value) {
     if (onImage(p)) hookScene().shifts[3 * pixelIndex(p) + layer] = texelShift(value);
+}
+// The temporal round's shifts in the spatial round's first two slots and its neighbours, a pixel index, -1 for none,
+// in the third: all three free until the spatial round's prepass rewrites them
+static __device__ uint4 fcptTemporalShift(int2 p, unsigned layer) { return fcptShiftData(p, layer); }
+static __device__ void fcptStoreTemporalShift(int2 p, unsigned layer, uint4 value) {
+    fcptStoreShiftData(p, layer, value);
+}
+static __device__ void fcptStoreTemporalNeighbor(int2 p, int2 q) {
+    if (onImage(p)) hookScene().shifts[3 * pixelIndex(p) + 2].f.x = __int_as_float(q.x < 0 ? -1 : int(pixelIndex(q)));
+}
+static __device__ int2 fcptLoadTemporalNeighbor(int2 p) {
+    const int q = __float_as_int(hookScene().shifts[3 * pixelIndex(p) + 2].f.x);
+    return q < 0 ? make_int2(-1, -1) : make_int2(q % int(hookScene().width), q / int(hookScene().width));
 }
 static __device__ bool fcptRestirUsed() { return hookScene().settings.restir; }
 // The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
