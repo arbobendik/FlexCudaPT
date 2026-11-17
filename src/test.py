@@ -2351,6 +2351,16 @@ due = [curves.mapping.evaluate(curves.mapping.curves[c], curves.mapping.evaluate
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), due, rtol=0.02), ('folded sky', device, due)
+# Grazing the horizon, the same table: a view 0.1 degrees wide, 0.15 degrees up and 94 degrees from a sun 2 degrees up,
+# at turbidity 9 and ground albedo 0, holds the formula's mean over the view, (0.0027952, 0.0015028, 0.00047345),
+# evaluated apart from Flex
+links.new(dome.outputs['Color'], scene.world.node_tree.nodes['Background'].inputs['Color'])
+dome.turbidity, dome.ground_albedo, dome.sun_direction = 9, 0, (math.cos(math.radians(2)), 0, math.sin(math.radians(2)))
+scene.camera.rotation_euler = (math.pi / 2 + math.radians(0.15), 0, math.radians(4))
+scene.camera.data.sensor_width, scene.camera.data.lens = 1, 0.5 / math.tan(math.radians(0.05))
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.allclose(render().mean((0, 1)), (0.0027952, 0.0015028, 0.00047345), rtol=0.02), ('grazing sky', device)
 # A value edited in a material whose emission is a folded sky chain pipes steps alone, the chain's table kept, as in a
 # material without one, where a table made anew would count as a new texture and export the scene anew; also after
 # Blender copied the material anew in between, as new data makes it do, its nodes at new addresses: tables are keyed by
