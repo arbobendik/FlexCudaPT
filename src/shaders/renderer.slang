@@ -45,7 +45,7 @@ struct Hit { uint triangle, instance; float2 uv; };
 struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
 static const int PAIRING_SIZES[] = {254, 230, 210};
 static const uint QUEUE_HEADER = 3 + 2 * 40; // The shift queue's dispatch size, jobs per bin and jobs written per bin
-// The programs by their indices in renderer.h's PROGRAMS, its Pass
+// The passes by their indices in renderer.h's PROGRAMS
 static const uint PASS_INITIAL = 0, PASS_TEMPORAL = 1, PASS_COUNT = 2, PASS_PREPASS = 3, PASS_SHIFT = 4,
     PASS_SPATIAL = 5, PASS_DUPLICATES = 6, PASS_BAKE = 7, PASS_LIGHTS = 8;
 // Workgroups of a launch one high per row of them, the least count in x Vulkan guarantees, as FlexKernels' queue
@@ -1438,15 +1438,14 @@ struct VkScene : IScene {
         fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
         return fcpt.sampleHair(scene, fiber, in_dir, random_state);
     }
-    // The reuse passes' hooks. A pixel's domain is its sample's: the camera ray its seed draws; a stored domain is the
-    // one this frame's camera draws for the seed, none off the image or where the ray misses
+    // Reuse-pass hooks: a pixel's domain is its seed's camera ray (pixelDomain); none off the image or on a miss
     uint index(int2 p) { return p.y * scene.width + p.x; }
     bool onImage(int2 p) { return all(p >= int2(0)) && p.x < int(scene.width) && p.y < int(scene.height); }
     // The scene the previous frame traced: the anchor's on a view's first frame, which reuses its reservoirs
     Scene* previousScene() { return scene.frame == 0 ? scene.anchor : scene; }
     uint2 renderSize() { return uint2(scene.width, scene.height); }
     uint frame() { return scene.frame; }
-    // FlexLight's camera, which pixelOf replaces
+    // Camera matrices the passes ask for, unused: pixelOf draws each camera ray
     float3x3 viewMatrix() { return float3x3(float3(0), float3(0), float3(0)); }
     float3 cameraPosition() { return float3(0); }
     float3x3 prevViewMatrix() { return float3x3(float3(0), float3(0), float3(0)); }
@@ -1455,7 +1454,7 @@ struct VkScene : IScene {
         int8_t* delta = scene.pairing[t] + 2 * (texel.y * PAIRING_SIZES[t] + texel.x);
         return int4(delta[0], delta[1], 0, 0);
     }
-    // A reservoir's layer 0 as FlexLight's texel: its seed, path, unbiased contribution weight and confidence
+    // A reservoir's layer 0 as the passes read it: seed, path, unbiased contribution weight, confidence
     uint4 reservoirPrevious(int2 q, uint layer) {
         const Reservoir r = scene.previous[index(q)];
         return uint4(r.seed, r.path, asuint(r.w), asuint(r.c));
@@ -1506,8 +1505,7 @@ struct VkScene : IScene {
     // The indirect dispatch's size, which launches over the whole queue leave unread
     void queueDispatchStore(uint x, uint y, uint z) {}
     uint queuedShifts(uint index) { return scene.queue[index]; }
-    // Every pixel on the image, a sample that misses keeping the confidence of the estimator it is; its domain is its
-    // sample's, which the passes ask for by the seed, so none here
+    // Every pixel on the image is current, a miss keeping its confidence; the passes draw its domain from the seed
     bool currentDomain(int2 p, out FKDomain dom) {
         dom = {};
         dom.hit.instance_index = NONE;
@@ -1518,7 +1516,7 @@ struct VkScene : IScene {
     void storeReservoirInitial(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.initial[index(p)] = r; }
     void storeReservoirTemporal(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.temporal[index(p)] = r; }
     void storeReservoirPrevious(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.previous[index(p)] = r; }
-    // FlexLight's primary hit's UVs beside the reservoir, which the renderer draws again from the sample's seed
+    // No layer stored beside the reservoir: its primary hit is drawn again from the sample's seed
     void storePreviousLayer(int2 p, uint layer, uint4 value) {}
     uint4 duplication(int2 q) { return uint4(asuint(scene.duplication[index(q)]), 0, 0, 0); }
     void storeDuplication(int2 p, uint4 value) { if (onImage(p)) scene.duplication[index(p)] = asfloat(value.x); }
@@ -1544,7 +1542,7 @@ struct VkScene : IScene {
         const Reservoir r = scene.temporal[index(q)];
         return uint4(r.seed, r.path, asuint(r.w), asuint(r.c));
     }
-    // FlexLight's temporal output, background and color store, which no pass of the renderer's calls
+    // Temporal output, background and color store: no pass here calls them
     uint isTemporal() { return 0; }
     float3x3 invViewMatrix() { return float3x3(float3(0), float3(0), float3(0)); }
     void storeColor(int2 p, uint layer, float4 color) {}

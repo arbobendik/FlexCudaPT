@@ -189,9 +189,7 @@ static __device__ float3 fcptAmbient() { return make_float3(0, 0, 0); }
 static __device__ unsigned fcptMaxBounces() { return hookScene().settings.bounces; }
 static __device__ FKHit fcptReservoirHit(Reservoir r) { return {r.rc.uv, r.rc.instance, r.rc.triangle, 0, 0}; }
 static __device__ void fcptWithReservoirHit(Reservoir* r, const FKHit* hit) { r->rc = nativeHit(*hit); }
-// The reuse passes' hooks. A pixel's domain is its sample's: the camera ray its seed draws (pixelDomain), a miss of
-// no instance; a stored domain is the one this frame's camera draws for the seed, none off the image or where the
-// ray misses, as a shift there carries nothing
+// Reuse-pass hooks: a pixel's domain is its seed's camera ray (pixelDomain); none off the image or on a miss
 static __device__ unsigned pixelIndex(int2 p) { return p.y * hookScene().width + p.x; }
 static __device__ bool onImage(int2 p) {
     return p.x >= 0 && p.y >= 0 && p.x < int(hookScene().width) && p.y < int(hookScene().height);
@@ -206,8 +204,7 @@ static __device__ Domain nativeDomain(const FKDomain& dom) {
 // The scene the previous frame traced: the anchor's on a view's first frame, which reuses its reservoirs
 static __device__ const Scene& previousScene() { return hookScene().frame == 0 ? *hookScene().anchor : hookScene(); }
 static __device__ uint3 imageSize() { return make_uint3(hookScene().width, hookScene().height, 1); }
-// Every pixel on the image, a sample that misses keeping the confidence of the estimator it is; its domain is its
-// sample's, which the passes ask for by the seed, so none here
+// Every pixel on the image is current, a miss keeping its confidence; the passes draw its domain from the seed
 static __device__ bool fcptCurrentDomain(int2 p, FKDomain* dom) {
     *dom = {};
     dom->hit.instance_index = NONE;
@@ -256,7 +253,7 @@ static __device__ int4 fcptPairing(int2 texel, unsigned t) {
 static __device__ Reservoir fcptLoadReservoirInitial(int2 p) { return hookScene().initial[pixelIndex(p)]; }
 static __device__ Reservoir fcptLoadReservoirTemporal(int2 p) { return hookScene().temporal[pixelIndex(p)]; }
 static __device__ Reservoir fcptLoadReservoirPrevious(int2 q) { return hookScene().previous[pixelIndex(q)]; }
-// A reservoir's layer 0 as FlexLight's texel: its seed, path, unbiased contribution weight and confidence
+// A reservoir's layer 0 as the passes read it: seed, path, unbiased contribution weight, confidence
 static __device__ uint4 fcptReservoirPrevious(int2 q, unsigned layer) {
     const Reservoir& r = hookScene().previous[pixelIndex(q)];
     return make_uint4(r.seed, r.path, __float_as_uint(r.w), __float_as_uint(r.c));
@@ -274,7 +271,7 @@ static __device__ void fcptStoreReservoirTemporal(int2 p, Reservoir r, FKHit x1)
 static __device__ void fcptStoreReservoirPrevious(int2 p, Reservoir r, FKHit x1) {
     if (onImage(p)) hookScene().previous[pixelIndex(p)] = r;
 }
-// FlexLight's primary hit's UVs beside the reservoir, which the renderer draws again from the sample's seed
+// No layer stored beside the reservoir: its primary hit is drawn again from the sample's seed
 static __device__ void fcptStorePreviousLayer(int2 p, unsigned layer, uint4 value) {}
 static __device__ uint4 fcptDuplication(int2 q) {
     return make_uint4(__float_as_uint(hookScene().duplication[pixelIndex(q)]), 0, 0, 0);
