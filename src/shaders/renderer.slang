@@ -1204,7 +1204,7 @@ float3 passing(Scene* scene, Medium medium, uint material, float3 origin, float3
 
 // Medium entered leaving a volume: the world's inside its box, else none
 Medium outside(Scene* scene, uint instance) {
-    if (!used(WORLD) || instance == scene.box) return NO_MEDIUM;
+    if (!used(WORLD) || scene.box == NONE || instance == scene.box) return NO_MEDIUM;
     const uint first = scene.instances[scene.box].first;
     return volume(shade(scene, scene.box, first, 0, 0, cornerNormals(scene.normals, scene.instances[scene.box],
         first)[0], float3(0, 0, 1), Ray(false, false, LOBE_NONE, 0.0f, 0.0f)));
