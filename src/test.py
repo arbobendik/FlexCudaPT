@@ -2598,6 +2598,63 @@ def cameraed():  # A moved camera's updates
     bpy.context.window.scene = shown
 cameraed()
 
+# A kept engine's rows taken again: of two exporters of the same scene, one taking its last rows again and one shading
+# anew, the updates Blender reports pipe the same, byte for byte, whatever changed; an update that changes no material
+# shades none, one of one material's value that one alone
+def replayed():  # A kept engine's rows taken again
+    shown, kept = bpy.context.window.scene, opened('replayed')
+    shades, shade = [], flex.shade
+    flex.shade = lambda *args: shades.append(args[0]) or shade(*args)
+    image = bpy.data.images.new('replayed', 4, 4)
+    for name, x in (('replayed noise', -1), ('replayed image', 1)):
+        bm = bmesh.new()
+        bm.loops.layers.uv.new()
+        bmesh.ops.create_grid(bm, size=0.5, calc_uvs=True)
+        bm.to_mesh(data := bpy.data.meshes.new(name)), bm.free()
+        data.materials.append(material := bpy.data.materials.new(name))
+        kept.collection.objects.link(ob := bpy.data.objects.new(name, data))
+        ob.location.x, nodes = x, material.node_tree.nodes
+        source = nodes.new('ShaderNodeTexNoise' if x < 0 else 'ShaderNodeTexImage')
+        if x > 0: source.image = image
+        material.node_tree.links.new(source.outputs['Color'], nodes['Principled BSDF'].inputs['Base Color'])
+    principled = bpy.data.materials['replayed image'].node_tree.nodes['Principled BSDF']
+    class Exporter:  # A kept engine without a renderer: its scene piped into its requests, exported anew by itself
+        start, visible, requests = Viewport.engine.start, (), None
+    exporters = [Exporter(), Exporter()]
+    def piped(change):  # After the change, what each exporter pipes, the second's last rows dropped; the first's shades
+        exporters[1].kept, shades[:], first = {}, [], []
+        for exporter in exporters: exporter.requests = io.BytesIO()
+        def run(_, graph):
+            exporters[0].start(graph, True)
+            first[:] = shades
+            exporters[1].start(graph, True)
+        reported = bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.frame_change_post
+        for handlers in reported: handlers.append(run)
+        change()
+        bpy.context.view_layer.update()
+        for handlers in reported: handlers.remove(run)
+        taken, anew = (exporter.requests.getvalue() for exporter in exporters)
+        assert taken and taken == anew, ('rows taken again', change.__name__, len(taken), len(anew))
+        return first
+    def untouched(): principled.inputs['Roughness'].default_value = principled.inputs['Roughness'].default_value
+    piped(untouched)  # The scene's first update, all of it reported
+    def value(): principled.inputs['Roughness'].default_value = 0.25
+    def linked(): principled.id_data.links.new(principled.id_data.nodes['Image Texture'].outputs['Alpha'],
+        principled.inputs['Metallic'])
+    def painted(): image.pixels.foreach_set(numpy.full(64, 0.5, 'f')), image.update_tag()
+    def unwrapped(): bpy.data.meshes['replayed noise'].uv_layers[0].data[0].uv = (0.1, 0.1)
+    def modified(): bpy.data.objects['replayed noise'].modifiers.new('subdivided', 'SUBSURF')
+    def sampled(): kept.world.flex_sample_light = False
+    assert piped(untouched) == [] and [m.name for m in piped(value)] == ['replayed image'], 'rows shaded'
+    for change in (linked, painted, unwrapped, modified, sampled): piped(change)
+    for frame, roughness in ((1, 0.3), (2, 0.6)):
+        principled.inputs['Roughness'].default_value = roughness
+        principled.inputs['Roughness'].keyframe_insert('default_value', frame=frame)
+    piped(lambda: kept.frame_set(1))
+    assert [m.name for m in piped(lambda: kept.frame_set(2))] == ['replayed image'], 'frame stepped'
+    flex.shade, bpy.context.window.scene = shade, shown
+replayed()
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')
