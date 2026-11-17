@@ -34,8 +34,7 @@ constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "
 enum Pass : unsigned { PASS_INITIAL, PASS_TEMPORAL, PASS_COUNT, PASS_PREPASS, PASS_SHIFT, PASS_SPATIAL, PASS_DUPLICATES,
     PASS_BAKE, PASS_LIGHTS, PASS_DENOISE };
 static_assert(sizeof(PROGRAMS) / sizeof(*PROGRAMS) == PASS_DENOISE + 1, "a pass named per program");
-// The shift queue (FlexLight's ShiftQueue): the indirect dispatch's size, then jobs per bin and jobs written per bin
-// of its 40 bins, then the jobs, bin after bin
+// The shift queue: dispatch size, jobs per bin and jobs written per bin of 40 bins, then the jobs
 constexpr unsigned QUEUE_HEADER = 3 + 2 * 40;
 // Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
 // the anchor's record first, then the passes', so a pass finds it its program's number and one records back

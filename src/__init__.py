@@ -1635,12 +1635,13 @@ MEDIA = {}  # Of each material shade() resolved, its volume's absorption, densit
 GRIDS = {}  # Of the fluid domain shaded, its name and its grids by Cycles' attribute names
 media_key = lambda material: (material, GRIDS[None]) if GRIDS else material  # MEDIA's key, a domain's its own
 GRID_WAIT = 120  # Seconds a render's job waits for the main thread to read a volume's grids, as a script holds it
-def reading():  # Whether this thread is within a grid's read, whose temporary IDs have Blender update a viewport within
+def reading():  # Whether this thread is inside lattice(), whose temporary IDs make Blender update viewports
     frame = sys._getframe(1)
     while frame and frame.f_code is not lattice.__code__: frame = frame.f_back
     return bool(frame)
-def on_main(f, volume):  # f() on the main thread, where reading a grid makes IDs; from a render's job handed over by a
-    if threading.current_thread() is threading.main_thread(): return f()  # timer and waited for
+# f() on the main thread, where a grid's read makes IDs: at once there, else by a timer the job waits for
+def on_main(f, volume):
+    if threading.current_thread() is threading.main_thread(): return f()
     done, out = threading.Event(), []
     # The read, then a timer after it, which Blender runs in order and whether or not the read raised, ending the wait
     bpy.app.timers.register(lambda: (out.append(f()), None)[1])
@@ -1649,16 +1650,18 @@ def on_main(f, volume):  # f() on the main thread, where reading a grid makes ID
         'thread did not answer, as while a script waits on this render')
     if not out: raise RuntimeError(f"Flex: reading the grids of volume '{volume}' failed, as Blender's console shows")
     return out[0]
-def lattice(ob, name):  # A volume's float grid as the exporting depsgraph evaluated it, in its mode, read on the main
-    path = os.path.join(bpy.app.tempdir, f'flex grid {time.time_ns()}.vdb')  # thread through Blender's geometry nodes,
-    ob.data.grids.save(path)  # a file of its own each, which Blender caches by path, from a temporary volume of the
-    scene, tree = bpy.data.scenes.new('flex grid'), bpy.data.node_groups.new('flex grid', 'GeometryNodeTree')  # grids
-    (source := bpy.data.objects.new('flex grid', bpy.data.volumes.new('flex grid'))).data.filepath = path  # saved: per
-    tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')  # active voxel or tile its
+# The evaluated grid, saved and reloaded, read per active voxel or tile (value, index, extent) by Grid To Points
+def lattice(ob, name):
+    # Its own file: Blender caches volumes by path
+    path = os.path.join(bpy.app.tempdir, f'flex grid {time.time_ns()}.vdb')
+    ob.data.grids.save(path)
+    scene, tree = bpy.data.scenes.new('flex grid'), bpy.data.node_groups.new('flex grid', 'GeometryNodeTree')
+    (source := bpy.data.objects.new('flex grid', bpy.data.volumes.new('flex grid'))).data.filepath = path
+    tree.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
     info, get, points, verts, out = (tree.nodes.new(t) for t in ('GeometryNodeObjectInfo', 'GeometryNodeGetNamedGrid',
-        'GeometryNodeGridToPoints', 'GeometryNodePointsToVertices', 'NodeGroupOutput'))  # value, index and extent
-    info.inputs['Object'].default_value, get.inputs['Name'].default_value = source, name  # from a temporary object's
-    tree.links.new(info.outputs['Geometry'], get.inputs['Volume'])  # nodes
+        'GeometryNodeGridToPoints', 'GeometryNodePointsToVertices', 'NodeGroupOutput'))
+    info.inputs['Object'].default_value, get.inputs['Name'].default_value = source, name
+    tree.links.new(info.outputs['Geometry'], get.inputs['Volume'])
     tree.links.new(get.outputs['Grid'], points.inputs[0])
     geometry = points.outputs['Points']
     for field, kind in (('Value', 'FLOAT'), ('X', 'INT'), ('Y', 'INT'), ('Z', 'INT'), ('Extent', 'INT')):
@@ -1695,14 +1698,16 @@ def dense(read, volume, name):  # The voxels and tiles read, dense over their ac
         e = read['extent'][k]
         values[z[k]:z[k] + e, y[k]:y[k] + e, x[k]:x[k] + e] = read['value'][k]
     return values.ravel(), low, size
-def volume_grid(ob, name, frame, lattices):  # Its lattice at the point of its index by its inverse transform, voxel k
-    if lattices.get((ob.name, name), (None,))[0] != frame:  # at (k + 0.5) / size; read anew on another frame
+# index = matrix_object⁻¹ · p, voxel k centred at index k, dense cell k − low centred at (k − low + 0.5) / size
+# => point = (index − low + 0.5) / size
+def volume_grid(ob, name, frame, lattices):
+    if lattices.get((ob.name, name), (None,))[0] != frame:  # Read anew on another frame
         lattices[ob.name, name] = frame, dense(on_main(lambda: lattice(ob, name), ob.name), ob.name, name)
     values, low, size = lattices[ob.name, name][1]
     point = transform(ob.data.grids[name].matrix_object.inverted(), ('OBJECT',))
     return Grid(values, size.tolist(), ('DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size))
-def boxed(ob):  # The box a volume's bounds span, as the export reads a mesh: per corner of its 12 triangles its
-    # vertex, flat normal and texture space point, a tangent along a face, no UVs or colors
+# The box of a volume's bounds as a mesh: 12 triangles' corners, flat normals, texture space, no UVs or colors
+def boxed(ob):
     low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
     corners = numpy.array([(i & 1, i >> 1 & 1, i >> 2) for i in range(8)], 'f')  # Faces of -z, z, -y, y, -x, x
     faces = numpy.array(((0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)))
@@ -1719,10 +1724,12 @@ def fluid(ob, frame, lattices):  # Of a gas domain or a volume object, its name,
     domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'
         and m.domain_settings.domain_type == 'GAS'), None)
     if not domain: return {}
-    low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)  # The box its evaluated mesh spans,
-    point = 'DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low  # the adaptive one's
-    def read(name):  # Heat at the simulation's resolution, the others at the noise's too; color as RGBA, its RGB
-        values = numpy.empty(len(getattr(domain, name + '_grid')), 'f')  # premultiplied by its alpha
+    # The box the evaluated (adaptive) domain spans
+    low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
+    point = 'DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low
+    # Heat at the simulation's resolution, the others at the noise's; color as RGBA, RGB premultiplied
+    def read(name):
+        values = numpy.empty(len(getattr(domain, name + '_grid')), 'f')
         getattr(domain, name + '_grid').foreach_get(values)
         size = (numpy.array(domain.domain_resolution) * (domain.noise_scale if domain.use_noise and name != 'heat'
             else 1)).tolist()
@@ -1752,8 +1759,7 @@ class Inputs(list):  # A node's inputs, by order and by name
     def __contains__(self, name): return any(input.name == name for input in self)
     def __getitem__(self, key): return next(i for i in self if i.name == key) if isinstance(key, str) else \
         super().__getitem__(key)
-# The medium of a volume object that no Volume output fills: Principled Volume at its defaults, a node of which
-# Blender keeps none
+# The default volume, Principled Volume's defaults as stand-in sockets, for a volume object no Volume output fills
 DEFAULT_VOLUME = Default('Volume', 'SHADER', None)
 DEFAULT_VOLUME.links = [types.SimpleNamespace(is_valid=True, is_muted=False, from_socket=DEFAULT_VOLUME,
     from_node=types.SimpleNamespace(type='PRINCIPLED_VOLUME', mute=False, outputs=[DEFAULT_VOLUME], inputs=Inputs(
@@ -1762,21 +1768,24 @@ DEFAULT_VOLUME.links = [types.SimpleNamespace(is_valid=True, is_muted=False, fro
     ('Absorption Color', 'RGBA', (0, 0, 0, 1)), ('Emission Strength', 'VALUE', 0), ('Emission Color', 'RGBA',
     (1, 1, 1, 1)), ('Blackbody Intensity', 'VALUE', 0), ('Blackbody Tint', 'RGBA', (1, 1, 1, 1)),
     ('Temperature', 'VALUE', 1000), ('Temperature Attribute', 'STRING', 'temperature')))))]
-def shade(material, program, filler=False):  # Of a volume object, a filler, no surface, and, where no Volume output
-    output = material and material.node_tree.get_output_node('CYCLES')  # fills it, the default volume
+# filler: a volume object's: no surface, and the default volume where no Volume output is linked
+def shade(material, program, filler=False):
+    output = material and material.node_tree.get_output_node('CYCLES')
     if not output and not filler: return [program(BLACK)]
     filling = output.inputs['Volume'] if output and output.inputs['Volume'].is_linked else filler and DEFAULT_VOLUME
-    surface = resolve(output.inputs['Surface']) if output and not filler else BLACK  # Its volume, or the medium its
-    SIDE['volume'] = True  # subsurface scattering fills
+    surface = resolve(output.inputs['Surface']) if output and not filler else BLACK
+    # Its volume, or the medium its subsurface scattering fills
+    SIDE['volume'] = True
     filled = filling and resolve(filling)
     SIDE['volume'] = False
     volume, glow = (filled[10:13], filled[4]) if filled else (surface[10:13], 0)
     phase = filled and nonzero(filled[16]) and ('PHASE', filled[16])  # Its phase's asymmetry, marked, else none
     MEDIA[media_key(material)] = *volume, glow
-    if output and output.inputs['Displacement'].is_linked:  # Onto the normal alone, displacing only as well, as
-        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)  # Flex moves no geometry: a Bump
+    # Displacement as a Bump of its height along the normal, as Flex moves no geometry
+    if output and output.inputs['Displacement'].is_linked:
+        height = 'DOT_PRODUCT', resolve(output.inputs['Displacement']), ('NORMAL',)
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
-            vector(1, 1, 0)), {}, 'NORMAL')  # of the height along it, where the surface reads the normal
+            vector(1, 1, 0)), {}, 'NORMAL')
     if filling and (filler or not output.inputs['Surface'].is_linked): surface = [*BLACK[:9], 0, *BLACK[10:]]
     layers = [surface[:10]] if len(surface) == 19 or not surface[19] else [[*surface[19][:4], surface[4],
         *surface[19][5:]],
@@ -2137,8 +2146,8 @@ class Flex(bpy.types.RenderEngine):
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
-        slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')  # A
-        # volume object's slots, or the one empty slot the default volume fills
+        # An object's slots; a volume object without any, one empty slot the default volume fills
+        slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
         # A kept engine's rows: recorded as shaded, keyed once piped, taken again where key and places match
         listed = lambda p: ('LIST', *map(listed, p)) if isinstance(p, list) else p
         digest = lambda a: a is not None and hashlib.sha1(numpy.ascontiguousarray(a).tobytes()).digest()
@@ -2152,8 +2161,9 @@ class Flex(bpy.types.RenderEngine):
         spots = lambda: (len(ops), len(aside[0]), len(bakes), len(placed), len(again), baked[0])
         ledgers = lambda: (hints, aside[1], textures, tilings, units, SOURCES, MEDIA, FOLDED, PROGRAMS)
         kept, spans = self.kept if shaded else {}, []
-        def shaded_row(material, filler=False):  # Its row, apart for the open objects of a material with subsurface
-            recording, at = (shaded or keeping) and not GRIDS, spots()  # scattering
+        # Its row, apart for open objects of a material with subsurface scattering
+        def shaded_row(material, filler=False):
+            recording, at = (shaded or keeping) and not GRIDS, spots()
             context = recording and (material, filler, SEALING['closed'], material in subsurface, dict(current))
             key = shaded and recording and keyed(*context)
             if key in kept and kept[key][0] == at:
@@ -2328,7 +2338,7 @@ class Flex(bpy.types.RenderEngine):
                 # its mesh and materials piped once
                 record(i, instance, ob, entries[key])
                 continue
-            if ob.type == 'VOLUME':  # Its box's, apart from Blender's data, which the export leaves as it is
+            if ob.type == 'VOLUME':  # The box of its bounds, as boxed() makes it
                 sealing, (co, vertex, loops, index, normal, uv, tangent, color, orco, space) = False, boxed(ob)
             elif ob.type != 'LIGHT':  # Per corner of its triangles: index, vertex, normal (smooth, sharp or custom), UV
                 mesh = ob.to_mesh()
@@ -2620,7 +2630,7 @@ class Flex(bpy.types.RenderEngine):
             means = {key: texture(SOURCES[key], {}, tables[key])[3] for key in tables}
             if any((means[key] != textures[key][3]).any() for key in tables):
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
-                self.visible = visible  # Its steps again, as the same scene's
+                self.visible = visible  # The same scene: start() pipes its steps again
                 return self.start(depsgraph, keeping)
             # Then per table its first texel, texel count and texels, until a count of 0, those only bakes read flagged
             # in bit 31, and with bakes to run again their images, as piped, and tiles; per program its first step and

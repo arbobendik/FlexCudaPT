@@ -249,7 +249,7 @@ module = Viewport.engine.start.__globals__
 surface = module['fold'](module['resolve'](specular.nodes['Material Output'].inputs['Surface']))
 assert numpy.any(surface[1]) and numpy.all(surface[6] == 1.5), 'eevee specular'
 # One render starts one renderer per engine, though Blender calls an engine's constructor twice
-def spawns():  # Its names its own, apart from the rows after it
+def spawns():  # One renderer per engine
     counts, spawn = {}, Viewport.engine.spawn
     def counted(engine): counts[id(engine)] = counts.get(id(engine), 0) + 1; spawn(engine)
     Viewport.engine.spawn = counted
@@ -437,7 +437,7 @@ pixels = render()
 assert abs(pixels[18:46, 2:30].mean() - 0.9903) < 0.002, 'furnace'
 # Tinted, at its level and doubled, it returns in each channel what its tinted reflection and the diffuse of what that
 # leaves do, never more than it receives: each channel its single-scatter directional albedo, derived numerically as
-# 'furnace' is
+# the white one's is
 colored.inputs['Specular Tint'].default_value = (1, 0.08, 0.375, 1)
 for level, derived in ((0.5, (0.9903, 0.9936, 0.9926)), (1, (0.9863, 0.9929, 0.9908))):
     colored.inputs['Specular IOR Level'].default_value = level
@@ -1835,7 +1835,7 @@ bpy.context.window.scene = shown
 # its color unpremultiplied by its density once both are read; against a black sky, Volume Info's flame as a Principled
 # Volume's emission strength, the flame integrated down it, and a Principled Volume's blackbody at 1000 K times its
 # temperature grid, in luminance sigma T^4 / pi times Blender's 1e-6 integrated down it
-def burning():  # Its names its own, apart from the rows after it
+def burning():  # Fire through Volume Info
     fire = opened('fire', (1, 1, 1))
     fire.render.resolution_x = fire.render.resolution_y = 16
     fire.flex_samples = 1024
@@ -1921,7 +1921,7 @@ burning()
 # Principled Volume's density 2 times that grid, seen straight down against a white sky: each quarter of the view passes
 # exp(-2 x the density's integral down it), which the grid, linear in its voxels, holds exactly; its density extended
 # past the outermost voxels' centers out to its bounds
-def volumed():  # Its names its own, apart from the rows after it
+def volumed():  # Volume objects
     made = opened('grid', (1, 1, 1))
     made.render.resolution_x = made.render.resolution_y = 16
     made.camera = bpy.data.objects.new('grid', bpy.data.cameras.new('grid'))
@@ -2563,7 +2563,7 @@ assert numpy.allclose(drawn[..., :3].mean((0, 1)), 1, atol=0.01), ('exported ane
 
 # A camera that moved changes no step, as each request carries it: with a value changed, the update Blender reports
 # pipes the steps; with an object parented to it, moved too, the whole scene, as an export anew pipes it; alone, nothing
-def cameraed():  # Its names its own, apart from the rows after it
+def cameraed():  # A moved camera's updates
     shown, moving = bpy.context.window.scene, opened('moved camera')
     moving.camera = bpy.data.objects.new('moved camera', bpy.data.cameras.new('moved camera'))
     moving.camera.location.z = 5
@@ -2601,7 +2601,7 @@ cameraed()
 # A kept engine's rows taken again: of two exporters of the same scene, one taking its last rows again and one shading
 # anew, the updates Blender reports pipe the same, byte for byte, whatever changed; an update that changes no material
 # shades none, one of one material's value that one alone
-def replayed():  # Its names its own, apart from the rows after it
+def replayed():  # A kept engine's rows taken again
     shown, kept = bpy.context.window.scene, opened('replayed')
     shades, shade = [], flex.shade
     flex.shade = lambda *args: shades.append(args[0]) or shade(*args)
@@ -3058,7 +3058,7 @@ scene.flex_restir, preferences.device = True, device
 # at s 0.6 almost none straight on and most of it toward the rim, on both backends; each pixel's over its area, as
 # the sheen's, the sky's 1 past the rim; each ring within 3 SD of one image, as 16 independent renders (the sphere
 # alone in a different cell of a 4 x 4 canvas each) spread
-def velveted():  # Its names its own, apart from the rows after it
+def velveted():  # Ashikhmin's velvet
     def albedo(mu, s):  # D = exp(-cot² h / s²) / (pi s² sin⁴ h), G = min(1, 2 cos h min(cos v, cos l) / |v·h|)
         view = numpy.array((math.sqrt(1 - mu * mu), 0, mu))
         half = light + view
@@ -3088,7 +3088,7 @@ velveted()
 # rode the diffuse lobe's samples. Its sphere fills the view and the white sky is not light-sampled, so only rays
 # leaving the sheen reach the sky: scaled by the first two, max(output, 0), it renders as scaled by max(output, 1),
 # bit for bit, the same steps on the same random numbers; scaled by the third, black
-def sheen_path():  # Its names its own, apart from the rows after it
+def sheen_path():  # Light Path on a sheen bounce
     lit = new('sheen path', sky=(1, 1, 1))
     lit.flex_samples, lit.flex_restir, lit.world.flex_sample_light = 16, False, False
     lit.camera = bpy.data.objects.new('sheen path', bpy.data.cameras.new('sheen path'))
@@ -3117,7 +3117,7 @@ sheen_path()
 # Toon BSDFs, white on the same sphere: the diffuse returns at each view cosine its profile P there, 1 within Size's
 # cone, falling across Smooth's and none past it; the glossy its albedo, P about the mirror direction times cos over the
 # solid angle P weighs, by midpoint quadrature over the hemisphere; on both backends
-def tooned():  # Its names its own, apart from the rows after it
+def tooned():  # Toon BSDFs
     toon = sheened.id_data.nodes.new('ShaderNodeBsdfToon')
     toon.inputs['Color'].default_value = (1, 1, 1, 1)
     sheened.id_data.links.new(toon.outputs[0], sheened.id_data.get_output_node('CYCLES').inputs['Surface'])
@@ -3931,7 +3931,7 @@ preferences.device = 'OPTIX'
 
 # A Script node's value outputs export as the same graph of Math and Vector Math nodes does, byte for byte: its OSL
 # compiled by Blender's own compiler, its sockets made from its parameters, its main code run on expressions
-def scripted():  # Its names its own, apart from the rows after it
+def scripted():  # OSL scripts
     shown, osl = bpy.context.window.scene, opened('osl')
     bm = bmesh.new()
     bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
@@ -3973,7 +3973,7 @@ scripted()
 # SELECT step, so a branch not taken that overflows leaves no NaN. Seen on an emitting square along its Generated X by
 # an orthographic camera, its columns give 2x and 1 - x either side of 0.5 where both branches set the same variable,
 # 3/8 and 4/8 where one does, and 1/4 below 0.5, where the other branch, exp(1000 (0.5 - x)) / 2, overflows below 0.41
-def branched():  # Its names its own, apart from the rows after it
+def branched():  # A Script node's ifs and loops
     shown, chosen, was = bpy.context.window.scene, opened('branched', sky=(0, 0, 0)), preferences.device
     chosen.flex_samples, chosen.flex_restir = 64, False  # Each pixel's own samples
     bm = bmesh.new()
@@ -4108,7 +4108,7 @@ with tempfile.TemporaryDirectory() as cache:
     t = time.perf_counter()
     assert warm().wait(60) == 0 and time.perf_counter() - t < 10, 'warm-up of a cached module'
     # A UI Blender's viewport's first frame, by that cached generic module, matches the headless one's mean
-    def tiered():  # Its names its own, apart from the rows before it
+    def tiered():  # A UI Blender's first frame by the generic module
         class Tiered(Viewport):  # As the engine's spawn on OptiX, without the headless argument background mode adds
             def __init__(self):
                 self.device = 'OPTIX'
@@ -4152,7 +4152,7 @@ with tempfile.TemporaryDirectory() as cache:
     tiered()
     # The cached generic module on content, a baked texture, an image world and a fog volume: a UI viewport's first
     # frame matches the headless one's mean within 4 errors, its spread measured from 8 more frames' 4-sample increments
-    def contented():  # Its names its own, apart from the rows before it
+    def contented():  # The generic module on content
         import shutil
         offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
         class Spawned(Viewport):  # On OptiX by a copy of the cached generic module, which stands in unless headless
@@ -4263,7 +4263,7 @@ with tempfile.TemporaryDirectory() as cache:
 # The OptiX denoiser on the fog scene: its F12 finite and its mean within 4 errors of the undenoised 16-sample frame's,
 # the errors measured from a headless viewport's 4-sample increments, past the shift it was measured to make; then a
 # viewport's draw, a camera nudge within the jump distance and a second draw, both finite
-def denoised():  # Its names its own
+def denoised():  # The OptiX denoiser
     fog = bpy.data.scenes['generic fog']
     bpy.context.window.scene, preferences.device, fog.flex_samples, fog.flex_restir = fog, 'OPTIX', 64, False
     depsgraph = bpy.context.evaluated_depsgraph_get()
