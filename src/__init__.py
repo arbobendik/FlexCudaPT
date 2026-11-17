@@ -77,7 +77,9 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
     return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
 
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
-# emission, and a mark of its specular tint passes it on
+# emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD and SKY steps past every program's end,
+# of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of one with strands, of
+# one whose world has a volume, and of one whose world it samples by its luminance
 OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
@@ -99,9 +101,7 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
-    'SKY': None, 'TOON': lambda toon: toon}  # MEDIUM, CURVES, WORLD and SKY steps past every program's end, of a scene
-# whose media vary from point to point, so the renderer tracks those it fills alone, of one with strands, of one whose
-# world has a volume, and of one whose world it samples by its luminance
+    'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b)}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
