@@ -1325,8 +1325,6 @@ __device__ SampleBSDF sampleHair(const Scene& scene, const Surface& surface, flo
 }
 WALK_CALLABLE(__direct_callable__first, false)
 WALK_CALLABLE(__direct_callable__walk, true)
-#define WALK(scene, dom, r, replay, scale, sel) optixDirectCall<Shift>( \
-    !(replay) ? 0 : &(scene) == (const Scene*)optixGetSbtDataPointer() ? 1 : 2, &(dom), &(r), scale, &(sel))
 
 // Pixel coordinates a camera sees a position at
 __device__ float2 project(const Camera& camera, float3 position, uint3 size) {
@@ -1436,36 +1434,7 @@ extern "C" __global__ void __raygen__lights() {
 }
 
 // Initial candidates: path trees of the pixel's primary hits, and the radiance seen right there
-extern "C" __global__ void __raygen__initial() {
-    const uint3 p = optixGetLaunchIndex();
-    const uint3 size = optixGetLaunchDimensions();
-    const unsigned index = p.y * size.x + p.x;
-    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    const unsigned pixel_seed = stream(hash(scene.frame), index);
-    Selection initial = {};
-    initial.random_state = stream(pixel_seed, STREAM_SELECT);
-    initial.sums = !scene.settings.restir;
-    // The pixel's own seed even without a sample, its domain for later passes
-    initial.r.seed = stream(pixel_seed, 0u);
-    float3 seen = make_float3(0.0f, 0.0f, 0.0f);
-    for (unsigned i = 0u; i < scene.settings.paths; i++) {
-        Reservoir r = {};
-        r.seed = stream(pixel_seed, i);
-        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        if (dom.hit.triangle != NONE) {
-            WALK(scene, dom, r, false, 1.0f / scene.settings.paths, initial);
-        } else {
-            seen = seen + environment(scene, normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
-                / scene.settings.paths;
-        }
-    }
-    // What the walks saw at their first hits through the camera's medium, which they add up unresampled
-    seen = seen + initial.glow / scene.settings.paths;
-    if (scene.settings.restir) scene.initial[index] = finalize(initial, 1.0f);
-    const float3 radiance = scene.settings.restir ? seen : seen + initial.color;
-    float4& sum = scene.accumulation[index];
-    sum = make_float4(sum.x + radiance.x, sum.y + radiance.y, sum.z + radiance.z, sum.w + 1);
-}
+extern "C" __global__ void __raygen__initial() { restir_initial_hook(optixGetLaunchIndex()); }
 
 // Denoiser input and guides of the pixel, and the motion of what it sees since the last denoised frame
 extern "C" __global__ void __raygen__denoise() {
