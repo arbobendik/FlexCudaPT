@@ -3687,6 +3687,21 @@ for preferences.device in ('OPTIX', 'VULKAN'):
             preferences.device, texel.flex_restir, seen.mean(), seen.std() / seen.mean())
 preferences.device = 'OPTIX'
 
+# The image of 1, its world sampled by the image's luminance, keeps a white diffuse sphere's light: low-poly and
+# smooth-shaded, so its normals leave its faces, the sphere reads 1 inside 0.9 of its radius, ReSTIR off, to 0.002,
+# five times the spread of that mean at 256 samples (0.0004)
+lowpoly = viewed(imaged('smooth furnace', numpy.ones((32, 64, 3))), 'smooth furnace',
+    lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, radius=1), (1, 1, 1), (0, -3, 0),
+    (math.pi / 2, 0, 0))
+bpy.data.meshes['smooth furnace'].shade_smooth()
+lowpoly.camera.data.ortho_scale, lowpoly.flex_restir = 2.2, False
+centres = (numpy.arange(SIZE) + 0.5) / SIZE * 2.2 - 1.1
+within = numpy.hypot(*numpy.meshgrid(centres, centres)) < 0.9
+for preferences.device in ('OPTIX', 'VULKAN'):
+    seen = render(lowpoly).mean(2)[within].mean()
+    assert abs(seen - 1) < 0.002, ('smooth furnace', preferences.device, seen)
+preferences.device = 'OPTIX'
+
 # A Script node's value outputs export as the same graph of Math and Vector Math nodes does, byte for byte: its OSL
 # compiled by Blender's own compiler, its sockets made from its parameters, its main code run on expressions
 def scripted():  # Its names its own, apart from the rows after it
