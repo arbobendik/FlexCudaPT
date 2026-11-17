@@ -3872,7 +3872,7 @@ with tempfile.TemporaryDirectory() as cache:
             for ob in (made.camera, lamp, bpy.data.objects.new(name + ' floor', floor)):
                 made.collection.objects.link(ob)
             return made
-        def drawn(made, engine, count):  # Image means of the engine's first count draws of the camera's
+        def drawn(made, engine, count, update=None):  # Image means of the engine's first count draws of the camera's
             depsgraph = bpy.context.evaluated_depsgraph_get()  # view, 4 samples each, after its view_update
             view = types.SimpleNamespace(region=types.SimpleNamespace(width=SIZE, height=SIZE),
                 region_data=types.SimpleNamespace(view_matrix=made.camera.matrix_world.inverted(),
@@ -3883,7 +3883,7 @@ with tempfile.TemporaryDirectory() as cache:
                 gpu.matrix.load_matrix(Matrix.Identity(4))
                 gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE,
                     2 / SIZE, 1, 1)))
-                engine.view_update(view, depsgraph)
+                engine.view_update(view, update or depsgraph)
                 for _ in range(count):
                     engine.view_draw(view, depsgraph)
                     frame = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0,
@@ -3937,4 +3937,20 @@ with tempfile.TemporaryDirectory() as cache:
         fog.collection.objects.link(held := bpy.data.objects.new('generic fog cube', cube))
         held.location.z = 0.4
         standing(fog, 'copy-fog')
+        # The image world's Sample World Light turned off by a second view_update while the generic stands in, an
+        # update that keeps the world's light table, against the headless frames of the world with it off
+        switched = lit_world('generic switch')
+        copy = copied('copy-switch')
+        drawn(switched, tiered := Spawned(False, copy), 1)
+        switched.world.flex_sample_light = False
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        update = types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+            scene=depsgraph.scene, mode=depsgraph.mode, updates=[types.SimpleNamespace(id=switched.world,
+            is_updated_geometry=False, is_updated_transform=False, is_updated_shading=True)])
+        first = drawn(switched, tiered, 1, update)[0]
+        ended(tiered)
+        means = drawn(switched, headless := Spawned(True, copy), 9)
+        ended(headless)
+        assert (abs(first - means[0]) <= 4 * errors(means)).all() and first.max() > 0, ('generic switch', first,
+            means[0], errors(means))
     contented()
