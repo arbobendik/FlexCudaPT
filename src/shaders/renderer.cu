@@ -667,6 +667,8 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(MAXIMUM) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fmaxf(a, b); }); break;
         CASE(LOGARITHM) --top; top[-1] = each(top[-1], *top, logarithm); break;
         CASE(MULTIPLY_ADD) top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
+        CASE(SELECT) top -= 2; top[-1] = make_float3(top[-1].x != 0 ? top[0].x : top[1].x,
+            top[-1].y != 0 ? top[0].y : top[1].y, top[-1].z != 0 ? top[0].z : top[1].z); break;
         CASE(DIVIDE) --top; top[-1] = divide(top[-1], *top); break;
         CASE(SNAP) { --top;
             const float3 q = divide(top[-1], *top);
