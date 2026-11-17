@@ -1849,6 +1849,7 @@ class Flex(bpy.types.RenderEngine):
         # its first triangle of a material filling it
         self.box = 2 ** 32 - 1  # The instance of the world's box, none without a world volume
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
+        self.kept = {}  # Of the scene last piped, the rows a later export may take again, by their keys
         self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
         # unit's place (first texel of tiles, key, texture, program's hint and steps, value); texels piped before bakes
         self.texture = None  # The viewport's view as last traced
@@ -1879,7 +1880,8 @@ class Flex(bpy.types.RenderEngine):
     # settings and cameras, which need none. Objects that only moved or deformed update their triangles in place, as
     # FlexLight updates the slots of its instances, while they keep their count and the key of their materials: camera
     # visibility, those of their slots and a light's radiance, and its axes if it shapes its light by them.
-    def start(self, depsgraph):
+    # keeping: whether a later export of this engine may take this one's rows again, as a kept engine's
+    def start(self, depsgraph, keeping=False):
         visible = [instance.object.name for instance in depsgraph.object_instances]
         trees = (*bpy.data.node_groups, *(material.node_tree for material in (*bpy.data.materials, *bpy.data.worlds)))
         references = {node.object.name for tree in trees if tree for node in tree.nodes
@@ -2097,13 +2099,61 @@ class Flex(bpy.types.RenderEngine):
         rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
-        slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')  # A
-        # volume object's slots, or the one empty slot the default volume fills
-        def shaded_row(material, filler=False):  # Its row, apart for the open objects of a material with subsurface
-            SEALING['asked'] = False  # scattering
+        # An object's slots; a volume object without any, one empty slot the default volume fills
+        slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
+        # A kept engine's rows: recorded as shaded, keyed once piped, taken again where key and places match
+        listed = lambda p: ('LIST', *map(listed, p)) if isinstance(p, list) else p
+        digest = lambda a: a is not None and hashlib.sha1(numpy.ascontiguousarray(a).tobytes()).digest()
+        def keyed(material, filler, closed, sealed, cut):
+            output = material and material.node_tree and material.node_tree.get_output_node('CYCLES')
+            parts = None
+            if output:
+                parts = []
+                for name in ('Surface', 'Volume', 'Displacement'):
+                    SIDE['volume'] = name == 'Volume'
+                    parts.append(resolve(output.inputs[name]) if output.inputs[name].is_linked else None)
+                SIDE['volume'] = False
+            return (material, filler, closed, sealed, tuple(INSTANCER.items()), digest(cut.get('uv')),
+                digest(cut.get('triangles')), repr(cut.get('scales')), parts and expression_key(listed(parts)))
+        spots = lambda: (len(ops), len(aside[0]), len(bakes), len(placed), len(again), baked[0])
+        ledgers = lambda: (hints, aside[1], textures, tilings, units, SOURCES, MEDIA, FOLDED, PROGRAMS)
+        kept, spans = self.kept if shaded else {}, []
+        # Its row, apart for open objects of a material with subsurface scattering
+        def shaded_row(material, filler=False):
+            recording, at = (shaded or keeping) and not GRIDS, spots()
+            context = recording and (material, filler, SEALING['closed'], material in subsurface, dict(current))
+            key = shaded and recording and keyed(*context)
+            if key in kept and kept[key][0] == at:
+                lists, dicts, sets, made, row, baked[0] = kept[key][1:]
+                for target, items in zip((ops, aside[0], bakes, placed, again), lists): target.extend(items)
+                for target, items in zip(ledgers(), dicts): target.update(items)
+                derived.update(sets[0]), subsurface.update(sets[1]), current.get('made', []).extend(made)
+                spans.append((key, context, kept[key]))
+                return row
+            before, hairs = recording and ([dict(d) for d in ledgers()], dict(HAIRS), set(derived), set(subsurface),
+                len(current.get('made', ()))), dict(HAIRS)
+            SEALING['asked'] = False
             row = shade(material, program, filler)
             if SEALING['asked']: subsurface.add(material)
+            if recording and HAIRS == hairs: spans.append((key, context, (at, spots(), [{k: v for k, v in d.items()
+                if k not in b or b[k] is not v} for d, b in zip(ledgers(), before[0])], (derived - before[2],
+                subsurface - before[3]), current.get('made', [])[before[4]:], row)))
             return row
+        # This export's rows by key in the steps path's form: a scene's at its final texels, of textures the bakes'
+        def recorded(moved):
+            rows = {}
+            for key, context, record in spans:
+                if len(record) == 6:
+                    at, end, dicts, sets, made, row = record
+                    steps = [(0, t, w, h & ~(3 << 30)) if moved is not None and c == 0 and not h >> 28 & 1
+                        else (c, t, w, h) for c, t, w, h in aside[0][at[1]:end[1]]]
+                    if moved is not None:
+                        dicts[3] = {moved[tile][0]: tiles for tile, tiles in dicts[3].items()}
+                        dicts[2] = {k: v for k, v in dicts[2].items() if isinstance(k, Bake)}
+                    record = at, [ops[at[0]:end[0]], steps, bakes[at[2]:end[2]], placed[at[3]:end[3]],
+                        again[at[4]:end[4]]], dicts, sets, made, row, end[5]
+                rows[key or keyed(*context)] = record
+            return rows
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling volumes
         varying = set()  # Those whose volume varies, bounded inside where they are: moved, exported anew
         cuts = {}  # What each material of each object was cut over
@@ -2208,7 +2258,7 @@ class Flex(bpy.types.RenderEngine):
             bm = bmesh.new()
             if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
                 if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
-                    if ~i not in self.slots: return self.start(depsgraph)
+                    if ~i not in self.slots: return self.start(depsgraph, keeping)
                     record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
@@ -2456,7 +2506,7 @@ class Flex(bpy.types.RenderEngine):
         if moved:
             if varying or self.box != 2 ** 32 - 1 or not all(self.slots.get(i, ())[1:] == (count, key)
                     for i, count, key in slots):  # Or the world's box, which what moved may leave
-                return self.start(depsgraph)
+                return self.start(depsgraph, keeping)
             self.volumes.update(volumes)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
@@ -2529,7 +2579,7 @@ class Flex(bpy.types.RenderEngine):
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
-                return self.start(depsgraph)
+                return self.start(depsgraph, keeping)
             read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
             tables = {key: [] for key, entry in textures.items()
                 if not isinstance(key, (tuple, Bake)) and entry[0] in read}
@@ -2537,8 +2587,8 @@ class Flex(bpy.types.RenderEngine):
             means = {key: texture(SOURCES[key], {}, tables[key])[3] for key in tables}
             if any((means[key] != textures[key][3]).any() for key in tables):
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
-                self.visible = visible  # Its steps again, as the same scene's
-                return self.start(depsgraph)
+                self.visible = visible  # The same scene: start() pipes its steps again
+                return self.start(depsgraph, keeping)
             # Then per table its first texel, texel count and texels, until a count of 0, those only bakes read flagged
             # in bit 31, and with bakes to run again their images, as piped, and tiles; per program its first step and
             # light power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again; then
@@ -2557,7 +2607,7 @@ class Flex(bpy.types.RenderEngine):
                 width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
                 numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
                 numpy.array(again, 'I'), struct.pack('<2I', *regrid)))
-            self.visible = visible
+            self.visible, self.kept = visible, recorded(None)
             return
         self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
@@ -2589,7 +2639,7 @@ class Flex(bpy.types.RenderEngine):
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
-        self.visible = visible
+        self.visible, self.kept = visible, recorded(at) if keeping else {}
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
@@ -2632,19 +2682,19 @@ class Flex(bpy.types.RenderEngine):
         # The scene as set: with persistent data the evaluated one keeps its first render's values of its properties
         # changed alone, such as Flex's settings, while its camera follows
         scene = depsgraph.scene
+        render = scene.render
         width = self.resolution_x
         height = self.resolution_y
         self.update_progress(0)
         self.update_stats('', f'{scene.name} | Syncing scene')
         self.restart()
-        self.start(depsgraph)
+        self.start(depsgraph, render.use_persistent_data or self.is_animation)  # Kept for a later render
         evaluated = scene.camera.evaluated_get(depsgraph)
         camera = (evaluated.matrix_world.normalized(),
-            evaluated.calc_matrix_camera(depsgraph, x=scene.render.resolution_x, y=scene.render.resolution_y), evaluated)
+            evaluated.calc_matrix_camera(depsgraph, x=render.resolution_x, y=render.resolution_y), evaluated)
         result = self.begin_result(0, 0, width, height)  # Blender clips the result to the render border
-        border = depsgraph.scene.render
-        x = int(border.use_border * border.border_min_x * width)
-        y = int(border.use_border * border.border_min_y * height)
+        x = int(render.use_border * render.border_min_x * width)
+        y = int(render.use_border * render.border_min_y * height)
         follows = self.is_animation and scene.frame_current == self.following
         self.following = scene.frame_current + scene.frame_step
         started = time.perf_counter()
@@ -2669,7 +2719,7 @@ class Flex(bpy.types.RenderEngine):
     def view_update(self, context, depsgraph):
         if reading(): return  # Of the IDs a grid's read makes, within the export reading it
         self.restart()
-        self.start(depsgraph)
+        self.start(depsgraph, True)  # A viewport's engine is kept
 
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
         if self.visible is None: return  # No scene piped to trace
