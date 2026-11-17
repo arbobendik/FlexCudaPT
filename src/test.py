@@ -3944,3 +3944,96 @@ with tempfile.TemporaryDirectory() as cache:
         assert numpy.isfinite(first[1]).all() and first[1].max() > 0 and numpy.allclose(means[1], means[0], rtol=0.05,
             atol=0), ('generic module', means)
     tiered()
+    # The cached generic module on content, a baked texture, an image world and a fog volume: a UI viewport's first
+    # frame matches the headless one's mean within 4 errors, its spread measured from 8 more frames' 4-sample increments
+    def contented():  # The generic module on content
+        import shutil
+        offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
+        class Spawned(Viewport):  # On OptiX by a copy of the cached generic module, which stands in unless headless
+            def __init__(self, headless, copy):
+                self.device = 'OPTIX'
+                process = subprocess.Popen((flex.BINARY, str(self.shared.fileno()), str(os.getpid()))
+                    + ('headless',) * headless, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    pass_fds=(self.shared.fileno(),), env={**os.environ, 'OPTIX_CACHE_PATH': copy})
+                self.requests, self.answers, self.process = process.stdin, process.stdout, process
+                process.stdin = process.stdout = None
+        def floored(name):  # A floor of 1 with UVs, a lamp 1 above it and a camera 2 above
+            made = opened(name)
+            made.camera = bpy.data.objects.new(name, bpy.data.cameras.new(name))
+            made.camera.location.z = 2
+            lamp = bpy.data.objects.new(name + ' lamp', bpy.data.lights.new(name + ' lamp', 'POINT'))
+            lamp.location.z, lamp.data.energy = 1, 100
+            floor, bm = bpy.data.meshes.new(name + ' floor'), bmesh.new()
+            bm.loops.layers.uv.new()
+            bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+            bm.to_mesh(floor), bm.free()
+            floor.materials.append(bpy.data.materials.new(name + ' floor'))
+            for ob in (made.camera, lamp, bpy.data.objects.new(name + ' floor', floor)):
+                made.collection.objects.link(ob)
+            return made
+        def drawn(made, engine, count):  # Image means of the engine's first count draws of the camera's
+            depsgraph = bpy.context.evaluated_depsgraph_get()  # view, 4 samples each, after its view_update
+            view = types.SimpleNamespace(region=types.SimpleNamespace(width=SIZE, height=SIZE),
+                region_data=types.SimpleNamespace(view_matrix=made.camera.matrix_world.inverted(),
+                window_matrix=made.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA'),
+                space_data=types.SimpleNamespace(camera=made.camera, clip_end=1000))
+            means = []
+            with offscreen.bind():
+                gpu.matrix.load_matrix(Matrix.Identity(4))
+                gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE,
+                    2 / SIZE, 1, 1)))
+                engine.view_update(view, depsgraph)
+                for _ in range(count):
+                    engine.view_draw(view, depsgraph)
+                    frame = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0,
+                        'FLOAT').to_list())[..., :3]
+                    assert numpy.isfinite(frame).all(), ('generic content', made.name)
+                    means.append(frame.reshape(-1, 3).mean(0))
+            return numpy.array(means)
+        def errors(means):  # The spread of a 4-sample frame's mean: of the increments of a view's draws past its first
+            k = numpy.arange(2, len(means) + 1)[:, None]
+            return numpy.std(k * means[1:] - (k - 1) * means[:-1], 0, ddof=1)
+        def ended(engine): engine.requests.close(), engine.process.wait(60)
+        def copied(label):  # The cache of the generic alone, for the scene's tiered engine to find no module of its own
+            copy = os.path.join(cache, label)
+            shutil.copytree(cache, copy, ignore=shutil.ignore_patterns('flex-*.lock', 'copy-*'))
+            return copy
+        def standing(made, label):  # The generic's first frame of the scene against the headless frames of it
+            copy = copied(label)
+            first = drawn(made, tiered := Spawned(False, copy), 1)[0]
+            ended(tiered)
+            means = drawn(made, headless := Spawned(True, copy), 9)
+            ended(headless)
+            assert (abs(first - means[0]) <= 4 * errors(means)).all() and first.max() > 0, (label, first,
+                means[0], errors(means))
+        def lit_world(name):  # The floor under a world of a float image read Closest, black but one texel of 1000,
+            made = floored(name)  # seen orthographically
+            hot = numpy.zeros((32, 64, 4), 'f')
+            hot[..., 3], hot[23, 10, :3] = 1, 1000
+            picture = bpy.data.images.new(name, 64, 32, float_buffer=True)
+            picture.pixels.foreach_set(hot.ravel())
+            nodes = made.world.node_tree.nodes
+            texture = nodes.new('ShaderNodeTexEnvironment')
+            texture.image, texture.interpolation = picture, 'Closest'
+            made.world.node_tree.links.new(texture.outputs['Color'], nodes['Background'].inputs['Color'])
+            made.camera.data.type, made.camera.data.ortho_scale = 'ORTHO', 1
+            return made
+        baked = floored('generic baked')
+        tree = baked.collection.objects['generic baked floor'].data.materials[0].node_tree
+        noise = tree.nodes.new('ShaderNodeTexNoise')
+        tree.links.new(tree.nodes.new('ShaderNodeTexCoord').outputs['UV'], noise.inputs['Vector'])
+        tree.links.new(noise.outputs['Color'], tree.nodes['Principled BSDF'].inputs['Base Color'])
+        standing(baked, 'copy-baked')
+        standing(lit_world('generic world'), 'copy-world')
+        fog = floored('generic fog')
+        cube, bm = bpy.data.meshes.new('generic fog cube'), bmesh.new()
+        bmesh.ops.create_cube(bm, size=0.6)
+        bm.to_mesh(cube), bm.free()
+        cube.materials.append(murk := bpy.data.materials.new('generic fog cube'))
+        murk.node_tree.nodes.remove(murk.node_tree.nodes['Principled BSDF'])
+        murk.node_tree.links.new(murk.node_tree.nodes.new('ShaderNodeVolumePrincipled').outputs[0],
+            murk.node_tree.nodes['Material Output'].inputs['Volume'])
+        fog.collection.objects.link(held := bpy.data.objects.new('generic fog cube', cube))
+        held.location.z = 0.4
+        standing(fog, 'copy-fog')
+    contented()
