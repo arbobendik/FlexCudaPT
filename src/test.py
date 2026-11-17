@@ -3562,3 +3562,46 @@ with tempfile.TemporaryDirectory() as cache:
     assert first.wait(900) == 0, 'warm-up'
     t = time.perf_counter()
     assert warm().wait(60) == 0 and time.perf_counter() - t < 10, 'warm-up of a cached module'
+    # A UI Blender's viewport's first frame, by that cached generic module, matches the headless one's mean
+    def tiered():  # Its names its own, apart from the rows before it
+        class Tiered(Viewport):  # As the engine's spawn on OptiX, without the headless argument background mode adds
+            def __init__(self):
+                self.device = 'OPTIX'
+                process = subprocess.Popen((flex.BINARY, str(self.shared.fileno()), str(os.getpid())),
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),),
+                    env={**os.environ, 'OPTIX_CACHE_PATH': cache})
+                self.requests, self.answers, self.process = process.stdin, process.stdout, process
+                process.stdin = process.stdout = None
+        lit = opened('generic module')
+        lit.camera = bpy.data.objects.new('generic module', bpy.data.cameras.new('generic module'))
+        lit.camera.location.z = 2
+        lamp = bpy.data.objects.new('generic lamp', bpy.data.lights.new('generic lamp', 'POINT'))
+        lamp.location.z, lamp.data.energy = 1, 100
+        floor = bpy.data.meshes.new('generic floor')
+        bm = bmesh.new()
+        bmesh.ops.create_grid(bm, size=1)
+        bm.to_mesh(floor)
+        for ob in (lit.camera, lamp, bpy.data.objects.new('generic floor', floor)): lit.collection.objects.link(ob)
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
+        view = types.SimpleNamespace(region=types.SimpleNamespace(width=SIZE, height=SIZE),
+            region_data=types.SimpleNamespace(view_matrix=lit.camera.matrix_world.inverted(),
+            window_matrix=lit.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA'),
+            space_data=types.SimpleNamespace(camera=lit.camera, clip_end=1000))
+        first = []
+        for kind in (Viewport, Tiered):
+            engine = kind()
+            with offscreen.bind():
+                gpu.matrix.load_matrix(Matrix.Identity(4))
+                gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE,
+                    2 / SIZE, 1, 1)))
+                engine.view_update(view, depsgraph)
+                engine.view_draw(view, depsgraph)
+                first.append(numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0,
+                    'FLOAT').to_list())[..., :3])
+        engine.requests.close()  # Its renderer ended before its cache goes
+        engine.process.wait(60)
+        means = [frame.mean((0, 1)) for frame in first]  # Which a path flipped by rounding moves within 4 errors
+        assert numpy.isfinite(first[1]).all() and first[1].max() > 0 and numpy.allclose(means[1], means[0], rtol=0.05,
+            atol=0), ('generic module', means)
+    tiered()
