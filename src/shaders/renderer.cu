@@ -41,6 +41,7 @@ constexpr unsigned LOBE_DIFFUSE = 0u;
 constexpr unsigned LOBE_REFRACT = 1u;
 constexpr unsigned LOBE_REFLECT = 2u;
 constexpr unsigned LOBE_NONE = 3u;
+constexpr unsigned LOBE_SHEEN_VELVET = 4u;  // FlexKernels' sheen and velvet lobe, spread like the diffuse
 constexpr float BIAS = 0.0000152587890625f;
 // Share of a ray cone's width a mip level covers, 2^-1.5
 constexpr float CONE_SHARE = 0.35355339f;
@@ -51,9 +52,9 @@ __device__ float lightPath(const Ray& ray, int output) {
     switch (output) {
         case 0: return ray.camera;
         case 1: return ray.shadow;
-        case 2: return ray.lobe == LOBE_DIFFUSE;
+        case 2: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET;
         case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT;
-        case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT;
+        case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET;
         case 6: return ray.lobe == LOBE_REFRACT;
         case 8: return ray.length;
         default: return ray.depth;
