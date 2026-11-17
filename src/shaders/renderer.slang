@@ -1514,7 +1514,10 @@ struct VkScene : IScene {
     }
     uint samples() { return scene.settings.paths; }
     uint restirDecorrelation() { return scene.settings.decorrelation; }
-    void storeReservoirInitial(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.initial[index(p)] = r; }
+    // Without ReSTIR the scene holds one reservoir and the initial pass stores none
+    void storeReservoirInitial(int2 p, Reservoir r, FKHit x1) {
+        if (onImage(p) && scene.settings.restir != 0) scene.initial[index(p)] = r;
+    }
     void storeReservoirTemporal(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.temporal[index(p)] = r; }
     void storeReservoirPrevious(int2 p, Reservoir r, FKHit x1) { if (onImage(p)) scene.previous[index(p)] = r; }
     // No layer stored beside the reservoir: its primary hit is drawn again from the sample's seed
@@ -1551,9 +1554,8 @@ struct VkScene : IScene {
     void storeColor(int2 p, uint layer, float4 color) {}
     bool restirUsed() { return scene.settings.restir != 0; }
     // The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
-    void missed(int2 p, FKDomain dom, float scale) {
-        scene.accumulation[index(p)] += float4(environment(scene, normalize(dom.x1 - dom.x0),
-            Ray(true, false, LOBE_NONE, 1, 0)) * scale, 0);
+    float3 missed(int2 p, FKDomain dom, float scale) {
+        return environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0)) / scene.settings.paths;
     }
     // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
     void addColor(int2 p, float4 color) { scene.accumulation[index(p)] += color; }
