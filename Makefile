@@ -42,8 +42,21 @@ build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/sh
 	mkdir -p build/vulkan
 	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/shaders.spv
 	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/extended.spv
+	# The temporal round's count and queue alone, the second pipeline's, and its queued shifts and reuse alone, the
+	# third's: what each entry reaches
+	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -entry queue -target spirv -o build/vulkan/queue.spv
+	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -entry queue -target spirv \
+		-o build/vulkan/extended_queue.spv
+	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -entry temporal -target spirv \
+		-o build/vulkan/temporal.spv
+	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -entry temporal -target spirv \
+		-o build/vulkan/extended_temporal.spv
 	xxd -i -n build_shaders_ptx build/vulkan/shaders.spv > $@
 	xxd -i -n build_extended_ptx build/vulkan/extended.spv >> $@
+	xxd -i -n build_queue_ptx build/vulkan/queue.spv >> $@
+	xxd -i -n build_extended_queue_ptx build/vulkan/extended_queue.spv >> $@
+	xxd -i -n build_temporal_ptx build/vulkan/temporal.spv >> $@
+	xxd -i -n build_extended_temporal_ptx build/vulkan/extended_temporal.spv >> $@
 	printf '#define build_standin_ptx build_shaders_ptx\n' >> $@ # Its own stand-in: Vulkan has no inlining to undo
 	printf '#define build_standin_ptx_len build_shaders_ptx_len\n' >> $@
 	printf '#define build_extended_standin_ptx build_extended_ptx\n' >> $@
