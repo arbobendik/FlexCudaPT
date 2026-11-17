@@ -2205,8 +2205,9 @@ for preferences.device in ('OPTIX', 'VULKAN'):
 preferences.device = device
 
 # White furnace: a white metal sphere of roughness 0.5 under a sky of one scatters each ray once, so a pixel it covers
-# holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines: 0.8801 over those within its
-# silhouette, integrated numerically
+# holds GGX's single-scatter albedo under exact Smith masking at the pixel's view cosines, 0.8801 over those within its
+# silhouette, times FlexKernels' rebounce there, m = min(1 / (1 - lost), 1 / E_up(mu)) (its pathtracer.slang's fits):
+# 0.9858, integrated numerically; and never above 1
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.render.engine, scene.flex_restir, scene.flex_samples = 'FLEX', False, 64
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (1, 1, 1, 1)
@@ -2220,7 +2221,8 @@ corner = numpy.linspace(-1, 1, SIZE + 1) * math.tan(0.4)  # Pixel corners' rays,
 x, y = numpy.meshgrid(corner, corner)
 inside = 9 * (x * x + y * y) < 0.9801 * (1 + x * x + y * y)  # Within 0.99 of the center, inside the mesh's silhouette
 covered = inside[:-1, :-1] & inside[1:, :-1] & inside[:-1, 1:] & inside[1:, 1:]
-assert abs(disk[covered].mean() - 0.8801) < 0.003, 'rough metal furnace'
+assert abs(disk[covered].mean() - 0.9858) < 0.003 and disk[covered].mean() <= 1, ('rough metal furnace',
+    disk[covered].mean())
 
 # End-to-end parity test, run by make test: renders a scene of textures, among them one mirrored and interpolated at
 # negative coordinates, node programs, an emitter, a point light, glossy metal, glass and a volume under a sky with Flex
@@ -3132,6 +3134,42 @@ def sheen_path():  # Light Path on a sheen bounce
             {k: v.mean() for k, v in seen.items()})
     preferences.device = device
 sheen_path()
+
+# Rough metal under the white sky gives back what its microfacets lose between them, at most what it receives: a unit
+# sphere of white or coloured metal seen from 10 away, its pixels of view cosine above 0.15, reads at most 1 and at
+# least the least directional albedo any view of it has (by quadrature of FlexKernels' measured E and its shipped
+# factor), each by 3 SD of one image as 16 independent renders spread (the sphere alone in a different cell of a 4 x 4
+# canvas each), per channel
+def metal_furnace():  # Rough metal's furnace
+    lit = new('metal furnace', sky=(1, 1, 1))
+    lit.camera = bpy.data.objects.new('metal furnace', bpy.data.cameras.new('metal furnace'))
+    lit.camera.location, lit.camera.data.angle = (0, 0, 10), 2 * math.atan(0.12)
+    lit.collection.objects.link(lit.camera)
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=128, v_segments=64, radius=1)
+    bm.to_mesh(mesh := bpy.data.meshes.new('metal furnace'))
+    mesh.shade_smooth()
+    lit.collection.objects.link(bpy.data.objects.new('metal furnace', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('metal furnace'))
+    metal = material.node_tree.nodes['Principled BSDF']
+    metal.inputs['Metallic'].default_value = 1
+    facing = cosine > 0.15  # The sheen rows' view cosines, of the same sphere seen the same way
+    least = {((1, 1, 1), 0.25): 0.891, ((1, 1, 1), 0.5): 0.943, ((1, 1, 1), 1): 0.814,
+        ((0.9, 0.5, 0.2), 0.25): (0.801, 0.443, 0.176), ((0.9, 0.5, 0.2), 0.5): (0.837, 0.441, 0.17),
+        ((0.9, 0.5, 0.2), 1): (0.628, 0.223, 0.07)}
+    # 3 SD of one image per channel, as the 16 renders measured
+    margin = {((1, 1, 1), 0.25): 0.0133, ((1, 1, 1), 0.5): 0.0267, ((1, 1, 1), 1): 0.0094,
+        ((0.9, 0.5, 0.2), 0.25): (0.0141, 0.0078, 0.0031), ((0.9, 0.5, 0.2), 0.5): (0.0204, 0.0109, 0.0042),
+        ((0.9, 0.5, 0.2), 1): (0.0082, 0.0029, 0.0009)}
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        for (color, roughness), low in least.items():
+            metal.inputs['Base Color'].default_value, metal.inputs['Roughness'].default_value = (*color, 1), roughness
+            seen = render(lit)[facing].mean(0)
+            print('METAL furnace', preferences.device, color, roughness, seen, flush=True)
+            assert (seen <= 1 + numpy.array(margin[color, roughness])).all() and (seen >= numpy.array(low)
+                - margin[color, roughness]).all(), ('metal furnace', preferences.device, color, roughness, seen)
+    preferences.device = device
+metal_furnace()
 # Toon BSDFs, white on the same sphere: the diffuse returns at each view cosine its profile P there, 1 within Size's
 # cone, falling across Smooth's and none past it; the glossy its albedo, P about the mirror direction times cos over the
 # solid angle P weighs, by midpoint quadrature over the hemisphere; on both backends
@@ -3194,6 +3232,14 @@ def anisotropic(ax, ay, mu=0.3):  # Of white GGX metal of the roughnesses along 
     g1 = lambda w: 2 * w[..., 2] / (w[..., 2] + numpy.sqrt((ax * w[..., 0]) ** 2 + (ay * w[..., 1]) ** 2 + w[..., 2] ** 2))
     return (d * g1(view) * g1(light) / (4 * mu) * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512)
 along, across = anisotropic(0.25 / math.sqrt(0.1), 0.25 * math.sqrt(0.1)), anisotropic(0.25 * math.sqrt(0.1), 0.25 / math.sqrt(0.1))
+# Times FlexKernels' rebounce at the view's cosine 0.3, of its smoother axis's r = sqrt(min alpha):
+# m = min(1 / (1 - lost), 1 / E_up), its pathtracer.slang's fits; the same for both, white
+smoother, viewed = math.sqrt(0.25 * math.sqrt(0.1)), 0.3
+lost = smoother ** 3.6317 * (2.15372 - 0.73285 * smoother ** 2) / (1 + 1.28095 * smoother ** 2)
+returned = min(1.000645 - smoother * (0.003755 + viewed * (-0.041334 + viewed * (-0.909385 + viewed * 0.352754)))
+    - smoother ** 2 * (0.276028 + viewed * (1.270234 + viewed * 0.0474)) - smoother ** 3 * (0.314529 - viewed
+    * 0.348307) + smoother ** 4 * 0.272297, 1)
+along, across = (value * min(1 / (1 - lost), 1 / returned) for value in (along, across))
 pixels = render().mean(-1)
 # Under each pixel the point x = -up / 0.3, y = right of the view, at the radial rectangle's generated point gx, gy
 right, up = numpy.meshgrid(*[((numpy.arange(SIZE) + 0.5) / SIZE - 0.5) * 2.4] * 2)
