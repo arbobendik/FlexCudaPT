@@ -46,8 +46,25 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
     if (!argv[1]) return 0; // Probe: whether this machine's device runs it
-    // Once the extension's process, its parent, is gone, closed, crashed or killed, the renderer ends with it within a
-    // tenth of a second, whatever it is doing
+#ifdef VK_VERSION_1_0
+    if (!std::strcmp(argv[1], "compile")) { // A helper renderer: of the op mask and SPIR-V given, the temporal round's
+        helping = argv[5]; // pipelines into the file given (optixPipelineCreate)
+        Params params{{std::strtoull(argv[2], nullptr, 10), std::strtoull(argv[3], nullptr, 10)}};
+        const OptixModuleCompileBoundValueEntry bound{0, sizeof(params), &params};
+        const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
+        const bool extended = argv[4][0] == '1';
+        OptixModule module;
+        CHECK(optixModuleCreate(context, &options, nullptr, (const char*)(extended ? build_extended_ptx
+            : build_shaders_ptx), extended ? build_extended_ptx_len : build_shaders_ptx_len, nullptr, nullptr,
+            &module));
+        OptixProgramGroup_t group{module, 0};
+        const OptixProgramGroup groups[] = {&group};
+        OptixPipeline pipeline;
+        CHECK(optixPipelineCreate(context, nullptr, nullptr, groups, 1, nullptr, nullptr, &pipeline));
+        return 0;
+    }
+#endif
+    // Ends within 0.1 s of its parent, the extension's process
     std::thread([parent = std::atoi(argv[2])] {
         while (getppid() == parent) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         std::_Exit(0);
