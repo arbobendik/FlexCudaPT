@@ -2696,14 +2696,20 @@ def albedo(mu):  # Of Charlie's distribution of roughness 0.5 by Ashikhmin's vis
     sine = 1 - (half[..., 2] / numpy.linalg.norm(half, axis=-1)) ** 2
     return (4 * sine / (2 * math.pi) / (4 * (light[..., 2] + mu - light[..., 2] * mu)) * light[..., 2]
         * numpy.sin(theta)).sum() * (math.pi / 2 / 256) * (2 * math.pi / 512)
-x = ((numpy.arange(SIZE) + 0.5) / SIZE * 2 - 1) * 0.12  # Each pixel's view cosine where its ray meets the sphere, or 0
-ray = numpy.stack([*numpy.meshgrid(x, x), -numpy.ones((SIZE, SIZE))], -1)
-ray /= numpy.linalg.norm(ray, axis=-1, keepdims=True)
-toward = -10 * ray[..., 2]
-reach = toward ** 2 - 99
-hit = numpy.array((0, 0, 10)) + (toward - numpy.sqrt(numpy.clip(reach, 0, None)))[..., None] * ray
-cosine = numpy.where(reach > 0, -(hit * ray).sum(-1), 0)
-expected = numpy.interp(cosine, numpy.linspace(0, 1, 33), [albedo(mu) for mu in numpy.linspace(0, 1, 33)])
+albedos = [albedo(mu) for mu in numpy.linspace(0, 1, 33)]
+# Through each pixel's point dx, dy off its centre: the view cosine on the sphere, else 0, and the albedo or sky's 1
+def seen(dx, dy):
+    u, v = (((numpy.arange(SIZE) + 0.5 + d) / SIZE * 2 - 1) * 0.12 for d in (dx, dy))
+    ray = numpy.stack([*numpy.meshgrid(u, v), -numpy.ones((SIZE, SIZE))], -1)
+    ray /= numpy.linalg.norm(ray, axis=-1, keepdims=True)
+    toward = -10 * ray[..., 2]
+    reach = toward ** 2 - 99
+    hit = numpy.array((0, 0, 10)) + (toward - numpy.sqrt(numpy.clip(reach, 0, None)))[..., None] * ray
+    cosine = numpy.where(reach > 0, -(hit * ray).sum(-1), 0)
+    return cosine, numpy.where(reach > 0, numpy.interp(cosine, numpy.linspace(0, 1, 33), albedos), 1)
+cosine, offsets = seen(0, 0)[0], (numpy.arange(16) + 0.5) / 16 - 0.5
+# Each pixel's albedo over its area, as the renderer's box filter jitters its rays; its ring by its centre's cosine
+expected = numpy.mean([seen(dx, dy)[1] for dx in offsets for dy in offsets], 0)
 pixels = render().mean(-1)
 for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
     ring = (cosine > low) & (cosine <= high)
