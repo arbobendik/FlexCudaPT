@@ -4053,3 +4053,47 @@ with tempfile.TemporaryDirectory() as cache:
         assert (abs(first - means[0]) <= 4 * errors(means)).all() and first.max() > 0, ('generic switch', first,
             means[0], errors(means))
     contented()
+
+# The OptiX denoiser on the fog scene: its F12 finite and its mean within 4 errors of the undenoised 16-sample frame's,
+# the errors measured from a headless viewport's 4-sample increments, past the shift it was measured to make; then a
+# viewport's draw, a camera nudge within the jump distance and a second draw, both finite
+def denoised():  # The OptiX denoiser
+    fog = bpy.data.scenes['generic fog']
+    bpy.context.window.scene, preferences.device, fog.flex_samples, fog.flex_restir = fog, 'OPTIX', 64, False
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
+    def drawn(engine, shifts):  # The engine's frames after a draw at each shift of the camera's view along x
+        frames = []
+        with offscreen.bind():
+            gpu.matrix.load_matrix(Matrix.Identity(4))
+            gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE,
+                1, 1)))
+            for shift in shifts:
+                view = types.SimpleNamespace(region=types.SimpleNamespace(width=SIZE, height=SIZE),
+                    region_data=types.SimpleNamespace(view_matrix=Matrix.Translation((-shift, 0, 0))
+                    @ fog.camera.matrix_world.inverted(), window_matrix=fog.camera.calc_matrix_camera(depsgraph,
+                    x=SIZE, y=SIZE), view_perspective='CAMERA'), space_data=types.SimpleNamespace(camera=fog.camera,
+                    clip_end=1000))
+                if not frames: engine.view_update(view, depsgraph)
+                engine.view_draw(view, depsgraph)
+                frames.append(numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0,
+                    'FLOAT').to_list())[..., :3])
+        engine.requests.close()
+        return frames
+    fog.flex_denoise = False
+    means = numpy.array([frame.reshape(-1, 3).mean(0) for frame in drawn(Viewport(), [0] * 9)])
+    k = numpy.arange(2, len(means) + 1)[:, None]
+    errors = numpy.std(k * means[1:] - (k - 1) * means[:-1], 0, ddof=1) / 2  # Of 16 samples, four times 4
+    fog.flex_samples = 16
+    plain = render(fog, SIZE)
+    fog.flex_denoise = True
+    smooth = render(fog, SIZE)
+    shift = 0.00123  # The denoiser's shift of the mean, relative: the largest over four scenes its lamp moved by 1 mm
+    gap = abs(smooth.reshape(-1, 3).mean(0) - plain.reshape(-1, 3).mean(0))
+    assert numpy.isfinite(smooth).all() and (gap <= 4 * errors + shift * plain.reshape(-1, 3).mean(0)).all(), (
+        'denoiser', gap, errors)
+    fog.flex_samples = 64
+    nudged = drawn(Viewport(), [0, 0.01 * fog.flex_jump_distance])
+    assert all(numpy.isfinite(frame).all() and frame.max() > 0 for frame in nudged), 'denoised viewport'
+    preferences.device = device
+denoised()
