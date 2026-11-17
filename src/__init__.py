@@ -1899,8 +1899,11 @@ class Flex(bpy.types.RenderEngine):
         data = {update.id.original: update.is_updated_geometry for update in depsgraph.updates}
         geometric = lambda update: update.is_updated_geometry and not (isinstance(update.id, bpy.types.Object)
             and not update.id.modifiers and data.get(getattr(update.id.data, 'original', None)) is False)
+        # A camera that moved changes no step, as each request carries it, unless the world's box holds its near plane
+        camera = lambda update: getattr(update.id, 'type', '') == 'CAMERA' and self.box == 2 ** 32 - 1
         shaded = same and self.shape and len(depsgraph.updates) and not moved and all(not (geometric(update)
-            or update.is_updated_transform or isinstance(update.id, bpy.types.Image)) for update in depsgraph.updates)
+            or update.is_updated_transform and not camera(update) or isinstance(update.id, bpy.types.Image))
+            for update in depsgraph.updates)
         self.visible = None  # Until piped: an export that raises exports anew next
         scene = depsgraph.scene_eval
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
