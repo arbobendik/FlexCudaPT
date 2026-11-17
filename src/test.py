@@ -4234,6 +4234,40 @@ for kind in ('ShaderNodeBsdfRefraction', 'ShaderNodeBsdfGlass'):
 print('REFRACTION furnace', renders[0][24:40, 24:40].mean(), flush=True)
 assert numpy.array_equal(*renders) and 0.99 <= renders[0][24:40, 24:40].mean() <= 1.002, 'refraction as glass'
 
+# Dispersion, k = Scale / Abbe of a Principled BSDF that transmits: none at Scale 0, at an Abbe number of 0 or below or
+# without transmission, the scene piping byte for byte as at Blender's defaults, and marked by k otherwise. A clear
+# dispersive glass sphere under the white sky, each path one wavelength drawn by FK's signed CIE weights, reads per
+# channel what the same sphere without dispersion reads: without ReSTIR within 0.006, 4 SD of one image's channel at
+# 1024 samples; with it, whose reuse spreads a wavelength's color over neighbours, in luminance within 0.015, 4 SD
+scene = opened('dispersion', sky=(1, 1, 1))
+scene.camera = add(bpy.data.cameras.new('dispersion'), (0, 0, 4))
+scene.camera.data.angle, scene.flex_samples, scene.flex_bounces = 2 * math.atan(0.3), 1024, 16
+spread = shape('dispersive', lambda bm: bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=1),
+    (0, 0, 0))
+bpy.data.meshes['dispersive'].shade_smooth()
+spread.inputs['Base Color'].default_value, spread.inputs['Roughness'].default_value = (1, 1, 1, 1), 0
+def piped(scale, abbe, weight):  # The scene's requests at the inputs given
+    for name, value in (('Scale', scale), ('Abbe Number', abbe), ('', weight)):
+        spread.inputs[f'Transmission {"Dispersion " + name if name else "Weight"}'].default_value = value
+    return exported().requests.getvalue()
+assert all(piped(*inputs) == piped(0, 20, 1) for inputs in ((0, 5, 1), (1, 0, 1), (1, -5, 1))) and \
+    piped(1, 5, 0) == piped(0, 20, 0), 'no dispersion'
+dispersive, marked = piped(1, 5, 1), flex.resolve(spread.id_data.nodes['Material Output'].inputs['Surface'])
+assert dispersive != piped(0, 20, 1) and len(marked) > 23 and flex.marks(marked[23], 'DISPERSION') and numpy.allclose(
+    flex.fold(marked[23])[1], 0.2), 'dispersion marked'
+spread.inputs['Transmission Dispersion Abbe Number'].default_value = 5
+x = ((numpy.arange(SIZE) + 0.5) / SIZE * 2 - 1) * 0.3  # The pixels whose rays meet the sphere well inside its rim
+covered = numpy.hypot(*numpy.meshgrid(x, x)) < 0.8 * math.tan(math.asin(0.25))
+for scene.flex_restir in (False, True):
+    furnaces = []
+    for scale in (0, 1):
+        spread.inputs['Transmission Dispersion Scale'].default_value = scale
+        furnaces.append(render()[covered].mean(0))
+    print('DISPERSION furnace, ReSTIR', scene.flex_restir, furnaces, flush=True)
+    luminance = [furnace @ (0.2126, 0.7152, 0.0722) for furnace in furnaces]
+    assert numpy.allclose(furnaces[1], furnaces[0], rtol=0.006) if not scene.flex_restir else \
+        abs(luminance[1] / luminance[0] - 1) < 0.015, ('dispersion furnace', scene.flex_restir)
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
