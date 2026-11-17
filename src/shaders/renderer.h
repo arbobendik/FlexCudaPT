@@ -25,20 +25,17 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
 // its luminance; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
-// Raygen programs of a frame's passes, numbered as renderer.slang's main runs them: the spatial round's count, queue
-// and queued shifts before the spatial pass
-constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal", "__raygen__count", "__raygen__prepass",
-    "__raygen__shift", "__raygen__spatial", "__raygen__duplicates", "__raygen__bake", "__raygen__lights",
-    "__raygen__denoise"};
+// Raygen programs of a frame's passes, numbered as renderer.slang's main runs them: each round's count, queue and
+// queued shifts before its reuse pass, the temporal round's, then the spatial round's
+constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal_count", "__raygen__temporal_prepass",
+    "__raygen__temporal_shift", "__raygen__temporal", "__raygen__count", "__raygen__prepass", "__raygen__shift",
+    "__raygen__spatial", "__raygen__duplicates", "__raygen__bake", "__raygen__lights", "__raygen__denoise"};
 // Their indices, which the passes are picked by: here and as renderer.slang's PASS_ constants
-enum Pass : unsigned { PASS_INITIAL, PASS_TEMPORAL, PASS_COUNT, PASS_PREPASS, PASS_SHIFT, PASS_SPATIAL, PASS_DUPLICATES,
-    PASS_BAKE, PASS_LIGHTS, PASS_DENOISE };
+enum Pass : unsigned { PASS_INITIAL, PASS_TEMPORAL_COUNT, PASS_TEMPORAL_PREPASS, PASS_TEMPORAL_SHIFT, PASS_TEMPORAL,
+    PASS_COUNT, PASS_PREPASS, PASS_SHIFT, PASS_SPATIAL, PASS_DUPLICATES, PASS_BAKE, PASS_LIGHTS, PASS_DENOISE };
 static_assert(sizeof(PROGRAMS) / sizeof(*PROGRAMS) == PASS_DENOISE + 1, "a pass named per program");
 // The shift queue: dispatch size, jobs per bin and jobs written per bin of 40 bins, then the jobs
 constexpr unsigned QUEUE_COUNTS = 3, QUEUE_CURSORS = QUEUE_COUNTS + 40, QUEUE_HEADER = QUEUE_CURSORS + 40;
-// Bytes from one SBT record to the next: OptiX's header, then the scene, aligned as main.cpp asserts. The table holds
-// the anchor's record first, then the passes', so a pass finds it its program's number and one records back
-constexpr unsigned RECORD_STRIDE = 704;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
 struct Params { unsigned long long ops[2]; };
 // What a material's program leaves on the stack, from the bottom
