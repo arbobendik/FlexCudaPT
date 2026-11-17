@@ -2528,6 +2528,38 @@ for device in ('OPTIX', 'VULKAN'):
         ('world box outside', device, drawn[..., :3].mean((0, 1)))
     scene.world.node_tree.links.remove(scene.world.node_tree.nodes['World Output'].inputs['Volume'].links[0])
 
+# A viewport whose export raises, of a world's volume that emits, its error caught where Blender catches it, pipes no
+# request and draws nothing; the volume emitting nothing, an update of the scene alone exports anew and draws it
+preferences.device = 'OPTIX'
+glow = scene.world.node_tree.nodes.new('ShaderNodeVolumePrincipled')
+glow.inputs['Emission Strength'].default_value = 1
+scene.world.node_tree.links.new(glow.outputs[0], scene.world.node_tree.nodes['World Output'].inputs['Volume'])
+failing, raised = Viewport(), []
+pipes, failing.requests, failing.answers = (failing.requests, failing.answers), io.BytesIO(), io.BytesIO()
+def handled(_, graph): raised.append(True), failing.view_update(context, graph)
+bpy.app.handlers.depsgraph_update_post.append(handled)
+bpy.context.view_layer.update()
+bpy.app.handlers.depsgraph_update_post.remove(handled)
+with offscreen.bind():
+    gpu.state.active_framebuffer_get().clear(color=(0, 0, 0, 0))
+    failing.view_draw(context, bpy.context.evaluated_depsgraph_get())
+    blank = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+assert raised and failing.visible is None and not failing.requests.getvalue() and not blank.any(), 'failed export'
+failing.requests, failing.answers = pipes
+scene.world.node_tree.links.remove(glow.outputs[0].links[0])
+depsgraph = bpy.context.evaluated_depsgraph_get()
+alone = types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+    scene=depsgraph.scene, mode=depsgraph.mode, updates=[types.SimpleNamespace(id=scene, is_updated_geometry=False,
+    is_updated_transform=False, is_updated_shading=False)])
+with offscreen.bind():
+    gpu.matrix.load_matrix(Matrix.Identity(4))
+    gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+    failing.view_update(context, alone)
+    failing.view_draw(context, depsgraph)
+    while failing.__dict__.pop('redraw', False): failing.view_draw(context, depsgraph)
+    drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+assert numpy.allclose(drawn[..., :3].mean((0, 1)), 1, atol=0.01), ('exported anew', drawn[..., :3].mean((0, 1)))
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')
