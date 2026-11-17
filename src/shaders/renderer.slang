@@ -1308,7 +1308,7 @@ FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, ui
         used(SHEEN) ? surface.sheen : float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
         used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0), used(VELVET) ? surface.velvet : 0,
-        used(TOON) ? surface.toon : float3(0, 0, 0)};
+        used(TOON) ? surface.toon : float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0};
     const bool enclosed = encloses(scene, surface, at.instance);  // The medium it fills, only where it encloses one
     const Medium filled = enclosed ? volume(surface) : Medium(float3(0, 0, 0), float3(0, 0, 0));
     const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0;  // Its fiber, which rays leave from the vertex
@@ -1380,6 +1380,7 @@ struct VkScene : IScene {
     }
     // Whether hair is compiled in
     bool hairUsed() { return used(HAIR); }
+    bool dispersionUsed() { return used(DISPERSION); }
     FKMedium cameraMedium(float3 direction, float distance, out uint filling) {
         const Medium medium = fcpt.cameraMedium(scene, direction, distance, filling);
         return {medium.scatter, medium.extinction, medium.g};
