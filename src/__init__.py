@@ -1606,8 +1606,9 @@ class Flex(bpy.types.RenderEngine):
     bl_label = 'Flex'
     bl_use_shading_nodes_custom = False  # The Shader Editor offers Blender's shading nodes, which the engine resolves
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, source):  # Blender calls it twice: with the engine it made, then with this instance itself
+        super().__init__(source)
+        if source is self: return
         self.visible = ()  # Names of the instances the renderer was last started on
         self.slots = {}  # First triangle, triangle count and key of each instance exported, by its index
         self.varying = set()  # Of those, the ones whose volume varies: their bounds, made where they are, made anew
