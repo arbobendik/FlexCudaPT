@@ -2506,6 +2506,43 @@ with offscreen.bind():
     drawn = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
 assert numpy.allclose(drawn[..., :3].mean((0, 1)), 1, atol=0.01), ('exported anew', drawn[..., :3].mean((0, 1)))
 
+# A camera that moved changes no step, as each request carries it: with a value changed, the update Blender reports
+# pipes the steps; with an object parented to it, moved too, the whole scene, as an export anew pipes it; alone, nothing
+def cameraed():  # Its names its own, apart from the rows after it
+    shown, moving = bpy.context.window.scene, opened('moved camera')
+    moving.camera = bpy.data.objects.new('moved camera', bpy.data.cameras.new('moved camera'))
+    moving.camera.location.z = 5
+    meshes = []
+    for name, parent in (('moved cube', None), ('moved child', moving.camera)):
+        bm = bmesh.new()
+        bmesh.ops.create_cube(bm, size=1)
+        bm.to_mesh(data := bpy.data.meshes.new(name)), bm.free()
+        data.materials.append(bpy.data.materials.new(name))
+        meshes.append(bpy.data.objects.new(name, data))
+        meshes[-1].parent, meshes[-1].location.z = parent, -2 if parent else 0
+    for ob in (moving.camera, *meshes): moving.collection.objects.link(ob)
+    color = meshes[0].data.materials[0].node_tree.nodes['Principled BSDF'].inputs['Base Color']
+    exporter = exported()
+    def piped():  # The kind and bytes start() pipes on the updates Blender reports
+        run = lambda _, graph: Viewport.engine.start(exporter, graph)
+        exporter.requests = io.BytesIO()
+        bpy.app.handlers.depsgraph_update_post.append(run)
+        bpy.context.view_layer.update()
+        bpy.app.handlers.depsgraph_update_post.remove(run)
+        data = exporter.requests.getvalue()
+        return struct.unpack('<I', data[:4])[0] if data else None, data
+    moving.camera.location.x, color.default_value = 0.5, (0.2, 0.4, 0.6, 1)
+    kind, data = piped()
+    assert kind == flex.SCENE and data == exported().requests.getvalue(), ('camera and child moved', kind)
+    meshes[1].parent = None
+    piped()
+    moving.camera.location.x, color.default_value = 1, (0.6, 0.4, 0.2, 1)
+    assert piped()[0] == flex.STEPS, 'camera moved, a value changed'
+    moving.camera.location.x = 1.5
+    assert piped()[0] is None, 'camera moved alone'
+    bpy.context.window.scene = shown
+cameraed()
+
 # A sun of angle 0 is Blender's parallel light: straight down at pi W/m^2 on white Lambertian diffuse, each pixel holds
 # its irradiance over pi, one, on both backends
 scene = new('sun')
