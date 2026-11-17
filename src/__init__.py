@@ -737,14 +737,6 @@ def unanimated(value, memo=None):  # The expression with its animated values, wh
 def nonzero(value):  # Whether a value resolved is an expression or a constant not zero, its animated ones as constants
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
 
-def constant(expression, seen=None):  # Whether it is constant before products of zero fold it, as Blender's nodes see
-    if not isinstance(expression, tuple): return True  # it; each part shared once
-    seen = {} if seen is None else seen
-    if id(expression) not in seen:
-        seen[id(expression)] = expression[0] != 'UNASSOCIATE' and bool(OPS[expression[0]]) \
-            and all(constant(part, seen) for part in expression[1:])
-    return seen[id(expression)]
-
 def coated(a, b):  # Two surfaces of one shape: one without a coat given the other's of weight 0, so a coat mixes in by
     # its weight, else none; one without hair, velvet or toon a mark of none. A velvet sheen and another, or two
     # toons apart, one lobe each, refused
@@ -926,8 +918,6 @@ def map_range(node, inputs, index):
     if kind == 'SMOOTHERSTEP': t = 'MULTIPLY', ('MULTIPLY', ('MULTIPLY', t, t), t), ('ADD', ('MULTIPLY', t,
         ('SUBTRACT', ('MULTIPLY', t, 6), 15)), 10)
     value = 'ADD', to_low, ('MULTIPLY', t, ('SUBTRACT', to_high, to_low))
-    if node.data_type == 'FLOAT' and not all(map(constant, inputs)):
-        value = 'MULTIPLY', value, ('LESS_THAN', 0, absolute(('SUBTRACT', high, low)))
     return between(value, to_low, to_high) if node.clamp else value
 
 def hue_saturation(hue, saturation, value, factor, color):  # Of a hue saturation value node, as Cycles'

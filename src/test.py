@@ -317,7 +317,7 @@ assert surface[7][0] == 'SPECULAR' and numpy.allclose(numpy.array((surface[6], s
     ((1.5,) * 3, (0, 1, 0), (2,) * 3)), 'specular level'
 # A mapping at its defaults turns no point: an image read through it folds to its read at the UV, as a noise times zero
 # folds to zero, and transmitting nothing under a textured metallic, opaque; a degenerate map range of the noise times
-# zero stays guarded to zero, as Blender sees its input vary
+# zero returns its To Min, as Blender 5.3 does whether its input varies or not
 identities = bpy.data.materials.new('identities').node_tree
 bsdf, (mapping, image, product, ranged) = identities.nodes['Principled BSDF'], (identities.nodes.new(kind) for kind in
     ('ShaderNodeMapping', 'ShaderNodeTexImage', 'ShaderNodeMath', 'ShaderNodeMapRange'))
@@ -333,7 +333,7 @@ for output, target in ((image.outputs['Color'], bsdf.inputs['Base Color']), (ima
     identities.links.new(output, target)
 surface = flex.fold(flex.resolve(identities.nodes['Material Output'].inputs['Surface']))
 assert 'ROTATE' not in str(surface[1]) and not any(isinstance(surface[k], tuple) for k in (3, 5)), 'identities fold'
-assert not isinstance(surface[4], tuple) and not numpy.any(surface[4]), 'degenerate range guarded'
+assert not isinstance(surface[4], tuple) and numpy.allclose(surface[4], 0.3), 'degenerate range to its To Min'
 # Options Flex lacks render as the closest it has: Subsurface Scattering's Burley and Skin as Random Walk, which main
 # read with an IOR of 0, as no subsurface; a DirectX normal map as the OpenGL one of its green inverted; a displacement
 # alone as its bump. A physical conductor's color is its reflectance at normal incidence, and Principled hair's by
