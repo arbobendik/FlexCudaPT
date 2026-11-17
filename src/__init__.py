@@ -2622,18 +2622,19 @@ class Flex(bpy.types.RenderEngine):
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
                 self.visible = visible  # Its steps again, as the same scene's
                 return self.start(depsgraph, keeping)
-            # Then per table its first texel, width and texels, until a width of 0, those only bakes read flagged in bit
-            # 31, and with bakes to run again their images, as piped, and tiles; per program its first step and light
-            # power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again; then the
-            # world's grid where the world or a node group changed, else none, its last bake kept
+            # Then per table its first texel, texel count and texels, until a count of 0, those only bakes read flagged
+            # in bit 31, and with bakes to run again their images, as piped, and tiles; per program its first step and
+            # light power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again; then
+            # the world's grid where the world or a node group changed, else none, its last bake kept
             regrid = grid if any(isinstance(update.id, (bpy.types.World, bpy.types.NodeTree))
                 for update in depsgraph.updates) else (0, 0)
             def anew(key):  # An image only bakes read, read again as piped
                 texture(types.SimpleNamespace(type='TEX_IMAGE', image=key[0], extension=key[1]), {}, data := [])
                 return data
-            tables = [(entry[0] | (entry[2] >> 30 & 1) << 31, entry[1], tables[key]) for key, entry in textures.items()
-                if key in tables] + [(entry[0] | 1 << 31, len(data[0]) // 4, data) for key, entry in textures.items()
-                if again and isinstance(key, tuple) and entry[2] >> 30 & 1 for data in [anew(key)]] + [
+            tables = [(entry[0] | (entry[2] >> 30 & 1) << 31, sum(map(len, tables[key])) // 4, tables[key])
+                for key, entry in textures.items() if key in tables] + [(entry[0] | 1 << 31, len(data[0]) // 4, data)
+                for key, entry in textures.items() if again and isinstance(key, tuple) and entry[2] >> 30 & 1
+                for data in [anew(key)]] + [
                 (first | 1 << 31, len(tiles) // 4, [tiles]) for first, tiles in tilings.items() if again and len(tiles)]
             self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for first,
                 width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
