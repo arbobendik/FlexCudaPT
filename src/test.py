@@ -2175,6 +2175,14 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     assert abs(seen / (0.5 * (1 - math.exp(-0.99))) - 1) < 0.01, ('camera inside an emitting volume',
         preferences.device, seen)
 preferences.device = device
+# The same at 4 paths a sample, ReSTIR on and off: each path's glow at its share, no reservoir stored without ReSTIR
+lit.flex_paths = 4
+for lit.flex_restir in (True, False):
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = render(lit).mean()
+        assert abs(seen / (0.5 * (1 - math.exp(-0.99))) - 1) < 0.01, ('camera inside an emitting volume at 4 paths',
+            lit.flex_restir, preferences.device, seen)
+preferences.device = device
 # The absorber of density read from an image of straight alpha, its alpha unread: its colors associated, 0.5 and 0.75
 # of white and of three quarters at alphas 0.5 and 1 across x, under its straight colors' bound of 1, seen through its
 # depth of 2 at 1024 samples against a white sky again, the floor and sun gone, its halves passing exp(-1) and
