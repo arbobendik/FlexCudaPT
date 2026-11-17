@@ -248,6 +248,18 @@ specular.links.new(specular.nodes.new('ShaderNodeEeveeSpecular').outputs[0],
 module = Viewport.engine.start.__globals__
 surface = module['fold'](module['resolve'](specular.nodes['Material Output'].inputs['Surface']))
 assert numpy.any(surface[1]) and numpy.all(surface[6] == 1.5), 'eevee specular'
+# One render starts one renderer per engine, though Blender calls an engine's constructor twice
+def spawns():  # One renderer per engine
+    counts, spawn = {}, Viewport.engine.spawn
+    def counted(engine): counts[id(engine)] = counts.get(id(engine), 0) + 1; spawn(engine)
+    Viewport.engine.spawn = counted
+    made = new('spawns', 4, 1)
+    made.collection.objects.link(camera := bpy.data.objects.new('spawns', bpy.data.cameras.new('spawns')))
+    made.camera = camera
+    render(made, 4)
+    Viewport.engine.spawn = spawn
+    assert list(counts.values()) == [1], ('renderers per engine', counts)
+spawns()
 # A varying volume's majorant bounds its extinction everywhere in its box: densities of sines, cosines, a divisor of one
 # sign, floors, fractions, comparisons and absolute values of 7 (x + 0.07) at the generated x, against the extinction
 # the CPU shades at 10,000 points of the box; of 0.5 (x + 0.07), where sines and cosines have no extremum, by their
