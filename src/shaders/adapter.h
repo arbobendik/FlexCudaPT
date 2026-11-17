@@ -90,7 +90,7 @@ static __device__ bool fcptTemporalQueued();
 static __device__ uint4 fcptShiftData(int2 p, unsigned layer);
 static __device__ void fcptStoreShiftData(int2 p, unsigned layer, uint4 value);
 static __device__ bool fcptRestirUsed();
-static __device__ void fcptMissed(int2 p, Domain dom, float scale);
+static __device__ float3 fcptMissed(int2 p, Domain dom, float scale);
 static __device__ void fcptAddColor(int2 p, float4 color);
 static __device__ unsigned fcptQueueCountAdd(unsigned bin, unsigned jobs);
 static __device__ unsigned fcptQueueCountLoad(unsigned bin);
