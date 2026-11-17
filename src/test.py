@@ -1345,7 +1345,8 @@ other = nodes.new('ShaderNodeTexImage')  # The halves under the Bump, then an ed
 other.image, read.image = halves, sixteen  # update starts anew, as an export anew keeps the heightmap floats
 links.new(other.outputs['Color'], bump.inputs['Height'])
 export = types.SimpleNamespace(visible=(), requests=io.BytesIO())
-export.start = lambda depsgraph: Viewport.engine.start(export, depsgraph)  # As the engine starts anew
+# As the engine starts anew
+export.start = lambda depsgraph, keeping=False: Viewport.engine.start(export, depsgraph, keeping)
 Viewport.engine.start(export, bpy.context.evaluated_depsgraph_get())
 links.new(read.outputs['Color'], bump.inputs['Height'])
 links.new(other.outputs['Color'], nodes['Principled BSDF'].inputs['Base Color'])
@@ -2735,7 +2736,8 @@ spot = lights['spot'][0]
 for other, _ in lights.values(): other.hide_render = other != spot
 bpy.context.view_layer.update()
 exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
-exporter.start = lambda depsgraph: Viewport.engine.start(exporter, depsgraph)  # Anew, as an update can
+# Anew, as an update can
+exporter.start = lambda depsgraph, keeping=False: Viewport.engine.start(exporter, depsgraph, keeping)
 for vector, kind in ((spot.location, flex.UPDATE), (spot.rotation_euler, flex.SCENE)):
     vector.x, exporter.requests = 0.5, io.BytesIO()
     bpy.context.view_layer.update()
@@ -3072,11 +3074,11 @@ def keys(owner, name, *values):  # Its value at the job's two frames
         setattr(owner, name, value)
         owner.keyframe_insert(name, frame=frame)
 kinds, engines, start = [], [], flex.Flex.start  # The kind of each message an export pipes, and the engines exporting
-def tapped(self, depsgraph):
+def tapped(self, depsgraph, keeping=False):
     pipe, engines[len(engines):] = self.requests, [weakref.ref(self)]
     self.requests = types.SimpleNamespace(writelines=lambda parts: (kinds.append(struct.unpack('<I', (parts := [
         *parts])[0][:4])[0]), pipe.writelines(parts)))
-    start(self, depsgraph)
+    start(self, depsgraph, keeping)
     self.requests = pipe
 during = []  # The flag as each frame renders, and a file saved then
 def saving(scene, *_): during.append(scene.render.use_persistent_data), bpy.data.libraries.write(
