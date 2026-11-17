@@ -8,8 +8,11 @@
 #include <cstdio>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 #include <pwd.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -21,7 +24,13 @@ constexpr unsigned ROW_GROUPS = 65535;
 
 // A module: its shader, op mask and the pipeline cache its pipeline is made through, read from the cache file of this
 // release's SPIR-V, keyed by its hash
-struct OptixModule_t { VkShaderModule shader; Params params; VkPipelineCache cache; uint64_t key; };
+struct OptixModule_t { VkShaderModule shader, queue, temporal; Params params; VkPipelineCache cache; uint64_t key;
+    bool extended; };
+// The temporal round's count and queue, and its shifts and reuse, compiled from their entries alone (shaders.h)
+extern unsigned char build_shaders_ptx[], build_extended_ptx[], build_queue_ptx[], build_extended_queue_ptx[],
+    build_temporal_ptx[], build_extended_temporal_ptx[];
+extern unsigned int build_queue_ptx_len, build_extended_queue_ptx_len, build_temporal_ptx_len,
+    build_extended_temporal_ptx_len;
 // One file, beside OptiX's disk cache, of one release's pipelines: the SPIR-V's FNV-1a hash, then the cache's data,
 // whose header the driver checks against its own and device. Another release's or driver's loads as no data
 inline std::string cacheFile() {
@@ -31,7 +40,10 @@ inline std::string cacheFile() {
     return directory + "/flex-vulkan.bin";
 }
 struct OptixProgramGroup_t { OptixModule module; unsigned program; };
-struct OptixPipeline_t { VkPipelineLayout layout; VkPipeline pipeline; };
+// In a helper renderer (main.cpp's "compile"), the file its pipelines' cache goes to, for the renderer spawning it
+inline const char* helping = nullptr;
+// Its pipeline, the temporal round's count and queue apart in a second, its shifts and reuse in a third
+struct OptixPipeline_t { VkPipelineLayout layout; VkPipeline pipeline, queue, temporal; };
 
 inline OptixResult optixInit() { return OPTIX_SUCCESS; }
 
@@ -86,7 +98,19 @@ inline OptixResult optixModuleCreate(OptixDeviceContext, const OptixModuleCompil
     const VkPipelineCacheCreateInfo cache{.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
         .initialDataSize = data.size(), .pInitialData = data.data()};
     vkCreatePipelineCache(vulkan.device, &cache, nullptr, &(*module)->cache);
-    return vkCreateShaderModule(vulkan.device, &info, nullptr, &(*module)->shader) ? OPTIX_ERROR_INVALID_INPUT
+    // The temporal round's modules beside the program's: the extended ones beside the extended program
+    const bool extended = (*module)->extended = input == (const char*)build_extended_ptx;
+    std::vector<uint32_t> queue((extended ? build_extended_queue_ptx_len : build_queue_ptx_len) / 4);
+    std::memcpy(queue.data(), extended ? build_extended_queue_ptx : build_queue_ptx, queue.size() * 4);
+    std::vector<uint32_t> temporal((extended ? build_extended_temporal_ptx_len : build_temporal_ptx_len) / 4);
+    std::memcpy(temporal.data(), extended ? build_extended_temporal_ptx : build_temporal_ptx, temporal.size() * 4);
+    const VkShaderModuleCreateInfo queued{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = queue.size() * 4, .pCode = queue.data()};
+    const VkShaderModuleCreateInfo reused{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = temporal.size() * 4, .pCode = temporal.data()};
+    return vkCreateShaderModule(vulkan.device, &info, nullptr, &(*module)->shader)
+        || vkCreateShaderModule(vulkan.device, &queued, nullptr, &(*module)->queue)
+        || vkCreateShaderModule(vulkan.device, &reused, nullptr, &(*module)->temporal) ? OPTIX_ERROR_INVALID_INPUT
         : OPTIX_SUCCESS;
 }
 
@@ -134,20 +158,62 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
     // The module's op mask as renderer.slang's OPS0 and OPS1
     const VkSpecializationMapEntry entries[] = {{0, 0, 8}, {1, 8, 8}};
     const VkSpecializationInfo specialization{2, entries, sizeof(Params), &groups[0]->module->params};
-    const VkComputePipelineCreateInfo info{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = groups[0]->module->shader, .pName = "main", .pSpecializationInfo = &specialization},
-        .layout = (*pipeline)->layout};
     const OptixModule module = groups[0]->module;
-    if (vkCreateComputePipelines(vulkan.device, module->cache, 1, &info, nullptr, &(*pipeline)->pipeline))
-        return OPTIX_ERROR_PIPELINE_LINK_ERROR;
+    const VkShaderModule shaders[] = {module->shader, module->queue, module->temporal};
+    VkComputePipelineCreateInfo info[3];
+    for (int k = 0; k < 3; ++k) info[k] = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = shaders[k], .pName = "main", .pSpecializationInfo = &specialization}, // Each module's own entry
+        .layout = (*pipeline)->layout};
+    // The main pipeline compiled alone in this process while a helper renderer compiles the temporal round's two at
+    // once: compiled beside another in one process, the driver can leave the main pipeline a binary blind to its
+    // parameters. Their binaries come back through the cache's data, so here they are found at once
+    VkPipeline made[3];
+    VkResult results[3];
+    const auto create = [&](int k) {
+        results[k] = vkCreateComputePipelines(vulkan.device, module->cache, 1, &info[k], nullptr, &made[k]);
+    };
+    const std::string helped = cacheFile() + "." + std::to_string(getpid()) + ".helper";
+    if (helping) {  // The helper: the two at once, their cache to the file given
+        std::thread third(create, 2);
+        create(1);
+        third.join();
+    } else {
+        const std::string ops[] = {std::to_string(module->params.ops[0]), std::to_string(module->params.ops[1])};
+        const char* args[] = {"renderer", "compile", ops[0].c_str(), ops[1].c_str(), module->extended ? "1" : "0",
+            helped.c_str(), nullptr};
+        pid_t helper;
+        if (posix_spawn(&helper, "/proc/self/exe", nullptr, nullptr, (char* const*)args, environ))
+            return OPTIX_ERROR_PIPELINE_LINK_ERROR; // A helper not started fails the compile
+        create(0);
+        waitpid(helper, nullptr, 0);
+        std::vector<char> data;
+        if (FILE* file = std::fopen(helped.c_str(), "rb")) { // After its key, as the cache file
+            std::fseek(file, 0, SEEK_END);
+            data.resize(std::max(std::ftell(file) - long(sizeof(module->key)), 0l));
+            std::fseek(file, sizeof(module->key), SEEK_SET);
+            data.resize(std::fread(data.data(), 1, data.size(), file));
+            std::fclose(file);
+        }
+        std::remove(helped.c_str());
+        const VkPipelineCacheCreateInfo given{.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+            .initialDataSize = data.size(), .pInitialData = data.data()};
+        VkPipelineCache cache;
+        vkCreatePipelineCache(vulkan.device, &given, nullptr, &cache);
+        vkMergePipelineCaches(vulkan.device, module->cache, 1, &cache);
+        vkDestroyPipelineCache(vulkan.device, cache, nullptr);
+        create(1), create(2);
+        (*pipeline)->pipeline = made[0], (*pipeline)->queue = made[1], (*pipeline)->temporal = made[2];
+        if (results[0] || results[1] || results[2])
+            return OPTIX_ERROR_PIPELINE_LINK_ERROR;
+    }
     // The cache saved whole after the key, through a file of its own renamed into place: two renderers saving at once
     // leave one's whole, the other's pipeline coming again on its next save
     size_t size = 0;
     vkGetPipelineCacheData(vulkan.device, module->cache, &size, nullptr);
     std::vector<char> data(size);
     vkGetPipelineCacheData(vulkan.device, module->cache, &size, data.data());
-    const std::string file = cacheFile(), part = file + "." + std::to_string(getpid());
+    const std::string file = helping ? helping : cacheFile(), part = file + "." + std::to_string(getpid());
     if (FILE* out = std::fopen(part.c_str(), "wb")) {
         std::fwrite(&module->key, sizeof(module->key), 1, out), std::fwrite(data.data(), 1, size, out);
         std::fclose(out);
@@ -158,6 +224,8 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
 
 inline OptixResult optixModuleDestroy(OptixModule module) {
     vkDestroyShaderModule(vulkan.device, module->shader, nullptr);
+    vkDestroyShaderModule(vulkan.device, module->queue, nullptr);
+    vkDestroyShaderModule(vulkan.device, module->temporal, nullptr);
     vkDestroyPipelineCache(vulkan.device, module->cache, nullptr);
     delete module;
     return OPTIX_SUCCESS;
@@ -168,6 +236,8 @@ inline OptixResult optixProgramGroupDestroy(OptixProgramGroup group) {
 }
 inline OptixResult optixPipelineDestroy(OptixPipeline pipeline) {
     vkDestroyPipeline(vulkan.device, pipeline->pipeline, nullptr);
+    vkDestroyPipeline(vulkan.device, pipeline->queue, nullptr);
+    vkDestroyPipeline(vulkan.device, pipeline->temporal, nullptr);
     vkDestroyPipelineLayout(vulkan.device, pipeline->layout, nullptr);
     delete pipeline;
     return OPTIX_SUCCESS;
@@ -187,9 +257,15 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     const OptixShaderBindingTable* sbt, unsigned width, unsigned height, unsigned depth) {
     const Launch launch{sbt->raygenRecord, width, height, depth};
     const bool row = height == 1 && depth == 1;
+    // The pass by its record's place: main.cpp's passes precede the walk's callables, one record each; the temporal
+    // round's count and queue run in the second pipeline, its shifts and reuse in the third
+    const unsigned program = sbt->callablesRecordBase ? unsigned(std::size(PROGRAMS)
+        - (sbt->callablesRecordBase - sbt->raygenRecord) / sbt->callablesRecordStrideInBytes) : ~0u;
+    const VkPipeline bound = program == PASS_TEMPORAL_COUNT || program == PASS_TEMPORAL_PREPASS ? pipeline->queue
+        : program == PASS_TEMPORAL_SHIFT || program == PASS_TEMPORAL ? pipeline->temporal : pipeline->pipeline;
     const unsigned groups = (width + WORKGROUP * WORKGROUP - 1) / (WORKGROUP * WORKGROUP); // Of a row
     return run([&](VkCommandBuffer commands) {
-        vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+        vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, bound);
         vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout, 0, 1, &vulkan.textures, 0,
             nullptr);
         vkCmdPushConstants(commands, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(launch), &launch);
