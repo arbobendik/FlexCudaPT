@@ -753,10 +753,12 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
             const float c = cospif(top[1].x * INV_PI), s = sinpif(top[1].x * INV_PI);
             top[-1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
         } break;
-        CASE(EQUIRECTANGULAR) { // Image coordinates of a direction
+        // Image coordinates (u, v) of a direction; with rows (its texel), v a sky table's row, as equirectangular()
+        CASE(EQUIRECTANGULAR) {
             const float3 d = top[-1];
+            const float v = 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI;
             top[-1] = make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI),
-                0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI, 0);
+                op->texel ? (0.5f + 128 * cbrtf(fmaxf(2 * v - 1, 0))) / 129 : v, 0);
         } break;
         CASE(MIRROR_BALL) { // Image coordinates of a direction on a mirror ball
             float3 d = top[-1] / (length(top[-1]) > 0 ? length(top[-1]) : 1) - make_float3(0, 1, 0);

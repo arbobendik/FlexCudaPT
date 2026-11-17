@@ -782,10 +782,13 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             const float c = cospi(stack[top + 1].x * INV_PI), s = sinpi(stack[top + 1].x * INV_PI);
             stack[top - 1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
         } break;
-        CASE(EQUIRECTANGULAR) { // Image coordinates of a direction
+        // Image coordinates (u, v) of a direction; with rows (its texel), v a sky table's row, as equirectangular()
+        CASE(EQUIRECTANGULAR) {
             const float3 d = stack[top - 1];
+            const float v = 0.5f + atan2(d.z, sqrt(d.x * d.x + d.y * d.y)) / PI;
             stack[top - 1] = float3(0.5f - atan2(d.y, d.x) / (2 * PI),
-                0.5f + atan2(d.z, sqrt(d.x * d.x + d.y * d.y)) / PI, 0);
+                asuint(op.value.x) != 0 ? (0.5f + 128 * (1 + sign(2 * v - 1) * pow(abs(2 * v - 1), 1.0f / 3))) / 257
+                : v, 0);
         } break;
         CASE(MIRROR_BALL) { // Image coordinates of a direction on a mirror ball
             float3 d = stack[top - 1] / (length(stack[top - 1]) > 0 ? length(stack[top - 1]) : 1) - float3(0, 1, 0);
