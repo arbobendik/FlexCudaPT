@@ -1,7 +1,8 @@
 # End-to-end test, run by make test: renders a lit plane, half colored and half textured, and a textured emitter under a
 # sky with Flex through a render border and checks the pixels, then draws the same view through the engine's viewport
 # methods and compares.
-import bpy, bmesh, bpy_extras.object_utils, gc, gpu, io, math, numpy, os, struct, sys, time, types, weakref, zlib
+import bpy, bmesh, bpy_extras.object_utils, gc, gpu, io, math, numpy, os, struct, subprocess, sys, threading, time, types
+import weakref, zlib
 from mathutils import Color, Matrix
 
 SIZE = 64
@@ -2367,6 +2368,51 @@ material.node_tree.links.new(ramp.outputs['Color'], ramped.inputs['Emission Colo
 assert churned(material) == flex.STEPS, 'value beside a color ramp'
 assert all(node.id_data.is_evaluated for node in module['SOURCES'].values() if isinstance(node, bpy.types.Node)), \
     'tables read from evaluated nodes'
+# A kept engine under two skies, an emitter of one's colour tinted by the other's edited between two F12s with no
+# export between, pipes steps alone, which the renderer reads as piped: its second F12 is a new engine's; so a kept
+# viewport's draw after the same edit. Steps it can't read leave it waiting: its renderers killed after 60 s, the row
+# fails
+scene.camera.location, scene.camera.rotation_euler = (0, 0, 3), (0, 0, 0)
+scene.camera.data.sensor_width, scene.camera.data.lens = 36, 50
+material = bpy.data.materials['glowing']
+roughness = material.node_tree.nodes['Principled BSDF'].inputs['Roughness']
+tint = material.node_tree.nodes.new('ShaderNodeTexSky')
+tint.sky_type, tint.turbidity = 'HOSEK_WILKIE', 5
+material.node_tree.links.new(tint.outputs['Color'], material.node_tree.nodes['Principled BSDF'].inputs['Base Color'])
+depsgraph = bpy.context.evaluated_depsgraph_get()
+context = types.SimpleNamespace(region=region, region_data=types.SimpleNamespace(view_matrix=scene.camera.matrix_world
+    .inverted(), window_matrix=scene.camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA'),
+    space_data=types.SimpleNamespace(camera=scene.camera, clip_end=1000))
+def sky_drawn(viewport, updated):  # The viewport's draw to its sample limit once updated by the depsgraph given
+    with offscreen.bind():
+        gpu.matrix.load_matrix(Matrix.Identity(4))
+        gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+        viewport.view_update(context, updated)
+        viewport.view_draw(context, bpy.context.evaluated_depsgraph_get())
+        while viewport.__dict__.pop('redraw', False): viewport.view_draw(context, bpy.context.evaluated_depsgraph_get())
+        return numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+def watched(f, *args):  # f(*args), its renderers killed if it takes past 60 s
+    watchdog = threading.Timer(60, subprocess.run, (('pkill', '-P', str(os.getpid()), 'renderer'),))
+    watchdog.start()
+    value = f(*args)
+    watchdog.cancel()
+    return value
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    scene.render.use_persistent_data, roughness.default_value = True, 0.5
+    render()
+    roughness.default_value = 0.6
+    shown = watched(render)
+    scene.render.use_persistent_data = False
+    assert numpy.allclose(shown, render(), atol=2e-3), ('kept sky', device)
+    roughness.default_value = 0.5
+    sky_drawn(kept := Viewport(), bpy.context.evaluated_depsgraph_get())
+    roughness.default_value = 0.6
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    edit = types.SimpleNamespace(scene_eval=depsgraph.scene_eval, object_instances=depsgraph.object_instances,
+        updates=[types.SimpleNamespace(id=material, is_updated_geometry=False, is_updated_transform=False)])
+    assert numpy.allclose(watched(sky_drawn, kept, edit), sky_drawn(Viewport(), depsgraph), atol=2e-3), \
+        ('kept sky viewport', device)
 
 # A thin slab of a medium scattering 0.01 of what crosses it and absorbing nothing, lit from below by a parallel sun 30
 # degrees off the straight-up view of an orthographic camera above, scatters it once: its radiance follows its phase
