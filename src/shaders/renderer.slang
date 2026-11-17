@@ -46,8 +46,9 @@ struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise
 static const int PAIRING_SIZES[] = {254, 230, 210};
 static const uint QUEUE_HEADER = 3 + 2 * 40; // The shift queue's dispatch size, jobs per bin and jobs written per bin
 // The passes by their indices in renderer.h's PROGRAMS
-static const uint PASS_INITIAL = 0, PASS_TEMPORAL = 1, PASS_COUNT = 2, PASS_PREPASS = 3, PASS_SHIFT = 4,
-    PASS_SPATIAL = 5, PASS_DUPLICATES = 6, PASS_BAKE = 7, PASS_LIGHTS = 8;
+static const uint PASS_INITIAL = 0, PASS_TEMPORAL_COUNT = 1, PASS_TEMPORAL_PREPASS = 2, PASS_TEMPORAL_SHIFT = 3,
+    PASS_TEMPORAL = 4, PASS_COUNT = 5, PASS_PREPASS = 6, PASS_SHIFT = 7, PASS_SPATIAL = 8, PASS_DUPLICATES = 9,
+    PASS_BAKE = 10, PASS_LIGHTS = 11;
 // Workgroups of a launch one high per row of them, the least count in x Vulkan guarantees, as FlexKernels' queue
 // decodes them and optix_stubs.h dispatches them
 static const uint ROW_GROUPS = 65535;
@@ -1666,19 +1667,6 @@ SampleBSDF sampleHair(Scene* scene, Surface surface, float3 in_dir, uint state) 
     sampled.random_state = r.state;
     return sampled;
 }
-// The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
-Shift shift(Scene* scene, Camera camera, int pixel, uint3 size, Reservoir r) {
-    Selection sel = {};
-    if (r.w <= 0.0f) {
-        return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
-    }
-    const Domain dom = pixelDomain(scene, camera, pixel, size, r.seed);
-    if (dom.hit.triangle == NONE) {
-        return Shift(float3(0.0f, 0.0f, 0.0f), 0.0f);
-    }
-    return walkHooks<true>(VkScene(scene), dom, r, 0.0f, sel);
-}
-
 // Pixel coordinates a camera sees a position at
 float2 project(Camera camera, float3 position, uint3 size) {
     const float3 d = position - camera.origin;
@@ -1693,31 +1681,6 @@ float2 project(Camera camera, float3 position, uint3 size) {
         (1 - dot(cross(camera.x, d), camera.z) / depth) * 0.5f * size.y);
 }
 
-// Index of the pixel at q if the previous frame left it a sample, -1 otherwise
-int previousValid(Scene* scene, float2 q, uint3 size) {
-    const int x = int(floor(q.x));
-    const int y = int(floor(q.y));
-    const bool valid = x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)
-        && scene.previous[y * size.x + x].c > 0.0f;
-    return valid ? y * int(size.x) + x : -1;
-}
-
-// Backprojection of the camera motion, or the dual motion vector of the surface previously seen there (Sec. 6.4)
-int temporalNeighbor(Scene* scene, uint3 p, uint3 size, Domain dom) {
-    const float2 q = project(scene.previousCamera, dom.x1, size);
-    const int index = previousValid(scene, q, size);
-    if (index < 0) {
-        return -1;
-    }
-    const Domain previous = pixelDomain(scene, scene.previousCamera, index, size, scene.previous[index].seed);
-    if (previous.hit.instance == dom.hit.instance
-        && length(previous.x1 - dom.x1) <= length(dom.x1 - dom.x0) * 8.0f / size.x) {
-        return index;
-    }
-    const float2 moved = project(scene.camera, previous.x1, size);
-    return previousValid(scene, float2(p.x + floor(q.x) + 1.0f - moved.x, p.y + floor(q.y) + 1.0f - moved.y),
-        size);
-}
 
 // A texel of the bake the frame numbers, its top bit the pass: the albedo the program's surface takes there
 // Tiles of 16 x 16 texels over a triangle's UVs: owned by one triangle in the first pass, padding baked
@@ -1853,40 +1816,6 @@ void denoise(uint3 p, uint3 size, Scene* scene) {
     scene.seen[index] = seen;
 }
 
-// Temporal reuse: the initial sample against the previous frame's at the temporal neighbor
-void temporal(uint3 p, uint3 size, Scene* scene) {
-    const uint index = p.y * size.x + p.x;
-    Reservoir r = scene.initial[index];
-    const bool still = scene.frame > 0u && all(scene.camera.origin == scene.previousCamera.origin)
-        && all(scene.camera.x == scene.previousCamera.x) && all(scene.camera.y == scene.previousCamera.y)
-        && all(scene.camera.z == scene.previousCamera.z);
-    // The view's first frame reuses reservoirs of the anchor's scene
-    Scene* before = scene.frame == 0u ? &((Record*)((uint64_t)launch.record - 2 * RECORD_STRIDE)).scene : scene;
-    int q = scene.previous[index].c > 0.0f ? int(index) : -1;
-    if (!still) {
-        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        q = dom.hit.triangle == NONE ? -1 : temporalNeighbor(before, p, size, dom);
-    }
-    if (q >= 0) {
-        const Reservoir temporal = scene.previous[q];
-        // Optionally lower the confidence cap where the previous frame duplicated samples (Sec. 5), this biases the estimate
-        const float duplicated = scene.settings.decorrelation != 0 ? scene.duplication[q] : 0.0f;
-        const float c_t = min(temporal.c, confidenceCap(duplicated));
-        const Shift to_current = still ? Shift(temporal.f, 1.0f) : shift(scene, scene.camera, index, size, temporal);
-        const Shift to_previous = still ? Shift(r.f, 1.0f) : shift(before, scene.previousCamera, q, size, r);
-        const float p_c = rgb_to_greyscale(r.f);
-        const float p_t = rgb_to_greyscale(temporal.f);
-        Selection sel = {};
-        sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 1u);
-        const float2 weights = temporalWeights(r.c, p_c, c_t, p_t, rgb_to_greyscale(to_previous.f),
-            rgb_to_greyscale(to_current.f));
-        offerShifted(sel, r, Shift(r.f, 1.0f), weights.x);
-        offerShifted(sel, temporal, to_current, weights.y);
-        r = finalize(sel, r.c + c_t);
-    }
-    scene.temporal[index] = r;
-}
-
 // Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
 void duplicates(uint3 p, uint3 size, Scene* scene) {
     const uint index = p.y * size.x + p.x;
@@ -1905,7 +1834,6 @@ void duplicates(uint3 p, uint3 size, Scene* scene) {
 
 // A pass's record: its raygen program's number, then its scene
 struct Record { uint program; uint header[7]; Scene scene; };
-static const uint RECORD_STRIDE = 704; // From one record to the next
 struct Launch { Record* record; uint width, height, depth; };
 [[vk::push_constant]] Launch launch;
 
@@ -1915,14 +1843,17 @@ void run(uint3 thread, uint3 group, uint index) {
     const uint3 size = uint3(launch.width, launch.height, launch.depth);
     const uint3 p = size.y == 1 && size.z == 1 ? uint3((group.y * ROW_GROUPS + group.x) * 64 + index, 0, 0) : thread;
     Scene* scene = &launch.record.scene;
-    // The spatial round's count and queue: every invocation of a workgroup, past the image too, which have no job,
-    // for their barriers
+    // Each round's count and queue: every invocation of a workgroup, past the image too, which have no job, for their
+    // barriers
+    if (launch.record.program == PASS_TEMPORAL_COUNT) return restir_temporal_count(VkScene(scene), thread, index);
+    if (launch.record.program == PASS_TEMPORAL_PREPASS) return restir_temporal_prepass(VkScene(scene), thread, index);
     if (launch.record.program == PASS_COUNT) return restir_count(VkScene(scene), thread, index);
     if (launch.record.program == PASS_PREPASS) return restir_prepass(VkScene(scene), thread, index);
     if (any(p >= size)) return;
     switch (launch.record.program) {
         case PASS_INITIAL: initial(p, size, scene); break;
-        case PASS_TEMPORAL: temporal(p, size, scene); break;
+        case PASS_TEMPORAL_SHIFT: restir_temporal_shift(VkScene(scene), uint3(group.xy, 0), index); break;
+        case PASS_TEMPORAL: restir_temporal(VkScene(scene), thread); break;
         case PASS_SHIFT: restir_shift(VkScene(scene), uint3(group.xy, 0), index); break; // Jobs of the queue, 64 a bin
         case PASS_SPATIAL: restir_spatial(VkScene(scene), thread); break;
         case PASS_DUPLICATES: duplicates(p, size, scene); break;

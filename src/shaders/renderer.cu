@@ -1329,19 +1329,6 @@ WALK_CALLABLE(__direct_callable__walk, true)
 #define WALK(scene, dom, r, replay, scale, sel) optixDirectCall<Shift>( \
     !(replay) ? 0 : &(scene) == (const Scene*)optixGetSbtDataPointer() ? 1 : 2, &(dom), &(r), scale, &(sel))
 
-// The sample of r shifted into the pixel the camera sees, zero if its primary ray misses there
-__device__ Shift shift(const Scene& scene, const Camera& camera, int pixel, uint3 size, const Reservoir& r) {
-    Selection sel;
-    if (r.w <= 0.0f) {
-        return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
-    }
-    const Domain dom = pixelDomain(scene, camera, pixel, size, r.seed);
-    if (dom.hit.triangle == NONE) {
-        return Shift{make_float3(0.0f, 0.0f, 0.0f), 0.0f};
-    }
-    return WALK(scene, dom, r, true, 0.0f, sel);
-}
-
 // Pixel coordinates a camera sees a position at
 __device__ float2 project(const Camera& camera, float3 position, uint3 size) {
     const float3 d = position - camera.origin;
@@ -1354,32 +1341,6 @@ __device__ float2 project(const Camera& camera, float3 position, uint3 size) {
     const float depth = dot(cross(camera.x, camera.y), d);
     return make_float2((1 + dot(cross(d, camera.y), camera.z) / depth) * 0.5f * size.x,
         (1 - dot(cross(camera.x, d), camera.z) / depth) * 0.5f * size.y);
-}
-
-// Index of the pixel at q if the previous frame left it a sample, -1 otherwise
-__device__ int previousValid(const Scene& scene, float2 q, uint3 size) {
-    const int x = int(floorf(q.x));
-    const int y = int(floorf(q.y));
-    const bool valid = x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)
-        && scene.previous[y * size.x + x].c > 0.0f;
-    return valid ? y * int(size.x) + x : -1;
-}
-
-// Backprojection of the camera motion, or the dual motion vector of the surface previously seen there (Sec. 6.4)
-__device__ int temporalNeighbor(const Scene& scene, uint3 p, uint3 size, const Domain& dom) {
-    const float2 q = project(scene.previousCamera, dom.x1, size);
-    const int index = previousValid(scene, q, size);
-    if (index < 0) {
-        return -1;
-    }
-    const Domain previous = pixelDomain(scene, scene.previousCamera, index, size, scene.previous[index].seed);
-    if (previous.hit.instance == dom.hit.instance
-        && length(previous.x1 - dom.x1) <= length(dom.x1 - dom.x0) * 8.0f / size.x) {
-        return index;
-    }
-    const float2 moved = project(scene.camera, previous.x1, size);
-    return previousValid(scene, make_float2(p.x + floorf(q.x) + 1.0f - moved.x, p.y + floorf(q.y) + 1.0f - moved.y),
-        size);
 }
 
 // A texel of the bake the frame numbers, its top bit the pass: the albedo the program's surface takes there
@@ -1529,42 +1490,15 @@ extern "C" __global__ void __raygen__denoise() {
     scene.seen[index] = seen;
 }
 
-// Temporal reuse: the initial sample against the previous frame's at the temporal neighbor
-extern "C" __global__ void __raygen__temporal() {
-    const uint3 p = optixGetLaunchIndex();
-    const uint3 size = optixGetLaunchDimensions();
-    const unsigned index = p.y * size.x + p.x;
-    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    Reservoir r = scene.initial[index];
-    const bool still = scene.frame > 0u && scene.camera.origin == scene.previousCamera.origin
-        && scene.camera.x == scene.previousCamera.x && scene.camera.y == scene.previousCamera.y
-        && scene.camera.z == scene.previousCamera.z;
-    // The view's first frame reuses reservoirs of the anchor's scene
-    const Scene& before = scene.frame == 0u ? *(const Scene*)((const char*)&scene - 2 * RECORD_STRIDE) : scene;
-    int q = scene.previous[index].c > 0.0f ? int(index) : -1;
-    if (!still) {
-        const Domain dom = pixelDomain(scene, scene.camera, index, size, r.seed);
-        q = dom.hit.triangle == NONE ? -1 : temporalNeighbor(before, p, size, dom);
-    }
-    if (q >= 0) {
-        const Reservoir temporal = scene.previous[q];
-        // Optionally lower the confidence cap where the previous frame duplicated samples (Sec. 5), this biases the estimate
-        const float duplicated = scene.settings.decorrelation ? scene.duplication[q] : 0.0f;
-        const float c_t = fminf(temporal.c, confidenceCap(duplicated));
-        const Shift to_current = still ? Shift{temporal.f, 1.0f} : shift(scene, scene.camera, index, size, temporal);
-        const Shift to_previous = still ? Shift{r.f, 1.0f} : shift(before, scene.previousCamera, q, size, r);
-        const float p_c = rgb_to_greyscale(r.f);
-        const float p_t = rgb_to_greyscale(temporal.f);
-        Selection sel = {};
-        sel.random_state = stream(stream(hash(scene.frame), index), STREAM_SELECT + 1u);
-        const float2 weights = temporalWeights(r.c, p_c, c_t, p_t, rgb_to_greyscale(to_previous.f),
-            rgb_to_greyscale(to_current.f));
-        offerShifted(&sel, r, Shift{r.f, 1.0f}, weights.x);
-        offerShifted(&sel, temporal, to_current, weights.y);
-        r = finalize(sel, r.c + c_t);
-    }
-    scene.temporal[index] = r;
+// The temporal round of FlexKernels' shift queue: each pixel's neighbour stored and its jobs counted per bin, then
+// queued bin after bin, then run over the queue, a launch index its job; then temporal reuse at the neighbour
+extern "C" __global__ void __raygen__temporal_count() { restir_temporal_count_hook(optixGetLaunchIndex(), 0); }
+extern "C" __global__ void __raygen__temporal_prepass() { restir_temporal_prepass_hook(optixGetLaunchIndex(), 0); }
+extern "C" __global__ void __raygen__temporal_shift() {
+    const unsigned i = optixGetLaunchIndex().x;
+    restir_temporal_shift_hook(make_uint3(i / 64, 0, 0), i % 64);
 }
+extern "C" __global__ void __raygen__temporal() { restir_temporal_hook(optixGetLaunchIndex()); }
 
 // The spatial round of FlexKernels' shift queue: each pixel's jobs counted per bin, then queued bin after bin, then
 // run over the queue, a launch index its job; then paired spatial reuse (Sec. 3)
