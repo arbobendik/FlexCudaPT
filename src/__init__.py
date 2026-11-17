@@ -520,6 +520,7 @@ def bounds(expression, boxes, memo):
             else None
     elif name == 'FLOOR': box = numpy.floor(parts[0][0]), numpy.floor(parts[0][1])
     elif name == 'LESS_THAN': box = numpy.zeros(3), numpy.ones(3)  # A comparison
+    elif name == 'SELECT': box = numpy.minimum(parts[1][0], parts[2][0]), numpy.maximum(parts[1][1], parts[2][1])
     else: box = None
     memo[id(expression)] = box if box is None or numpy.isfinite(box).all() else None
     return memo[id(expression)]
@@ -1368,6 +1369,7 @@ TRIPLES = ('color', 'point', 'vector', 'normal')
 FLT_MIN = 1.1754944e-38  # OSL's logarithms clamp their argument up to it
 PROGRAMS = {}  # Of each Script node met in an export, by its pointer, its bytecode's program: compiled once an export
 LOOPS = 1024  # Iterations a loop unrolls at most
+DEPTH = 200  # Steps a script's output may lie deep, the exporter's walks of expressions recursing per step
 
 def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
     # on expressions in order; what that cannot express is refused by name
@@ -1394,7 +1396,15 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
             if op == 'if' and known(args[0]) is not None:
                 ended = run(at + 1, jumps[0]) if known(args[0]) else run(jumps[0], jumps[1])
                 if ended: return ended
-            elif op == 'if': refused('an if on a value that varies per hit')
+            elif op == 'if':  # Both branches, what either changes chosen per hit by its condition
+                before = dict(values)
+                ended = run(at + 1, jumps[0])
+                taken = dict(values)
+                values.update(before)
+                otherwise = run(jumps[0], jumps[1])
+                if ended or otherwise: refused('break or continue under a condition that varies per hit')
+                for name, value in taken.items():
+                    if value is not values[name]: values[name] = 'SELECT', values[args[0]], value, values[name]
             elif op in ('for', 'while', 'dowhile'):  # Init, then condition, body and step, the body first in dowhile's
                 run(at + 1, jumps[0])
                 for count in range(LOOPS + 1):
@@ -1430,9 +1440,20 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
             elif op in OSL and not (op in ('lt', 'gt', 'le', 'ge', 'eq', 'neq') and set(kinds[1:]) & set(TRIPLES)):
                 values[args[0]] = OSL[op](*operands)
             else: refused(f'the step {op}')
+            if not any(isinstance(o, tuple) for o in operands):  # Constants at once, so a loop of them grows no deeper
+                values[args[0]] = fold(values[args[0]])
     run(first, first + len(steps))
     outputs = {name: values[name] if name in values else refused(f'{type} outputs') for name, (kind, type, _)
         in symbols.items() if kind == 'oparam'}
+    # Each step's depth from its deepest leaf, counted without recursion
+    deep, pending = {}, [value for value in outputs.values() if isinstance(value, tuple)]
+    while pending:
+        waiting = [p for p in pending[-1][1:] if isinstance(p, tuple) and id(p) not in deep]
+        if waiting: pending += waiting
+        else:
+            e = pending.pop()
+            deep[id(e)] = 1 + max((deep[id(p)] for p in e[1:] if isinstance(p, tuple)), default=0)
+    if max(deep.values(), default=0) > DEPTH: refused(f'a computation deeper than {DEPTH} steps')
     return outputs
 NODES['SCRIPT'] = lambda node, inputs, index: translated(node, inputs)[node.outputs[index].identifier]
 
