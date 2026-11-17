@@ -1067,7 +1067,7 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, make_float4(0, 0, 0, 0), direction, 0, 0, NONE};
     return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{}, point, -direction,
-        false, ray, Info{{}, {}, 0, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
+        false, ray, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
 }
 
 __device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y), expf(a.z)); }
