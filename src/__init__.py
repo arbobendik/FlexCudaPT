@@ -1973,7 +1973,7 @@ class Flex(bpy.types.RenderEngine):
             matrix = instance.matrix_world
             instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
                 numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
-                ob.pass_index, 0, random, *numpy.array(matrix.to_3x3()).T.ravel()],
+                ob.pass_index, random, *numpy.array(matrix.to_3x3()).T.ravel()],
                 numpy.array([attributed(instance)], 'u4').view('f'), numpy.array((*media[0], media[1]), 'f')),
                 dtype='f')))
             slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
@@ -2553,7 +2553,7 @@ class Flex(bpy.types.RenderEngine):
             self.volumes.update(volumes)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
-                *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:41].astype('f'),
+                *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:40].astype('f'),
                 instances[k][3][:21].astype('f')))))
             self.visible = visible
             return

@@ -971,8 +971,8 @@ def generated_of(piped, i):  # Generated coordinates of the mesh entry of instan
     header, k = numpy.frombuffer(piped, 'I', count=11), [*exporter.slots].index(i)
     instances = 44 + 16 * header[2]  # After the header and the steps, four words each, and the hair tables
     instances += tables(piped, instances)
-    first, count = numpy.frombuffer(piped, 'I', count=2, offset=instances + 204 * k)
-    return numpy.frombuffer(piped, 'f', count=9 * count, offset=instances + 204 * header[9] + 36 * (2 * header[8]
+    first, count = numpy.frombuffer(piped, 'I', count=2, offset=instances + 200 * k)
+    return numpy.frombuffer(piped, 'f', count=9 * count, offset=instances + 200 * header[9] + 36 * (2 * header[8]
         + first)).reshape(-1, 3)
 generated = generated_of(exporter.requests.getvalue(), next(i for i, item in enumerate(depsgraph.object_instances)
     if item.object.original == twisted))
@@ -2881,7 +2881,7 @@ exporter = exported()
 piped = exporter.requests.getvalue()
 header = numpy.frombuffer(piped, 'I', count=11)  # Mesh triangles, past the steps, instances and four columns before UVs
 assert numpy.all(numpy.frombuffer(piped, 'f', count=6 * header[8], offset=44 + 16 * header[2]
-    + tables(piped, 44 + 16 * header[2]) + 204 * header[9]
+    + tables(piped, 44 + 16 * header[2]) + 200 * header[9]
     + 36 * 4 * header[8])
     == 0.25), 'render uv map'
 
