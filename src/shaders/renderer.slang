@@ -93,6 +93,7 @@ float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 
 static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
+static const uint LOBE_SHEEN_VELVET = 4u;  // FlexKernels' sheen and velvet lobe, spread like the diffuse
 // Share of a ray cone's width a mip level covers, 2^-1.5
 static const float CONE_SHARE = 0.35355339;
 // Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length,
@@ -102,9 +103,9 @@ float lightPath(Ray ray, int output) {
     switch (output) {
         case 0: return float(ray.camera);
         case 1: return float(ray.shadow);
-        case 2: return float(ray.lobe == LOBE_DIFFUSE);
+        case 2: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET);
         case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT);
-        case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT);
+        case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET);
         case 6: return float(ray.lobe == LOBE_REFRACT);
         case 8: return ray.length;
         default: return ray.depth;
