@@ -4268,6 +4268,88 @@ for scene.flex_restir in (False, True):
     assert numpy.allclose(furnaces[1], furnaces[0], rtol=0.006) if not scene.flex_restir else \
         abs(luminance[1] / luminance[0] - 1) < 0.015, ('dispersion furnace', scene.flex_restir)
 
+# A prism of 60 degrees, IOR 1.5 at the d line and Abbe number 5, turned about its axis so rays along x meet its first
+# face at the d line's minimum deviation, casts them onto a strip 10 away across the d line's exit, emitting its own x
+# over its width: per channel, over the strip emitting 1, the x they land at is FK's weights' mean by wavelength over
+# every path Snell's law and the faces' Fresnel give, reflections inside too, within 0.05 degrees, 6 SD of one image
+# without ReSTIR; without dispersion, the d line's alone
+scene = opened('prism', sky=(0, 0, 0))
+scene.render.resolution_x = scene.render.resolution_y = 32
+scene.camera = add(bpy.data.cameras.new('prism'), (-3, 0, 0), (math.pi / 2, 0, -math.pi / 2))
+scene.camera.data.type, scene.camera.data.ortho_scale, scene.flex_samples = 'ORTHO', 0.2, 1024
+scene.flex_restir, scene.flex_bounces = False, 16
+turn, corners = math.asin(0.75) - math.pi / 6, [(0, 3 ** -0.5), (-0.5, -0.5 * 3 ** -0.5), (0.5, -0.5 * 3 ** -0.5)]
+def prismed(bm):  # Its x, z corners around the centroid, along y
+    v = [bm.verts.new((x, y, z)) for y in (-1, 1) for x, z in corners]
+    for face in ((0, 1, 2), (3, 5, 4), *((k, (k + 1) % 3, (k + 1) % 3 + 3, k + 3) for k in range(3))):
+        bm.faces.new([v[i] for i in face])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+prism = shape('prism', prismed, (0, 0, 0), (0, turn, 0))
+prism.inputs['Base Color'].default_value, prism.inputs['Roughness'].default_value = (1, 1, 1, 1), 0
+for name, value in (('Weight', 1), ('Dispersion Scale', 1), ('Dispersion Abbe Number', 5)):
+    prism.inputs['Transmission ' + name].default_value = value
+apex, left, right = (numpy.array((x * math.cos(turn) + z * math.sin(turn), z * math.cos(turn) - x * math.sin(turn)))
+    for x, z in corners)
+faces = (apex, left), (apex, right), (left, right)  # Entry, exit and base, as segments in x, z
+def met(o, d, skip):  # The nearest face the ray from o along d meets, but the one it leaves: its distance and index
+    near = None
+    for k, (a, b) in enumerate(faces):
+        e, den = b - a, (b - a)[0] * d[1] - (b - a)[1] * d[0]
+        t = (e[0] * (a - o)[1] - e[1] * (a - o)[0]) / den if k != skip and den else -1
+        if t > 1e-9 and 0 <= (o + t * d - a) @ e / (e @ e) <= 1 and (near is None or t < near[0]): near = t, k
+    return near
+def split(o, d, n, inside, skip):  # Where it meets a face, its cosine, the direction refracted or None, reflected, F
+    t, k = met(o, d, skip)
+    e = faces[k][1] - faces[k][0]
+    facing = numpy.array((e[1], -e[0])) / math.hypot(*e)
+    facing = facing if facing @ d < 0 else -facing
+    c, eta = -facing @ d, 1 / n if inside else n
+    g = math.sqrt(max(eta * eta - 1 + c * c, 0))
+    f = 1 if not g else 0.5 * ((g - c) / (g + c)) ** 2 * (1 + ((c * (g + c) - 1) / (c * (g - c) + 1)) ** 2)
+    return o + t * d, k, (d + (c - g) * facing) / eta if g else None, d + 2 * c * facing, f
+o, normal = numpy.array((-3.0, 0.0)), numpy.array((1.0, 0.0))  # The d line's direct path, the strip across its exit
+for inside in (False, True): o, skip, normal, _, _ = split(o, normal, 1.5, inside, -1 if not inside else skip)
+centre, across = o + 10 * normal, numpy.array((-normal[1], normal[0])) * math.tan(math.radians(25)) * 10
+ends = centre - across, centre + across
+strip = bpy.data.meshes.new('strip')
+strip.from_pydata([(x, y, z) for x, z in ends for y in (-2, 2)], [], [(0, 1, 3, 2)])
+emitter = bpy.data.materials.new('strip')
+strip.materials.append(emitter)
+scene.collection.objects.link(bpy.data.objects.new('strip', strip))
+nodes = emitter.node_tree.nodes
+surface, coordinate = nodes['Principled BSDF'], nodes.new('ShaderNodeSeparateXYZ')
+surface.inputs['Base Color'].default_value, surface.inputs['IOR'].default_value = (0, 0, 0, 1), 1
+surface.inputs['Emission Color'].default_value = (1, 1, 1, 1)
+emitter.node_tree.links.new(nodes.new('ShaderNodeTexCoord').outputs['Generated'], coordinate.inputs[0])
+low, high = sorted(e[0] for e in ends)
+def landed(o, d, n, inside=False, w=1.0, skip=-1, depth=6):  # Every branch to the strip: its x and weight each
+    if met(o, d, skip) is None:
+        x = (o + (centre - o) @ normal / (d @ normal) * d - low)[0] / (high - low) if d @ normal > 0 else -1
+        return [(x, w)] if not inside and 0 <= x <= 1 else []
+    p, k, refracted, reflected, f = split(o, d, n, inside, skip)
+    return [] if not depth else (landed(p, refracted, n, not inside, w * (1 - f), k, depth - 1) if refracted is not None
+        else []) + landed(p, reflected, n, inside, w * f, k, depth - 1)
+text = open(os.path.join(os.path.dirname(__file__), 'shaders', 'flexkernels', 'pathtracer.cuh')).read()
+table = text.split('WAVELENGTH_WEIGHTS_0 = { {')[1].split('}')[0]  # FK's signed CIE weights, 5 nm apart from 380 nm
+lengths = numpy.linspace(0.38, 0.78, 401)
+weights = numpy.stack([numpy.interp(lengths, numpy.linspace(0.38, 0.78, 81), numpy.array([float(w.strip(' \nf'))
+    for w in table.split(',')]).reshape(81, 3)[:, c]) for c in range(3)], -1)
+heights = ((numpy.arange(32) + 0.5) / 32 - 0.5) * 0.2
+for scale in (1, 0):  # FK's IOR by wavelength, Cauchy's through the d line
+    prism.inputs['Transmission Dispersion Scale'].default_value = scale
+    n = 1.5 + 0.5 * scale / 5 / 1.90962409973144531 * (1 / lengths ** 2 - 2.89662933349609375)
+    hits = [[landed(numpy.array((-3.0, z)), numpy.array((1.0, 0.0)), k) for k in n] for z in heights]
+    expected = sum(weights[i] * x * w for row in hits for i, paths in enumerate(row) for x, w in paths) / sum(
+        weights[i] * w for row in hits for i, paths in enumerate(row) for x, w in paths)
+    seen = []
+    for linked in (True, False):
+        if linked: emitter.node_tree.links.new(coordinate.outputs['X'], surface.inputs['Emission Strength'])
+        else: emitter.node_tree.links.remove(surface.inputs['Emission Strength'].links[0])
+        surface.inputs['Emission Strength'].default_value = 1
+        seen.append(render(size=32).mean((0, 1)))
+    print('PRISM scale', scale, seen[0] / seen[1], 'expected', expected, flush=True)
+    assert numpy.allclose(seen[0] / seen[1], expected, atol=0.05 * 0.0187), ('prism', scale)  # 0.0187 of x a degree
+
 # The warm-up's renderer, which interactive Blender starts: on a fresh OptiX cache one compiles the generic module while
 # a second, finding its lock held, exits at once; the module cached, a third exits at once too
 import subprocess, tempfile
