@@ -22,10 +22,10 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON };
+    TOON, SELECT };
 // MEDIUM, CURVES, WORLD and SKY no program takes: a scene's varying media, strands, world volume and world sampled by
 // its luminance; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
-// distribution, TOON a toon lobe
+// distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third
 struct Op { Code code; float3 value; };
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -723,6 +723,8 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(MAXIMUM) --top; stack[top - 1] = max(stack[top - 1], stack[top]); break;
         CASE(LOGARITHM) --top; stack[top - 1] = logarithm(stack[top - 1], stack[top]); break;
         CASE(MULTIPLY_ADD) top -= 2; stack[top - 1] = stack[top - 1] * stack[top] + stack[top + 1]; break;
+        CASE(SELECT) top -= 2; stack[top - 1] = select(stack[top - 1] != float3(0, 0, 0), stack[top], stack[top + 1]);
+            break;
         CASE(DIVIDE) --top; stack[top - 1] = divide(stack[top - 1], stack[top]); break;
         CASE(SNAP) { --top;
             const float3 q = divide(stack[top - 1], stack[top]);
