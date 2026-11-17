@@ -104,7 +104,8 @@ OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fr
     'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
-    'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None}
+    'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
+    'DISPERSION': lambda k: k}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -429,7 +430,7 @@ def summarize(expression, table, scales):
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
         not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
-        'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET', 'TOON') or any(part[2] is None for part in parts) \
+        'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET', 'TOON', 'DISPERSION') or any(part[2] is None for part in parts) \
         else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
@@ -724,7 +725,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
     if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET',
-        'TOON') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
+        'TOON', 'DISPERSION') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
         for i, value in enumerate(operands):
@@ -747,18 +748,23 @@ def nonzero(value):  # Whether a value resolved is an expression or a constant n
     return isinstance(unanimated(value), tuple) or numpy.any(unanimated(value))
 
 def coated(a, b):  # Two surfaces of one shape: one without a coat given the other's of weight 0, so a coat mixes in by
-    # its weight, else none; one without hair, velvet or toon a mark of none. A velvet sheen and another, or two
-    # toons apart, one lobe each, refused
+    # its weight, else none; one without hair, velvet or toon a mark of none, and without dispersion the other's. A
+    # velvet sheen and another, two toons apart, one lobe each, or two dispersions apart, one wavelength, refused
     velvet = lambda x: len(x) > 21 and marks(x[21], 'VELVET')
+    dispersed = lambda x: len(x) > 23 and marks(x[23], 'DISPERSION')
     if all(len(x) > 14 and nonzero(x[14]) for x in (a, b)) and velvet(a) != velvet(b):
         raise ValueError("Flex: a material mixes a Sheen BSDF of Ashikhmin's velvet with another sheen, which Flex's "
             'one sheen lobe cannot draw')
     if all(len(x) > 22 and marks(x[22], 'TOON') for x in (a, b)) and repr(a[22]) != repr(b[22]):
         raise ValueError('Flex: a material mixes Toon BSDFs of both components or of other Size or Smooth, which '
             "Flex's one toon lobe cannot draw")
+    if all(map(dispersed, (a, b))) and repr(a[23]) != repr(b[23]):
+        raise ValueError('Flex: a material mixes Principled BSDFs of other dispersion, which the one wavelength of '
+            "Flex's paths cannot draw")
     def shaped(x, y):
-        x = [*x, *(None, 0, 0, 0)[len(x) - 19:max(len(x), len(y)) - 19]]
+        x = [*x, *(None, 0, 0, 0, 0)[len(x) - 19:max(len(x), len(y)) - 19]]
         if len(x) > 19 and not x[19] and len(y) > 19 and y[19]: x[19] = [*y[19][:9], 0]
+        if dispersed(y) and not dispersed(x): x[23] = y[23]
         return x
     return shaped(a, b), shaped(b, a)
 
@@ -1623,6 +1629,12 @@ def resolve(socket, groups=()):
         if nonzero(weight):
             value.append([get('Coat Normal'), get('Coat Tint'), 0, get('Coat Roughness'), 0, 1, get('Coat IOR'), 1, 1,
                 ('MULTIPLY', weight, alpha)])
+        # Its wavelengths spread by k = Scale / Abbe where it transmits, marked, after a coat, or none, and a hair,
+        # velvet and toon of none; none of an Abbe number of 0 or below
+        dispersion = principled and fold(('DIVIDE', between(get('Transmission Dispersion Scale'), 0, 1),
+            ('MAXIMUM', get('Transmission Dispersion Abbe Number'), 0)))
+        if nonzero(dispersion) and nonzero(get('Transmission Weight')):
+            value += [None][len(value) - 19:] + [0, 0, 0, ('DISPERSION', dispersion)]
     if hasattr(output, 'default_value') and animated(output): value = 'ANIMATED', value  # As of a value node
     if socket.type == 'VALUE' and output.type in WEIGHTS: return 'DOT_PRODUCT', value, WEIGHTS[output.type]
     if socket.type == 'SHADER' and not isinstance(value, list): value = [*BLACK[:4], value, *BLACK[5:]]  # Emits it
@@ -1807,9 +1819,9 @@ def shade(material, program, filler=False):
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
     # The base layer transmits the surface's translucent color diffusely and carries its sheen, anisotropy and hair, a
     # coat over it none; each filled by its volume's emission, its phase's asymmetry and its sheen's velvet mark
-    def tail(layer):  # Its hair, phase, velvet and toon after the glow, as far as the last there
+    def tail(layer):  # Its hair, phase, velvet, toon and dispersion after the glow, as far as the last there
         marked = [surface[20] if layer is base and len(surface) > 20 else 0, phase or 0,
-            *(surface[k] if layer is base and len(surface) > k else 0 for k in (21, 22))]
+            *(surface[k] if layer is base and len(surface) > k else 0 for k in (21, 22, 23))]
         while marked and not marked[-1]: marked.pop()
         return marked
     attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow, *tail(layer)]
@@ -2141,6 +2153,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
             # them out
+            if len(surface) == 25 and not marks(surface[24], 'DISPERSION'): surface = surface[:24]  # Its dispersion
             if len(surface) == 24 and not marks(surface[23], 'TOON'): surface = surface[:23]  # Its toon
             if len(surface) == 23 and not marks(surface[22], 'VELVET'): surface = surface[:22]  # Its velvet
             if len(surface) == 22 and not marks(surface[21], 'PHASE'): surface = surface[:21]  # Its phase's asymmetry
