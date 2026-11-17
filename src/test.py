@@ -625,9 +625,10 @@ print('SUBSURFACE furnace', furnace, flush=True)
 assert furnace <= 1.005, 'subsurface furnace'
 for ob in scene.objects: ob.hide_render = ob not in shown
 scene.camera.data.angle, floor.inputs['IOR'].default_value = math.pi / 2, 1.5
-# Every continuous lobe samples lights, including sharp glossy reflection and rough transmission below the face.
+# Light sampling where the estimated diffuse share exceeds 0.04 or roughness exceeds 0.2: metal of roughness 0.3 and
+# rough transmission below the face sample lights
 scene.camera.data.angle = 0.3
-for metallic, transparency, roughness, height in ((1, 0, 0.1, 0.5), (0, 1, 0.6, -0.5)):
+for metallic, transparency, roughness, height in ((1, 0, 0.3, 0.5), (0, 1, 0.6, -0.5)):
     floor.inputs['Metallic'].default_value, floor.inputs['Transmission Weight'].default_value = metallic, transparency
     floor.inputs['Roughness'].default_value, bpy.data.objects['dim'].location.z = roughness, height
     direct = mis_render(0, False)
@@ -636,6 +637,13 @@ for metallic, transparency, roughness, height in ((1, 0, 0.1, 0.5), (0, 1, 0.6, 
         pixels = mis_render(1, reuse)
         assert numpy.isclose(pixels.mean(), direct.mean(), rtol=0.02), \
             f'MIS continuous lobes {metallic, transparency, reuse}: {pixels.mean()} vs {direct.mean()}'
+# Metal of roughness 0.1 takes no light sample: it gathers its light by its BSDF alone, as much over all bounces as
+# light sampling gave it, 0.79955 (16 disjoint images under the former rule; 0.0001 an image)
+floor.inputs['Metallic'].default_value, floor.inputs['Transmission Weight'].default_value = 1, 0
+floor.inputs['Roughness'].default_value, bpy.data.objects['dim'].location.z = 0.1, 0.5
+assert not mis_render(0, False).any(), 'smooth metal samples no light'
+gathered = mis_render(bounces, False).mean()
+assert abs(gathered - 0.79955) < 0.0005, ('smooth metal by its BSDF', gathered)
 floor.inputs['Metallic'].default_value = floor.inputs['Transmission Weight'].default_value = 0
 floor.inputs['Roughness'].default_value, bpy.data.objects['dim'].location.z = 1, 0.5
 scene.camera.data.angle = math.pi / 2
