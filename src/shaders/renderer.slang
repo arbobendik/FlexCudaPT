@@ -1839,21 +1839,32 @@ struct Launch { Record* record; uint width, height, depth; };
 
 // The launch's raygen program at its index; a group's threads in a row for launches one high, its workgroups in rows of
 // ROW_GROUPS
+// The temporal round's count and queue in a pipeline of their own: every invocation of a workgroup, for their barriers
+void runQueue(uint3 thread, uint3 group, uint index) {
+    Scene* scene = &launch.record.scene;
+    if (launch.record.program == PASS_TEMPORAL_COUNT) restir_temporal_count(VkScene(scene), thread, index);
+    else restir_temporal_prepass(VkScene(scene), thread, index);
+}
+// The temporal round's queued shifts and reuse in a third pipeline, as run takes the passes
+void runTemporal(uint3 thread, uint3 group, uint index) {
+    const uint3 size = uint3(launch.width, launch.height, launch.depth);
+    const uint3 p = size.y == 1 && size.z == 1 ? uint3((group.y * ROW_GROUPS + group.x) * 64 + index, 0, 0) : thread;
+    Scene* scene = &launch.record.scene;
+    if (any(p >= size)) return;
+    if (launch.record.program == PASS_TEMPORAL_SHIFT) restir_temporal_shift(VkScene(scene), uint3(group.xy, 0), index);
+    else restir_temporal(VkScene(scene), thread);
+}
 void run(uint3 thread, uint3 group, uint index) {
     const uint3 size = uint3(launch.width, launch.height, launch.depth);
     const uint3 p = size.y == 1 && size.z == 1 ? uint3((group.y * ROW_GROUPS + group.x) * 64 + index, 0, 0) : thread;
     Scene* scene = &launch.record.scene;
-    // Each round's count and queue: every invocation of a workgroup, past the image too, which have no job, for their
-    // barriers
-    if (launch.record.program == PASS_TEMPORAL_COUNT) return restir_temporal_count(VkScene(scene), thread, index);
-    if (launch.record.program == PASS_TEMPORAL_PREPASS) return restir_temporal_prepass(VkScene(scene), thread, index);
+    // The spatial round's count and queue: every invocation of a workgroup, past the image too, which have no job,
+    // for their barriers
     if (launch.record.program == PASS_COUNT) return restir_count(VkScene(scene), thread, index);
     if (launch.record.program == PASS_PREPASS) return restir_prepass(VkScene(scene), thread, index);
     if (any(p >= size)) return;
     switch (launch.record.program) {
         case PASS_INITIAL: initial(p, size, scene); break;
-        case PASS_TEMPORAL_SHIFT: restir_temporal_shift(VkScene(scene), uint3(group.xy, 0), index); break;
-        case PASS_TEMPORAL: restir_temporal(VkScene(scene), thread); break;
         case PASS_SHIFT: restir_shift(VkScene(scene), uint3(group.xy, 0), index); break; // Jobs of the queue, 64 a bin
         case PASS_SPATIAL: restir_spatial(VkScene(scene), thread); break;
         case PASS_DUPLICATES: duplicates(p, size, scene); break;
@@ -1879,4 +1890,12 @@ void run(uint3 thread, uint3 group, uint index) {
 [shader("compute")] [numthreads(8, 8, 1)]
 void main(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
     fcpt.run(thread, group, index);
+}
+[shader("compute")] [numthreads(8, 8, 1)]
+void queue(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    fcpt.runQueue(thread, group, index);
+}
+[shader("compute")] [numthreads(8, 8, 1)]
+void temporal(uint3 thread : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex) {
+    fcpt.runTemporal(thread, group, index);
 }
