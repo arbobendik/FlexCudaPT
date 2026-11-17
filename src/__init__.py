@@ -1657,7 +1657,12 @@ class Flex(bpy.types.RenderEngine):
         moved = same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera, bpy.types.Object,
             bpy.types.Action)) for update in depsgraph.updates) and changed
         # Materials' values alone changed, as an animated one's by frame: the steps go anew, while they keep their shape
-        shaded = same and self.shape and len(depsgraph.updates) and not moved and all(not (update.is_updated_geometry
+        # Blender 5.3 also flags an object's geometry where only a value of its material changed: not geometry where
+        # the object has no modifiers and its data changed in its shading alone
+        data = {update.id.original: update.is_updated_geometry for update in depsgraph.updates}
+        geometric = lambda update: update.is_updated_geometry and not (isinstance(update.id, bpy.types.Object)
+            and not update.id.modifiers and data.get(getattr(update.id.data, 'original', None)) is False)
+        shaded = same and self.shape and len(depsgraph.updates) and not moved and all(not (geometric(update)
             or update.is_updated_transform or isinstance(update.id, bpy.types.Image)) for update in depsgraph.updates)
         self.visible = visible
         scene = depsgraph.scene_eval
