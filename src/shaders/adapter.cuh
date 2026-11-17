@@ -262,8 +262,9 @@ static __device__ uint4 fcptReservoirTemporal(int2 q, unsigned layer) {
     const Reservoir& r = hookScene().temporal[pixelIndex(q)];
     return make_uint4(r.seed, r.path, __float_as_uint(r.w), __float_as_uint(r.c));
 }
+// Without ReSTIR the scene holds one reservoir and the initial pass stores none
 static __device__ void fcptStoreReservoirInitial(int2 p, Reservoir r, FKHit x1) {
-    if (onImage(p)) hookScene().initial[pixelIndex(p)] = r;
+    if (onImage(p) && hookScene().settings.restir) hookScene().initial[pixelIndex(p)] = r;
 }
 static __device__ void fcptStoreReservoirTemporal(int2 p, Reservoir r, FKHit x1) {
     if (onImage(p)) hookScene().temporal[pixelIndex(p)] = r;
@@ -309,10 +310,9 @@ static __device__ int2 fcptLoadTemporalNeighbor(int2 p) {
 }
 static __device__ bool fcptRestirUsed() { return hookScene().settings.restir; }
 // The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
-static __device__ void fcptMissed(int2 p, FKDomain dom, float scale) {
-    const float3 seen = environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0}) * scale;
-    float4& sum = hookScene().accumulation[pixelIndex(p)];
-    sum = make_float4(sum.x + seen.x, sum.y + seen.y, sum.z + seen.z, sum.w);
+static __device__ float3 fcptMissed(int2 p, FKDomain dom, float scale) {
+    return environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
+        / hookScene().settings.paths;
 }
 // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
 static __device__ void fcptAddColor(int2 p, float4 color) {
