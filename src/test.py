@@ -3969,6 +3969,69 @@ def scripted():  # OSL scripts
     bpy.context.window.scene = shown
 scripted()
 
+# A Script node's ifs and loops. An if on a per-hit value chooses per channel between both branches' values by the
+# SELECT step, so a branch not taken that overflows leaves no NaN. Seen on an emitting square along its Generated X by
+# an orthographic camera, its columns give 2x and 1 - x either side of 0.5 where both branches set the same variable,
+# 3/8 and 4/8 where one does, and 1/4 below 0.5, where the other branch, exp(1000 (0.5 - x)) / 2, overflows below 0.41
+def branched():  # A Script node's ifs and loops
+    shown, chosen, was = bpy.context.window.scene, opened('branched', sky=(0, 0, 0)), preferences.device
+    chosen.flex_samples, chosen.flex_restir = 64, False  # Each pixel's own samples
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=0.5, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('branched'))
+    chosen.collection.objects.link(bpy.data.objects.new('branched', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('branched'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    x, light = nodes.new('ShaderNodeSeparateXYZ'), nodes.new('ShaderNodeEmission')
+    links.new(nodes.new('ShaderNodeTexCoord').outputs['Generated'], x.inputs[0])
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    def lit(text):  # The square's light the script's Color of its Generated X, compiled anew
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('branched.osl')
+        script.script.write('shader branched(float Fac = 0.5, output color Color = 0) {\n' + text + '}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(x.outputs['X'], script.inputs['Fac'])
+        links.new(script.outputs['Color'], light.inputs['Color'])
+    lit('    float y = 0, z = 3, w;\n    if (Fac < 0.5) y = 2 * Fac; else { y = 1 - Fac; z = 4; }\n'
+        '    if (Fac < 0.5) w = 0.25; else w = exp(1000 * (0.5 - Fac)) / 2;\n    Color = color(y, z / 8, w);\n')
+    chosen.camera = bpy.data.objects.new('branched camera', bpy.data.cameras.new('branched camera'))
+    chosen.collection.objects.link(chosen.camera)
+    chosen.camera.data.type, chosen.camera.data.ortho_scale, chosen.camera.location = 'ORTHO', 1, (0, 0, 1)
+    f = (numpy.arange(SIZE) + 0.5) / SIZE
+    due = numpy.stack((numpy.where(f < 0.5, 2 * f, 1 - f), numpy.where(f < 0.5, 3 / 8, 4 / 8)), 1)
+    left, right = numpy.r_[3:SIZE // 2 - 3], numpy.r_[SIZE // 2 + 3:SIZE - 3]  # Off the edges and the switch
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = render(chosen)[8:-8]
+        columns = seen.mean(0)
+        assert numpy.isfinite(seen).all() and numpy.allclose(seen[:, left, 2], 0.25, atol=1e-6) and numpy.allclose(
+            columns[numpy.r_[left, right], :2], due[numpy.r_[left, right]], atol=0.002), ('branched',
+            preferences.device, columns)
+    preferences.device = was
+    # Loops whose counts are known at export, unrolled, export as the same script written out, byte for byte: a for
+    # skipping a step by continue and leaving by break, a while and a do-while
+    nodes.remove(nodes['Script'])
+    lit('    float s = 0;\n    for (int i = 3; i < 10; i++) { if (i == 4) continue; if (i == 6) break; '
+        's += Fac * i; }\n    int j = 0;\n    while (j < 2) { s += Fac; j++; }\n    do { s *= Fac; } while (--j > 0);\n'
+        '    Color = s;\n')
+    piped = exported().requests.getvalue()
+    nodes.remove(nodes['Script'])
+    lit('    float s = 0;\n    s += Fac * 3; s += Fac * 5; s += Fac; s += Fac; s *= Fac; s *= Fac;\n'
+        '    Color = s;\n')
+    assert exported().requests.getvalue() == piped, 'loops as written out'
+    # A loop that builds a computation deeper than the exporter takes is refused by name: its export raises in a
+    # depsgraph handler, which Blender reports on stderr and goes on from
+    nodes.remove(nodes['Script'])
+    lit('    for (int i = 0; i < 300; i++) Color += Fac * i;\n')
+    reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
+    bpy.app.handlers.depsgraph_update_post.append(export)
+    sys.stderr = reported
+    bpy.context.view_layer.update()
+    sys.stderr = stderr
+    bpy.app.handlers.depsgraph_update_post.remove(export)
+    assert 'a computation deeper than 200 steps' in reported.getvalue(), ('deep script', reported.getvalue())
+    bpy.context.window.scene = shown
+branched()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
