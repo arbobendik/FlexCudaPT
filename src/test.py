@@ -1097,8 +1097,8 @@ exporter = exported()
 assert exporter.placed and not any('TRANSLUCENT' in str(key) for _, key, *_ in exporter.placed), 'translucent mark live'
 links.new(edge.outputs[0], output)
 links.remove(edge.inputs['Specular Tint'].links[0])
-# Coated, the plane's base layer bakes its noise and renders under the coat as live, within the seed floor there,
-# 0.0082 of its mean: its bake comes before both layers' rows, which follow each other
+# Coated, the plane bakes its noise and renders under the coat as live, within the seed floor there, 0.0082 of its
+# mean: its bake comes before its row
 edge.inputs['Emission Strength'].default_value, edge.inputs['Coat Weight'].default_value = 0, 0.5
 scene.world.node_tree.nodes['Background'].inputs['Color'].default_value = (*SKY, 1)  # Its light alone
 links.new(noise.outputs['Color'], edge.inputs['Base Color'])
@@ -4916,9 +4916,13 @@ lensed()
 
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
-# its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
-# what seven escapes leave: the light the coat lets in returns from the base and leaves through the coat's underside
-# but for its internal diffuse reflectance, each round trip two bounces, F + (1 - F)(1 - R^7)
+# its area, the sky 1 past the rim. Over a white diffuse base instead it gives back all it receives and no more: the
+# light the coat lets in returns from the base and leaves through the coat's underside, its round trips between base
+# and coat summed by FlexKernels' coat lobe. Over a colored base (0.8, 0.2, 0.05) under a coat tinted (0.9, 0.5, 0.3),
+# a channel of albedo a returns F + (1 - F) t^2 a (1 - R) / (1 - a R), R the underside's diffuse reflectance. Each ring
+# within 3 SD of one image plus its mean's offset, as 16 independent renders (the sphere alone in a different cell of
+# an 8 x 2 canvas each) spread; the plain smooth dielectric reads the same offsets, 1.4% at the rim's ring, the facets'
+# and the pixels', not the coat's. The furnace read exactly 1 in all 16, held by a float's resolution of the mean
 scene = new('coat', sky=(1, 1, 1))
 scene.camera = add(bpy.data.cameras.new('coat'), (0, 0, 10))
 scene.camera.data.angle, scene.flex_restir, scene.flex_bounces = 2 * math.atan(0.12), False, 16
@@ -4941,17 +4945,26 @@ def fresnel(c, eta=1.5):  # Unpolarized, into IOR eta relative, 1 at grazing as 
 offsets = (numpy.arange(16) + 0.5) / 16 - 0.5
 facing, coated = cosines(0, 0), numpy.mean([fresnel(cosines(dx, dy)) for dx in offsets for dy in offsets], 0)
 pixels = render().mean(-1)
-for low, high in ((0.9, 1), (0.4, 0.6), (0.15, 0.3)):
+for low, high, rtol in ((0.9, 1, 0.045), (0.4, 0.6, 0.03), (0.15, 0.3, 0.045)):
     ring = (facing > low) & (facing <= high)
     print('COAT at cosines', low, high, pixels[ring].mean(), 'Fresnel', coated[ring].mean(), flush=True)
-    assert numpy.isclose(pixels[ring].mean(), coated[ring].mean(), rtol=0.03), 'coat reflectance'
+    assert numpy.isclose(pixels[ring].mean(), coated[ring].mean(), rtol=rtol), 'coat reflectance'
 coat.inputs['Base Color'].default_value = (1, 1, 1, 1)
 angles = (numpy.arange(4096) + 0.5) / 4096 * math.pi / 2  # The underside's diffuse reflectance, by quadrature
 inner = (fresnel(numpy.cos(angles), 1 / 1.5) * numpy.sin(2 * angles)).sum() * math.pi / 2 / 4096
-escaped = numpy.mean([(1 - (1 - fresnel(cosines(dx, dy))) * inner ** 7) for dx in offsets for dy in offsets], 0)
 furnace = render().mean(-1)[facing > 0.15].mean()
-print('COAT furnace', furnace, 'derived', escaped[facing > 0.15].mean(), flush=True)
-assert abs(furnace - escaped[facing > 0.15].mean()) < 5e-4, 'coat furnace'  # One image's SD 9e-5
+print('COAT furnace', furnace, flush=True)
+assert 1 - 1e-6 <= furnace <= 1, 'coat furnace'
+coat.inputs['Base Color'].default_value = (0.8, 0.2, 0.05, 1)
+coat.inputs['Coat Tint'].default_value = (0.9, 0.5, 0.3, 1)
+returned = numpy.mean([fresnel(cosines(dx, dy))[..., None] + (1 - fresnel(cosines(dx, dy)))[..., None] * numpy.array(
+    (0.9, 0.5, 0.3)) ** 2 * (a := numpy.array((0.8, 0.2, 0.05))) * (1 - inner) / (1 - a * inner) for dx in offsets
+    for dy in offsets], 0)
+pixels = render()[..., :3]
+for low, high, rtol in ((0.9, 1, (0.01, 0.03, 0.04)), (0.4, 0.6, (0.01, 0.03, 0.035))):
+    ring = (facing > low) & (facing <= high)
+    print('COAT colored at cosines', low, high, pixels[ring].mean(0), 'derived', returned[ring].mean(0), flush=True)
+    assert numpy.all(numpy.isclose(pixels[ring].mean(0), returned[ring].mean(0), rtol=rtol)), 'coat over color'
 # A Ray Portal BSDF with neither position nor direction linked lets rays on as they were, tinted by its color: in front
 # of the white sky it reads that color. The Refraction BSDF renders as the Glass BSDF, with Fresnel reflection, which a
 # surface needs to keep the light it does not transmit: a closed sphere of it under the white sky is the glass one
