@@ -98,6 +98,8 @@ static __device__ __forceinline__ bool fcptDispersionUsed() { return used(DISPER
 // Whether the walk shades a light sample's emitter only once its shadow ray lets light through: on OptiX, where many
 // emitters each shaded before the test cost more than the test's branch
 static __device__ __forceinline__ constexpr bool fcptShadowFirst() { return true; }
+// Whether the world reads Light Path, so that a sky sample asks it as each lobe's ray at the next depth sees it
+static __device__ __forceinline__ bool fcptWorldReadsPath() { return used(WORLD_PATH); }
 // A hair fiber's scattering, as the renderer's walk takes it: of its fiber along hair by its level, its color and the
 // specular tint, which are all the hair's BSDF reads of a surface
 static __device__ SampleBSDF fcptConnectHair(float3 hair, float3 albedo, float3 tint, float3 in_dir, float3 out_dir) {
