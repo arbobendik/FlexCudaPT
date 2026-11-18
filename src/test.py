@@ -3209,6 +3209,40 @@ def sheen_path():  # Light Path on a sheen bounce
     preferences.device = device
 sheen_path()
 
+# A world reading Light Path lights a glossy sphere alike through its sampled sky and its escaping rays: a white sky of
+# strength 1 to diffuse rays and 0.5 to every other, over a white dielectric sphere of roughness 0.4 and IOR 1.5 seen
+# whole by an orthographic camera, its disk's mean with Sample World Light within 1% of the mean without, on both
+# backends; a sky sample asked the world as the camera sees it lit the diffuse lobe at the camera's 0.5, not 1
+def world_by_lobe():  # A sampled sky's world per lobe
+    lit = new('world by lobe', sky=(1, 1, 1))
+    lit.flex_samples, lit.flex_restir = 256, False
+    lit.camera = bpy.data.objects.new('world by lobe', bpy.data.cameras.new('world by lobe'))
+    lit.camera.location, lit.camera.data.type, lit.camera.data.ortho_scale = (0, 0, 3), 'ORTHO', 1
+    lit.collection.objects.link(lit.camera)
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=64, v_segments=32, radius=0.4)
+    bm.to_mesh(mesh := bpy.data.meshes.new('world by lobe')), bm.free()
+    mesh.shade_smooth()
+    mesh.materials.append(glossy := bpy.data.materials.new('world by lobe'))
+    bsdf = glossy.node_tree.nodes['Principled BSDF']
+    bsdf.inputs['Base Color'].default_value, bsdf.inputs['Roughness'].default_value = (1, 1, 1, 1), 0.4
+    bsdf.inputs['IOR'].default_value = 1.5
+    lit.collection.objects.link(bpy.data.objects.new('world by lobe', mesh))
+    nodes, links = lit.world.node_tree.nodes, lit.world.node_tree.links
+    half = nodes.new('ShaderNodeMath')
+    half.operation, half.inputs[1].default_value, half.inputs[2].default_value = 'MULTIPLY_ADD', 0.5, 0.5
+    links.new(nodes.new('ShaderNodeLightPath').outputs['Is Diffuse Ray'], half.inputs[0])
+    links.new(half.outputs[0], nodes['Background'].inputs['Strength'])
+    x, y = numpy.meshgrid(numpy.arange(SIZE) + 0.5, numpy.arange(SIZE) + 0.5)
+    disk = numpy.hypot(x - SIZE / 2, y - SIZE / 2) < 0.35 * SIZE  # Inside the sphere's silhouette of radius 0.4
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        means = []
+        for lit.world.flex_sample_light in (True, False):
+            means.append(render(lit).mean(2)[disk].mean())
+        assert abs(means[0] / means[1] - 1) < 0.01, ('world by lobe', preferences.device, means)
+    preferences.device = device
+world_by_lobe()
+
 # Rough metal under the white sky gives back what its microfacets lose between them, at most what it receives: a unit
 # sphere of white or coloured metal seen from 10 away, its pixels of view cosine above 0.15, reads at most 1 and at
 # least the least directional albedo any view of it has (by quadrature of FlexKernels' measured E and its shipped
