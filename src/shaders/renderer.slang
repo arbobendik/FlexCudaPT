@@ -1538,6 +1538,8 @@ struct VkScene : IScene {
     void storeTemporalNeighbor(int2 p, int2 q) {
         if (onImage(p)) scene.shifts[3 * index(p) + 2].f.x = asfloat(q.x < 0 ? -1 : int(index(q)));
     }
+    // Vulkan's temporal round queued, its passes in pipelines of their own
+    bool temporalQueued() { return true; }
     int2 loadTemporalNeighbor(int2 p) {
         const int q = asint(scene.shifts[3 * index(p) + 2].f.x);
         return q < 0 ? int2(-1) : int2(q % int(scene.width), q / int(scene.width));
