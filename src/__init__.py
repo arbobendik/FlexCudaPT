@@ -610,12 +610,14 @@ def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linea
         memo[id(expression)] = numpy.broadcast_to(numpy.asarray(value, 'f8'), (len(uv), 3))
     return memo[id(expression)]
 
-def strays(expression, low, span, size, cache):  # Whether a bake of size texels over the domain, read back linearly,
-    q = numpy.random.default_rng(0).random((64, 2)) * size - 0.5  # strays past BAKE_TOLERANCE from shading live, at
-    points = [numpy.floor(q) + (k % 2, k // 2) + 0.5 for k in range(4)] + [q + 0.5]  # 64 points: around each the
-    c = shaded(expression, low + numpy.concatenate(points) / size * span, cache, {}).reshape(5, 64, 3)  # texels baked
-    x, y = (q - numpy.floor(q)).T[..., None]
-    return (abs((c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y - c[4]) > BAKE_TOLERANCE).any()
+def strays(expression, low, span, sizes, cache):  # Per size of texels a bake over the domain may take, whether it,
+    qs = [numpy.random.default_rng(0).random((64, 2)) * size - 0.5 for size in sizes]  # read back linearly, strays
+    points = [low + numpy.concatenate([numpy.floor(q) + (k % 2, k // 2) + 0.5 for k in range(4)] + [q + 0.5]) / size
+        * span for q, size in zip(qs, sizes)]  # past BAKE_TOLERANCE from shading live, at 64 points: around each the
+    c = shaded(expression, numpy.concatenate(points), cache, {}).reshape(len(sizes), 5, 64, 3)  # texels baked; of all
+    xys = [(q - numpy.floor(q)).T[..., None] for q in qs]  # sizes in one evaluation
+    return [(abs((c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y - c[4]) > BAKE_TOLERANCE)
+        .any() for c, (x, y) in zip(c, xys)]
 
 def image_lattice(expression, cache):  # Of a unit of the UV alone, what uv_domain() takes of it whatever its UVs:
     # whether it has noise, and of the image lattice its reads share its origin and step in the UV, texels a UV and
@@ -649,10 +651,13 @@ def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone:
     else:
         low = -o / s + numpy.floor((low + o / s) * base) / base  # The corner of a texel at or below its UVs
         span = numpy.ones(2) if repeat else numpy.ceil((uvs.max(0) - low) * base).clip(1) / base
+    sized = lambda k: numpy.ceil(span * base * (k or 0) - 1e-6).astype(int)
+    tried = [] if noise or key in cache else [k for k in range(1, 9, 2) if not (sized(k) > 4096).any()]
+    stray = dict(zip(tried, strays(expression, low, span, [*map(sized, tried)], cache) if tried else []))
     for k in [cache[key]] if key in cache else range(1, 9, 2):
-        size = numpy.ceil(span * base * (k or 0) - 1e-6).astype(int)
+        size = sized(k)
         if not k or (size > 4096).any(): return None
-        if noise or key in cache or not strays(expression, low, span, size, cache):
+        if noise or key in cache or not stray[k]:
             return cache.setdefault(key, k) and (numpy.r_[cache.setdefault((key, 'low'), low) if repeat else low, 0],
                 numpy.r_[span, 1], size, repeat)  # Repeating, at the first object's corner, as it was baked there
     cache[key] = None
