@@ -435,78 +435,85 @@ static __device__ Random Random_x24init_0(uint state_0, float value_0)
     return _S94;
 }
 
-__device__ Random pcg(uint state_1)
+static __device__ float random_0(uint * state_1)
 {
-    uint _S95 = hash(state_1);
-    float value_1 = float(_S95 >> int(8)) * 5.9604644775390625e-08f;
-    return Random_x24init_0(_S95, value_1);
+    uint _S95 = hash(*state_1);
+    *state_1 = _S95;
+    return float((*state_1) >> int(8)) * 5.9604644775390625e-08f;
+}
+
+__device__ Random pcg(uint state_2)
+{
+    uint _S96 = state_2;
+    float value_1 = random_0(&_S96);
+    return Random_x24init_0(_S96, value_1);
 }
 
 __device__ uint2  noiseOffset(uint k_2)
 {
-    uint2  _S96 = make_uint2 (k_2 * 3242174889U, k_2 * 2447445414U) >> make_uint2 (16U);
-    uint _S97 = (fkBlueNoiseSize());
-    return (_S96 * make_uint2 (_S97)) >> make_uint2 (16U);
+    uint2  _S97 = make_uint2 (k_2 * 3242174889U, k_2 * 2447445414U) >> make_uint2 (16U);
+    uint _S98 = (fkBlueNoiseSize());
+    return (_S97 * make_uint2 (_S98)) >> make_uint2 (16U);
 }
 
 __device__ uint noiseOrigin(uint2  p_0, uint k_3)
 {
-    uint _S98 = ((p_0.x) >> 11U) | (((p_0.y) >> 11U) << 4U);
-    uint2  _S99 = noiseOffset(8192U + (k_3 >> 10U) + (_S98 << 20U));
-    uint2  _S100 = (p_0 + _S99) & make_uint2 (2047U);
-    return ((_S100.x) | ((_S100.y) << 11U)) | ((k_3 & 1023U) << 22U);
+    uint _S99 = ((p_0.x) >> 11U) | (((p_0.y) >> 11U) << 4U);
+    uint2  _S100 = noiseOffset(8192U + (k_3 >> 10U) + (_S99 << 20U));
+    uint2  _S101 = (p_0 + _S100) & make_uint2 (2047U);
+    return ((_S101.x) | ((_S101.y) << 11U)) | ((k_3 & 1023U) << 22U);
 }
 
 __device__ uint noiseAddress(uint origin_0, uint bounce_0)
 {
-    uint2  _S101 = make_uint2 (origin_0 & 2047U, (origin_0 >> 11U) & 2047U);
-    uint2  _S102 = noiseOffset(64U + bounce_0 * 17U);
-    uint2  _S103 = (_S101 + _S102) & make_uint2 (2047U);
-    return ((_S103.x) | ((_S103.y) << 11U)) | ((origin_0 >> 22U) << 22U);
+    uint2  _S102 = make_uint2 (origin_0 & 2047U, (origin_0 >> 11U) & 2047U);
+    uint2  _S103 = noiseOffset(64U + bounce_0 * 17U);
+    uint2  _S104 = (_S102 + _S103) & make_uint2 (2047U);
+    return ((_S104.x) | ((_S104.y) << 11U)) | ((origin_0 >> 22U) << 22U);
 }
 
 __device__ __noinline__ Random draw(uint address_0, uint variable_0)
 {
-    uint _S104 = address_0 >> 22U;
-    uint _S105 = _S104 / 32U;
-    uint2  _S106 = make_uint2 (address_0 & 2047U, (address_0 >> 11U) & 2047U);
-    uint _S107 = variable_0 & 2147483647U;
-    uint2  _S108 = noiseOffset(_S107);
-    uint2  _S109 = _S106 + _S108;
-    uint2  _S110 = noiseOffset(4096U + _S105);
-    uint2  _S111 = _S109 + _S110;
-    uint _S112 = (fkBlueNoiseSize());
-    uint2  _S113 = _S111 & make_uint2 (_S112 - 1U);
-    uint _S114 = (fkBlueNoise((_S113.x), (_S113.y), ((_S104 + ((_S105 * 2654435769U) >> 27U)) % 32U)));
-    bool _S115 = (variable_0 & 2147483648U) != 0U;
-    uint _S116 = stream(address_0, _S107);
-    Random _S117 = pcg(_S116);
-    float _S118;
-    if(_S114 == 4294967295U)
+    uint _S105 = address_0 >> 22U;
+    uint _S106 = _S105 / 32U;
+    uint2  _S107 = make_uint2 (address_0 & 2047U, (address_0 >> 11U) & 2047U);
+    uint _S108 = variable_0 & 2147483647U;
+    uint2  _S109 = noiseOffset(_S108);
+    uint2  _S110 = _S107 + _S109;
+    uint2  _S111 = noiseOffset(4096U + _S106);
+    uint2  _S112 = _S110 + _S111;
+    uint _S113 = (fkBlueNoiseSize());
+    uint2  _S114 = _S112 & make_uint2 (_S113 - 1U);
+    uint _S115 = (fkBlueNoise((_S114.x), (_S114.y), ((_S105 + ((_S106 * 2654435769U) >> 27U)) % 32U)));
+    bool _S116 = (variable_0 & 2147483648U) != 0U;
+    uint _S117 = stream(address_0, _S108);
+    Random _S118 = pcg(_S117);
+    float _S119;
+    if(_S115 == 4294967295U)
     {
-        if(_S115)
+        if(_S116)
         {
-            Random _S119 = pcg(_S117.state);
-            _S118 = _S119.value;
+            Random _S120 = pcg(_S118.state);
+            _S119 = _S120.value;
         }
         else
         {
-            _S118 = _S117.value;
+            _S119 = _S118.value;
         }
     }
     else
     {
-        uint _S120;
-        if(_S115)
+        uint _S121;
+        if(_S116)
         {
-            _S120 = _S114 >> 16U;
+            _S121 = _S115 >> 16U;
         }
         else
         {
-            _S120 = _S114 & 65535U;
+            _S121 = _S115 & 65535U;
         }
-        _S118 = (float(_S120) + 0.5f) / 6.5536e+04f;
+        _S119 = (float(_S121) + 0.5f) / 6.5536e+04f;
     }
-    return Random_x24init_0(address_0, _S118);
+    return Random_x24init_0(address_0, _S119);
 }
 
