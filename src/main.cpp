@@ -291,7 +291,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             kind == SCENE ? loadSteps(scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
                 : updateSteps(scene, loaded);
             Params next{};
-            for (const Op& op : loaded.ops) next.ops[op.code >> 6] |= 1ull << (op.code & 63);
+            for (const Op& op : loaded.ops) next.ops[(op.code & CODE) >> 6] |= 1ull << (op.code & 63);
             const bool another = !special || std::memcmp(&next, &special->params, sizeof(next));
             Tier* last = nullptr; // The last op set's stand-in: dropped once replaced
             bool early = false; // Its module compiled at once, as Vulkan's: its pipeline linked as the rest loads
