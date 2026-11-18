@@ -44,6 +44,7 @@ constexpr unsigned LOBE_REFRACT = 1u;
 constexpr unsigned LOBE_REFLECT = 2u;
 constexpr unsigned LOBE_NONE = 3u;
 constexpr unsigned LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
+constexpr unsigned LOBE_COAT = 5u;  // The coat's, a glossy reflection
 constexpr unsigned LOBE_TOON = 6u;  // The toon lobe, which Light Path reads as a diffuse reflection
 constexpr float BIAS = 0.0000152587890625f;
 // Share of a ray cone's width a mip level covers, 2^-1.5
@@ -56,9 +57,9 @@ __device__ float lightPath(const Ray& ray, int output) {
         case 0: return ray.camera;
         case 1: return ray.shadow;
         case 2: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET || ray.lobe == LOBE_TOON;
-        case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT;
+        case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_COAT;
         case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET
-            || ray.lobe == LOBE_TOON;
+            || ray.lobe == LOBE_TOON || ray.lobe == LOBE_COAT;
         case 6: return ray.lobe == LOBE_REFRACT;
         case 8: return ray.length;
         default: return ray.depth;
@@ -946,6 +947,7 @@ template <bool HOT = false> __device__ SHADE_INLINE Surface shade(const Scene& s
         CASE(VELVET) break;
         CASE(TOON) break;
         CASE(DISPERSION) break;
+        CASE(COAT) break;
         CASE(HAIR) top[-1] = op_HAIR(x, top[-1]); break;
         CASE(UV) *top++ = op_UV(x); break;
         CASE(GENERATED) *top++ = op_GENERATED(x); break;
@@ -1031,7 +1033,10 @@ template <bool HOT = false> __device__ SHADE_INLINE Surface shade(const Scene& s
         used(HAIR) && top - stack > 20 ? stack[20] : make_float3(0, 0, 0),
         used(PHASE) && top - stack > 21 ? stack[21].x : 0, used(VELVET) && top - stack > 22 ? stack[22].x : 0,
         used(TOON) && top - stack > 23 ? stack[23] : make_float3(0, 0, 0),
-        used(DISPERSION) && top - stack > 24 ? stack[24].x : 0};
+        used(DISPERSION) && top - stack > 24 ? stack[24].x : 0,
+        used(COAT) && top - stack > 27 ? stack[25] : make_float3(0, 0.03f, 1.5f),
+        used(COAT) && top - stack > 27 ? stack[26] : make_float3(1, 1, 1),
+        used(COAT) && top - stack > 27 ? stack[27] : make_float3(0, 0, 0)};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -1531,7 +1536,11 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
                 .transmission = surface.transparency, .ior = surface.ior,
                 .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
                 .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
+                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0),
+                .coat = used(COAT) ? surface.coat.x : 0, .coat_roughness = used(COAT) ? surface.coat.y : 0.03f,
+                .coat_ior = used(COAT) ? surface.coat.z : 1.5f,
+                .coat_tint = used(COAT) ? surface.coat_tint : make_float3(1, 1, 1),
+                .coat_normal = used(COAT) ? surface.coat_normal : make_float3(0, 0, 0)}, surface.coverage);
             if (layer == 0 && encloses(scene, surface, hit.instance)) {
                 const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
                 medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,

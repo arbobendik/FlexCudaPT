@@ -27,13 +27,14 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH, TRIANGLE, NOISE_EXTRA };
+    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH, TRIANGLE, NOISE_EXTRA, COAT };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen
 // of the Sheen BSDF's Ashikhmin distribution, TOON a toon lobe; SELECT, per channel, the second value where the first
 // is not 0, else the third; DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes,
 // a world that reads Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges; NOISE_EXTRA
-// periodic gradient, simplex or sparse convolution noise
+// periodic gradient, simplex or sparse convolution noise;
+// COAT a coat's weight, roughness and IOR, its tint and normal following
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 constexpr unsigned CODE = 255, IMMEDIATE = 1u << 31, LEFT = 1u << 30;
@@ -59,17 +60,19 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
     float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase, velvet; float3 toon;
-    float dispersion;
+    float dispersion; float3 coat, coat_tint, coat_normal;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
 // will read, the color of Blender's Translucent BSDF, the color and roughness of its sheen, and its anisotropy, the
 // anisotropy's rotation and the hit's tangent, which change nothing by default; whether the sheen is velvet; its toon;
-// and its dispersion, k = Scale / Abbe, none at 0
+// its dispersion, k = Scale / Abbe, none at 0; and its coat's weight, none at 0, roughness, IOR, tint and normal, the
+// shading normal at 0
 struct BSDFMaterial {
     float3 albedo, emissive; float roughness, metallic, transmission, ior; float3 absorption, specular_tint{1, 1, 1};
     float specular_level = 1; float3 translucent{0, 0, 0}, sheen{0, 0, 0}; float sheen_roughness = 0.5f;
     float anisotropy = 0, anisotropic_rotation = 0; float3 tangent{0, 0, 0}; float velvet = 0; float3 toon{0, 0, 0};
-    float dispersion = 0;
+    float dispersion = 0, coat = 0, coat_roughness = 0.03f, coat_ior = 1.5f; float3 coat_tint{1, 1, 1},
+    coat_normal{0, 0, 0};
 };
 // Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
 // The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point; bit 1
