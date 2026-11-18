@@ -25,6 +25,12 @@ FROM, FIRST, KEEP = 1 << 29, 1 << 28, 1 << 27
 LEVELS = numpy.arange(256, dtype='u1')
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 MODIFIED = os.path.getmtime(__file__)
+# numpy.resize(x, 3), at a fraction of its cost: a scalar or vector repeated or cut to three values of its type
+TRIPLES_AT = {1: numpy.zeros(3, int), 2: numpy.array((0, 1, 0)), 3: numpy.arange(3)}
+def triple(x):
+    a = x.ravel() if type(x) is numpy.ndarray else numpy.asarray(x).ravel()
+    return a[TRIPLES_AT[a.size]] if a.size in TRIPLES_AT else a[:3].copy() if a.size else numpy.zeros(3, a.dtype)
+
 def logarithm(a, b):  # Of a to the base b, zero where undefined as Blender's
     with numpy.errstate(all='ignore'):
         return numpy.where((a > 0) & (b > 0) & (b != 1), numpy.log(a) / numpy.log(b), 0)
@@ -41,7 +47,7 @@ def power(a, b):  # Of a to the power of b, zero where undefined as Blender's on
         return numpy.where(b == 0, 1, numpy.where((a == 0) | (a < 0) & (b != numpy.trunc(b)), 0, numpy.power(a, b)))
 
 def to_hsv(c):  # RGB to HSV, as Cycles', of a color or rows of them
-    c = numpy.asarray(c); c = numpy.resize(c, 3) if c.ndim < 2 else c
+    c = numpy.asarray(c); c = triple(c) if c.ndim < 2 else c
     high, delta = c.max(-1), numpy.ptp(c, -1)
     with numpy.errstate(all='ignore'):
         d = (high[..., None] - c) / delta[..., None]
@@ -51,7 +57,7 @@ def to_hsv(c):  # RGB to HSV, as Cycles', of a color or rows of them
         return numpy.stack((numpy.where(gray, 0, h + (h < 0)), numpy.where(gray, 0, delta / high), high), -1)
 
 def from_hsv(c):  # HSV to RGB, as Cycles', of a color or rows of them
-    c = numpy.asarray(c); h, s, v = (numpy.resize(c, 3) if c.ndim < 2 else c).T
+    c = numpy.asarray(c); h, s, v = (triple(c) if c.ndim < 2 else c).T
     i, f = numpy.divmod(numpy.where(h == 1, 0, 6 * h), 1)
     p, q, t = v * (1 - s), v * (1 - s * f), v * (1 - s * (1 - f))
     rows = numpy.stack(((v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)))
@@ -59,7 +65,7 @@ def from_hsv(c):  # HSV to RGB, as Cycles', of a color or rows of them
         None], 0)[0]).T
 
 def to_hsl(c):  # RGB to HSL, as Cycles'
-    c = numpy.resize(c, 3)
+    c = triple(c)
     high, low = max(c), min(c)
     l, delta = min(1, (high + low) / 2), high - low
     if not delta: return numpy.array((0, 0, l))
@@ -68,20 +74,20 @@ def to_hsl(c):  # RGB to HSL, as Cycles'
     return numpy.array((h / 6, delta / (2 - high - low) if l > 0.5 else delta / (high + low), l))
 
 def from_hsl(c):  # HSL to RGB, as Cycles'
-    h, s, l = numpy.resize(c, 3)
+    h, s, l = triple(c)
     n = numpy.clip((abs(h * 6 - 3) - 1, 2 - abs(h * 6 - 2), 2 - abs(h * 6 - 4)), 0, 1)
     return (n - 0.5) * (1 - abs(2 * l - 1)) * s + l
 
 # Image coordinates (u, v) of a direction, as Cycles'; with rows, v sky()'s row instead, row k of 129 at elevation
 # fraction e = 2 v - 1, clamped at the horizon: e = (k / 128)^3 => k = 128 max(e, 0)^(1/3), at (k + 0.5) / 129
 def equirectangular(d, rows=0):
-    d = numpy.resize(d, 3)
+    d = triple(d)
     v = 0.5 + math.atan2(d[2], math.hypot(*d[:2])) / math.pi
-    v = (0.5 + 128 * max(2 * v - 1, 0) ** (1 / 3)) / 129 if numpy.resize(rows, 3)[0] else v
+    v = (0.5 + 128 * max(2 * v - 1, 0) ** (1 / 3)) / 129 if triple(rows)[0] else v
     return numpy.array((0.5 - math.atan2(d[1], d[0]) / (2 * math.pi), v, 0))
 
 def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cycles'
-    d = numpy.resize(d, 3)
+    d = triple(d)
     d = d / (numpy.linalg.norm(d) or 1) - (0, 1, 0)
     d = d / (2 * math.sqrt(max(-0.5 * d[1], 0)) or 1)
     return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
@@ -90,7 +96,7 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
 # emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD, SKY and PANORAMA steps past every
 # program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of one
 # with strands, of one whose world has a volume, of one whose world it samples by its luminance and of a panoramic camera
-OPS = {'END': lambda *surface: numpy.sum(numpy.resize(surface[4], 3)), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
+OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
     'MULTIPLY_ADD': lambda a, b, c: a * b + c, **dict.fromkeys(('IMAGE_LINEAR', 'ALPHA_LINEAR')),
@@ -345,7 +351,7 @@ def expression_key(expression, memo=None, table=None):
         return memo[id(expression)][1]
     if isinstance(expression, ImageRead): return expression.key
     if isinstance(expression, (int, float, numpy.number, numpy.ndarray)):
-        return tuple(numpy.resize(expression, 3).astype('f'))
+        return tuple(triple(expression).astype('f'))
     return original(expression) if isinstance(expression, bpy.types.Node) else expression
 
 class ImageRead:  # Samples Cycles can merge share whether their alpha is read
@@ -379,7 +385,7 @@ def jacobian(expression, input, around=0.5):
     values = [fold(mapped(expression, at(numpy.full(3, around) + 1e-3 * step), {}))
         for step in (*numpy.eye(3), numpy.zeros(3))]
     if any(isinstance(value, tuple) for value in values): return math.inf
-    return max(numpy.linalg.norm(numpy.resize(value, 3) - numpy.resize(values[3], 3)) for value in values[:3]) * 1e3
+    return max(numpy.linalg.norm(triple(value) - triple(values[3])) for value in values[:3]) * 1e3
 
 # Largest change of a point input per unit of its triangles' UVs, its corners' values as values and theirs as uvs: of
 # its derivative along the UVs, by its Frobenius norm, the 90th percentile over the triangles that have area in UV,
@@ -443,7 +449,7 @@ def summarize(expression, table, scales):
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
     need = max([0, *(part[4] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
     if scales and name == 'NOISE':
-        detail, roughness, lacunarity = (0, 1, 1) if isinstance(operands[1], tuple) else numpy.resize(operands[1], 3)
+        detail, roughness, lacunarity = (0, 1, 1) if isinstance(operands[1], tuple) else triple(operands[1])
         rate = roughness * lacunarity if 'BUMP' in scales else roughness  # Under a bump of its gradient, at twice the
         octaves = detail if rate >= 1 else min(detail, math.log(1 / 256) / math.log(max(rate, 1e-3)))  # samples
         need = math.inf if isinstance(operands[1], tuple) else max(need, (16 if 'BUMP' in scales else 8) * lacunarity
@@ -453,9 +459,9 @@ def summarize(expression, table, scales):
 
 def channel(expression, k):  # Of an expression, its kth channel when constant whatever its parts that vary: a product
     # with a constant zero there zero, sums of such and constants summed; None otherwise
-    if not isinstance(expression, tuple): return float(numpy.resize(expression, 3)[k])
+    if not isinstance(expression, tuple): return float(triple(expression)[k])
     name, *operands = expression
-    if name == 'MULTIPLY' and any(not isinstance(o, tuple) and numpy.resize(o, 3)[k] == 0 for o in operands): return 0.0
+    if name == 'MULTIPLY' and any(not isinstance(o, tuple) and triple(o)[k] == 0 for o in operands): return 0.0
     parts = [channel(o, k) for o in operands] if name in ('ADD', 'MULTIPLY') else [None]
     return None if None in parts else sum(parts) if name == 'ADD' else parts[0] * parts[1]
 
@@ -473,7 +479,7 @@ def image_texels(node):  # Of an image read in a medium, texels its texels' valu
     return numpy.concatenate((texels, numpy.zeros((1, 4)))) if getattr(node, 'extension', '') == 'CLIP' else texels
 def bounds(expression, boxes, memo):
     if not isinstance(expression, tuple):
-        value = numpy.resize(numpy.asarray(expression, 'd'), 3)
+        value = triple(numpy.asarray(expression, 'd'))
         return value, value
     if id(expression) in memo: return memo[id(expression)]
     name, *operands = expression
@@ -580,7 +586,7 @@ def texels_of(source, cache):  # An image's or table's texels as the export hold
 
 ROWS = ('RGB_TO_HSV', 'HSV_TO_RGB', 'RGB_TO_HSL', 'HSL_TO_RGB', 'EQUIRECTANGULAR', 'MIRROR_BALL')  # Steps of one vector
 def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linear reads of the UV at rows of UVs
-    if not isinstance(expression, tuple): return numpy.broadcast_to(numpy.resize(expression, 3), (len(uv), 3))
+    if not isinstance(expression, tuple): return numpy.broadcast_to(triple(expression), (len(uv), 3))
     if id(expression) not in memo:
         name, *operands = expression
         if name == 'UV': value = numpy.column_stack((uv, numpy.zeros(len(uv))))
@@ -700,7 +706,7 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
     keys = {} if keys is None else keys
     if isinstance(expression, list): expression = 'END', *expression
     if not isinstance(expression, tuple):
-        ops.append((1, *numpy.resize(expression, 3).astype('f').view('I')))
+        ops.append((1, *triple(expression).astype('f').view('I')))
         return expression
     name, *operands = expression
     key = shift, expression_key(expression, keys)
@@ -730,10 +736,10 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
         else shift, keys) for k, operand in enumerate(operands)]
     code = [*OPS].index(name) | (own is not None) * (IMMEDIATE | LEFT * (own == 0)) | (kept is not None) * (FROM
         | FIRST * (kept == 0))
-    ops.append((code, *(payload[:3] if own is None else numpy.resize(operands[own], 3).astype('f').view('I')))
+    ops.append((code, *(payload[:3] if own is None else triple(operands[own]).astype('f').view('I')))
         + (() if kept is None else (held[kept], None)))
     if name == 'LIGHT_PATH': return float(values[0] >= 8)  # Of no ray, length and depth one, as light sampling shades
-    value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
+    value = OPS[name](*values) if OPS[name] else triple(payload[3][3:] if 'ALPHA' in name else payload[3][:3])
     if slots is None: uses[key] = [1, value]
     elif name != 'SHIFT' and uses[key][0] > 1:
         slots[key] = len(slots)
@@ -751,7 +757,7 @@ def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
     if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET',
         'TOON', 'DISPERSION') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
-        return OPS[name](*(numpy.resize(operand, 3) for operand in operands))
+        return OPS[name](*(triple(operand) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
         for i, value in enumerate(operands):
             if isinstance(value, tuple): continue
@@ -1230,7 +1236,7 @@ def curves(node, inputs, index):  # Of an RGB, vector or float curves node, each
     factor, value = inputs
     if node.type == 'CURVE_FLOAT' and not any(isinstance(fold(v), tuple) for v in inputs):
         rebuilt(node.mapping)
-        looked = node.mapping.evaluate(node.mapping.curves[0], float(numpy.resize(fold(value), 3)[0]))
+        looked = node.mapping.evaluate(node.mapping.curves[0], float(triple(fold(value))[0]))
         return mix(value, between(looked, node.mapping.clip_min_y, node.mapping.clip_max_y)
             if node.mapping.use_clip else looked, factor)
     low, high = span(node)
@@ -1420,7 +1426,7 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
         if kind == 'param' and name in given: values[name] = given[name]
         elif kind != 'global' and type in ('float', 'int', 'string', *TRIPLES):
             values[name] = v if type == 'string' else (int(v[0]) if v else 0) if type == 'int' else \
-                numpy.resize(numpy.array(v or [0.0]), 3) if type in TRIPLES else (v[0] if v else 0.0)
+                triple(numpy.array(v or [0.0])) if type in TRIPLES else (v[0] if v else 0.0)
     def known(name):  # Whether a value fixed at export is not 0, None for one that varies per hit
         value = fold(values[name])
         return None if isinstance(value, tuple) else bool(numpy.any(value))
@@ -1506,7 +1512,7 @@ def resolve(socket, groups=()):
         if link.is_valid and not (socket.is_output or link.is_muted)), None)
     if not link and socket.type == 'SHADER': return BLACK
     if not link:  # A virtual socket has no value; an animated one is left to the interpreter, never baked
-        value = numpy.resize(getattr(socket, 'default_value', 0), 3)
+        value = triple(getattr(socket, 'default_value', 0))
         value = ('ANIMATED', value) if hasattr(socket, 'default_value') and animated(socket) else value
         return {'Normal': ('NORMAL',), 'Coat Normal': ('NORMAL',), 'UV': ('UV',), 'Tangent': radial('Z')}.get(
             socket.name, value)
@@ -2128,7 +2134,7 @@ class Flex(bpy.types.RenderEngine):
                 ops.extend(steps[1])
             else:
                 bakes.append(program([GRAY[0], expression, *GRAY[2:]], cut=False)[1])
-                value = numpy.resize(emit(expression, [], textures, texels, set(), {}), 3)
+                value = triple(emit(expression, [], textures, texels, set(), {}))
                 if last: again.append(bakes[-1])
             placed.append((tile, key, units[key], (hints[bakes[-1]], ops[bakes[-1]:]), value))
             current['made'].append(bakes[-1])
@@ -2214,7 +2220,7 @@ class Flex(bpy.types.RenderEngine):
                 spilled = max(crowded, key=lambda s: last[s] - stored[s])
                 uses[next(key for key, slot in slots.items() if slot == spilled)][0] = 1
             # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
-            scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(numpy.resize(surface[k], 3)[0])
+            scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(triple(surface[k])[0])
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
             hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
