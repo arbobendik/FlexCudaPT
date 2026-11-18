@@ -1803,22 +1803,6 @@ void denoise(uint3 p, uint3 size, Scene* scene) {
     scene.seen[index] = seen;
 }
 
-// Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
-void duplicates(uint3 p, uint3 size, Scene* scene) {
-    const uint index = p.y * size.x + p.x;
-    const Reservoir own = scene.previous[index];
-    uint count = 0u;
-    for (int y = int(p.y) - 8; y <= int(p.y) + 8; y++) {
-        for (int x = int(p.x) - 8; x <= int(p.x) + 8; x++) {
-            if (x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)) {
-                const Reservoir other = scene.previous[y * size.x + x];
-                count += other.w > 0.0f && other.seed == own.seed ? 1u : 0u;
-            }
-        }
-    }
-    scene.duplication[index] = own.w > 0.0f ? (count - 1u) / 288.0f : 0.0f;
-}
-
 // A pass's record: its raygen program's number, then its scene
 struct Record { uint program; uint header[7]; Scene scene; };
 struct Launch { Record* record; uint width, height, depth; };
@@ -1849,12 +1833,14 @@ void run(uint3 thread, uint3 group, uint index) {
     // for their barriers
     if (launch.record.program == PASS_COUNT) return restir_count(VkScene(scene), thread, index);
     if (launch.record.program == PASS_PREPASS) return restir_prepass(VkScene(scene), thread, index);
+    // The duplication over a shared tile of each workgroup's neighbourhood: every invocation, for its barrier
+    if (launch.record.program == PASS_DUPLICATES)
+        return restir_duplicates(VkScene(scene), thread, thread - group * uint3(8, 8, 1), index);
     if (any(p >= size)) return;
     switch (launch.record.program) {
         case PASS_INITIAL: restir_initial(VkScene(scene), thread); break;
         case PASS_SHIFT: restir_shift(VkScene(scene), uint3(group.xy, 0), index); break; // Jobs of the queue, 64 a bin
         case PASS_SPATIAL: restir_spatial(VkScene(scene), thread); break;
-        case PASS_DUPLICATES: duplicates(p, size, scene); break;
         case PASS_BAKE: if (used(BAKED)) bake(p, scene); break; // Only for scenes that bake
         case PASS_LIGHTS: lights(p, scene); break;
         default: denoise(p, size, scene); break;
