@@ -1364,22 +1364,25 @@ __device__ BSDFMaterial atWavelength(BSDFMaterial material_0, float wavelength_1
     float _S349 = upsample(material_0.sheen, wavelength_1);
     float3  _S350 = make_float3 (_S349);
     (&at_0)->sheen = _S350;
+    float _S351 = upsample(material_0.coat_tint, wavelength_1);
+    float3  _S352 = make_float3 (_S351);
+    (&at_0)->coat_tint = _S352;
     return at_0;
 }
 
 __device__ BSDFMaterial pathMaterial(BSDFMaterial material_1, float wavelength_2)
 {
-    BSDFMaterial _S351;
+    BSDFMaterial _S353;
     if(wavelength_2 > 0.0f)
     {
-        BSDFMaterial _S352 = atWavelength(material_1, wavelength_2);
-        _S351 = _S352;
+        BSDFMaterial _S354 = atWavelength(material_1, wavelength_2);
+        _S353 = _S354;
     }
     else
     {
-        _S351 = material_1;
+        _S353 = material_1;
     }
-    return _S351;
+    return _S353;
 }
 
 static __device__ float3  negate_0(float3  x_13)
@@ -1389,23 +1392,23 @@ static __device__ float3  negate_0(float3  x_13)
 
 static __device__ float sign_0(float e_1)
 {
-    float _S353;
+    float _S355;
     if(e_1 > 0.0f)
     {
-        _S353 = 1.0f;
+        _S355 = 1.0f;
     }
     else
     {
         if(e_1 < 0.0f)
         {
-            _S353 = -1.0f;
+            _S355 = -1.0f;
         }
         else
         {
-            _S353 = 0.0f;
+            _S355 = 0.0f;
         }
     }
-    return _S353;
+    return _S355;
 }
 
 struct AnisotropicFrame
@@ -1416,61 +1419,61 @@ struct AnisotropicFrame
 
 static __device__ AnisotropicFrame AnisotropicFrame_x24init_0(float3  tangent_0, float2  alphas_0)
 {
-    AnisotropicFrame _S354;
-    (&_S354)->tangent = tangent_0;
-    (&_S354)->alphas = alphas_0;
-    return _S354;
+    AnisotropicFrame _S356;
+    (&_S356)->tangent = tangent_0;
+    (&_S356)->alphas = alphas_0;
+    return _S356;
 }
 
 __device__ float3  tangentToWorld(float3  v_0, float3  n_1)
 {
     float3  a_1 = make_float3 (0.0f, 1.0f, 0.0f);
-    bool _S355 = (F32_abs((dot_0(n_1, a_1)))) > 0.9999847412109375f;
+    bool _S357 = (F32_abs((dot_0(n_1, a_1)))) > 0.9999847412109375f;
     float3  a_2;
-    if(_S355)
+    if(_S357)
     {
-        float3  _S356 = make_float3 (1.0f, 0.0f, 0.0f);
-        a_2 = _S356;
+        float3  _S358 = make_float3 (1.0f, 0.0f, 0.0f);
+        a_2 = _S358;
     }
     else
     {
         a_2 = a_1;
     }
-    float3  _S357 = cross_0(n_1, a_2);
-    float3  _S358 = ((((_S357)) * make_float3(rnorm3df(((_S357)).x, ((_S357)).y, ((_S357)).z))));
-    float3  _S359 = cross_0(n_1, _S358);
-    return make_float3 (v_0.x) * _S358 + make_float3 (v_0.y) * n_1 + make_float3 (v_0.z) * _S359;
+    float3  _S359 = cross_0(n_1, a_2);
+    float3  _S360 = ((((_S359)) * make_float3(rnorm3df(((_S359)).x, ((_S359)).y, ((_S359)).z))));
+    float3  _S361 = cross_0(n_1, _S360);
+    return make_float3 (v_0.x) * _S360 + make_float3 (v_0.y) * n_1 + make_float3 (v_0.z) * _S361;
 }
 
 __device__ AnisotropicFrame anisotropicFrame(BSDFMaterial material_2, float3  n_i_0)
 {
-    float _S360 = material_2.roughness;
-    float _S361 = _S360 * _S360;
-    bool _S362 = (material_2.anisotropy) == 0.0f;
-    bool _S363;
-    if(_S362)
+    float _S362 = material_2.roughness;
+    float _S363 = _S362 * _S362;
+    bool _S364 = (material_2.anisotropy) == 0.0f;
+    bool _S365;
+    if(_S364)
     {
-        _S363 = true;
+        _S365 = true;
     }
     else
     {
-        _S363 = !(_S361 > 0.0f);
+        _S365 = !(_S363 > 0.0f);
     }
-    if(_S363)
+    if(_S365)
     {
         return AnisotropicFrame_x24init_0(make_float3 (0.0f), make_float2 (0.0f));
     }
-    float3  _S364 = material_2.tangent - n_i_0 * make_float3 (dot_0(n_i_0, material_2.tangent));
-    float3  _S365 = tangentToWorld(make_float3 (1.0f, 0.0f, 0.0f), n_i_0);
-    bool _S366 = (dot_0(_S364, _S364)) > 0.0f;
-    float3  _S367 = _slang_select(_S366, _S364,_S365);
-    float3  _S368 = ((((_S367)) * make_float3(rnorm3df(((_S367)).x, ((_S367)).y, ((_S367)).z))));
-    float _S369 = 6.28318548202514648f * material_2.anisotropic_rotation;
-    float _S370 = (F32_sqrt((1.0f - 0.89999997615814209f * (F32_abs((material_2.anisotropy))))));
-    float _S371 = 1.0f / _S370;
-    bool _S372 = (material_2.anisotropy) < 0.0f;
-    float _S373 = _slang_select(_S372, _S371,_S370);
-    return AnisotropicFrame_x24init_0(_S368 * make_float3 ((F32_cos((_S369)))) + cross_0(n_i_0, _S368) * make_float3 ((F32_sin((_S369)))), make_float2 (_S361 / _S373, _S361 * _S373));
+    float3  _S366 = material_2.tangent - n_i_0 * make_float3 (dot_0(n_i_0, material_2.tangent));
+    float3  _S367 = tangentToWorld(make_float3 (1.0f, 0.0f, 0.0f), n_i_0);
+    bool _S368 = (dot_0(_S366, _S366)) > 0.0f;
+    float3  _S369 = _slang_select(_S368, _S366,_S367);
+    float3  _S370 = ((((_S369)) * make_float3(rnorm3df(((_S369)).x, ((_S369)).y, ((_S369)).z))));
+    float _S371 = 6.28318548202514648f * material_2.anisotropic_rotation;
+    float _S372 = (F32_sqrt((1.0f - 0.89999997615814209f * (F32_abs((material_2.anisotropy))))));
+    float _S373 = 1.0f / _S372;
+    bool _S374 = (material_2.anisotropy) < 0.0f;
+    float _S375 = _slang_select(_S374, _S373,_S372);
+    return AnisotropicFrame_x24init_0(_S370 * make_float3 ((F32_cos((_S371)))) + cross_0(n_i_0, _S370) * make_float3 ((F32_sin((_S371)))), make_float2 (_S363 / _S375, _S363 * _S375));
 }
 
 __device__ float rgb_to_greyscale(float3  rgb_1)
@@ -1486,39 +1489,39 @@ __device__ static const FixedArray<float, 576>  SHEEN_ALBEDO_0 = { {
 } };
 __device__ float sheenAlbedo(float3  v_1, float3  n_i_1, BSDFMaterial material_3)
 {
-    float _S374 = rgb_to_greyscale(material_3.sheen);
-    bool _S375 = _S374 > 0.0f;
+    float _S376 = rgb_to_greyscale(material_3.sheen);
+    bool _S377 = _S376 > 0.0f;
     float albedo_0;
-    if(_S375)
+    if(_S377)
     {
-        float _S376 = clamp_1((F32_sqrt(((F32_max((dot_0(n_i_1, v_1)), (0.0f)))))), 0.0f, 1.0f) * 23.0f;
-        uint _S377 = (U32_min((uint(_S376)), (22U)));
-        float _S378 = (F32_sqrt((0.05000000074505806f)));
-        float _S379 = (F32_sqrt((0.10000000149011612f)));
-        bool _S380 = (material_3.velvet) > 0.0f;
-        float _S381 = _slang_select(_S380, _S379,_S378);
-        float _S382 = (clamp_1((F32_sqrt(((F32_max((material_3.sheen_roughness), (0.0f)))))), _S381, 1.0f) - _S381) / (1.0f - _S381) * 23.0f;
-        uint _S383 = (U32_min((uint(_S382)), (22U)));
-        uint _S384 = _S377 * 24U + _S383;
-        float _S385 = _S376 - float(_S377);
-        float _S386 = _S382 - float(_S383);
-        if(_S380)
+        float _S378 = clamp_1((F32_sqrt(((F32_max((dot_0(n_i_1, v_1)), (0.0f)))))), 0.0f, 1.0f) * 23.0f;
+        uint _S379 = (U32_min((uint(_S378)), (22U)));
+        float _S380 = (F32_sqrt((0.05000000074505806f)));
+        float _S381 = (F32_sqrt((0.10000000149011612f)));
+        bool _S382 = (material_3.velvet) > 0.0f;
+        float _S383 = _slang_select(_S382, _S381,_S380);
+        float _S384 = (clamp_1((F32_sqrt(((F32_max((material_3.sheen_roughness), (0.0f)))))), _S383, 1.0f) - _S383) / (1.0f - _S383) * 23.0f;
+        uint _S385 = (U32_min((uint(_S384)), (22U)));
+        uint _S386 = _S379 * 24U + _S385;
+        float _S387 = _S378 - float(_S379);
+        float _S388 = _S384 - float(_S385);
+        if(_S382)
         {
-            uint _S387 = _S384 + 24U;
-            float _S388 = VELVET_ALBEDO_0[_S384] + (VELVET_ALBEDO_0[_S387] - VELVET_ALBEDO_0[_S384]) * _S385;
-            uint _S389 = _S384 + 1U;
-            float _S390 = VELVET_ALBEDO_0[_S389] + (VELVET_ALBEDO_0[_S387 + 1U] - VELVET_ALBEDO_0[_S389]) * _S385;
-            float _S391 = _S388 + (_S390 - _S388) * _S386;
-            albedo_0 = _S391;
+            uint _S389 = _S386 + 24U;
+            float _S390 = VELVET_ALBEDO_0[_S386] + (VELVET_ALBEDO_0[_S389] - VELVET_ALBEDO_0[_S386]) * _S387;
+            uint _S391 = _S386 + 1U;
+            float _S392 = VELVET_ALBEDO_0[_S391] + (VELVET_ALBEDO_0[_S389 + 1U] - VELVET_ALBEDO_0[_S391]) * _S387;
+            float _S393 = _S390 + (_S392 - _S390) * _S388;
+            albedo_0 = _S393;
         }
         else
         {
-            uint _S392 = _S384 + 24U;
-            float _S393 = SHEEN_ALBEDO_0[_S384] + (SHEEN_ALBEDO_0[_S392] - SHEEN_ALBEDO_0[_S384]) * _S385;
-            uint _S394 = _S384 + 1U;
-            float _S395 = SHEEN_ALBEDO_0[_S394] + (SHEEN_ALBEDO_0[_S392 + 1U] - SHEEN_ALBEDO_0[_S394]) * _S385;
-            float _S396 = (F32_exp((_S393 + (_S395 - _S393) * _S386)));
-            albedo_0 = _S396;
+            uint _S394 = _S386 + 24U;
+            float _S395 = SHEEN_ALBEDO_0[_S386] + (SHEEN_ALBEDO_0[_S394] - SHEEN_ALBEDO_0[_S386]) * _S387;
+            uint _S396 = _S386 + 1U;
+            float _S397 = SHEEN_ALBEDO_0[_S396] + (SHEEN_ALBEDO_0[_S394 + 1U] - SHEEN_ALBEDO_0[_S396]) * _S387;
+            float _S398 = (F32_exp((_S395 + (_S397 - _S395) * _S388)));
+            albedo_0 = _S398;
         }
     }
     else
@@ -1526,6 +1529,161 @@ __device__ float sheenAlbedo(float3  v_1, float3  n_i_1, BSDFMaterial material_3
         albedo_0 = 0.0f;
     }
     return albedo_0;
+}
+
+struct CoatFrame
+{
+    float3  normal;
+    float alpha;
+    float ior;
+};
+
+static __device__ CoatFrame CoatFrame_x24init_0(float3  normal_3, float alpha_0, float ior_0)
+{
+    CoatFrame _S399;
+    (&_S399)->normal = normal_3;
+    (&_S399)->alpha = alpha_0;
+    (&_S399)->ior = ior_0;
+    return _S399;
+}
+
+__device__ __forceinline__ CoatFrame coatFrame(BSDFMaterial material_4, float3  n_2)
+{
+    float3  _S400 = material_4.coat_normal;
+    bool _S401 = (dot_0(_S400, _S400)) > 0.0f;
+    float3  _S402 = material_4.coat_normal;
+    float3  _S403 = ((((_S402)) * make_float3(rnorm3df(((_S402)).x, ((_S402)).y, ((_S402)).z))));
+    float3  _S404 = _slang_select(_S401, _S403,n_2);
+    float _S405 = sign_0(dot_0(_S404, n_2));
+    float _S406 = material_4.coat_roughness;
+    return CoatFrame_x24init_0(_S404 * make_float3 (_S405), _S406 * _S406, (F32_max((material_4.coat_ior), (1.00999999046325684f))));
+}
+
+__device__ __forceinline__ float3  coatSeries(CoatFrame coat_frame_0, BSDFMaterial material_5)
+{
+    float _S407 = coat_frame_0.ior * coat_frame_0.ior;
+    float _S408 = _S407 * _S407;
+    float _S409 = coat_frame_0.ior - 1.0f;
+    float _S410 = coat_frame_0.ior + 1.0f;
+    float _S411 = _S407 - 1.0f;
+    float _S412 = _S407 + 1.0f;
+    float _S413 = _S408 - 1.0f;
+    float _S414 = _S412 * _S413;
+    float _S415 = 0.5f + _S409 * (3.0f * coat_frame_0.ior + 1.0f) / (6.0f * _S410 * _S410) + _S407 * _S411 * _S411 / (_S412 * _S412 * _S412) * (F32_log((_S409 / _S410))) - 2.0f * _S407 * coat_frame_0.ior * (_S407 + 2.0f * coat_frame_0.ior - 1.0f) / _S414 + 8.0f * _S408 * (_S408 + 1.0f) / (_S414 * _S413) * (F32_log((coat_frame_0.ior)));
+    float _S416 = 1.0f - (1.0f - _S415) / _S407;
+    float3  _S417 = material_5.coat_tint;
+    return _S417 * _S417 * make_float3 (1.0f - _S416) / (make_float3 (1.0f) - material_5.albedo * make_float3 (_S416));
+}
+
+__device__ float3  anisotropicLocal(float3  w_0, float3  t_12, float3  n_3)
+{
+    return make_float3 (dot_0(w_0, t_12), dot_0(w_0, cross_0(n_3, t_12)), dot_0(w_0, n_3));
+}
+
+static __device__ float unshared_0(float x_14)
+{
+    return x_14;
+}
+
+__device__ float3  sampleGGXVNDF(float3  Ve_0, float alpha_1, float U1_0, float U2_0)
+{
+    float3  _S418 = make_float3 (alpha_1 * Ve_0.x, alpha_1 * Ve_0.y, Ve_0.z);
+    float3  _S419 = ((((_S418)) * make_float3(rnorm3df(((_S418)).x, ((_S418)).y, ((_S418)).z))));
+    float _S420 = _S419.x;
+    float _S421 = _S419.y;
+    float _S422 = _S420 * _S420 + _S421 * _S421;
+    float3  _S423;
+    if(_S422 > 0.0f)
+    {
+        float3  _S424 = make_float3 (- _S421, _S420, 0.0f);
+        float _S425 = (rsqrtf((_S422)));
+        _S423 = _S424 * make_float3 (_S425);
+    }
+    else
+    {
+        _S423 = make_float3 (1.0f, 0.0f, 0.0f);
+    }
+    float3  _S426 = cross_0(_S419, _S423);
+    float _S427 = (F32_sqrt((U1_0)));
+    float _S428 = 6.28318548202514648f * U2_0;
+    float _S429 = _S427 * (F32_cos((_S428)));
+    float t2_0 = _S427 * (F32_sin((_S428)));
+    float _S430 = 0.5f * (1.0f + _S419.z);
+    float t2_1 = (1.0f - _S430) * (F32_sqrt(((F32_max((0.0f), (1.0f - _S429 * _S429)))))) + _S430 * t2_0;
+    float3  _S431 = make_float3 (_S429) * _S423 + make_float3 (t2_1) * _S426;
+    float _S432 = unshared_0(_S429);
+    float _S433 = unshared_0(_S429);
+    float3  _S434 = _S431 + make_float3 ((F32_sqrt(((F32_max((0.0f), (1.0f - _S432 * _S433 - t2_1 * t2_1))))))) * _S419;
+    float3  _S435 = make_float3 (alpha_1 * _S434.x, alpha_1 * _S434.y, (F32_max((0.0f), (_S434.z))));
+    float3  _S436 = ((((_S435)) * make_float3(rnorm3df(((_S435)).x, ((_S435)).y, ((_S435)).z))));
+    return _S436;
+}
+
+__device__ float3  worldToTangent(float3  v_2, float3  n_4)
+{
+    float3  a_3 = make_float3 (0.0f, 1.0f, 0.0f);
+    bool _S437 = (F32_abs((dot_0(n_4, a_3)))) > 0.9999847412109375f;
+    float3  a_4;
+    if(_S437)
+    {
+        float3  _S438 = make_float3 (1.0f, 0.0f, 0.0f);
+        a_4 = _S438;
+    }
+    else
+    {
+        a_4 = a_3;
+    }
+    float3  _S439 = cross_0(n_4, a_4);
+    float3  _S440 = ((((_S439)) * make_float3(rnorm3df(((_S439)).x, ((_S439)).y, ((_S439)).z))));
+    float3  _S441 = cross_0(n_4, _S440);
+    return make_float3 (dot_0(v_2, _S440), dot_0(v_2, n_4), dot_0(v_2, _S441));
+}
+
+__device__ __forceinline__ float3  sampleHalfVector(float3  v_3, float3  n_i_2, float alpha_2, AnisotropicFrame frame_0, uint * random_state_2, uint first_1)
+{
+    Random _S442 = draw(*random_state_2, first_1);
+    Random _S443 = draw(*random_state_2, first_1 | 2147483648U);
+    *random_state_2 = _S443.state;
+    float _S444 = frame_0.alphas.x;
+    bool _S445 = _S444 > 0.0f;
+    if(_S445)
+    {
+        float3  _S446 = anisotropicLocal(v_3, frame_0.tangent, n_i_2);
+        float _S447 = frame_0.alphas.y;
+        float3  _S448 = make_float3 (_S444 * _S446.x, _S447 * _S446.y, _S446.z);
+        float3  _S449 = ((((_S448)) * make_float3(rnorm3df(((_S448)).x, ((_S448)).y, ((_S448)).z))));
+        float3  _S450 = sampleGGXVNDF(_S449, 1.0f, _S442.value, _S443.value);
+        float3  _S451 = make_float3 (_S444 * _S450.x, _S447 * _S450.y, _S450.z);
+        float3  _S452 = ((((_S451)) * make_float3(rnorm3df(((_S451)).x, ((_S451)).y, ((_S451)).z))));
+        return make_float3 (_S452.x) * frame_0.tangent + make_float3 (_S452.y) * cross_0(n_i_2, frame_0.tangent) + make_float3 (_S452.z) * n_i_2;
+    }
+    float3  _S453 = worldToTangent(v_3, n_i_2);
+    float3  _S454 = sampleGGXVNDF(float3 {_S453.x, _S453.z, _S453.y}, alpha_2, _S442.value, _S443.value);
+    float3  _S455 = float3 {_S454.x, _S454.z, _S454.y};
+    float3  _S456 = tangentToWorld(_S455, n_i_2);
+    return _S456;
+}
+
+__device__ __forceinline__ float3  coatHalf(float3  v_4, CoatFrame coat_frame_1, BSDFMaterial material_6, uint random_state_3)
+{
+    bool _S457 = (material_6.coat) > 0.0f;
+    bool _S458;
+    if(_S457)
+    {
+        _S458 = (dot_0(coat_frame_1.normal, v_4)) > 0.0f;
+    }
+    else
+    {
+        _S458 = false;
+    }
+    bool _S459 = !_S458;
+    if(_S459)
+    {
+        return make_float3 (0.0f);
+    }
+    uint state_3 = random_state_3;
+    float3  _S460 = sampleHalfVector(v_4, coat_frame_1.normal, coat_frame_1.alpha, AnisotropicFrame_x24init_0(make_float3 (0.0f), make_float2 (0.0f)), &state_3, 1U);
+    return _S460;
 }
 
 struct Weights
@@ -1542,152 +1700,65 @@ struct Weights
     float p_sheen_velvet;
     float p_toon;
     float3  sheen;
-    float3  toon;
+    float3  coat;
+    float p_coat;
 };
 
-static __device__ Weights Weights_x24init_0(float v_dot_h_0, float3  refracted_1, float3  F_0, float reflect_weight_0, float3  diffuse_weight_0, float3  refract_weight_0, float p_diffuse_0, float p_reflect_0, float p_refract_0, float p_sheen_velvet_0, float p_toon_0, float3  sheen_0, float3  toon_0)
+static __device__ Weights Weights_x24init_0(float v_dot_h_0, float3  refracted_1, float3  F_0, float reflect_weight_0, float3  diffuse_weight_0, float3  refract_weight_0, float p_diffuse_0, float p_reflect_0, float p_refract_0, float p_sheen_velvet_0, float p_toon_0, float3  sheen_0, float3  coat_0, float p_coat_0)
 {
-    Weights _S397;
-    (&_S397)->v_dot_h = v_dot_h_0;
-    (&_S397)->refracted = refracted_1;
-    (&_S397)->F = F_0;
-    (&_S397)->reflect_weight = reflect_weight_0;
-    (&_S397)->diffuse_weight = diffuse_weight_0;
-    (&_S397)->refract_weight = refract_weight_0;
-    (&_S397)->p_diffuse = p_diffuse_0;
-    (&_S397)->p_reflect = p_reflect_0;
-    (&_S397)->p_refract = p_refract_0;
-    (&_S397)->p_sheen_velvet = p_sheen_velvet_0;
-    (&_S397)->p_toon = p_toon_0;
-    (&_S397)->sheen = sheen_0;
-    (&_S397)->toon = toon_0;
-    return _S397;
+    Weights _S461;
+    (&_S461)->v_dot_h = v_dot_h_0;
+    (&_S461)->refracted = refracted_1;
+    (&_S461)->F = F_0;
+    (&_S461)->reflect_weight = reflect_weight_0;
+    (&_S461)->diffuse_weight = diffuse_weight_0;
+    (&_S461)->refract_weight = refract_weight_0;
+    (&_S461)->p_diffuse = p_diffuse_0;
+    (&_S461)->p_reflect = p_reflect_0;
+    (&_S461)->p_refract = p_refract_0;
+    (&_S461)->p_sheen_velvet = p_sheen_velvet_0;
+    (&_S461)->p_toon = p_toon_0;
+    (&_S461)->sheen = sheen_0;
+    (&_S461)->coat = coat_0;
+    (&_S461)->p_coat = p_coat_0;
+    return _S461;
 }
 
-__device__ float3  anisotropicLocal(float3  w_0, float3  t_12, float3  n_2)
+__device__ __forceinline__ float3  sampledHalf(float3  v_5, float3  n_i_3, float alpha_3, AnisotropicFrame frame_1, uint random_state_4)
 {
-    return make_float3 (dot_0(w_0, t_12), dot_0(w_0, cross_0(n_2, t_12)), dot_0(w_0, n_2));
+    uint state_4 = random_state_4;
+    float3  _S462 = sampleHalfVector(v_5, n_i_3, alpha_3, frame_1, &state_4, 0U);
+    return _S462;
 }
 
-static __device__ float unshared_0(float x_14)
+static __device__ float3  refract_0(float3  i_5, float3  n_5, float eta_0)
 {
-    return x_14;
-}
-
-__device__ float3  sampleGGXVNDF(float3  Ve_0, float alpha_0, float U1_0, float U2_0)
-{
-    float3  _S398 = make_float3 (alpha_0 * Ve_0.x, alpha_0 * Ve_0.y, Ve_0.z);
-    float3  _S399 = ((((_S398)) * make_float3(rnorm3df(((_S398)).x, ((_S398)).y, ((_S398)).z))));
-    float _S400 = _S399.x;
-    float _S401 = _S399.y;
-    float _S402 = _S400 * _S400 + _S401 * _S401;
-    float3  _S403;
-    if(_S402 > 0.0f)
-    {
-        float3  _S404 = make_float3 (- _S401, _S400, 0.0f);
-        float _S405 = (rsqrtf((_S402)));
-        _S403 = _S404 * make_float3 (_S405);
-    }
-    else
-    {
-        _S403 = make_float3 (1.0f, 0.0f, 0.0f);
-    }
-    float3  _S406 = cross_0(_S399, _S403);
-    float _S407 = (F32_sqrt((U1_0)));
-    float _S408 = 6.28318548202514648f * U2_0;
-    float _S409 = _S407 * (F32_cos((_S408)));
-    float t2_0 = _S407 * (F32_sin((_S408)));
-    float _S410 = 0.5f * (1.0f + _S399.z);
-    float t2_1 = (1.0f - _S410) * (F32_sqrt(((F32_max((0.0f), (1.0f - _S409 * _S409)))))) + _S410 * t2_0;
-    float3  _S411 = make_float3 (_S409) * _S403 + make_float3 (t2_1) * _S406;
-    float _S412 = unshared_0(_S409);
-    float _S413 = unshared_0(_S409);
-    float3  _S414 = _S411 + make_float3 ((F32_sqrt(((F32_max((0.0f), (1.0f - _S412 * _S413 - t2_1 * t2_1))))))) * _S399;
-    float3  _S415 = make_float3 (alpha_0 * _S414.x, alpha_0 * _S414.y, (F32_max((0.0f), (_S414.z))));
-    float3  _S416 = ((((_S415)) * make_float3(rnorm3df(((_S415)).x, ((_S415)).y, ((_S415)).z))));
-    return _S416;
-}
-
-__device__ float3  worldToTangent(float3  v_2, float3  n_3)
-{
-    float3  a_3 = make_float3 (0.0f, 1.0f, 0.0f);
-    bool _S417 = (F32_abs((dot_0(n_3, a_3)))) > 0.9999847412109375f;
-    float3  a_4;
-    if(_S417)
-    {
-        float3  _S418 = make_float3 (1.0f, 0.0f, 0.0f);
-        a_4 = _S418;
-    }
-    else
-    {
-        a_4 = a_3;
-    }
-    float3  _S419 = cross_0(n_3, a_4);
-    float3  _S420 = ((((_S419)) * make_float3(rnorm3df(((_S419)).x, ((_S419)).y, ((_S419)).z))));
-    float3  _S421 = cross_0(n_3, _S420);
-    return make_float3 (dot_0(v_2, _S420), dot_0(v_2, n_3), dot_0(v_2, _S421));
-}
-
-__device__ __forceinline__ float3  sampleHalfVector(float3  v_3, float3  n_i_2, float alpha_1, AnisotropicFrame frame_0, uint * random_state_2)
-{
-    Random _S422 = draw(*random_state_2, 0U);
-    Random _S423 = draw(*random_state_2, 2147483648U);
-    *random_state_2 = _S423.state;
-    float _S424 = frame_0.alphas.x;
-    bool _S425 = _S424 > 0.0f;
-    if(_S425)
-    {
-        float3  _S426 = anisotropicLocal(v_3, frame_0.tangent, n_i_2);
-        float _S427 = frame_0.alphas.y;
-        float3  _S428 = make_float3 (_S424 * _S426.x, _S427 * _S426.y, _S426.z);
-        float3  _S429 = ((((_S428)) * make_float3(rnorm3df(((_S428)).x, ((_S428)).y, ((_S428)).z))));
-        float3  _S430 = sampleGGXVNDF(_S429, 1.0f, _S422.value, _S423.value);
-        float3  _S431 = make_float3 (_S424 * _S430.x, _S427 * _S430.y, _S430.z);
-        float3  _S432 = ((((_S431)) * make_float3(rnorm3df(((_S431)).x, ((_S431)).y, ((_S431)).z))));
-        return make_float3 (_S432.x) * frame_0.tangent + make_float3 (_S432.y) * cross_0(n_i_2, frame_0.tangent) + make_float3 (_S432.z) * n_i_2;
-    }
-    float3  _S433 = worldToTangent(v_3, n_i_2);
-    float3  _S434 = sampleGGXVNDF(float3 {_S433.x, _S433.z, _S433.y}, alpha_1, _S422.value, _S423.value);
-    float3  _S435 = float3 {_S434.x, _S434.z, _S434.y};
-    float3  _S436 = tangentToWorld(_S435, n_i_2);
-    return _S436;
-}
-
-__device__ __forceinline__ float3  sampledHalf(float3  v_4, float3  n_i_3, float alpha_2, AnisotropicFrame frame_1, uint random_state_3)
-{
-    uint state_3 = random_state_3;
-    float3  _S437 = sampleHalfVector(v_4, n_i_3, alpha_2, frame_1, &state_3);
-    return _S437;
-}
-
-static __device__ float3  refract_0(float3  i_5, float3  n_4, float eta_0)
-{
-    float _S438 = dot_0(n_4, i_5);
-    float _S439 = 1.0f - eta_0 * eta_0 * (1.0f - _S438 * _S438);
-    if(_S439 < 0.0f)
+    float _S463 = dot_0(n_5, i_5);
+    float _S464 = 1.0f - eta_0 * eta_0 * (1.0f - _S463 * _S463);
+    if(_S464 < 0.0f)
     {
         return make_float3 (0.0f);
     }
-    return make_float3 (eta_0) * i_5 - make_float3 (eta_0 * _S438 + (F32_sqrt((_S439)))) * n_4;
+    return make_float3 (eta_0) * i_5 - make_float3 (eta_0 * _S463 + (F32_sqrt((_S464)))) * n_5;
 }
 
 __device__ float fresnel(float cos_theta_0, float eta_i_0, float eta_o_0)
 {
-    float _S440 = (F32_sqrt(((F32_max((0.0f), (1.0f - cos_theta_0 * cos_theta_0))))));
-    float _S441 = eta_i_0 / eta_o_0 * _S440;
-    bool _S442 = _S441 < 1.0f;
+    float _S465 = (F32_sqrt(((F32_max((0.0f), (1.0f - cos_theta_0 * cos_theta_0))))));
+    float _S466 = eta_i_0 / eta_o_0 * _S465;
+    bool _S467 = _S466 < 1.0f;
     float kr_0;
-    if(_S442)
+    if(_S467)
     {
-        float _S443 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S441 * _S441))))));
-        float _S444 = eta_o_0 * cos_theta_0;
-        float _S445 = eta_i_0 * _S443;
-        float _S446 = (_S444 - _S445) / (_S444 + _S445);
-        float _S447 = eta_i_0 * cos_theta_0;
-        float _S448 = eta_o_0 * _S443;
-        float _S449 = (_S447 - _S448) / (_S447 + _S448);
-        float _S450 = (_S446 * _S446 + _S449 * _S449) / 2.0f;
-        kr_0 = _S450;
+        float _S468 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S466 * _S466))))));
+        float _S469 = eta_o_0 * cos_theta_0;
+        float _S470 = eta_i_0 * _S468;
+        float _S471 = (_S469 - _S470) / (_S469 + _S470);
+        float _S472 = eta_i_0 * cos_theta_0;
+        float _S473 = eta_o_0 * _S468;
+        float _S474 = (_S472 - _S473) / (_S472 + _S473);
+        float _S475 = (_S471 * _S471 + _S474 * _S474) / 2.0f;
+        kr_0 = _S475;
     }
     else
     {
@@ -1715,386 +1786,453 @@ static __device__ float3  min_1(float3  x_15, float3  y_4)
     return result_5;
 }
 
+static __device__ float3  reflect_0(float3  i_7, float3  n_6)
+{
+    return i_7 - make_float3 (2.0f * dot_0(n_6, i_7)) * n_6;
+}
+
+__device__ float smithG1(float alpha_4, float n_dot_x_0)
+{
+    float _S476 = alpha_4 * alpha_4;
+    float _S477 = 2.0f * n_dot_x_0 / (n_dot_x_0 + (F32_sqrt((_S476 + (1.0f - _S476) * n_dot_x_0 * n_dot_x_0))));
+    bool _S478 = alpha_4 > 0.0f;
+    float _S479 = _slang_select(_S478, _S477,1.0f);
+    return _S479;
+}
+
+__device__ __forceinline__ float coatFresnel(float3  in_dir_0, float3  v_6, float3  coat_h_0, CoatFrame coat_frame_2, float eta_i_1, bool behind_0)
+{
+    float _S480 = dot_0(coat_frame_2.normal, reflect_0(in_dir_0, coat_h_0));
+    float _S481 = (F32_abs((dot_0(v_6, coat_h_0))));
+    float _S482 = eta_i_1 / coat_frame_2.ior * (F32_sqrt(((F32_max((1.0f - _S481 * _S481), (0.0f))))));
+    float _S483 = (F32_sqrt(((F32_max((1.0f - _S482 * _S482), (0.0f))))));
+    float _S484 = _slang_select(behind_0, _S483,_S481);
+    float _S485 = _slang_select(behind_0, coat_frame_2.ior,1.0f);
+    float _S486 = _slang_select(behind_0, 1.0f,coat_frame_2.ior);
+    float _S487 = fresnel(_S484, _S485, _S486);
+    float _S488 = smithG1(coat_frame_2.alpha, _S480);
+    float _S489 = _S487 * _S488;
+    bool _S490 = _S480 > 0.0f;
+    float _S491 = _slang_select(_S490, _S489,0.0f);
+    return _S491;
+}
+
 static __device__ float3  mix_0(float3  e1_0, float3  e2_0, float e3_0)
 {
     return e1_0 * make_float3 (1.0f - e3_0) + e2_0 * make_float3 (e3_0);
 }
 
-__device__ __forceinline__ Weights lobeWeights(float3  in_dir_0, float3  v_5, float3  n_i_4, float3  ggx_n_0, AnisotropicFrame frame_2, float sheen_albedo_0, BSDFMaterial material_4, float eta_i_1, float eta_o_1)
+__device__ __forceinline__ Weights lobeWeights(float3  in_dir_1, float3  v_7, float3  n_i_4, float3  ggx_n_0, float3  coat_h_1, AnisotropicFrame frame_2, float sheen_albedo_0, CoatFrame coat_frame_3, float3  coat_series_0, BSDFMaterial material_7, float eta_i_2, float eta_o_1)
 {
-    float _S451 = dot_0(ggx_n_0, v_5);
-    float _S452 = eta_i_1 / eta_o_1;
-    float3  _S453 = refract_0(in_dir_0, ggx_n_0, _S452);
-    float3  _S454 = ((((_S453)) * make_float3(rnorm3df(((_S453)).x, ((_S453)).y, ((_S453)).z))));
-    float _S455 = (F32_min(((F32_sqrt((material_4.specular_level))) * (F32_abs((eta_i_1 - eta_o_1))) / (eta_i_1 + eta_o_1)), (0.9999847412109375f)));
-    float _S456 = _S455 * _S455;
-    float _S457 = (1.0f + _S455) / (1.0f - _S455);
-    float _S458 = (F32_abs((_S451)));
-    bool _S459 = eta_i_1 > eta_o_1;
+    float _S492 = dot_0(ggx_n_0, v_7);
+    float _S493 = eta_i_2 / eta_o_1;
+    float3  _S494 = refract_0(in_dir_1, ggx_n_0, _S493);
+    float3  _S495 = ((((_S494)) * make_float3(rnorm3df(((_S494)).x, ((_S494)).y, ((_S494)).z))));
+    float _S496 = (F32_min(((F32_sqrt((material_7.specular_level))) * (F32_abs((eta_i_2 - eta_o_1))) / (eta_i_2 + eta_o_1)), (0.9999847412109375f)));
+    float _S497 = _S496 * _S496;
+    float _S498 = (1.0f + _S496) / (1.0f - _S496);
+    float _S499 = (F32_abs((_S492)));
+    bool _S500 = eta_i_2 > eta_o_1;
     float sheen_component_0;
-    if(_S459)
+    if(_S500)
     {
-        sheen_component_0 = _S457;
+        sheen_component_0 = _S498;
     }
     else
     {
         sheen_component_0 = 1.0f;
     }
     float toon_component_0;
-    if(_S459)
+    if(_S500)
     {
         toon_component_0 = 1.0f;
     }
     else
     {
-        toon_component_0 = _S457;
+        toon_component_0 = _S498;
     }
-    float _S460 = fresnel(_S458, sheen_component_0, toon_component_0);
-    bool _S461 = (eta_i_1 * eta_i_1 * (1.0f - _S451 * _S451)) >= (eta_o_1 * eta_o_1);
-    float3  _S462;
-    if(_S461)
+    float _S501 = fresnel(_S499, sheen_component_0, toon_component_0);
+    bool _S502 = (eta_i_2 * eta_i_2 * (1.0f - _S492 * _S492)) >= (eta_o_1 * eta_o_1);
+    float3  _S503;
+    if(_S502)
     {
-        _S462 = make_float3 (1.0f);
+        _S503 = make_float3 (1.0f);
     }
     else
     {
-        float3  _S463 = material_4.specular_tint * make_float3 (_S456);
-        _S462 = _S463 + (make_float3 (1.0f) - _S463) * make_float3 (_S460 - _S456) / make_float3 (1.0f - _S456);
+        float3  _S504 = material_7.specular_tint * make_float3 (_S497);
+        _S503 = _S504 + (make_float3 (1.0f) - _S504) * make_float3 (_S501 - _S497) / make_float3 (1.0f - _S497);
     }
-    float3  _S464 = make_float3 (1.0f);
-    float3  _S465 = make_float3 (0.0f);
-    float _S466 = rgb_to_greyscale(material_4.sheen);
-    bool _S467 = _S466 > 0.0f;
+    float3  _S505 = make_float3 (1.0f);
+    float3  _S506 = make_float3 (0.0f);
+    float _S507 = rgb_to_greyscale(material_7.sheen);
+    bool _S508 = _S507 > 0.0f;
     float3  sheen_1;
     float3  scale_1;
-    if(_S467)
+    if(_S508)
     {
-        float _S468 = (F32_min((sheen_albedo_0), (1.0f)));
-        float3  _S469 = make_float3 (1.0f) - material_4.sheen * make_float3 (_S468);
-        float _S470 = rgb_to_greyscale(material_4.sheen);
-        float _S471 = _S470 * _S468;
-        float3  _S472 = material_4.sheen / make_float3 ((F32_max((sheen_albedo_0), (1.0f))));
-        sheen_component_0 = _S471;
-        sheen_1 = _S472;
-        scale_1 = _S469;
+        float _S509 = (F32_min((sheen_albedo_0), (1.0f)));
+        float3  _S510 = make_float3 (1.0f) - material_7.sheen * make_float3 (_S509);
+        float _S511 = rgb_to_greyscale(material_7.sheen);
+        float _S512 = _S511 * _S509;
+        float3  _S513 = material_7.sheen / make_float3 ((F32_max((sheen_albedo_0), (1.0f))));
+        sheen_component_0 = _S512;
+        sheen_1 = _S513;
+        scale_1 = _S510;
     }
     else
     {
         sheen_component_0 = 0.0f;
-        sheen_1 = _S465;
-        scale_1 = _S464;
+        sheen_1 = _S506;
+        scale_1 = _S505;
     }
-    float _S473 = (F32_abs((material_4.toon.x)));
-    bool _S474 = _S473 > 0.0f;
-    if(_S474)
+    float _S514 = (F32_abs((material_7.toon.x)));
+    bool _S515 = _S514 > 0.0f;
+    if(_S515)
     {
-        float _S475 = (F32_min((_S473), (1.0f)));
-        float3  scale_2 = scale_1 * make_float3 (1.0f - _S475);
-        float _S476 = rgb_to_greyscale(material_4.albedo);
-        float _S477 = _S475 * _S476;
-        toon_component_0 = _S477;
+        float _S516 = (F32_min((_S514), (1.0f)));
+        float3  scale_2 = scale_1 * make_float3 (1.0f - _S516);
+        float _S517 = rgb_to_greyscale(material_7.albedo);
+        float _S518 = _S516 * _S517;
+        toon_component_0 = _S518;
         scale_1 = scale_2;
     }
     else
     {
         toon_component_0 = 0.0f;
     }
-    bool _S478 = (material_4.metallic) > 0.0f;
+    bool _S519 = (material_7.metallic) > 0.0f;
     float3  rebounce_0;
-    if(_S478)
+    if(_S519)
     {
-        float _S479 = frame_2.alphas.x;
-        float _S480 = (F32_sqrt(((F32_min((_S479), (frame_2.alphas.y))))));
-        bool _S481 = _S479 > 0.0f;
-        float _S482 = _slang_select(_S481, _S480,material_4.roughness);
-        float _S483 = _S482 * _S482;
-        float _S484 = (F32_pow((_S483), (1.81585001945495605f))) * (2.15371990203857422f - 0.73285001516342163f * _S483) / (1.0f + 1.28094995021820068f * _S483);
-        bool _S485 = _S483 > 0.0f;
-        float _S486 = _slang_select(_S485, _S484,0.0f);
-        float _S487 = clamp_1(dot_0(n_i_4, v_5), 0.0f, 1.0f);
-        float _S488 = _S483 * _S482;
-        float _S489 = (F32_min((1.00064504146575928f - _S482 * (0.00375499995425344f + _S487 * (-0.04133399948477745f + _S487 * (-0.90938502550125122f + _S487 * 0.35275399684906006f))) - _S483 * (0.27602800726890564f + _S487 * (1.27023398876190186f + _S487 * 0.04740000143647194f)) - _S488 * (0.31452900171279907f - _S487 * 0.34830701351165771f) + _S488 * _S482 * 0.27229699492454529f), (1.0f)));
-        float3  _S490 = min_1(make_float3 (1.0f) / (make_float3 (1.0f) - material_4.albedo * make_float3 (_S486)), make_float3 (1.0f / (F32_max((_S489), (0.0000152587890625f)))));
-        rebounce_0 = _S490;
+        float _S520 = frame_2.alphas.x;
+        float _S521 = (F32_sqrt(((F32_min((_S520), (frame_2.alphas.y))))));
+        bool _S522 = _S520 > 0.0f;
+        float _S523 = _slang_select(_S522, _S521,material_7.roughness);
+        float _S524 = _S523 * _S523;
+        float _S525 = (F32_pow((_S524), (1.81585001945495605f))) * (2.15371990203857422f - 0.73285001516342163f * _S524) / (1.0f + 1.28094995021820068f * _S524);
+        bool _S526 = _S524 > 0.0f;
+        float _S527 = _slang_select(_S526, _S525,0.0f);
+        float _S528 = clamp_1(dot_0(n_i_4, v_7), 0.0f, 1.0f);
+        float _S529 = _S524 * _S523;
+        float _S530 = (F32_min((1.00064504146575928f - _S523 * (0.00375499995425344f + _S528 * (-0.04133399948477745f + _S528 * (-0.90938502550125122f + _S528 * 0.35275399684906006f))) - _S524 * (0.27602800726890564f + _S528 * (1.27023398876190186f + _S528 * 0.04740000143647194f)) - _S529 * (0.31452900171279907f - _S528 * 0.34830701351165771f) + _S529 * _S523 * 0.27229699492454529f), (1.0f)));
+        float3  _S531 = min_1(make_float3 (1.0f) / (make_float3 (1.0f) - material_7.albedo * make_float3 (_S527)), make_float3 (1.0f / (F32_max((_S530), (0.0000152587890625f)))));
+        rebounce_0 = _S531;
     }
     else
     {
-        rebounce_0 = _S464;
+        rebounce_0 = _S505;
     }
-    float3  _S491 = mix_0(_S462, material_4.albedo * rebounce_0, material_4.metallic);
-    float3  F_1 = _S491 * scale_1;
-    float _S492 = rgb_to_greyscale(F_1);
-    float _S493 = 1.0f - material_4.metallic;
-    float3  _S494 = make_float3 (1.0f) - _S462;
-    float3  _S495 = make_float3 ((1.0f - material_4.transmission) * _S493) * _S494 * scale_1;
-    float3  _S496 = make_float3 (material_4.transmission * _S493) * _S494 * scale_1;
-    float _S497 = (F32_max((_S492), (0.0f)));
-    float _S498 = rgb_to_greyscale(_S495);
-    float _S499 = (F32_max((_S498), (0.0f)));
-    float _S500 = rgb_to_greyscale(_S496);
-    float _S501 = sign_0(length_0(_S454));
-    float _S502 = (F32_max((_S500 * _S501), (0.0f)));
-    float _S503 = _S497 + _S499 + _S502 + toon_component_0;
-    float _S504 = (F32_min((sheen_component_0), (1.0f)));
-    bool _S505 = sheen_component_0 > 0.0f;
-    bool _S506;
-    if(_S505)
+    bool _S532 = (dot_0(coat_h_1, coat_h_1)) > 0.0f;
+    float3  coat_1;
+    float3  up_0;
+    float3  through_0;
+    if(_S532)
     {
-        _S506 = !(_S503 > 0.0f);
+        float _S533 = coatFresnel(in_dir_1, v_7, coat_h_1, coat_frame_3, eta_i_2, _S500);
+        float _S534 = material_7.coat * _S533;
+        float3  _S535 = material_7.coat_tint;
+        float3  _S536 = _S535 * _S535;
+        float3  _S537 = _slang_select(_S500, _S536,_S505);
+        float3  _S538 = make_float3 (_S534) * _S537;
+        float _S539 = 1.0f - _S533;
+        bool _S540 = !_S500;
+        float3  _S541 = _slang_select(_S540, coat_series_0,_S505);
+        float3  _S542 = mix_0(_S505, make_float3 (_S539) * _S541, material_7.coat);
+        float3  _S543 = mix_0(_S505, make_float3 (_S539) * material_7.coat_tint, material_7.coat);
+        coat_1 = _S538;
+        up_0 = _S542;
+        through_0 = _S543;
     }
     else
     {
-        _S506 = false;
+        coat_1 = _S506;
+        up_0 = _S505;
+        through_0 = _S505;
     }
-    float _S507 = _slang_select(_S506, 1.0f,_S504);
-    float _S508 = (1.0f - _S507) / (F32_max((_S503), (0.0000152587890625f)));
-    float _S509 = _S499 * _S508;
-    float _S510 = _S497 * _S508;
-    float _S511 = _S502 * _S508;
-    return Weights_x24init_0(_S451, _S454, F_1, 1.0f, _S495, _S496, _S509, _S510, _S511, _S507, toon_component_0 * _S508, sheen_1, _S465);
+    float3  _S544 = scale_1 * coat_1;
+    float _S545 = rgb_to_greyscale(_S544);
+    float3  _S546 = mix_0(_S503, material_7.albedo * rebounce_0, material_7.metallic);
+    float3  F_1 = _S546 * scale_1 * up_0;
+    float _S547 = rgb_to_greyscale(F_1);
+    float _S548 = 1.0f - material_7.metallic;
+    float3  _S549 = make_float3 (1.0f) - _S503;
+    float3  _S550 = make_float3 ((1.0f - material_7.transmission) * _S548) * _S549 * scale_1 * up_0;
+    float3  _S551 = make_float3 (material_7.transmission * _S548) * _S549 * scale_1 * through_0;
+    float _S552 = (F32_max((_S547), (0.0f)));
+    float _S553 = rgb_to_greyscale(_S550);
+    float _S554 = (F32_max((_S553), (0.0f)));
+    float _S555 = rgb_to_greyscale(_S551);
+    float _S556 = sign_0(length_0(_S495));
+    float _S557 = (F32_max((_S555 * _S556), (0.0f)));
+    float _S558 = _S552 + _S554 + _S557 + toon_component_0 + _S545;
+    float _S559 = (F32_min((sheen_component_0), (1.0f)));
+    bool _S560 = sheen_component_0 > 0.0f;
+    bool _S561;
+    if(_S560)
+    {
+        _S561 = !(_S558 > 0.0f);
+    }
+    else
+    {
+        _S561 = false;
+    }
+    float _S562 = _slang_select(_S561, 1.0f,_S559);
+    float _S563 = (1.0f - _S562) / (F32_max((_S558), (0.0000152587890625f)));
+    float _S564 = _S554 * _S563;
+    float _S565 = _S552 * _S563;
+    float _S566 = _S557 * _S563;
+    return Weights_x24init_0(_S492, _S495, F_1, 1.0f, _S550, _S551, _S564, _S565, _S566, _S562, toon_component_0 * _S563, sheen_1, _S544, _S545 * _S563);
 }
 
-__device__ __forceinline__ float3  refractedHalf(float3  in_dir_1, float3  out_dir_0, float3  n_5, float eta_i_2, float eta_o_2)
+__device__ __forceinline__ float3  refractedHalf(float3  in_dir_2, float3  out_dir_0, float3  n_7, float eta_i_3, float eta_o_2)
 {
-    float3  _S512 = negate_0(in_dir_1);
-    float3  _S513 = negate_0(make_float3 (eta_i_2) * _S512 + make_float3 (eta_o_2) * out_dir_0);
-    float3  _S514 = ((((_S513)) * make_float3(rnorm3df(((_S513)).x, ((_S513)).y, ((_S513)).z))));
-    float _S515 = sign_0(dot_0(n_5, _S512));
-    float _S516 = sign_0(dot_0(_S513, n_5 * make_float3 (_S515)));
-    return _S514 * make_float3 (_S516);
+    float3  _S567 = negate_0(in_dir_2);
+    float3  _S568 = negate_0(make_float3 (eta_i_3) * _S567 + make_float3 (eta_o_2) * out_dir_0);
+    float3  _S569 = ((((_S568)) * make_float3(rnorm3df(((_S568)).x, ((_S568)).y, ((_S568)).z))));
+    float _S570 = sign_0(dot_0(n_7, _S567));
+    float _S571 = sign_0(dot_0(_S568, n_7 * make_float3 (_S570)));
+    return _S569 * make_float3 (_S571);
 }
 
-__device__ __forceinline__ float3  reflectedHalf(float3  in_dir_2, float3  out_dir_1)
+__device__ __forceinline__ float3  reflectedHalf(float3  in_dir_3, float3  out_dir_1)
 {
-    float3  _S517 = negate_0(in_dir_2);
-    float3  _S518 = _S517 + out_dir_1;
-    float3  _S519 = ((((_S518)) * make_float3(rnorm3df(((_S518)).x, ((_S518)).y, ((_S518)).z))));
-    return _S519;
+    float3  _S572 = negate_0(in_dir_3);
+    float3  _S573 = _S572 + out_dir_1;
+    float3  _S574 = ((((_S573)) * make_float3(rnorm3df(((_S573)).x, ((_S573)).y, ((_S573)).z))));
+    return _S574;
 }
 
-__device__ float translucentShare(BSDFMaterial material_5)
+__device__ float translucentShare(BSDFMaterial material_8)
 {
-    float _S520 = rgb_to_greyscale(material_5.translucent);
-    float _S521 = rgb_to_greyscale(material_5.albedo);
-    float _S522 = _S520 / (_S521 + _S520);
-    bool _S523 = _S520 > 0.0f;
-    float _S524 = _slang_select(_S523, _S522,0.0f);
-    return _S524;
+    float _S575 = rgb_to_greyscale(material_8.translucent);
+    float _S576 = rgb_to_greyscale(material_8.albedo);
+    float _S577 = _S575 / (_S576 + _S575);
+    bool _S578 = _S575 > 0.0f;
+    float _S579 = _slang_select(_S578, _S577,0.0f);
+    return _S579;
 }
 
-__device__ __forceinline__ float diffusePDF(float n_i_dot_l_0, float n_i_dot_v_0, BSDFMaterial material_6, Weights w_1)
+__device__ __forceinline__ float diffusePDF(float n_i_dot_l_0, float n_i_dot_v_0, BSDFMaterial material_9, Weights w_1)
 {
-    float _S525 = translucentShare(material_6);
-    float _S526 = w_1.p_diffuse * n_i_dot_l_0 * 0.31830987334251404f;
-    float _S527 = w_1.p_diffuse * (F32_abs((n_i_dot_l_0))) * 0.31830987334251404f;
-    float _S528 = 1.0f - _S525;
-    bool _S529 = n_i_dot_l_0 < 0.0f;
-    float _S530 = _slang_select(_S529, _S525,_S528);
-    float _S531 = _S527 * _S530;
-    bool _S532 = _S525 > 0.0f;
-    float _S533 = _slang_select(_S532, _S531,_S526);
-    bool _S534 = n_i_dot_v_0 > 0.0f;
-    float _S535 = _slang_select(_S534, _S533,0.0f);
-    return _S535;
+    float _S580 = translucentShare(material_9);
+    float _S581 = w_1.p_diffuse * n_i_dot_l_0 * 0.31830987334251404f;
+    float _S582 = w_1.p_diffuse * (F32_abs((n_i_dot_l_0))) * 0.31830987334251404f;
+    float _S583 = 1.0f - _S580;
+    bool _S584 = n_i_dot_l_0 < 0.0f;
+    float _S585 = _slang_select(_S584, _S580,_S583);
+    float _S586 = _S582 * _S585;
+    bool _S587 = _S580 > 0.0f;
+    float _S588 = _slang_select(_S587, _S586,_S581);
+    bool _S589 = n_i_dot_v_0 > 0.0f;
+    float _S590 = _slang_select(_S589, _S588,0.0f);
+    return _S590;
 }
 
-__device__ __forceinline__ float3  diffuseBSDF(float3  l_0, float3  n_i_5, BSDFMaterial material_7, Weights w_2)
+__device__ __forceinline__ float3  diffuseBSDF(float3  l_0, float3  n_i_5, BSDFMaterial material_10, Weights w_2)
 {
-    float _S536 = translucentShare(material_7);
-    bool _S537 = (dot_0(n_i_5, l_0)) < 0.0f;
-    float3  _S538 = _slang_select(_S537, material_7.translucent,material_7.albedo);
-    float _S539 = 1.0f - _S536;
-    float _S540 = _slang_select(_S537, _S536,_S539);
-    float3  _S541 = _S538 / make_float3 (_S540);
-    bool _S542 = _S536 > 0.0f;
-    float3  _S543 = _slang_select(_S542, _S541,material_7.albedo);
-    return w_2.diffuse_weight * _S543 / make_float3 (w_2.p_diffuse);
+    float _S591 = translucentShare(material_10);
+    bool _S592 = (dot_0(n_i_5, l_0)) < 0.0f;
+    float3  _S593 = _slang_select(_S592, material_10.translucent,material_10.albedo);
+    float _S594 = 1.0f - _S591;
+    float _S595 = _slang_select(_S592, _S591,_S594);
+    float3  _S596 = _S593 / make_float3 (_S595);
+    bool _S597 = _S591 > 0.0f;
+    float3  _S598 = _slang_select(_S597, _S596,material_10.albedo);
+    return w_2.diffuse_weight * _S598 / make_float3 (w_2.p_diffuse);
 }
 
-__device__ float smithG1(float alpha_3, float n_dot_x_0)
+__device__ float trowbridgeReitz(float alpha_5, float n_dot_h_0)
 {
-    float _S544 = alpha_3 * alpha_3;
-    float _S545 = 2.0f * n_dot_x_0 / (n_dot_x_0 + (F32_sqrt((_S544 + (1.0f - _S544) * n_dot_x_0 * n_dot_x_0))));
-    bool _S546 = alpha_3 > 0.0f;
-    float _S547 = _slang_select(_S546, _S545,1.0f);
-    return _S547;
-}
-
-__device__ float trowbridgeReitz(float alpha_4, float n_dot_h_0)
-{
-    float _S548 = alpha_4 * alpha_4;
-    float _S549 = (1.0f - n_dot_h_0) * (1.0f + n_dot_h_0) + _S548 * n_dot_h_0 * n_dot_h_0;
-    return _S548 / (F32_max((3.14159274101257324f * _S549 * _S549), (1.17549435082228751e-38f)));
+    float _S599 = alpha_5 * alpha_5;
+    float _S600 = (1.0f - n_dot_h_0) * (1.0f + n_dot_h_0) + _S599 * n_dot_h_0 * n_dot_h_0;
+    return _S599 / (F32_max((3.14159274101257324f * _S600 * _S600), (1.17549435082228751e-38f)));
 }
 
 __device__ float anisotropicG1(float3  w_3, float2  alphas_1)
 {
-    float _S550 = (F32_max((w_3.z), (0.0f)));
-    return 2.0f * _S550 / (_S550 + length_0(make_float3 (alphas_1.x * w_3.x, alphas_1.y * w_3.y, _S550)));
+    float _S601 = (F32_max((w_3.z), (0.0f)));
+    return 2.0f * _S601 / (_S601 + length_0(make_float3 (alphas_1.x * w_3.x, alphas_1.y * w_3.y, _S601)));
 }
 
 __device__ float anisotropicD(float3  h_0, float2  alphas_2)
 {
-    float _S551 = alphas_2.x;
-    float _S552 = h_0.x / _S551;
-    float _S553 = alphas_2.y;
-    float _S554 = h_0.y / _S553;
-    float _S555 = h_0.z;
-    float _S556 = _S552 * _S552 + _S554 * _S554 + _S555 * _S555;
-    return 1.0f / (F32_max((3.14159274101257324f * _S551 * _S553 * _S556 * _S556), (1.17549435082228751e-38f)));
+    float _S602 = alphas_2.x;
+    float _S603 = h_0.x / _S602;
+    float _S604 = alphas_2.y;
+    float _S605 = h_0.y / _S604;
+    float _S606 = h_0.z;
+    float _S607 = _S603 * _S603 + _S605 * _S605 + _S606 * _S606;
+    return 1.0f / (F32_max((3.14159274101257324f * _S602 * _S604 * _S607 * _S607), (1.17549435082228751e-38f)));
 }
 
-__device__ __forceinline__ float vndfPDF(float3  v_6, float3  h_1, float3  n_i_6, float n_i_dot_v_1, float alpha_5, AnisotropicFrame frame_3, float v_dot_h_1)
+__device__ __forceinline__ float vndfPDF(float3  v_8, float3  h_1, float3  n_i_6, float n_i_dot_v_1, float alpha_6, AnisotropicFrame frame_3, float v_dot_h_1)
 {
-    float _S557 = dot_0(n_i_6, h_1);
-    float _S558 = smithG1(alpha_5, n_i_dot_v_1);
-    float _S559 = _S558 * v_dot_h_1;
-    float _S560 = trowbridgeReitz(alpha_5, _S557);
-    float _S561 = _S559 * _S560 / n_i_dot_v_1;
-    bool _S562 = alpha_5 > 0.0f;
-    bool _S563;
-    if(_S562)
+    float _S608 = dot_0(n_i_6, h_1);
+    float _S609 = smithG1(alpha_6, n_i_dot_v_1);
+    float _S610 = _S609 * v_dot_h_1;
+    float _S611 = trowbridgeReitz(alpha_6, _S608);
+    float _S612 = _S610 * _S611 / n_i_dot_v_1;
+    bool _S613 = alpha_6 > 0.0f;
+    bool _S614;
+    if(_S613)
     {
-        _S563 = v_dot_h_1 > 0.0f;
+        _S614 = v_dot_h_1 > 0.0f;
     }
     else
     {
-        _S563 = false;
+        _S614 = false;
     }
-    if(_S563)
+    if(_S614)
     {
-        _S563 = _S557 > 0.0f;
+        _S614 = _S608 > 0.0f;
     }
     else
     {
-        _S563 = false;
+        _S614 = false;
     }
-    if(_S563)
+    if(_S614)
     {
-        _S563 = n_i_dot_v_1 > 0.0f;
+        _S614 = n_i_dot_v_1 > 0.0f;
     }
     else
     {
-        _S563 = false;
+        _S614 = false;
     }
-    float _S564 = _slang_select(_S563, _S561,0.0f);
-    bool _S565 = (frame_3.alphas.x) > 0.0f;
+    float _S615 = _slang_select(_S614, _S612,0.0f);
+    bool _S616 = (frame_3.alphas.x) > 0.0f;
     float pdf_h_0;
-    if(_S565)
+    if(_S616)
     {
-        float3  _S566 = anisotropicLocal(v_6, frame_3.tangent, n_i_6);
-        float _S567 = anisotropicG1(_S566, frame_3.alphas);
-        float3  _S568 = anisotropicLocal(h_1, frame_3.tangent, n_i_6);
-        float _S569 = anisotropicD(_S568, frame_3.alphas);
-        float _S570 = _S567 * _S569;
-        float _S571 = _S570 * v_dot_h_1 / n_i_dot_v_1;
-        bool _S572 = v_dot_h_1 > 0.0f;
-        if(_S572)
+        float3  _S617 = anisotropicLocal(v_8, frame_3.tangent, n_i_6);
+        float _S618 = anisotropicG1(_S617, frame_3.alphas);
+        float3  _S619 = anisotropicLocal(h_1, frame_3.tangent, n_i_6);
+        float _S620 = anisotropicD(_S619, frame_3.alphas);
+        float _S621 = _S618 * _S620;
+        float _S622 = _S621 * v_dot_h_1 / n_i_dot_v_1;
+        bool _S623 = v_dot_h_1 > 0.0f;
+        if(_S623)
         {
-            _S563 = _S557 > 0.0f;
+            _S614 = _S608 > 0.0f;
         }
         else
         {
-            _S563 = false;
+            _S614 = false;
         }
-        if(_S563)
+        if(_S614)
         {
-            _S563 = n_i_dot_v_1 > 0.0f;
+            _S614 = n_i_dot_v_1 > 0.0f;
         }
         else
         {
-            _S563 = false;
+            _S614 = false;
         }
-        float _S573 = _slang_select(_S563, _S571,0.0f);
-        pdf_h_0 = _S573;
+        float _S624 = _slang_select(_S614, _S622,0.0f);
+        pdf_h_0 = _S624;
     }
     else
     {
-        pdf_h_0 = _S564;
+        pdf_h_0 = _S615;
     }
     return pdf_h_0;
 }
 
-__device__ __forceinline__ float refractPDF(float l_dot_h_0, float pdf_h_1, Weights w_4, float eta_i_3, float eta_o_3)
+__device__ __forceinline__ float refractPDF(float l_dot_h_0, float pdf_h_1, Weights w_4, float eta_i_4, float eta_o_3)
 {
-    float _S574 = eta_i_3 * w_4.v_dot_h + eta_o_3 * l_dot_h_0;
-    float _S575 = w_4.p_refract * pdf_h_1 * eta_o_3 * eta_o_3 * (F32_abs((l_dot_h_0))) / (_S574 * _S574);
-    bool _S576 = eta_i_3 != eta_o_3;
-    bool _S577;
-    if(_S576)
+    float _S625 = eta_i_4 * w_4.v_dot_h + eta_o_3 * l_dot_h_0;
+    float _S626 = w_4.p_refract * pdf_h_1 * eta_o_3 * eta_o_3 * (F32_abs((l_dot_h_0))) / (_S625 * _S625);
+    bool _S627 = eta_i_4 != eta_o_3;
+    bool _S628;
+    if(_S627)
     {
-        _S577 = l_dot_h_0 < 0.0f;
+        _S628 = l_dot_h_0 < 0.0f;
     }
     else
     {
-        _S577 = false;
+        _S628 = false;
     }
-    float _S578 = _slang_select(_S577, _S575,0.0f);
-    return _S578;
+    float _S629 = _slang_select(_S628, _S626,0.0f);
+    return _S629;
 }
 
-__device__ __forceinline__ float3  refractBSDF(float3  l_1, float3  n_i_7, float alpha_6, AnisotropicFrame frame_4, BSDFMaterial material_8, Weights w_5)
+__device__ __forceinline__ float3  refractBSDF(float3  l_1, float3  n_i_7, float alpha_7, AnisotropicFrame frame_4, BSDFMaterial material_11, Weights w_5)
 {
-    float _S579 = - dot_0(n_i_7, l_1);
-    float _S580 = smithG1(alpha_6, (F32_max((_S579), (0.0f))));
-    bool _S581 = (frame_4.alphas.x) > 0.0f;
+    float _S630 = - dot_0(n_i_7, l_1);
+    float _S631 = smithG1(alpha_7, (F32_max((_S630), (0.0f))));
+    bool _S632 = (frame_4.alphas.x) > 0.0f;
     float G1_l_0;
-    if(_S581)
+    if(_S632)
     {
-        float3  _S582 = negate_0(n_i_7);
-        float3  _S583 = anisotropicLocal(l_1, frame_4.tangent, _S582);
-        float _S584 = anisotropicG1(_S583, frame_4.alphas);
-        G1_l_0 = _S584;
+        float3  _S633 = negate_0(n_i_7);
+        float3  _S634 = anisotropicLocal(l_1, frame_4.tangent, _S633);
+        float _S635 = anisotropicG1(_S634, frame_4.alphas);
+        G1_l_0 = _S635;
     }
     else
     {
-        G1_l_0 = _S580;
+        G1_l_0 = _S631;
     }
-    return w_5.refract_weight * make_float3 (G1_l_0) * material_8.albedo / make_float3 (w_5.p_refract);
+    return w_5.refract_weight * make_float3 (G1_l_0) * material_11.albedo / make_float3 (w_5.p_refract);
 }
 
 __device__ __forceinline__ float sheenVelvetPDF(float n_i_dot_l_1, float n_i_dot_v_2, Weights w_6)
 {
-    float _S585 = w_6.p_sheen_velvet * 0.5f * 0.31830987334251404f;
-    bool _S586 = n_i_dot_l_1 > 0.0f;
-    bool _S587;
-    if(_S586)
+    float _S636 = w_6.p_sheen_velvet * 0.5f * 0.31830987334251404f;
+    bool _S637 = n_i_dot_l_1 > 0.0f;
+    bool _S638;
+    if(_S637)
     {
-        _S587 = n_i_dot_v_2 > 0.0f;
+        _S638 = n_i_dot_v_2 > 0.0f;
     }
     else
     {
-        _S587 = false;
+        _S638 = false;
     }
-    float _S588 = _slang_select(_S587, _S585,0.0f);
-    return _S588;
+    float _S639 = _slang_select(_S638, _S636,0.0f);
+    return _S639;
 }
 
-__device__ __forceinline__ float3  sheenVelvetBSDF(float3  l_2, float3  v_7, float3  n_i_8, BSDFMaterial material_9, Weights w_7)
+__device__ __forceinline__ float3  sheenVelvetBSDF(float3  l_2, float3  v_9, float3  n_i_8, BSDFMaterial material_12, Weights w_7)
 {
-    float3  _S589 = l_2 + v_7;
-    float3  _S590 = ((((_S589)) * make_float3(rnorm3df(((_S589)).x, ((_S589)).y, ((_S589)).z))));
-    float _S591 = dot_0(n_i_8, _S590);
-    float _S592 = (F32_max((dot_0(n_i_8, l_2)), (0.0f)));
-    float _S593 = (F32_max((dot_0(n_i_8, v_7)), (0.0f)));
-    float _S594 = 1.0f / (F32_max((material_9.sheen_roughness), (0.05000000074505806f)));
-    float _S595 = 1.0f - _S591 * _S591;
-    float _S596 = (2.0f + _S594) * (F32_pow(((F32_max((_S595), (0.0f)))), (0.5f * _S594))) * 0.5f * 0.31830987334251404f / (F32_max((4.0f * (_S592 + _S593 - _S592 * _S593)), (0.0000152587890625f)));
-    bool _S597 = (material_9.velvet) > 0.0f;
+    float3  _S640 = l_2 + v_9;
+    float3  _S641 = ((((_S640)) * make_float3(rnorm3df(((_S640)).x, ((_S640)).y, ((_S640)).z))));
+    float _S642 = dot_0(n_i_8, _S641);
+    float _S643 = (F32_max((dot_0(n_i_8, l_2)), (0.0f)));
+    float _S644 = (F32_max((dot_0(n_i_8, v_9)), (0.0f)));
+    float _S645 = 1.0f / (F32_max((material_12.sheen_roughness), (0.05000000074505806f)));
+    float _S646 = 1.0f - _S642 * _S642;
+    float _S647 = (2.0f + _S645) * (F32_pow(((F32_max((_S646), (0.0f)))), (0.5f * _S645))) * 0.5f * 0.31830987334251404f / (F32_max((4.0f * (_S643 + _S644 - _S643 * _S644)), (0.0000152587890625f)));
+    bool _S648 = (material_12.velvet) > 0.0f;
     float f_1;
-    if(_S597)
+    if(_S648)
     {
-        float _S598 = (F32_max((material_9.sheen_roughness), (0.00999999977648258f)));
-        float _S599 = _S598 * _S598;
-        float _S600 = (F32_max((_S595), (0.0000152587890625f)));
-        float _S601 = (F32_exp((- _S591 * _S591 / (_S600 * _S599)))) / (3.14159274101257324f * _S599 * _S600 * _S600) * (F32_min((1.0f), (2.0f * _S591 * (F32_min((_S592), (_S593))) / (F32_max(((F32_abs((dot_0(_S590, v_7))))), (0.0000152587890625f)))))) / (F32_max((4.0f * _S592 * _S593), (0.0000152587890625f)));
-        f_1 = _S601;
+        float _S649 = (F32_max((material_12.sheen_roughness), (0.00999999977648258f)));
+        float _S650 = _S649 * _S649;
+        float _S651 = (F32_max((_S646), (0.0000152587890625f)));
+        float _S652 = (F32_exp((- _S642 * _S642 / (_S651 * _S650)))) / (3.14159274101257324f * _S650 * _S651 * _S651) * (F32_min((1.0f), (2.0f * _S642 * (F32_min((_S643), (_S644))) / (F32_max(((F32_abs((dot_0(_S641, v_9))))), (0.0000152587890625f)))))) / (F32_max((4.0f * _S643 * _S644), (0.0000152587890625f)));
+        f_1 = _S652;
     }
     else
     {
-        f_1 = _S596;
+        f_1 = _S647;
     }
-    return w_7.sheen * make_float3 (f_1 * _S592 * 2.0f * 3.14159274101257324f / w_7.p_sheen_velvet);
+    return w_7.sheen * make_float3 (f_1 * _S643 * 2.0f * 3.14159274101257324f / w_7.p_sheen_velvet);
+}
+
+__device__ __forceinline__ float coatPDF(float3  v_10, float3  coat_h_2, CoatFrame coat_frame_4, Weights w_8)
+{
+    float _S653 = dot_0(coat_frame_4.normal, v_10);
+    float _S654 = smithG1(coat_frame_4.alpha, _S653);
+    float _S655 = trowbridgeReitz(coat_frame_4.alpha, dot_0(coat_frame_4.normal, coat_h_2));
+    float _S656 = _S654 * _S655 / (4.0f * _S653);
+    bool _S657 = (coat_frame_4.alpha) > 0.0f;
+    float _S658 = _slang_select(_S657, _S656,0.0f);
+    return w_8.p_coat * _S658;
+}
+
+__device__ __forceinline__ float3  coatBSDF(Weights w_9)
+{
+    return w_9.coat / make_float3 (w_9.p_coat);
 }
 
 struct ToonProfile
@@ -2111,16 +2249,16 @@ struct ToonProfile
 
 __device__ __forceinline__ float toonP(float t_13, float a_5, float s_0)
 {
-    float _S602;
+    float _S659;
     if(t_13 < a_5)
     {
-        _S602 = 1.0f;
+        _S659 = 1.0f;
     }
     else
     {
-        _S602 = (F32_max((1.0f - (t_13 - a_5) / (F32_max((s_0), (0.0000152587890625f)))), (0.0f)));
+        _S659 = (F32_max((1.0f - (t_13 - a_5) / (F32_max((s_0), (0.0000152587890625f)))), (0.0f)));
     }
-    return _S602;
+    return _S659;
 }
 
 __device__ __forceinline__ float toonIntegral(float t_14, float a_6, float s_1, bool glossy_0)
@@ -2132,520 +2270,586 @@ __device__ __forceinline__ float toonIntegral(float t_14, float a_6, float s_1, 
     }
     else
     {
-        float _S603 = (F32_sin(((F32_min((t_14), (a_6))))));
-        integral_0 = _S603 * _S603 / 2.0f;
+        float _S660 = (F32_sin(((F32_min((t_14), (a_6))))));
+        integral_0 = _S660 * _S660 / 2.0f;
     }
-    bool _S604 = t_14 > a_6;
-    bool _S605;
-    if(_S604)
+    bool _S661 = t_14 > a_6;
+    bool _S662;
+    if(_S661)
     {
-        _S605 = s_1 > 0.0f;
+        _S662 = s_1 > 0.0f;
     }
     else
     {
-        _S605 = false;
+        _S662 = false;
     }
-    if(_S605)
+    if(_S662)
     {
-        float _S606;
+        float _S663;
         if(glossy_0)
         {
-            float _S607 = (F32_cos((a_6)));
-            float _S608 = (F32_cos((t_14)));
-            _S606 = (1.0f + a_6 / s_1) * (_S607 - _S608) - ((F32_sin((t_14))) - t_14 * _S608 - ((F32_sin((a_6))) - a_6 * _S607)) / s_1;
+            float _S664 = (F32_cos((a_6)));
+            float _S665 = (F32_cos((t_14)));
+            _S663 = (1.0f + a_6 / s_1) * (_S664 - _S665) - ((F32_sin((t_14))) - t_14 * _S665 - ((F32_sin((a_6))) - a_6 * _S664)) / s_1;
         }
         else
         {
-            float _S609 = 2.0f * a_6;
-            float _S610 = (F32_cos((_S609)));
-            float _S611 = 2.0f * t_14;
-            float _S612 = (F32_cos((_S611)));
-            _S606 = (1.0f + a_6 / s_1) * (_S610 - _S612) / 4.0f - ((F32_sin((_S611))) / 8.0f - t_14 * _S612 / 4.0f - ((F32_sin((_S609))) / 8.0f - a_6 * _S610 / 4.0f)) / s_1;
+            float _S666 = 2.0f * a_6;
+            float _S667 = (F32_cos((_S666)));
+            float _S668 = 2.0f * t_14;
+            float _S669 = (F32_cos((_S668)));
+            _S663 = (1.0f + a_6 / s_1) * (_S667 - _S669) / 4.0f - ((F32_sin((_S668))) / 8.0f - t_14 * _S669 / 4.0f - ((F32_sin((_S666))) / 8.0f - a_6 * _S667 / 4.0f)) / s_1;
         }
-        float integral_1 = integral_0 + _S606;
+        float integral_1 = integral_0 + _S663;
         integral_0 = integral_1;
     }
     return integral_0;
 }
 
-static __device__ ToonProfile ToonProfile_x24init_0(float3  toon_1, bool glossy_1, float a_7, float s_2, float b_1, float norm_0, float view_0, float3  axis_0)
+static __device__ ToonProfile ToonProfile_x24init_0(float3  toon_0, bool glossy_1, float a_7, float s_2, float b_1, float norm_0, float view_0, float3  axis_0)
 {
-    ToonProfile _S613;
-    (&_S613)->toon = toon_1;
-    (&_S613)->glossy = glossy_1;
-    (&_S613)->a = a_7;
-    (&_S613)->s = s_2;
-    (&_S613)->b = b_1;
-    (&_S613)->norm = norm_0;
-    (&_S613)->view = view_0;
-    (&_S613)->axis = axis_0;
-    return _S613;
+    ToonProfile _S670;
+    (&_S670)->toon = toon_0;
+    (&_S670)->glossy = glossy_1;
+    (&_S670)->a = a_7;
+    (&_S670)->s = s_2;
+    (&_S670)->b = b_1;
+    (&_S670)->norm = norm_0;
+    (&_S670)->view = view_0;
+    (&_S670)->axis = axis_0;
+    return _S670;
 }
 
-__device__ __forceinline__ ToonProfile toonProfile(float3  v_8, float3  n_i_9, BSDFMaterial material_10)
+__device__ __forceinline__ ToonProfile toonProfile(float3  v_11, float3  n_i_9, BSDFMaterial material_13)
 {
-    float _S614 = material_10.toon.x;
-    bool _S615 = _S614 < 0.0f;
-    float _S616 = clamp_1(material_10.toon.y / _S614, 0.00000999999974738f, 1.0f) * 3.14159274101257324f / 2.0f;
-    float _S617 = clamp_1(material_10.toon.z / _S614, 0.0f, 1.0f) * 3.14159274101257324f / 2.0f;
-    float _S618 = (F32_min((_S616 + _S617), (1.57079637050628662f)));
-    float _S619 = dot_0(n_i_9, v_8);
-    float _S620 = toonP((F32_acos(((F32_min((_S619), (1.0f)))))), _S616, _S617);
-    float3  _S621;
-    if(_S615)
+    float _S671 = material_13.toon.x;
+    bool _S672 = _S671 < 0.0f;
+    float _S673 = clamp_1(material_13.toon.y / _S671, 0.00000999999974738f, 1.0f) * 3.14159274101257324f / 2.0f;
+    float _S674 = clamp_1(material_13.toon.z / _S671, 0.0f, 1.0f) * 3.14159274101257324f / 2.0f;
+    float _S675 = (F32_min((_S673 + _S674), (1.57079637050628662f)));
+    float _S676 = dot_0(n_i_9, v_11);
+    float _S677 = toonP((F32_acos(((F32_min((_S676), (1.0f)))))), _S673, _S674);
+    float3  _S678;
+    if(_S672)
     {
-        float3  _S622 = make_float3 (2.0f * _S619) * n_i_9 - v_8;
-        float3  _S623 = ((((_S622)) * make_float3(rnorm3df(((_S622)).x, ((_S622)).y, ((_S622)).z))));
-        _S621 = _S623;
+        float3  _S679 = make_float3 (2.0f * _S676) * n_i_9 - v_11;
+        float3  _S680 = ((((_S679)) * make_float3(rnorm3df(((_S679)).x, ((_S679)).y, ((_S679)).z))));
+        _S678 = _S680;
     }
     else
     {
-        _S621 = n_i_9;
+        _S678 = n_i_9;
     }
-    float3  _S624 = make_float3 ((F32_min(((F32_abs((_S614)))), (1.0f)))) * material_10.albedo;
-    float _S625 = toonIntegral(_S618, _S616, _S617, _S615);
-    return ToonProfile_x24init_0(_S624, _S615, _S616, _S617, _S618, 6.28318548202514648f * _S625, _S620, _S621);
+    float3  _S681 = make_float3 ((F32_min(((F32_abs((_S671)))), (1.0f)))) * material_13.albedo;
+    float _S682 = toonIntegral(_S675, _S673, _S674, _S672);
+    return ToonProfile_x24init_0(_S681, _S672, _S673, _S674, _S675, 6.28318548202514648f * _S682, _S677, _S678);
 }
 
-__device__ __forceinline__ float toonPDF(float3  l_3, float3  n_i_10, ToonProfile profile_0, Weights w_8)
+__device__ __forceinline__ float toonPDF(float3  l_3, float3  n_i_10, ToonProfile profile_0, Weights w_10)
 {
-    float _S626 = dot_0(n_i_10, l_3);
-    float _S627 = dot_0(l_3, profile_0.axis);
-    float _S628 = _slang_select(profile_0.glossy, _S627,_S626);
-    float _S629 = (F32_acos((clamp_1(_S628, -1.0f, 1.0f))));
-    float _S630 = toonP(_S629, profile_0.a, profile_0.s);
-    float _S631 = w_8.p_toon * _S630;
-    float _S632 = _slang_select(profile_0.glossy, 1.0f,_S626);
-    float _S633 = _S631 * _S632 / profile_0.norm;
-    bool _S634;
+    float _S683 = dot_0(n_i_10, l_3);
+    float _S684 = dot_0(l_3, profile_0.axis);
+    float _S685 = _slang_select(profile_0.glossy, _S684,_S683);
+    float _S686 = (F32_acos((clamp_1(_S685, -1.0f, 1.0f))));
+    float _S687 = toonP(_S686, profile_0.a, profile_0.s);
+    float _S688 = w_10.p_toon * _S687;
+    float _S689 = _slang_select(profile_0.glossy, 1.0f,_S683);
+    float _S690 = _S688 * _S689 / profile_0.norm;
+    bool _S691;
     if(profile_0.glossy)
     {
-        _S634 = true;
+        _S691 = true;
     }
     else
     {
-        _S634 = _S626 > 0.0f;
+        _S691 = _S683 > 0.0f;
     }
-    float _S635 = _slang_select(_S634, _S633,0.0f);
-    return _S635;
+    float _S692 = _slang_select(_S691, _S690,0.0f);
+    return _S692;
 }
 
-__device__ __forceinline__ float3  toonBSDF(float3  l_4, float3  n_i_11, ToonProfile profile_1, Weights w_9)
+__device__ __forceinline__ float3  toonBSDF(float3  l_4, float3  n_i_11, ToonProfile profile_1, Weights w_11)
 {
-    float _S636 = (F32_max((dot_0(n_i_11, l_4)), (0.0f)));
-    float _S637 = _slang_select(profile_1.glossy, _S636,profile_1.view);
-    return profile_1.toon * make_float3 (_S637) / make_float3 (w_9.p_toon);
+    float _S693 = (F32_max((dot_0(n_i_11, l_4)), (0.0f)));
+    float _S694 = _slang_select(profile_1.glossy, _S693,profile_1.view);
+    return profile_1.toon * make_float3 (_S694) / make_float3 (w_11.p_toon);
 }
 
-__device__ __forceinline__ float reflectPDF(float pdf_h_2, Weights w_10)
+__device__ __forceinline__ float reflectPDF(float pdf_h_2, Weights w_12)
 {
-    float _S638 = w_10.p_reflect * pdf_h_2 / (4.0f * w_10.v_dot_h);
-    bool _S639 = pdf_h_2 > 0.0f;
-    float _S640 = _slang_select(_S639, _S638,0.0f);
-    return _S640;
+    float _S695 = w_12.p_reflect * pdf_h_2 / (4.0f * w_12.v_dot_h);
+    bool _S696 = pdf_h_2 > 0.0f;
+    float _S697 = _slang_select(_S696, _S695,0.0f);
+    return _S697;
 }
 
-__device__ __forceinline__ float3  reflectBSDF(float3  l_5, float3  n_i_12, float alpha_7, AnisotropicFrame frame_5, Weights w_11)
+__device__ __forceinline__ float3  reflectBSDF(float3  l_5, float3  n_i_12, float alpha_8, AnisotropicFrame frame_5, Weights w_13)
 {
-    float _S641 = dot_0(n_i_12, l_5);
-    float _S642 = smithG1(alpha_7, (F32_max((_S641), (0.0f))));
-    bool _S643 = (frame_5.alphas.x) > 0.0f;
+    float _S698 = dot_0(n_i_12, l_5);
+    float _S699 = smithG1(alpha_8, (F32_max((_S698), (0.0f))));
+    bool _S700 = (frame_5.alphas.x) > 0.0f;
     float G1_l_1;
-    if(_S643)
+    if(_S700)
     {
-        float3  _S644 = anisotropicLocal(l_5, frame_5.tangent, n_i_12);
-        float _S645 = anisotropicG1(_S644, frame_5.alphas);
-        G1_l_1 = _S645;
+        float3  _S701 = anisotropicLocal(l_5, frame_5.tangent, n_i_12);
+        float _S702 = anisotropicG1(_S701, frame_5.alphas);
+        G1_l_1 = _S702;
     }
     else
     {
-        G1_l_1 = _S642;
+        G1_l_1 = _S699;
     }
-    return make_float3 (w_11.reflect_weight * G1_l_1) * w_11.F / make_float3 (w_11.p_reflect);
+    return make_float3 (w_13.reflect_weight * G1_l_1) * w_13.F / make_float3 (w_13.p_reflect);
 }
 
-__device__ __forceinline__ float3  BSDF(float3  in_dir_3, float3  out_dir_2, float3  n_6, BSDFMaterial material_11, float eta_i_4, float eta_o_4, bool refracted_2, uint random_state_4, uint mask_0, FixedArray<float3 , 5>  * throughputs_0, FixedArray<float, 5>  * pdfs_0)
+__device__ __forceinline__ float3  BSDF(float3  in_dir_4, float3  out_dir_2, float3  n_8, BSDFMaterial material_14, float eta_i_5, float eta_o_4, bool refracted_2, uint random_state_5, uint mask_0, FixedArray<float3 , 6>  * throughputs_0, FixedArray<float, 6>  * pdfs_0)
 {
-    float3  _S646 = negate_0(in_dir_3);
-    float _S647 = dot_0(n_6, _S646);
-    float _S648 = sign_0(_S647);
-    float3  _S649 = n_6 * make_float3 (_S648);
-    float _S650 = dot_0(_S649, out_dir_2);
-    float _S651 = material_11.roughness;
-    float _S652 = _S651 * _S651;
-    AnisotropicFrame _S653 = anisotropicFrame(material_11, _S649);
-    float _S654 = sheenAlbedo(_S646, _S649, material_11);
-    float _S655 = rgb_to_greyscale(material_11.translucent);
-    bool _S656 = _S655 > 0.0f;
-    bool _S657 = (dot_0(n_6, out_dir_2) * _S647) < 0.0f;
-    uint _S658;
-    if((F32_abs((material_11.toon.x))) > 0.0f)
+    float3  _S703 = negate_0(in_dir_4);
+    float _S704 = dot_0(n_8, _S703);
+    float _S705 = sign_0(_S704);
+    float3  _S706 = n_8 * make_float3 (_S705);
+    float _S707 = dot_0(_S706, out_dir_2);
+    float _S708 = material_14.roughness;
+    float _S709 = _S708 * _S708;
+    AnisotropicFrame _S710 = anisotropicFrame(material_14, _S706);
+    float _S711 = sheenAlbedo(_S703, _S706, material_14);
+    float3  _S712 = make_float3 (0.0f);
+    CoatFrame _S713 = CoatFrame_x24init_0(_S712, 0.0f, 0.0f);
+    bool _S714 = (material_14.coat) > 0.0f;
+    CoatFrame coat_frame_5;
+    float3  coat_series_1;
+    if(_S714)
     {
-        _S658 = 5U;
+        CoatFrame coat_frame_6 = coatFrame(material_14, _S706);
+        float3  _S715 = coatSeries(coat_frame_6, material_14);
+        coat_frame_5 = coat_frame_6;
+        coat_series_1 = _S715;
     }
     else
     {
-        _S658 = 4U;
+        coat_frame_5 = _S713;
+        coat_series_1 = _S712;
     }
-    uint i_7 = 0U;
+    float _S716 = rgb_to_greyscale(material_14.translucent);
+    bool _S717 = _S716 > 0.0f;
+    bool _S718 = (dot_0(n_8, out_dir_2) * _S704) < 0.0f;
+    bool _S719 = (F32_abs((material_14.toon.x))) > 0.0f;
+    uint _S720;
+    if(_S714)
+    {
+        _S720 = 6U;
+    }
+    else
+    {
+        if(_S719)
+        {
+            _S720 = 5U;
+        }
+        else
+        {
+            _S720 = 4U;
+        }
+    }
+    uint i_8 = 0U;
     for(;;)
     {
-        if(i_7 < 5U)
+        if(i_8 < 6U)
         {
         }
         else
         {
             break;
         }
-        float3  _S659 = make_float3 (0.0f);
-        (*throughputs_0)[i_7] = _S659;
-        (*pdfs_0)[i_7] = 0.0f;
-        uint i_8 = i_7 + 1U;
-        i_7 = i_8;
+        (*throughputs_0)[i_8] = _S712;
+        (*pdfs_0)[i_8] = 0.0f;
+        uint i_9 = i_8 + 1U;
+        i_8 = i_9;
     }
-    float3  _S660 = make_float3 (0.0f);
-    Weights _S661 = Weights_x24init_0(0.0f, _S660, _S660, 0.0f, _S660, _S660, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, _S660, _S660);
-    bool _S662 = (mask_0 & 49U) != 0U;
-    bool _S663;
-    if(_S662)
+    float3  _S721 = coatHalf(_S703, coat_frame_5, material_14, random_state_5);
+    Weights _S722 = Weights_x24init_0(0.0f, _S712, _S712, 0.0f, _S712, _S712, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, _S712, _S712, 0.0f);
+    bool _S723 = (mask_0 & 49U) != 0U;
+    bool _S724;
+    if(_S723)
     {
-        if(_S656)
+        if(_S717)
         {
-            _S663 = _S657;
+            _S724 = _S718;
         }
         else
         {
-            _S663 = false;
+            _S724 = false;
         }
-        bool _S664 = _S663 == refracted_2;
-        if(_S664)
+        bool _S725 = _S724 == refracted_2;
+        if(_S725)
         {
-            _S663 = true;
+            _S724 = true;
         }
         else
         {
-            bool _S665 = !refracted_2;
-            if(_S665)
+            bool _S726 = !refracted_2;
+            if(_S726)
             {
-                _S663 = _S658 > 4U;
+                _S724 = _S720 > 4U;
             }
             else
             {
-                _S663 = false;
+                _S724 = false;
             }
         }
     }
     else
     {
-        _S663 = false;
+        _S724 = false;
     }
+    float3  sampled_n_0;
     Weights sampled_w_0;
-    if(_S663)
+    if(_S724)
     {
-        float3  sampled_n_0 = sampledHalf(_S646, _S649, _S652, _S653, random_state_4);
-        Weights _S666 = lobeWeights(in_dir_3, _S646, _S649, sampled_n_0, _S653, _S654, material_11, eta_i_4, eta_o_4);
-        sampled_w_0 = _S666;
+        float3  sampled_n_1 = sampledHalf(_S703, _S706, _S709, _S710, random_state_5);
+        Weights _S727 = lobeWeights(in_dir_4, _S703, _S706, sampled_n_1, _S721, _S710, _S711, coat_frame_5, coat_series_1, material_14, eta_i_5, eta_o_4);
+        sampled_w_0 = _S727;
+        sampled_n_0 = sampled_n_1;
     }
     else
     {
-        sampled_w_0 = _S661;
+        sampled_w_0 = _S722;
+        sampled_n_0 = _S712;
     }
     float3  f_2;
     if(refracted_2)
     {
-        float3  _S667 = refractedHalf(in_dir_3, out_dir_2, n_6, eta_i_4, eta_o_4);
-        f_2 = _S667;
+        float3  _S728 = refractedHalf(in_dir_4, out_dir_2, n_8, eta_i_5, eta_o_4);
+        f_2 = _S728;
     }
     else
     {
-        float3  _S668 = reflectedHalf(in_dir_3, out_dir_2);
-        f_2 = _S668;
+        float3  _S729 = reflectedHalf(in_dir_4, out_dir_2);
+        f_2 = _S729;
     }
-    bool _S669 = (mask_0 & 14U) != 0U;
-    Weights w_12;
-    if(_S669)
+    bool _S730 = (mask_0 & 14U) != 0U;
+    Weights w_14;
+    if(_S730)
     {
-        Weights _S670 = lobeWeights(in_dir_3, _S646, _S649, f_2, _S653, _S654, material_11, eta_i_4, eta_o_4);
-        w_12 = _S670;
+        Weights _S731 = lobeWeights(in_dir_4, _S703, _S706, f_2, _S721, _S710, _S711, coat_frame_5, coat_series_1, material_14, eta_i_5, eta_o_4);
+        w_14 = _S731;
     }
     else
     {
-        w_12 = _S661;
+        w_14 = _S722;
     }
-    i_7 = 0U;
+    i_8 = 0U;
     for(;;)
     {
-        if(i_7 < _S658)
+        if(i_8 < _S720)
         {
         }
         else
         {
             break;
         }
-        uint _S671;
-        if(i_7 == 3U)
+        uint _S732;
+        if(i_8 == 3U)
         {
-            _S671 = 4U;
+            _S732 = 4U;
         }
         else
         {
-            if(i_7 == 4U)
+            if(i_8 == 4U)
             {
-                _S671 = 6U;
+                _S732 = 6U;
             }
             else
             {
-                _S671 = i_7;
+                if(i_8 == 5U)
+                {
+                    _S732 = 5U;
+                }
+                else
+                {
+                    _S732 = i_8;
+                }
             }
         }
-        bool _S672 = (mask_0 & (1U << i_7)) == 0U;
-        if(_S672)
+        bool _S733 = (mask_0 & (1U << i_8)) == 0U;
+        bool _S734;
+        if(_S733)
         {
-            _S663 = true;
+            _S724 = true;
         }
         else
         {
-            bool _S673 = _S671 == 0U;
-            if(_S673)
+            bool _S735 = _S732 == 0U;
+            if(_S735)
             {
-                _S663 = _S656;
+                _S724 = _S717;
             }
             else
             {
-                _S663 = false;
+                _S724 = false;
             }
-            bool _S674;
-            if(_S663)
+            if(_S724)
             {
-                _S674 = _S657;
+                _S734 = _S718;
             }
             else
             {
-                _S674 = _S671 == 1U;
+                _S734 = _S732 == 1U;
             }
-            _S663 = _S674 != refracted_2;
+            _S724 = _S734 != refracted_2;
         }
-        if(_S663)
+        if(_S724)
         {
-            uint i_9 = i_7 + 1U;
-            i_7 = i_9;
+            _S734 = true;
+        }
+        else
+        {
+            bool _S736 = _S732 == 6U;
+            if(_S736)
+            {
+                _S734 = !_S719;
+            }
+            else
+            {
+                _S734 = false;
+            }
+        }
+        if(_S734)
+        {
+            uint i_10 = i_8 + 1U;
+            i_8 = i_10;
             continue;
         }
-        switch(_S671)
+        switch(_S732)
         {
         case 0U:
             {
-                float _S675 = diffusePDF(_S650, (F32_abs((_S647))), material_11, sampled_w_0);
-                (*pdfs_0)[int(0)] = _S675;
-                float3  _S676 = diffuseBSDF(out_dir_2, _S649, material_11, sampled_w_0);
-                (*throughputs_0)[int(0)] = _S676;
+                float _S737 = diffusePDF(_S707, (F32_abs((_S704))), material_14, sampled_w_0);
+                (*pdfs_0)[int(0)] = _S737;
+                float3  _S738 = diffuseBSDF(out_dir_2, _S706, material_14, sampled_w_0);
+                (*throughputs_0)[int(0)] = _S738;
                 break;
             }
         case 1U:
             {
-                float _S677 = dot_0(out_dir_2, f_2);
-                float _S678 = vndfPDF(_S646, f_2, _S649, (F32_abs((_S647))), _S652, _S653, w_12.v_dot_h);
-                float _S679 = refractPDF(_S677, _S678, w_12, eta_i_4, eta_o_4);
-                (*pdfs_0)[int(1)] = _S679;
-                float3  _S680 = refractBSDF(out_dir_2, _S649, _S652, _S653, material_11, w_12);
-                (*throughputs_0)[int(1)] = _S680;
+                float _S739 = dot_0(out_dir_2, f_2);
+                float _S740 = vndfPDF(_S703, f_2, _S706, (F32_abs((_S704))), _S709, _S710, w_14.v_dot_h);
+                float _S741 = refractPDF(_S739, _S740, w_14, eta_i_5, eta_o_4);
+                (*pdfs_0)[int(1)] = _S741;
+                float3  _S742 = refractBSDF(out_dir_2, _S706, _S709, _S710, material_14, w_14);
+                (*throughputs_0)[int(1)] = _S742;
                 break;
             }
         case 4U:
             {
-                float _S681 = sheenVelvetPDF(_S650, (F32_abs((_S647))), w_12);
-                (*pdfs_0)[int(3)] = _S681;
-                float3  _S682 = sheenVelvetBSDF(out_dir_2, _S646, _S649, material_11, w_12);
-                (*throughputs_0)[int(3)] = _S682;
+                float _S743 = sheenVelvetPDF(_S707, (F32_abs((_S704))), w_14);
+                (*pdfs_0)[int(3)] = _S743;
+                float3  _S744 = sheenVelvetBSDF(out_dir_2, _S703, _S706, material_14, w_14);
+                (*throughputs_0)[int(3)] = _S744;
+                break;
+            }
+        case 5U:
+            {
+                Weights _S745 = lobeWeights(in_dir_4, _S703, _S706, sampled_n_0, f_2, _S710, _S711, coat_frame_5, coat_series_1, material_14, eta_i_5, eta_o_4);
+                float _S746 = coatPDF(_S703, f_2, coat_frame_5, _S745);
+                (*pdfs_0)[int(5)] = _S746;
+                float3  _S747 = coatBSDF(_S745);
+                (*throughputs_0)[int(5)] = _S747;
                 break;
             }
         case 6U:
             {
-                ToonProfile _S683 = toonProfile(_S646, _S649, material_11);
-                float _S684 = toonPDF(out_dir_2, _S649, _S683, sampled_w_0);
-                (*pdfs_0)[int(4)] = _S684;
-                float3  _S685 = toonBSDF(out_dir_2, _S649, _S683, sampled_w_0);
-                (*throughputs_0)[int(4)] = _S685;
+                ToonProfile _S748 = toonProfile(_S703, _S706, material_14);
+                float _S749 = toonPDF(out_dir_2, _S706, _S748, sampled_w_0);
+                (*pdfs_0)[int(4)] = _S749;
+                float3  _S750 = toonBSDF(out_dir_2, _S706, _S748, sampled_w_0);
+                (*throughputs_0)[int(4)] = _S750;
                 break;
             }
         default:
             {
-                float _S686 = vndfPDF(_S646, f_2, _S649, (F32_abs((_S647))), _S652, _S653, w_12.v_dot_h);
-                float _S687 = reflectPDF(_S686, w_12);
-                (*pdfs_0)[int(2)] = _S687;
-                float3  _S688 = reflectBSDF(out_dir_2, _S649, _S652, _S653, w_12);
-                (*throughputs_0)[int(2)] = _S688;
+                float _S751 = vndfPDF(_S703, f_2, _S706, (F32_abs((_S704))), _S709, _S710, w_14.v_dot_h);
+                float _S752 = reflectPDF(_S751, w_14);
+                (*pdfs_0)[int(2)] = _S752;
+                float3  _S753 = reflectBSDF(out_dir_2, _S706, _S709, _S710, w_14);
+                (*throughputs_0)[int(2)] = _S753;
                 break;
             }
         }
-        uint i_9 = i_7 + 1U;
-        i_7 = i_9;
+        uint i_10 = i_8 + 1U;
+        i_8 = i_10;
     }
-    i_7 = 0U;
-    f_2 = _S660;
+    i_8 = 0U;
+    f_2 = _S712;
     for(;;)
     {
-        if(i_7 < 5U)
+        if(i_8 < 6U)
         {
         }
         else
         {
             break;
         }
-        bool _S689 = ((*pdfs_0)[i_7]) > 0.0f;
-        if(_S689)
+        bool _S754 = ((*pdfs_0)[i_8]) > 0.0f;
+        if(_S754)
         {
-            float3  f_3 = f_2 + (*throughputs_0)[i_7] * make_float3 ((*pdfs_0)[i_7]);
+            float3  f_3 = f_2 + (*throughputs_0)[i_8] * make_float3 ((*pdfs_0)[i_8]);
             f_2 = f_3;
         }
-        uint i_10 = i_7 + 1U;
-        i_7 = i_10;
+        uint i_11 = i_8 + 1U;
+        i_8 = i_11;
     }
     return f_2;
 }
 
-static __device__ __noinline__ float3  skyColor_0(float3  in_dir_4, float3  dir_3, FKSurface * surface_1, float wavelength_3, float2  eta_1, bool is_inside_2, float pdf_0, uint random_state_5, uint depth_0)
+static __device__ __noinline__ float3  skyColor_0(float3  in_dir_5, float3  dir_3, FKSurface * surface_1, float wavelength_3, float2  eta_1, bool is_inside_2, float pdf_0, uint random_state_6, uint depth_0)
 {
-    BSDFMaterial _S690 = pathMaterial(surface_1->material, wavelength_3);
-    float _S691 = eta_1.x;
-    float _S692 = eta_1.y;
-    bool _S693 = wrongSide_0(is_inside_2, false, dir_3, surface_1->geometry_n);
-    FixedArray<float3 , 5>  throughputs_1;
-    FixedArray<float, 5>  pdfs_1;
-    float3  _S694 = BSDF(in_dir_4, dir_3, surface_1->smooth_n, _S690, _S691, _S692, _S693, random_state_5, 4294967295U, &throughputs_1, &pdfs_1);
-    float3  _S695 = make_float3 (0.0f);
-    uint i_11 = 0U;
-    float3  color_0 = _S695;
+    BSDFMaterial _S755 = pathMaterial(surface_1->material, wavelength_3);
+    float _S756 = eta_1.x;
+    float _S757 = eta_1.y;
+    bool _S758 = wrongSide_0(is_inside_2, false, dir_3, surface_1->geometry_n);
+    FixedArray<float3 , 6>  throughputs_1;
+    FixedArray<float, 6>  pdfs_1;
+    float3  _S759 = BSDF(in_dir_5, dir_3, surface_1->smooth_n, _S755, _S756, _S757, _S758, random_state_6, 4294967295U, &throughputs_1, &pdfs_1);
+    float3  _S760 = make_float3 (0.0f);
+    uint i_12 = 0U;
+    float3  color_0 = _S760;
     for(;;)
     {
-        if(i_11 < 5U)
+        if(i_12 < 6U)
         {
         }
         else
         {
             break;
         }
-        bool _S696 = (pdfs_1[i_11]) > 0.0f;
-        if(_S696)
+        bool _S761 = (pdfs_1[i_12]) > 0.0f;
+        if(_S761)
         {
-            float3  _S697 = throughputs_1[i_11] * make_float3 (pdfs_1[i_11]) / make_float3 (pdfs_1[i_11] + pdf_0);
-            uint _S698;
-            if(i_11 == 3U)
+            float3  _S762 = throughputs_1[i_12] * make_float3 (pdfs_1[i_12]) / make_float3 (pdfs_1[i_12] + pdf_0);
+            uint _S763;
+            if(i_12 == 3U)
             {
-                _S698 = 4U;
+                _S763 = 4U;
             }
             else
             {
-                if(i_11 == 4U)
+                if(i_12 == 4U)
                 {
-                    _S698 = 6U;
+                    _S763 = 6U;
                 }
                 else
                 {
-                    _S698 = i_11;
+                    if(i_12 == 5U)
+                    {
+                        _S763 = 5U;
+                    }
+                    else
+                    {
+                        _S763 = i_12;
+                    }
                 }
             }
-            float3  _S699 = (fcptEnvMapSample((dir_3), (depth_0), (_S698)));
-            float3  color_1 = color_0 + _S697 * _S699;
+            float3  _S764 = (fcptEnvMapSample((dir_3), (depth_0), (_S763)));
+            float3  color_1 = color_0 + _S762 * _S764;
             color_0 = color_1;
         }
-        uint i_12 = i_11 + 1U;
-        i_11 = i_12;
+        uint i_13 = i_12 + 1U;
+        i_12 = i_13;
     }
     return color_0;
 }
 
-__device__ float3  skyBSDF(float3  in_dir_5, float3  dir_4, FKSurface surface_2, BSDFMaterial material_12, float2  eta_2, bool is_inside_3, float pdf_1, uint random_state_6)
+__device__ float3  skyBSDF(float3  in_dir_6, float3  dir_4, FKSurface surface_2, BSDFMaterial material_15, float2  eta_2, bool is_inside_3, float pdf_1, uint random_state_7)
 {
-    float _S700 = eta_2.x;
-    float _S701 = eta_2.y;
-    bool _S702 = wrongSide_0(is_inside_3, false, dir_4, surface_2.geometry_n);
-    FixedArray<float3 , 5>  throughputs_2;
-    FixedArray<float, 5>  pdfs_2;
-    float3  _S703 = BSDF(in_dir_5, dir_4, surface_2.smooth_n, material_12, _S700, _S701, _S702, random_state_6, 4294967295U, &throughputs_2, &pdfs_2);
-    float3  _S704 = make_float3 (0.0f);
-    uint i_13 = 0U;
-    float3  f_4 = _S704;
+    float _S765 = eta_2.x;
+    float _S766 = eta_2.y;
+    bool _S767 = wrongSide_0(is_inside_3, false, dir_4, surface_2.geometry_n);
+    FixedArray<float3 , 6>  throughputs_2;
+    FixedArray<float, 6>  pdfs_2;
+    float3  _S768 = BSDF(in_dir_6, dir_4, surface_2.smooth_n, material_15, _S765, _S766, _S767, random_state_7, 4294967295U, &throughputs_2, &pdfs_2);
+    float3  _S769 = make_float3 (0.0f);
+    uint i_14 = 0U;
+    float3  f_4 = _S769;
     for(;;)
     {
-        if(i_13 < 5U)
+        if(i_14 < 6U)
         {
         }
         else
         {
             break;
         }
-        bool _S705 = (pdfs_2[i_13]) > 0.0f;
-        if(_S705)
+        bool _S770 = (pdfs_2[i_14]) > 0.0f;
+        if(_S770)
         {
-            float3  f_5 = f_4 + throughputs_2[i_13] * make_float3 (pdfs_2[i_13]) / make_float3 (pdfs_2[i_13] + pdf_1);
+            float3  f_5 = f_4 + throughputs_2[i_14] * make_float3 (pdfs_2[i_14]) / make_float3 (pdfs_2[i_14] + pdf_1);
             f_4 = f_5;
         }
-        uint i_14 = i_13 + 1U;
-        i_13 = i_14;
+        uint i_15 = i_14 + 1U;
+        i_14 = i_15;
     }
     return f_4;
 }
 
-static __device__ SkySample SkySample_x24init_0(float3  dir_5, float3  radiance_0, float3  color_2, uint random_state_7)
+static __device__ SkySample SkySample_x24init_0(float3  dir_5, float3  radiance_0, float3  color_2, uint random_state_8)
 {
-    SkySample _S706;
-    (&_S706)->dir = dir_5;
-    (&_S706)->radiance = radiance_0;
-    (&_S706)->color = color_2;
-    (&_S706)->random_state = random_state_7;
-    return _S706;
+    SkySample _S771;
+    (&_S771)->dir = dir_5;
+    (&_S771)->radiance = radiance_0;
+    (&_S771)->color = color_2;
+    (&_S771)->random_state = random_state_8;
+    return _S771;
 }
 
 static __device__ SkySample sampleSky_0(FKRay * ray_0, FKSurface * surface_3, float wavelength_4, float2  eta_3, bool is_inside_4, uint init_random_state_0, uint lobe_state_0, ShadowContext * context_2)
 {
-    uint2  _S707 = (fcptEnvironmentCdfSize());
-    uint2  _S708 = make_uint2 (1U, 0U);
-    uint2  _S709 = _S707 - _S708;
-    Random _S710 = draw(init_random_state_0, 6U);
-    Random _S711 = draw(init_random_state_0, 2147483654U);
-    Random _S712 = draw(init_random_state_0, 7U);
-    Random _S713 = draw(init_random_state_0, 2147483655U);
-    uint _S714 = _S709.x;
-    uint _S715 = searchCDF_0(make_uint2 (_S714, 0U), make_uint2 (0U, 1U), _S709.y, _S710.value);
-    uint _S716 = searchCDF_0(make_uint2 (0U, _S715), _S708, _S714, _S711.value);
-    float2  _S717 = make_float2 ((float)_S709.x, (float)_S709.y);
-    float2  _S718 = (make_float2 (float(_S716), float(_S715)) + make_float2 (_S712.value, _S713.value)) / _S717 * make_float2 (6.28318548202514648f, 3.14159274101257324f);
-    float _S719 = _S718.y;
-    float _S720 = (F32_sin((_S719)));
-    float _S721 = _S718.x;
-    float3  _S722 = make_float3 (- _S720 * (F32_cos((_S721))), _S720 * (F32_sin((_S721))), (F32_cos((_S719))));
-    float _S723 = environmentPdf_0(_S722);
-    bool _S724 = (fcptWorldReadsPath());
-    float3  _S725;
-    if(_S724)
+    uint2  _S772 = (fcptEnvironmentCdfSize());
+    uint2  _S773 = make_uint2 (1U, 0U);
+    uint2  _S774 = _S772 - _S773;
+    Random _S775 = draw(init_random_state_0, 6U);
+    Random _S776 = draw(init_random_state_0, 2147483654U);
+    Random _S777 = draw(init_random_state_0, 7U);
+    Random _S778 = draw(init_random_state_0, 2147483655U);
+    uint _S779 = _S774.x;
+    uint _S780 = searchCDF_0(make_uint2 (_S779, 0U), make_uint2 (0U, 1U), _S774.y, _S775.value);
+    uint _S781 = searchCDF_0(make_uint2 (0U, _S780), _S773, _S779, _S776.value);
+    float2  _S782 = make_float2 ((float)_S774.x, (float)_S774.y);
+    float2  _S783 = (make_float2 (float(_S781), float(_S780)) + make_float2 (_S777.value, _S778.value)) / _S782 * make_float2 (6.28318548202514648f, 3.14159274101257324f);
+    float _S784 = _S783.y;
+    float _S785 = (F32_sin((_S784)));
+    float _S786 = _S783.x;
+    float3  _S787 = make_float3 (- _S785 * (F32_cos((_S786))), _S785 * (F32_sin((_S786))), (F32_cos((_S784))));
+    float _S788 = environmentPdf_0(_S787);
+    bool _S789 = (fcptWorldReadsPath());
+    float3  _S790;
+    if(_S789)
     {
-        float3  _S726 = skyColor_0(ray_0->unit_direction, _S722, surface_3, wavelength_4, eta_3, is_inside_4, _S723, lobe_state_0, context_2->depth + 1U);
-        _S725 = _S726;
+        float3  _S791 = skyColor_0(ray_0->unit_direction, _S787, surface_3, wavelength_4, eta_3, is_inside_4, _S788, lobe_state_0, context_2->depth + 1U);
+        _S790 = _S791;
     }
     else
     {
-        BSDFMaterial _S727 = pathMaterial(surface_3->material, wavelength_4);
-        float3  _S728 = skyBSDF(ray_0->unit_direction, _S722, *surface_3, _S727, eta_3, is_inside_4, _S723, lobe_state_0);
-        _S725 = _S728;
+        BSDFMaterial _S792 = pathMaterial(surface_3->material, wavelength_4);
+        float3  _S793 = skyBSDF(ray_0->unit_direction, _S787, *surface_3, _S792, eta_3, is_inside_4, _S788, lobe_state_0);
+        _S790 = _S793;
     }
-    bool _S729 = !(_S723 > 0.0f);
-    bool _S730;
-    if(_S729)
+    bool _S794 = !(_S788 > 0.0f);
+    bool _S795;
+    if(_S794)
     {
-        _S730 = true;
+        _S795 = true;
     }
     else
     {
-        _S730 = all_1(_S725 == make_float3 (0.0f));
+        _S795 = all_1(_S790 == make_float3 (0.0f));
     }
-    if(_S730)
+    if(_S795)
     {
-        float3  _S731 = make_float3 (0.0f);
-        return SkySample_x24init_0(_S722, _S731, _S731, _S713.state);
+        float3  _S796 = make_float3 (0.0f);
+        return SkySample_x24init_0(_S787, _S796, _S796, _S778.state);
     }
-    float3  _S732 = skyRadiance_0(ray_0->origin, surface_3, is_inside_4, _S722, context_2, _S713.state);
-    return SkySample_x24init_0(_S722, _S732, _S725 * _S732, _S713.state);
+    float3  _S797 = skyRadiance_0(ray_0->origin, surface_3, is_inside_4, _S787, context_2, _S778.state);
+    return SkySample_x24init_0(_S787, _S797, _S790 * _S797, _S778.state);
 }
 
 struct TreeSample
@@ -2666,86 +2870,86 @@ struct SampleBSDF
     float pdf;
 };
 
-static __device__ float3  hairLight_0(FKSurface * surface_4, float3  in_dir_6, TreeSample * light_1, bool competing_0)
+static __device__ float3  hairLight_0(FKSurface * surface_4, float3  in_dir_7, TreeSample * light_1, bool competing_0)
 {
-    SampleBSDF _S733 = (fcptConnectHair((surface_4->hair), ((&surface_4->material)->albedo), ((&surface_4->material)->specular_tint), (in_dir_6), (light_1->dir)));
-    float3  _S734 = _S733.throughput * make_float3 (_S733.pdf);
-    float _S735 = light_1->density;
-    float _S736 = 1.0f + _S733.pdf * _S733.pdf / (light_1->density * light_1->density);
-    bool _S737;
+    SampleBSDF _S798 = (fcptConnectHair((surface_4->hair), ((&surface_4->material)->albedo), ((&surface_4->material)->specular_tint), (in_dir_7), (light_1->dir)));
+    float3  _S799 = _S798.throughput * make_float3 (_S798.pdf);
+    float _S800 = light_1->density;
+    float _S801 = 1.0f + _S798.pdf * _S798.pdf / (light_1->density * light_1->density);
+    bool _S802;
     if(competing_0)
     {
-        _S737 = _S735 > 0.0f;
+        _S802 = _S800 > 0.0f;
     }
     else
     {
-        _S737 = false;
+        _S802 = false;
     }
-    float _S738 = _slang_select(_S737, _S736,1.0f);
-    return _S734 / make_float3 (_S738) * light_1->radiance;
+    float _S803 = _slang_select(_S802, _S801,1.0f);
+    return _S799 / make_float3 (_S803) * light_1->radiance;
 }
 
-static __device__ TreeSample TreeSample_x24init_0(float3  dir_6, float3  radiance_1, float density_0, uint random_state_8)
+static __device__ TreeSample TreeSample_x24init_0(float3  dir_6, float3  radiance_1, float density_0, uint random_state_9)
 {
-    TreeSample _S739;
-    (&_S739)->dir = dir_6;
-    (&_S739)->radiance = radiance_1;
-    (&_S739)->density = density_0;
-    (&_S739)->random_state = random_state_8;
-    return _S739;
+    TreeSample _S804;
+    (&_S804)->dir = dir_6;
+    (&_S804)->radiance = radiance_1;
+    (&_S804)->density = density_0;
+    (&_S804)->random_state = random_state_9;
+    return _S804;
 }
 
-__device__ uint pickChild(LightNode first_1, LightNode second_1, float3  p_12, float3  normal_3, float * pick_0, float * probability_3)
+__device__ uint pickChild(LightNode first_2, LightNode second_1, float3  p_12, float3  normal_4, float * pick_0, float * probability_3)
 {
-    float _S740 = importance(first_1, p_12, normal_3);
-    float _S741 = importance(second_1, p_12, normal_3);
-    float2  _S742 = make_float2 (_S740, _S741);
-    bool _S743 = _S740 == 0.0f;
-    bool _S744;
-    if(_S743)
+    float _S805 = importance(first_2, p_12, normal_4);
+    float _S806 = importance(second_1, p_12, normal_4);
+    float2  _S807 = make_float2 (_S805, _S806);
+    bool _S808 = _S805 == 0.0f;
+    bool _S809;
+    if(_S808)
     {
-        _S744 = _S741 == 0.0f;
+        _S809 = _S806 == 0.0f;
     }
     else
     {
-        _S744 = false;
+        _S809 = false;
     }
-    if(_S744)
+    if(_S809)
     {
         return 2U;
     }
-    float _S745 = _S740 + _S741;
-    bool _S746 = _S741 > 0.0f;
-    if(_S746)
+    float _S810 = _S805 + _S806;
+    bool _S811 = _S806 > 0.0f;
+    if(_S811)
     {
-        _S744 = (*pick_0 * _S745) >= _S740;
+        _S809 = (*pick_0 * _S810) >= _S805;
     }
     else
     {
-        _S744 = false;
+        _S809 = false;
     }
-    uint _S747 = uint(_S744);
-    float _S748 = (F32_min(((*pick_0 * _S745 - float(_S747) * _S740) / _slang_vector_get_element(_S742, _S747)), (0.99999994039535522f)));
-    *pick_0 = _S748;
-    float _S749 = *probability_3 * (_slang_vector_get_element(_S742, _S747) / _S745);
-    *probability_3 = _S749;
-    return _S747;
+    uint _S812 = uint(_S809);
+    float _S813 = (F32_min(((*pick_0 * _S810 - float(_S812) * _S805) / _slang_vector_get_element(_S807, _S812)), (0.99999994039535522f)));
+    *pick_0 = _S813;
+    float _S814 = *probability_3 * (_slang_vector_get_element(_S807, _S812) / _S810);
+    *probability_3 = _S814;
+    return _S812;
 }
 
 __device__ float3  sampleSphere(float3  center_1, float radius_1, float3  p_13, float u1_0, float u2_0)
 {
-    float3  _S750 = center_1 - p_13;
-    float _S751 = radius_1 * radius_1 / dot_0(_S750, _S750);
-    float _S752 = u1_0 * _S751 / (1.0f + (F32_sqrt(((F32_max((1.0f - _S751), (0.0f)))))));
-    float _S753 = 2.0f * u1_0;
-    bool _S754 = _S751 >= 1.0f;
-    float _S755 = _slang_select(_S754, _S753,_S752);
-    float _S756 = (F32_sqrt(((F32_max((_S755 * (2.0f - _S755)), (0.0f))))));
-    float _S757 = 6.28318548202514648f * u2_0;
-    float3  _S758 = make_float3 (_S756 * (F32_cos((_S757))), 1.0f - _S755, _S756 * (F32_sin((_S757))));
-    float3  _S759 = ((((_S750)) * make_float3(rnorm3df(((_S750)).x, ((_S750)).y, ((_S750)).z))));
-    float3  _S760 = tangentToWorld(_S758, _S759);
-    return _S760;
+    float3  _S815 = center_1 - p_13;
+    float _S816 = radius_1 * radius_1 / dot_0(_S815, _S815);
+    float _S817 = u1_0 * _S816 / (1.0f + (F32_sqrt(((F32_max((1.0f - _S816), (0.0f)))))));
+    float _S818 = 2.0f * u1_0;
+    bool _S819 = _S816 >= 1.0f;
+    float _S820 = _slang_select(_S819, _S818,_S817);
+    float _S821 = (F32_sqrt(((F32_max((_S820 * (2.0f - _S820)), (0.0f))))));
+    float _S822 = 6.28318548202514648f * u2_0;
+    float3  _S823 = make_float3 (_S821 * (F32_cos((_S822))), 1.0f - _S820, _S821 * (F32_sin((_S822))));
+    float3  _S824 = ((((_S815)) * make_float3(rnorm3df(((_S815)).x, ((_S815)).y, ((_S815)).z))));
+    float3  _S825 = tangentToWorld(_S823, _S824);
+    return _S825;
 }
 
 __device__ float3  pointLightRadiance(float3  color_3, float intensity_0, float radius_2)
@@ -2755,44 +2959,44 @@ __device__ float3  pointLightRadiance(float3  color_3, float intensity_0, float 
 
 static __device__ float raySphere_0(float3  center_2, float radius_3, FKRay * ray_1, float max_len_0)
 {
-    float3  _S761 = center_2 - ray_1->origin;
-    float _S762 = dot_0(_S761, ray_1->unit_direction);
-    float _S763 = dot_0(_S761, _S761) - _S762 * _S762;
-    float _S764 = radius_3 * radius_3;
-    bool _S765 = _S763 > _S764;
-    if(_S765)
+    float3  _S826 = center_2 - ray_1->origin;
+    float _S827 = dot_0(_S826, ray_1->unit_direction);
+    float _S828 = dot_0(_S826, _S826) - _S827 * _S827;
+    float _S829 = radius_3 * radius_3;
+    bool _S830 = _S828 > _S829;
+    if(_S830)
     {
         return 4.294967296e+09f;
     }
-    float _S766 = (F32_sqrt((_S764 - _S763)));
-    float _S767 = _S762 - _S766;
-    float _S768 = _S762 + _S766;
-    bool _S769 = _S767 > 0.0000152587890625f;
-    bool _S770;
-    if(_S769)
+    float _S831 = (F32_sqrt((_S829 - _S828)));
+    float _S832 = _S827 - _S831;
+    float _S833 = _S827 + _S831;
+    bool _S834 = _S832 > 0.0000152587890625f;
+    bool _S835;
+    if(_S834)
     {
-        _S770 = _S767 < max_len_0;
+        _S835 = _S832 < max_len_0;
     }
     else
     {
-        _S770 = false;
+        _S835 = false;
     }
-    if(_S770)
+    if(_S835)
     {
-        return _S767;
+        return _S832;
     }
-    bool _S771 = _S768 > 0.0000152587890625f;
-    if(_S771)
+    bool _S836 = _S833 > 0.0000152587890625f;
+    if(_S836)
     {
-        _S770 = _S768 < max_len_0;
+        _S835 = _S833 < max_len_0;
     }
     else
     {
-        _S770 = false;
+        _S835 = false;
     }
-    if(_S770)
+    if(_S835)
     {
-        return _S768;
+        return _S833;
     }
     return 4.294967296e+09f;
 }
@@ -2810,19 +3014,19 @@ static __device__ float3  mul_0(float3  left_1, Matrix<float, 3, 3>  right_1)
         {
             break;
         }
-        int i_15 = int(0);
+        int i_16 = int(0);
         float sum_0 = 0.0f;
         for(;;)
         {
-            if(i_15 < int(3))
+            if(i_16 < int(3))
             {
             }
             else
             {
                 break;
             }
-            float sum_1 = sum_0 + _slang_vector_get_element(left_1, i_15) * _slang_vector_get_element(right_1.rows[i_15], j_1);
-            i_15 = i_15 + int(1);
+            float sum_1 = sum_0 + _slang_vector_get_element(left_1, i_16) * _slang_vector_get_element(right_1.rows[i_16], j_1);
+            i_16 = i_16 + int(1);
             sum_0 = sum_1;
         }
         *_slang_vector_get_element_ptr(&result_6, j_1) = sum_0;
@@ -2833,186 +3037,186 @@ static __device__ float3  mul_0(float3  left_1, Matrix<float, 3, 3>  right_1)
 
 static __device__ __forceinline__ TreeSample sampleLightTree_0(float3  origin_4, float3  smooth_n_2, float3  geometry_n_1, float geometry_offset_1, bool sided_0, uint init_random_state_1, ShadowContext * context_3)
 {
-    Random _S772 = draw(init_random_state_1, 4U);
-    Random _S773 = draw(init_random_state_1, 5U);
-    Random _S774 = draw(init_random_state_1, 2147483653U);
-    float3  _S775 = make_float3 (0.0f);
-    TreeSample _S776 = TreeSample_x24init_0(_S775, _S775, 0.0f, _S774.state);
-    TreeSample sample_0 = _S776;
-    float3  _S777 = _slang_select(sided_0, _S775,smooth_n_2);
-    float3  _S778 = origin_4 + make_float3 (geometry_offset_1) * smooth_n_2;
-    float pick_1 = _S772.value;
+    Random _S837 = draw(init_random_state_1, 4U);
+    Random _S838 = draw(init_random_state_1, 5U);
+    Random _S839 = draw(init_random_state_1, 2147483653U);
+    float3  _S840 = make_float3 (0.0f);
+    TreeSample _S841 = TreeSample_x24init_0(_S840, _S840, 0.0f, _S839.state);
+    TreeSample sample_0 = _S841;
+    float3  _S842 = _slang_select(sided_0, _S840,smooth_n_2);
+    float3  _S843 = origin_4 + make_float3 (geometry_offset_1) * smooth_n_2;
+    float pick_1 = _S837.value;
     float probability_4 = 1.0f;
-    uint n_7 = 0U;
+    uint n_9 = 0U;
     for(;;)
     {
-        uint4  _S779 = (fcptLightNode((n_7)));
-        if((_S779.x) == 0U)
+        uint4  _S844 = (fcptLightNode((n_9)));
+        if((_S844.x) == 0U)
         {
         }
         else
         {
             break;
         }
-        uint _S780 = (fcptLightSecond((n_7)));
-        uint _S781 = n_7 + 1U;
-        LightNode _S782 = (fcptLightBounds((_S781)));
-        LightNode _S783 = (fcptLightBounds((_S780)));
-        uint _S784 = pickChild(_S782, _S783, origin_4, _S777, &pick_1, &probability_4);
-        bool _S785 = _S784 > 1U;
-        if(_S785)
+        uint _S845 = (fcptLightSecond((n_9)));
+        uint _S846 = n_9 + 1U;
+        LightNode _S847 = (fcptLightBounds((_S846)));
+        LightNode _S848 = (fcptLightBounds((_S845)));
+        uint _S849 = pickChild(_S847, _S848, origin_4, _S842, &pick_1, &probability_4);
+        bool _S850 = _S849 > 1U;
+        if(_S850)
         {
             return sample_0;
         }
-        bool _S786 = _S784 == 1U;
-        uint _S787 = _slang_select(_S786, _S780,_S781);
-        n_7 = _S787;
+        bool _S851 = _S849 == 1U;
+        uint _S852 = _slang_select(_S851, _S845,_S846);
+        n_9 = _S852;
     }
-    bool _S788 = n_7 == 0U;
-    bool _S789;
-    if(_S788)
+    bool _S853 = n_9 == 0U;
+    bool _S854;
+    if(_S853)
     {
-        LightNode _S790 = (fcptLightBounds((0U)));
-        float _S791 = importance(_S790, origin_4, _S777);
-        _S789 = !(_S791 > 0.0f);
+        LightNode _S855 = (fcptLightBounds((0U)));
+        float _S856 = importance(_S855, origin_4, _S842);
+        _S854 = !(_S856 > 0.0f);
     }
     else
     {
-        _S789 = false;
+        _S854 = false;
     }
-    if(_S789)
+    if(_S854)
     {
         return sample_0;
     }
-    uint4  _S792 = (fcptLightNode((n_7)));
-    FKHit _S793 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
-    bool _S794 = (_S792.x) == 2U;
+    uint4  _S857 = (fcptLightNode((n_9)));
+    FKHit _S858 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
+    bool _S859 = (_S857.x) == 2U;
     float3  emitter_point_0;
     float3  lift_n_0;
     float3  shadow_1;
     FKHit emitter_0;
-    if(_S794)
+    if(_S859)
     {
-        FKLight _S795 = (fcptLight((_S792.y)));
+        FKLight _S860 = (fcptLight((_S857.y)));
         if(sided_0)
         {
-            float _S796 = sign_0(dot_0(geometry_n_1, _S795.position - origin_4));
-            float3  lift_n_1 = smooth_n_2 * make_float3 (_S796);
-            float3  _S797 = origin_4 + make_float3 (geometry_offset_1) * lift_n_1;
-            emitter_point_0 = _S797;
+            float _S861 = sign_0(dot_0(geometry_n_1, _S860.position - origin_4));
+            float3  lift_n_1 = smooth_n_2 * make_float3 (_S861);
+            float3  _S862 = origin_4 + make_float3 (geometry_offset_1) * lift_n_1;
+            emitter_point_0 = _S862;
             lift_n_0 = lift_n_1;
         }
         else
         {
-            emitter_point_0 = _S778;
+            emitter_point_0 = _S843;
             lift_n_0 = smooth_n_2;
         }
-        bool _S798 = (_S795.variance) == 0.0f;
-        if(_S798)
+        bool _S863 = (_S860.variance) == 0.0f;
+        if(_S863)
         {
-            float3  _S799 = _S795.position - emitter_point_0;
-            float3  _S800 = ((((_S799)) * make_float3(rnorm3df(((_S799)).x, ((_S799)).y, ((_S799)).z))));
-            (&sample_0)->dir = _S800;
-            float3  _S801 = _S795.color * make_float3 (_S795.intensity) / make_float3 (dot_0(_S799, _S799) * probability_4);
-            (&sample_0)->radiance = _S801;
-            shadow_1 = _S799;
+            float3  _S864 = _S860.position - emitter_point_0;
+            float3  _S865 = ((((_S864)) * make_float3(rnorm3df(((_S864)).x, ((_S864)).y, ((_S864)).z))));
+            (&sample_0)->dir = _S865;
+            float3  _S866 = _S860.color * make_float3 (_S860.intensity) / make_float3 (dot_0(_S864, _S864) * probability_4);
+            (&sample_0)->radiance = _S866;
+            shadow_1 = _S864;
         }
         else
         {
-            float3  _S802 = sampleSphere(_S795.position, _S795.variance, emitter_point_0, _S773.value, _S774.value);
-            (&sample_0)->dir = _S802;
-            float _S803 = sphereDensity(_S795.position, _S795.variance, emitter_point_0);
-            float _S804 = probability_4 * _S803;
-            (&sample_0)->density = _S804;
-            float3  _S805 = pointLightRadiance(_S795.color, _S795.intensity, _S795.variance);
-            float3  _S806 = _S805 / make_float3 ((&sample_0)->density);
-            (&sample_0)->radiance = _S806;
-            FKRay _S807 = Ray_x24init_0(emitter_point_0, (&sample_0)->dir);
-            float _S808 = raySphere_0(_S795.position, _S795.variance, &_S807, 4.294967296e+09f);
-            float3  _S809 = (&sample_0)->dir * make_float3 (_S808);
-            shadow_1 = _S809;
+            float3  _S867 = sampleSphere(_S860.position, _S860.variance, emitter_point_0, _S838.value, _S839.value);
+            (&sample_0)->dir = _S867;
+            float _S868 = sphereDensity(_S860.position, _S860.variance, emitter_point_0);
+            float _S869 = probability_4 * _S868;
+            (&sample_0)->density = _S869;
+            float3  _S870 = pointLightRadiance(_S860.color, _S860.intensity, _S860.variance);
+            float3  _S871 = _S870 / make_float3 ((&sample_0)->density);
+            (&sample_0)->radiance = _S871;
+            FKRay _S872 = Ray_x24init_0(emitter_point_0, (&sample_0)->dir);
+            float _S873 = raySphere_0(_S860.position, _S860.variance, &_S872, 4.294967296e+09f);
+            float3  _S874 = (&sample_0)->dir * make_float3 (_S873);
+            shadow_1 = _S874;
         }
-        emitter_0 = _S793;
-        emitter_point_0 = _S775;
+        emitter_0 = _S858;
+        emitter_point_0 = _S840;
     }
     else
     {
-        uint _S810 = _S792.y;
-        uint _S811 = (fcptTriangleOffset((_S810)));
-        uint _S812 = _S811 + _S792.z;
-        Matrix<float, 3, 3>  _S813 = (fcptWorldTriangle((_S810), (_S812)));
-        float _S814 = (F32_sqrt((_S773.value)));
-        float2  _S815 = make_float2 (_S814 * (1.0f - _S774.value), _S814 * _S774.value);
-        float3  _S816 = mul_0(make_float3 (1.0f - _S814, _S815.x, _S815.y), _S813);
+        uint _S875 = _S857.y;
+        uint _S876 = (fcptTriangleOffset((_S875)));
+        uint _S877 = _S876 + _S857.z;
+        Matrix<float, 3, 3>  _S878 = (fcptWorldTriangle((_S875), (_S877)));
+        float _S879 = (F32_sqrt((_S838.value)));
+        float2  _S880 = make_float2 (_S879 * (1.0f - _S839.value), _S879 * _S839.value);
+        float3  _S881 = mul_0(make_float3 (1.0f - _S879, _S880.x, _S880.y), _S878);
         if(sided_0)
         {
-            float _S817 = sign_0(dot_0(geometry_n_1, _S816 - origin_4));
-            float3  lift_n_2 = smooth_n_2 * make_float3 (_S817);
-            float3  _S818 = origin_4 + make_float3 (geometry_offset_1) * lift_n_2;
-            emitter_point_0 = _S818;
+            float _S882 = sign_0(dot_0(geometry_n_1, _S881 - origin_4));
+            float3  lift_n_2 = smooth_n_2 * make_float3 (_S882);
+            float3  _S883 = origin_4 + make_float3 (geometry_offset_1) * lift_n_2;
+            emitter_point_0 = _S883;
             lift_n_0 = lift_n_2;
         }
         else
         {
-            bool _S819 = !((dot_0(smooth_n_2, _S816 - origin_4)) > 0.0f);
-            if(_S819)
+            bool _S884 = !((dot_0(smooth_n_2, _S881 - origin_4)) > 0.0f);
+            if(_S884)
             {
                 return sample_0;
             }
-            emitter_point_0 = _S778;
+            emitter_point_0 = _S843;
             lift_n_0 = smooth_n_2;
         }
-        FKHit emitter_1 = Hit_x24init_0(_S815, _S810, _S812, 0U, 0.0f);
-        float3  _S820 = _S816 - emitter_point_0;
-        float3  _S821 = ((((_S820)) * make_float3(rnorm3df(((_S820)).x, ((_S820)).y, ((_S820)).z))));
-        (&sample_0)->dir = _S821;
-        float _S822 = solidAngle(probability_4, cross_0(_S813.rows[int(1)] - _S813.rows[int(0)], _S813.rows[int(2)] - _S813.rows[int(0)]), _S820);
-        (&sample_0)->density = _S822;
-        bool _S823 = (fcptShadowFirst());
-        bool _S824 = !_S823;
-        if(_S824)
+        FKHit emitter_1 = Hit_x24init_0(_S880, _S875, _S877, 0U, 0.0f);
+        float3  _S885 = _S881 - emitter_point_0;
+        float3  _S886 = ((((_S885)) * make_float3(rnorm3df(((_S885)).x, ((_S885)).y, ((_S885)).z))));
+        (&sample_0)->dir = _S886;
+        float _S887 = solidAngle(probability_4, cross_0(_S878.rows[int(1)] - _S878.rows[int(0)], _S878.rows[int(2)] - _S878.rows[int(0)]), _S885);
+        (&sample_0)->density = _S887;
+        bool _S888 = (fcptShadowFirst());
+        bool _S889 = !_S888;
+        if(_S889)
         {
-            FKSurface _S825 = (fcptLightSurfaceAt((emitter_1), (_S816), (_S774.state), ((&sample_0)->dir), (context_3->depth), (length_0(_S816 - origin_4))));
-            (&sample_0)->random_state = _S825.random_state;
-            float3  _S826 = _slang_select(_S825.skip, _S775,_S825.material.emissive);
-            float3  _S827 = _S826 / make_float3 ((&sample_0)->density);
-            (&sample_0)->radiance = _S827;
+            FKSurface _S890 = (fcptLightSurfaceAt((emitter_1), (_S881), (_S839.state), ((&sample_0)->dir), (context_3->depth), (length_0(_S881 - origin_4))));
+            (&sample_0)->random_state = _S890.random_state;
+            float3  _S891 = _slang_select(_S890.skip, _S840,_S890.material.emissive);
+            float3  _S892 = _S891 / make_float3 ((&sample_0)->density);
+            (&sample_0)->radiance = _S892;
         }
-        shadow_1 = _S820;
+        shadow_1 = _S885;
         emitter_0 = emitter_1;
-        emitter_point_0 = _S816;
+        emitter_point_0 = _S881;
     }
-    FKHit _S828 = emitter_0;
-    float3  _S829 = lightTransmittance_0(origin_4, lift_n_0, geometry_offset_1, shadow_1, context_3, _S774.state, &_S828);
-    bool _S830 = (fcptShadowFirst());
-    if(_S830)
+    FKHit _S893 = emitter_0;
+    float3  _S894 = lightTransmittance_0(origin_4, lift_n_0, geometry_offset_1, shadow_1, context_3, _S839.state, &_S893);
+    bool _S895 = (fcptShadowFirst());
+    if(_S895)
     {
-        _S789 = (emitter_0.instance_index) != 4294967295U;
+        _S854 = (emitter_0.instance_index) != 4294967295U;
     }
     else
     {
-        _S789 = false;
+        _S854 = false;
     }
-    if(_S789)
+    if(_S854)
     {
-        _S789 = !all_1(_S829 == _S775);
+        _S854 = !all_1(_S894 == _S840);
     }
     else
     {
-        _S789 = false;
+        _S854 = false;
     }
-    if(_S789)
+    if(_S854)
     {
-        FKSurface _S831 = (fcptLightSurfaceAt((emitter_0), (emitter_point_0), (_S774.state), ((&sample_0)->dir), (context_3->depth), (length_0(emitter_point_0 - origin_4))));
-        (&sample_0)->random_state = _S831.random_state;
-        float3  _S832 = _slang_select(_S831.skip, _S775,_S831.material.emissive);
-        float3  _S833 = _S832 / make_float3 ((&sample_0)->density);
-        (&sample_0)->radiance = _S833;
+        FKSurface _S896 = (fcptLightSurfaceAt((emitter_0), (emitter_point_0), (_S839.state), ((&sample_0)->dir), (context_3->depth), (length_0(emitter_point_0 - origin_4))));
+        (&sample_0)->random_state = _S896.random_state;
+        float3  _S897 = _slang_select(_S896.skip, _S840,_S896.material.emissive);
+        float3  _S898 = _S897 / make_float3 ((&sample_0)->density);
+        (&sample_0)->radiance = _S898;
     }
-    float3  _S834 = (&sample_0)->radiance * _S829;
-    bool _S835 = all_1(_S829 == _S775);
-    float3  _S836 = _slang_select(_S835, _S775,_S834);
-    (&sample_0)->radiance = _S836;
+    float3  _S899 = (&sample_0)->radiance * _S894;
+    bool _S900 = all_1(_S894 == _S840);
+    float3  _S901 = _slang_select(_S900, _S840,_S899);
+    (&sample_0)->radiance = _S901;
     return sample_0;
 }
 
@@ -3027,107 +3231,107 @@ struct NEEVertex
 
 __device__ float powerHeuristic(float a_8, float b_2)
 {
-    float _S837 = 1.0f / (1.0f + b_2 / a_8 * (b_2 / a_8));
-    bool _S838 = b_2 > 0.0f;
-    float _S839 = _slang_select(_S838, _S837,1.0f);
-    return _S839;
+    float _S902 = 1.0f / (1.0f + b_2 / a_8 * (b_2 / a_8));
+    bool _S903 = b_2 > 0.0f;
+    float _S904 = _slang_select(_S903, _S902,1.0f);
+    return _S904;
 }
 
 static __device__ float emissionWeight_0(NEEVertex * vertex_0, FKHit * hit_1, float3  light_point_1)
 {
-    bool _S840 = vertex_0->none;
-    if(_S840)
+    bool _S905 = vertex_0->none;
+    if(_S905)
     {
         return 1.0f;
     }
-    uint _S841 = (fcptLightSlot((*hit_1)));
-    float _S842 = lightPdf_0(vertex_0->origin, vertex_0->smooth_n, vertex_0->start, _S841, light_point_1);
-    float _S843 = powerHeuristic(vertex_0->pdf, _S842);
-    return _S843;
+    uint _S906 = (fcptLightSlot((*hit_1)));
+    float _S907 = lightPdf_0(vertex_0->origin, vertex_0->smooth_n, vertex_0->start, _S906, light_point_1);
+    float _S908 = powerHeuristic(vertex_0->pdf, _S907);
+    return _S908;
 }
 
 static __device__ float3  environment_0(float3  dir_7, uint depth_1, uint lobe_0)
 {
-    uint2  _S844 = (fcptEnvironmentMapSize());
-    bool _S845 = (_S844.x) > 1U;
-    bool _S846;
-    if(_S845)
+    uint2  _S909 = (fcptEnvironmentMapSize());
+    bool _S910 = (_S909.x) > 1U;
+    bool _S911;
+    if(_S910)
     {
-        uint2  _S847 = (fcptEnvironmentMapSize());
-        _S846 = (_S847.y) > 1U;
+        uint2  _S912 = (fcptEnvironmentMapSize());
+        _S911 = (_S912.y) > 1U;
     }
     else
     {
-        _S846 = false;
+        _S911 = false;
     }
-    if(_S846)
+    if(_S911)
     {
-        float3  _S848 = (fcptEnvMapSample((dir_7), (depth_1), (lobe_0)));
-        return _S848;
+        float3  _S913 = (fcptEnvMapSample((dir_7), (depth_1), (lobe_0)));
+        return _S913;
     }
-    float3  _S849 = (fcptAmbient());
-    return _S849;
+    float3  _S914 = (fcptAmbient());
+    return _S914;
 }
 
 static __device__ bool environmentMapped_0()
 {
-    uint2  _S850 = (fcptEnvironmentCdfSize());
-    bool _S851 = (_S850.x) > 1U;
-    bool _S852;
-    if(_S851)
+    uint2  _S915 = (fcptEnvironmentCdfSize());
+    bool _S916 = (_S915.x) > 1U;
+    bool _S917;
+    if(_S916)
     {
-        uint2  _S853 = (fcptEnvironmentCdfSize());
-        _S852 = (_S853.y) > 1U;
+        uint2  _S918 = (fcptEnvironmentCdfSize());
+        _S917 = (_S918.y) > 1U;
     }
     else
     {
-        _S852 = false;
+        _S917 = false;
     }
-    bool _S854 = !_S852;
-    if(_S854)
+    bool _S919 = !_S917;
+    if(_S919)
     {
         return false;
     }
-    uint2  _S855 = (fcptEnvironmentMapSize());
-    bool _S856 = (_S855.x) > 1U;
-    if(_S856)
+    uint2  _S920 = (fcptEnvironmentMapSize());
+    bool _S921 = (_S920.x) > 1U;
+    if(_S921)
     {
-        uint2  _S857 = (fcptEnvironmentMapSize());
-        _S852 = (_S857.y) > 1U;
+        uint2  _S922 = (fcptEnvironmentMapSize());
+        _S917 = (_S922.y) > 1U;
     }
     else
     {
-        _S852 = false;
+        _S917 = false;
     }
-    return _S852;
+    return _S917;
 }
 
 static __device__ float escapeWeight_0(float pdf_2, float3  dir_8)
 {
-    bool _S858 = pdf_2 <= 0.0f;
-    bool _S859;
-    if(_S858)
+    bool _S923 = pdf_2 <= 0.0f;
+    bool _S924;
+    if(_S923)
     {
-        _S859 = true;
+        _S924 = true;
     }
     else
     {
-        bool _S860 = environmentMapped_0();
-        _S859 = !_S860;
+        bool _S925 = environmentMapped_0();
+        _S924 = !_S925;
     }
-    if(_S859)
+    if(_S924)
     {
         return 1.0f;
     }
-    float _S861 = environmentPdf_0(dir_8);
-    return pdf_2 / (pdf_2 + _S861);
+    float _S926 = environmentPdf_0(dir_8);
+    return pdf_2 / (pdf_2 + _S926);
 }
 
 static __device__ void restir_duplicates_0(uint3  global_invocation_id_1, uint3  local_invocation_id_0, uint local_invocation_index_3)
 {
-    uint2  _S862 = uint2 {global_invocation_id_1.x, global_invocation_id_1.y};
-    int2  _S863 = make_int2 ((int)_S862.x, (int)_S862.y);
-    uint _S864 = previousSeed_0(_S863);
+    uint2  _S927 = uint2 {global_invocation_id_1.x, global_invocation_id_1.y};
+    int2  _S928 = make_int2 ((int)_S927.x, (int)_S927.y);
+    uint _S929 = previousSeed_0(_S928);
     int y_5 = int(-8);
     uint count_2 = 0U;
     for(;;)
@@ -3149,10 +3353,10 @@ static __device__ void restir_duplicates_0(uint3  global_invocation_id_1, uint3 
             {
                 break;
             }
-            uint _S865 = previousSeed_0(_S863 + make_int2 (x_16, y_5));
-            bool _S866 = _S865 == _S864;
-            uint _S867 = _slang_select(_S866, 1U,0U);
-            uint count_3 = count_2 + _S867;
+            uint _S930 = previousSeed_0(_S928 + make_int2 (x_16, y_5));
+            bool _S931 = _S930 == _S929;
+            uint _S932 = _slang_select(_S931, 1U,0U);
+            uint count_3 = count_2 + _S932;
             int x_17 = x_16 + int(1);
             x_16 = x_17;
             count_2 = count_3;
@@ -3160,90 +3364,90 @@ static __device__ void restir_duplicates_0(uint3  global_invocation_id_1, uint3 
         int y_6 = y_5 + int(1);
         y_5 = y_6;
     }
-    float _S868 = float(count_2 - 1U) / 288.0f;
-    bool _S869 = _S864 != 0U;
-    float _S870 = _slang_select(_S869, _S868,0.0f);
-    fcptStoreDuplication((_S863), (make_uint4 ((F32_asuint((_S870))), 0U, 0U, 0U)));
+    float _S933 = float(count_2 - 1U) / 288.0f;
+    bool _S934 = _S929 != 0U;
+    float _S935 = _slang_select(_S934, _S933,0.0f);
+    fcptStoreDuplication((_S928), (make_uint4 ((F32_asuint((_S935))), 0U, 0U, 0U)));
     return;
 }
 
 static __device__ float3  abs_0(float3  x_18)
 {
     float3  result_7;
-    int i_16 = int(0);
+    int i_17 = int(0);
     for(;;)
     {
-        if(i_16 < int(3))
+        if(i_17 < int(3))
         {
         }
         else
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_7, i_16) = (F32_abs((_slang_vector_get_element(x_18, i_16))));
-        i_16 = i_16 + int(1);
+        *_slang_vector_get_element_ptr(&result_7, i_17) = (F32_abs((_slang_vector_get_element(x_18, i_17))));
+        i_17 = i_17 + int(1);
     }
     return result_7;
 }
 
 __device__ float resamplingTarget(float3  f_6)
 {
-    float _S871 = rgb_to_greyscale(abs_0(f_6));
-    return _S871;
+    float _S936 = rgb_to_greyscale(abs_0(f_6));
+    return _S936;
 }
 
 static __device__ float4  asfloat_0(uint4  x_19)
 {
     float4  result_8;
-    int i_17 = int(0);
+    int i_18 = int(0);
     for(;;)
     {
-        if(i_17 < int(4))
+        if(i_18 < int(4))
         {
         }
         else
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_8, i_17) = (U32_asfloat((_slang_vector_get_element(x_19, i_17))));
-        i_17 = i_17 + int(1);
+        *_slang_vector_get_element_ptr(&result_8, i_18) = (U32_asfloat((_slang_vector_get_element(x_19, i_18))));
+        i_18 = i_18 + int(1);
     }
     return result_8;
 }
 
 __device__ void offer(Selection * sel_2, Reservoir candidate_0, float3  weight_0)
 {
-    float _S872 = resamplingTarget(weight_0);
-    bool _S873 = _S872 > 0.0f;
-    bool _S874;
-    if(_S873)
+    float _S937 = resamplingTarget(weight_0);
+    bool _S938 = _S937 > 0.0f;
+    bool _S939;
+    if(_S938)
     {
-        _S874 = _S872 < 3.00000000549775576e+38f;
+        _S939 = _S937 < 3.00000000549775576e+38f;
     }
     else
     {
-        _S874 = false;
+        _S939 = false;
     }
-    bool _S875 = !_S874;
-    if(_S875)
+    bool _S940 = !_S939;
+    if(_S940)
     {
         return;
     }
-    bool _S876 = sel_2->sums;
-    if(_S876)
+    bool _S941 = sel_2->sums;
+    if(_S941)
     {
-        float3  _S877 = sel_2->color + weight_0;
-        sel_2->color = _S877;
+        float3  _S942 = sel_2->color + weight_0;
+        sel_2->color = _S942;
         return;
     }
-    float _S878 = sel_2->w_sum + _S872;
-    sel_2->w_sum = _S878;
-    float3  _S879 = sel_2->color + weight_0;
-    sel_2->color = _S879;
-    Random _S880 = pcg(sel_2->random_state);
-    sel_2->random_state = _S880.state;
-    bool _S881 = (_S880.value * sel_2->w_sum) <= _S872;
-    if(_S881)
+    float _S943 = sel_2->w_sum + _S937;
+    sel_2->w_sum = _S943;
+    float3  _S944 = sel_2->color + weight_0;
+    sel_2->color = _S944;
+    Random _S945 = pcg(sel_2->random_state);
+    sel_2->random_state = _S945.state;
+    bool _S946 = (_S945.value * sel_2->w_sum) <= _S937;
+    if(_S946)
     {
         sel_2->r = candidate_0;
     }
@@ -3253,10 +3457,10 @@ __device__ void offer(Selection * sel_2, Reservoir candidate_0, float3  weight_0
 __device__ void offerShifted(Selection * sel_3, Reservoir r_3, Shift shifted_0, float mis_0)
 {
     Reservoir candidate_1 = r_3;
-    float3  _S882 = shifted_0.f / make_float3 (shifted_0.jac);
-    (&candidate_1)->f = _S882;
-    float _S883 = r_3.jac * shifted_0.jac;
-    (&candidate_1)->jac = _S883;
+    float3  _S947 = shifted_0.f / make_float3 (shifted_0.jac);
+    (&candidate_1)->f = _S947;
+    float _S948 = r_3.jac * shifted_0.jac;
+    (&candidate_1)->jac = _S948;
     offer(sel_3, candidate_1, make_float3 (mis_0) * shifted_0.f * make_float3 (r_3.w));
     return;
 }
@@ -3264,11 +3468,11 @@ __device__ void offerShifted(Selection * sel_3, Reservoir r_3, Shift shifted_0, 
 __device__ Reservoir finalize(Selection sel_4, float c_1)
 {
     Reservoir r_4 = sel_4.r;
-    float _S884 = resamplingTarget((&r_4)->f);
-    float _S885 = sel_4.w_sum / _S884;
-    bool _S886 = _S884 > 0.0f;
-    float _S887 = _slang_select(_S886, _S885,0.0f);
-    (&r_4)->w = _S887;
+    float _S949 = resamplingTarget((&r_4)->f);
+    float _S950 = sel_4.w_sum / _S949;
+    bool _S951 = _S949 > 0.0f;
+    float _S952 = _slang_select(_S951, _S950,0.0f);
+    (&r_4)->w = _S952;
     (&r_4)->c = c_1;
     return r_4;
 }
@@ -3276,194 +3480,194 @@ __device__ Reservoir finalize(Selection sel_4, float c_1)
 static __device__ uint2  asuint_0(float2  x_20)
 {
     uint2  result_9;
-    int i_18 = int(0);
+    int i_19 = int(0);
     for(;;)
     {
-        if(i_18 < int(2))
+        if(i_19 < int(2))
         {
         }
         else
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_9, i_18) = (F32_asuint((_slang_vector_get_element(x_20, i_18))));
-        i_18 = i_18 + int(1);
+        *_slang_vector_get_element_ptr(&result_9, i_19) = (F32_asuint((_slang_vector_get_element(x_20, i_19))));
+        i_19 = i_19 + int(1);
     }
     return result_9;
 }
 
 static __device__ void restir_spatial_0(uint3  global_invocation_id_2)
 {
-    uint2  _S888 = uint2 {global_invocation_id_2.x, global_invocation_id_2.y};
-    int2  _S889 = make_int2 ((int)_S888.x, (int)_S888.y);
-    float3  _S890 = make_float3 (0.0f);
-    FKHit _S891 = Hit_x24init_0(make_float2 (0.0f), 0U, 0U, 0U, 0.0f);
-    Domain _S892 = Domain_x24init_0(_S890, _S890, &_S891, 0.0f, 0.0f);
-    Domain dom_4 = _S892;
-    bool _S893 = (fcptCurrentDomain((_S889), (&dom_4)));
-    bool _S894 = !_S893;
-    if(_S894)
+    uint2  _S953 = uint2 {global_invocation_id_2.x, global_invocation_id_2.y};
+    int2  _S954 = make_int2 ((int)_S953.x, (int)_S953.y);
+    float3  _S955 = make_float3 (0.0f);
+    FKHit _S956 = Hit_x24init_0(make_float2 (0.0f), 0U, 0U, 0U, 0.0f);
+    Domain _S957 = Domain_x24init_0(_S955, _S955, &_S956, 0.0f, 0.0f);
+    Domain dom_4 = _S957;
+    bool _S958 = (fcptCurrentDomain((_S954), (&dom_4)));
+    bool _S959 = !_S958;
+    if(_S959)
     {
-        Reservoir _S895 = (Reservoir{});
-        fcptStoreReservoirPrevious((_S889), (_S895), ((&dom_4)->hit));
+        Reservoir _S960 = (Reservoir{});
+        fcptStoreReservoirPrevious((_S954), (_S960), ((&dom_4)->hit));
         return;
     }
-    Reservoir _S896 = (fcptLoadReservoirTemporal((_S889)));
+    Reservoir _S961 = (fcptLoadReservoirTemporal((_S954)));
     uint t_15 = 0U;
     float count_4 = 0.0f;
-    float c_sum_0 = _S896.c;
+    float c_sum_0 = _S961.c;
     for(;;)
     {
-        uint _S897 = (fcptRestirNeighbours());
-        if(t_15 < _S897)
+        uint _S962 = (fcptRestirNeighbours());
+        if(t_15 < _S962)
         {
         }
         else
         {
             break;
         }
-        int2  _S898 = partner_0(_S889, t_15);
-        Domain neighbor_0 = _S892;
-        bool _S899 = (fcptCurrentDomain((_S898), (&neighbor_0)));
-        if(_S899)
+        int2  _S963 = partner_0(_S954, t_15);
+        Domain neighbor_0 = _S957;
+        bool _S964 = (fcptCurrentDomain((_S963), (&neighbor_0)));
+        if(_S964)
         {
             float count_5 = count_4 + 1.0f;
-            uint4  _S900 = (fcptReservoirTemporal((_S898), (0U)));
-            float c_sum_1 = c_sum_0 + (U32_asfloat((_S900.w)));
+            uint4  _S965 = (fcptReservoirTemporal((_S963), (0U)));
+            float c_sum_1 = c_sum_0 + (U32_asfloat((_S965.w)));
             count_4 = count_5;
             c_sum_0 = c_sum_1;
         }
         uint t_16 = t_15 + 1U;
         t_15 = t_16;
     }
-    float _S901 = _S896.c / (F32_max((count_4), (1.0f)));
-    float _S902 = resamplingTarget(_S896.f);
-    bool _S903 = count_4 == 0.0f;
-    float _S904 = _slang_select(_S903, 1.0f,0.0f);
-    Selection _S905 = (Selection{});
-    Selection sel_5 = _S905;
-    uint _S906 = (fcptFrame());
-    uint _S907 = hash(_S906);
-    uint _S908 = global_invocation_id_2.x;
-    uint2  _S909 = (fcptRenderSize());
-    uint _S910 = stream(_S907, _S908 + _S909.x * global_invocation_id_2.y);
-    uint _S911 = stream(_S910, 195U);
-    (&sel_5)->random_state = _S911;
+    float _S966 = _S961.c / (F32_max((count_4), (1.0f)));
+    float _S967 = resamplingTarget(_S961.f);
+    bool _S968 = count_4 == 0.0f;
+    float _S969 = _slang_select(_S968, 1.0f,0.0f);
+    Selection _S970 = (Selection{});
+    Selection sel_5 = _S970;
+    uint _S971 = (fcptFrame());
+    uint _S972 = hash(_S971);
+    uint _S973 = global_invocation_id_2.x;
+    uint2  _S974 = (fcptRenderSize());
+    uint _S975 = stream(_S972, _S973 + _S974.x * global_invocation_id_2.y);
+    uint _S976 = stream(_S975, 195U);
+    (&sel_5)->random_state = _S976;
     t_15 = 0U;
-    float canonical_mis_0 = _S904;
+    float canonical_mis_0 = _S969;
     for(;;)
     {
-        uint _S912 = (fcptRestirNeighbours());
-        if(t_15 < _S912)
+        uint _S977 = (fcptRestirNeighbours());
+        if(t_15 < _S977)
         {
         }
         else
         {
             break;
         }
-        int2  _S913 = partner_0(_S889, t_15);
-        Domain neighbor_dom_0 = _S892;
-        bool _S914 = (fcptCurrentDomain((_S913), (&neighbor_dom_0)));
-        if(_S914)
+        int2  _S978 = partner_0(_S954, t_15);
+        Domain neighbor_dom_0 = _S957;
+        bool _S979 = (fcptCurrentDomain((_S978), (&neighbor_dom_0)));
+        if(_S979)
         {
-            Reservoir _S915 = (fcptLoadReservoirTemporal((_S913)));
-            uint4  _S916 = (fcptShiftData((_S913), (t_15)));
-            float4  _S917 = asfloat_0(_S916);
-            uint4  _S918 = (fcptShiftData((_S889), (t_15)));
-            float4  _S919 = asfloat_0(_S918);
-            float _S920 = (_S915.c + _S901) / c_sum_0;
-            bool _S921 = _S902 > 0.0f;
+            Reservoir _S980 = (fcptLoadReservoirTemporal((_S978)));
+            uint4  _S981 = (fcptShiftData((_S978), (t_15)));
+            float4  _S982 = asfloat_0(_S981);
+            uint4  _S983 = (fcptShiftData((_S954), (t_15)));
+            float4  _S984 = asfloat_0(_S983);
+            float _S985 = (_S980.c + _S966) / c_sum_0;
+            bool _S986 = _S967 > 0.0f;
             float canonical_mis_1;
-            if(_S921)
+            if(_S986)
             {
-                float _S922 = _S920 * _S901 * _S902;
-                float _S923 = _S901 * _S902;
-                float _S924 = resamplingTarget(float3 {_S919.x, _S919.y, _S919.z});
-                float canonical_mis_2 = canonical_mis_0 + _S922 / (_S923 + _S915.c * _S924);
+                float _S987 = _S985 * _S966 * _S967;
+                float _S988 = _S966 * _S967;
+                float _S989 = resamplingTarget(float3 {_S984.x, _S984.y, _S984.z});
+                float canonical_mis_2 = canonical_mis_0 + _S987 / (_S988 + _S980.c * _S989);
                 canonical_mis_1 = canonical_mis_2;
             }
             else
             {
                 canonical_mis_1 = canonical_mis_0;
             }
-            float3  _S925 = float3 {_S917.x, _S917.y, _S917.z};
-            Shift _S926 = Shift_x24init_0(_S925, _S917.w);
-            float _S927 = _S920 * _S915.c;
-            float _S928 = resamplingTarget(_S915.f);
-            float _S929 = _S927 * _S928;
-            float _S930 = resamplingTarget(_S915.f);
-            float _S931 = _S915.c * _S930;
-            float _S932 = resamplingTarget(_S925);
-            offerShifted(&sel_5, _S915, _S926, _S929 / (_S931 + _S901 * _S932));
+            float3  _S990 = float3 {_S982.x, _S982.y, _S982.z};
+            Shift _S991 = Shift_x24init_0(_S990, _S982.w);
+            float _S992 = _S985 * _S980.c;
+            float _S993 = resamplingTarget(_S980.f);
+            float _S994 = _S992 * _S993;
+            float _S995 = resamplingTarget(_S980.f);
+            float _S996 = _S980.c * _S995;
+            float _S997 = resamplingTarget(_S990);
+            offerShifted(&sel_5, _S980, _S991, _S994 / (_S996 + _S966 * _S997));
             canonical_mis_0 = canonical_mis_1;
         }
         uint t_17 = t_15 + 1U;
         t_15 = t_17;
     }
-    offerShifted(&sel_5, _S896, Shift_x24init_0(_S896.f, 1.0f), canonical_mis_0);
-    Reservoir _S933 = finalize(sel_5, c_sum_0);
-    fcptStoreReservoirPrevious((_S889), (_S933), ((&dom_4)->hit));
-    fcptStorePreviousLayer((_S889), (5U), (make_uint4 (asuint_0((&(&dom_4)->hit)->uv).x, asuint_0((&(&dom_4)->hit)->uv).y, 0U, 0U)));
-    fcptAddColor((_S889), (make_float4 ((&sel_5)->color.x, (&sel_5)->color.y, (&sel_5)->color.z, 0.0f)));
+    offerShifted(&sel_5, _S961, Shift_x24init_0(_S961.f, 1.0f), canonical_mis_0);
+    Reservoir _S998 = finalize(sel_5, c_sum_0);
+    fcptStoreReservoirPrevious((_S954), (_S998), ((&dom_4)->hit));
+    fcptStorePreviousLayer((_S954), (5U), (make_uint4 (asuint_0((&(&dom_4)->hit)->uv).x, asuint_0((&(&dom_4)->hit)->uv).y, 0U, 0U)));
+    fcptAddColor((_S954), (make_float4 ((&sel_5)->color.x, (&sel_5)->color.y, (&sel_5)->color.z, 0.0f)));
     return;
 }
 
 static __device__ uint3  asuint_1(float3  x_21)
 {
     uint3  result_10;
-    int i_19 = int(0);
+    int i_20 = int(0);
     for(;;)
     {
-        if(i_19 < int(3))
+        if(i_20 < int(3))
         {
         }
         else
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_10, i_19) = (F32_asuint((_slang_vector_get_element(x_21, i_19))));
-        i_19 = i_19 + int(1);
+        *_slang_vector_get_element_ptr(&result_10, i_20) = (F32_asuint((_slang_vector_get_element(x_21, i_20))));
+        i_20 = i_20 + int(1);
     }
     return result_10;
 }
 
 static __device__ void restir_shift_0(uint3  workgroup_id_1, uint local_invocation_index_4)
 {
-    uint _S934 = queuedShift_0(workgroup_id_1, local_invocation_index_4);
-    bool _S935 = _S934 != 4294967295U;
-    if(_S935)
+    uint _S999 = queuedShift_0(workgroup_id_1, local_invocation_index_4);
+    bool _S1000 = _S999 != 4294967295U;
+    if(_S1000)
     {
-        uint2  _S936 = make_uint2 (_S934, _S934 >> 14U) & make_uint2 (16383U);
-        int2  _S937 = make_int2 ((int)_S936.x, (int)_S936.y);
-        ShiftJob _S938 = (ShiftJob{});
-        ShiftJob shift_job_0 = _S938;
-        Shift _S939 = Shift_x24init_0(make_float3 (0.0f), 0.0f);
-        uint _S940 = _S934 >> 28U;
-        bool _S941 = spatialJob_0(_S937, _S940, &shift_job_0, true);
+        uint2  _S1001 = make_uint2 (_S999, _S999 >> 14U) & make_uint2 (16383U);
+        int2  _S1002 = make_int2 ((int)_S1001.x, (int)_S1001.y);
+        ShiftJob _S1003 = (ShiftJob{});
+        ShiftJob shift_job_0 = _S1003;
+        Shift _S1004 = Shift_x24init_0(make_float3 (0.0f), 0.0f);
+        uint _S1005 = _S999 >> 28U;
+        bool _S1006 = spatialJob_0(_S1002, _S1005, &shift_job_0, true);
         Shift shifted_1;
-        if(_S941)
+        if(_S1006)
         {
-            Domain _S942 = (&shift_job_0)->dom;
-            Reservoir _S943 = (&shift_job_0)->r;
-            Shift _S944 = shift_0(&_S942, &_S943);
-            shifted_1 = _S944;
+            Domain _S1007 = (&shift_job_0)->dom;
+            Reservoir _S1008 = (&shift_job_0)->r;
+            Shift _S1009 = shift_0(&_S1007, &_S1008);
+            shifted_1 = _S1009;
         }
         else
         {
-            shifted_1 = _S939;
+            shifted_1 = _S1004;
         }
-        fcptStoreShiftData((_S937), (_S940), (make_uint4 (asuint_1(shifted_1.f).x, asuint_1(shifted_1.f).y, asuint_1(shifted_1.f).z, (F32_asuint((shifted_1.jac))))));
+        fcptStoreShiftData((_S1002), (_S1005), (make_uint4 (asuint_1(shifted_1.f).x, asuint_1(shifted_1.f).y, asuint_1(shifted_1.f).z, (F32_asuint((shifted_1.jac))))));
     }
     return;
 }
 
 static __device__ void restir_prepass_0(uint3  global_invocation_id_3, uint local_invocation_index_5)
 {
-    uint2  _S945 = uint2 {global_invocation_id_3.x, global_invocation_id_3.y};
-    int2  _S946 = make_int2 ((int)_S945.x, (int)_S945.y);
-    FixedArray<uint, 3>  _S947;
-    spatialBins_0(_S946, &_S947);
-    FixedArray<uint, 3>  _S948 = _S947;
+    uint2  _S1010 = uint2 {global_invocation_id_3.x, global_invocation_id_3.y};
+    int2  _S1011 = make_int2 ((int)_S1010.x, (int)_S1010.y);
+    FixedArray<uint, 3>  _S1012;
+    spatialBins_0(_S1011, &_S1012);
+    FixedArray<uint, 3>  _S1013 = _S1012;
     uint t_18 = 0U;
     for(;;)
     {
@@ -3474,53 +3678,53 @@ static __device__ void restir_prepass_0(uint3  global_invocation_id_3, uint loca
         {
             break;
         }
-        bool _S949 = (_S948[t_18]) == 40U;
-        if(_S949)
+        bool _S1014 = (_S1013[t_18]) == 40U;
+        if(_S1014)
         {
-            fcptStoreShiftData((_S946), (t_18), (make_uint4 (0U)));
+            fcptStoreShiftData((_S1011), (t_18), (make_uint4 (0U)));
         }
         uint t_19 = t_18 + 1U;
         t_18 = t_19;
     }
-    FixedArray<uint, 3>  _S950 = _S948;
-    queueShifts_0(_S946, &_S950, global_invocation_id_3, local_invocation_index_5);
+    FixedArray<uint, 3>  _S1015 = _S1013;
+    queueShifts_0(_S1011, &_S1015, global_invocation_id_3, local_invocation_index_5);
     return;
 }
 
 static __device__ void restir_count_0(uint3  global_invocation_id_4, uint local_invocation_index_6)
 {
-    uint2  _S951 = uint2 {global_invocation_id_4.x, global_invocation_id_4.y};
-    int2  _S952 = make_int2 ((int)_S951.x, (int)_S951.y);
-    FixedArray<uint, 3>  _S953;
-    spatialBins_0(_S952, &_S953);
-    FixedArray<uint, 3>  _S954 = _S953;
-    countShifts_0(&_S954, local_invocation_index_6);
+    uint2  _S1016 = uint2 {global_invocation_id_4.x, global_invocation_id_4.y};
+    int2  _S1017 = make_int2 ((int)_S1016.x, (int)_S1016.y);
+    FixedArray<uint, 3>  _S1018;
+    spatialBins_0(_S1017, &_S1018);
+    FixedArray<uint, 3>  _S1019 = _S1018;
+    countShifts_0(&_S1019, local_invocation_index_6);
     return;
 }
 
 static __device__ void restir_temporal_shift_0(uint3  workgroup_id_2, uint local_invocation_index_7)
 {
-    uint _S955 = queuedShift_0(workgroup_id_2, local_invocation_index_7);
-    bool _S956 = _S955 != 4294967295U;
-    if(_S956)
+    uint _S1020 = queuedShift_0(workgroup_id_2, local_invocation_index_7);
+    bool _S1021 = _S1020 != 4294967295U;
+    if(_S1021)
     {
-        uint2  _S957 = make_uint2 (_S955, _S955 >> 14U) & make_uint2 (16383U);
-        int2  _S958 = make_int2 ((int)_S957.x, (int)_S957.y);
-        int2  _S959 = (fcptLoadTemporalNeighbor((_S958)));
-        uint _S960 = _S955 >> 28U;
-        Shift _S961 = temporalShiftAt_0(_S958, _S959, _S960);
-        fcptStoreShiftData((_S958), (_S960), (make_uint4 (asuint_1(_S961.f).x, asuint_1(_S961.f).y, asuint_1(_S961.f).z, (F32_asuint((_S961.jac))))));
+        uint2  _S1022 = make_uint2 (_S1020, _S1020 >> 14U) & make_uint2 (16383U);
+        int2  _S1023 = make_int2 ((int)_S1022.x, (int)_S1022.y);
+        int2  _S1024 = (fcptLoadTemporalNeighbor((_S1023)));
+        uint _S1025 = _S1020 >> 28U;
+        Shift _S1026 = temporalShiftAt_0(_S1023, _S1024, _S1025);
+        fcptStoreShiftData((_S1023), (_S1025), (make_uint4 (asuint_1(_S1026.f).x, asuint_1(_S1026.f).y, asuint_1(_S1026.f).z, (F32_asuint((_S1026.jac))))));
     }
     return;
 }
 
 static __device__ void restir_temporal_prepass_0(uint3  global_invocation_id_5, uint local_invocation_index_8)
 {
-    uint2  _S962 = uint2 {global_invocation_id_5.x, global_invocation_id_5.y};
-    int2  _S963 = make_int2 ((int)_S962.x, (int)_S962.y);
-    FixedArray<uint, 3>  _S964;
-    temporalBins_0(_S963, &_S964);
-    FixedArray<uint, 3>  _S965 = _S964;
+    uint2  _S1027 = uint2 {global_invocation_id_5.x, global_invocation_id_5.y};
+    int2  _S1028 = make_int2 ((int)_S1027.x, (int)_S1027.y);
+    FixedArray<uint, 3>  _S1029;
+    temporalBins_0(_S1028, &_S1029);
+    FixedArray<uint, 3>  _S1030 = _S1029;
     uint t_20 = 0U;
     for(;;)
     {
@@ -3531,46 +3735,46 @@ static __device__ void restir_temporal_prepass_0(uint3  global_invocation_id_5, 
         {
             break;
         }
-        bool _S966 = (_S965[t_20]) == 40U;
-        if(_S966)
+        bool _S1031 = (_S1030[t_20]) == 40U;
+        if(_S1031)
         {
-            fcptStoreShiftData((_S963), (t_20), (make_uint4 (0U)));
+            fcptStoreShiftData((_S1028), (t_20), (make_uint4 (0U)));
         }
         uint t_21 = t_20 + 1U;
         t_20 = t_21;
     }
-    FixedArray<uint, 3>  _S967 = _S965;
-    queueShifts_0(_S963, &_S967, global_invocation_id_5, local_invocation_index_8);
+    FixedArray<uint, 3>  _S1032 = _S1030;
+    queueShifts_0(_S1028, &_S1032, global_invocation_id_5, local_invocation_index_8);
     return;
 }
 
 static __device__ void restir_temporal_count_0(uint3  global_invocation_id_6, uint local_invocation_index_9)
 {
-    uint2  _S968 = uint2 {global_invocation_id_6.x, global_invocation_id_6.y};
-    int2  _S969 = make_int2 ((int)_S968.x, (int)_S968.y);
-    bool _S970 = (fcptSceneUnchanged());
-    bool _S971 = !_S970;
-    bool _S972;
-    if(_S971)
+    uint2  _S1033 = uint2 {global_invocation_id_6.x, global_invocation_id_6.y};
+    int2  _S1034 = make_int2 ((int)_S1033.x, (int)_S1033.y);
+    bool _S1035 = (fcptSceneUnchanged());
+    bool _S1036 = !_S1035;
+    bool _S1037;
+    if(_S1036)
     {
-        uint2  _S973 = (fcptRenderSize());
-        int2  _S974 = make_int2 ((int)_S973.x, (int)_S973.y);
-        _S972 = all_0(_S969 < _S974);
+        uint2  _S1038 = (fcptRenderSize());
+        int2  _S1039 = make_int2 ((int)_S1038.x, (int)_S1038.y);
+        _S1037 = all_0(_S1034 < _S1039);
     }
     else
     {
-        _S972 = false;
+        _S1037 = false;
     }
-    if(_S972)
+    if(_S1037)
     {
-        Reservoir _S975 = (fcptLoadReservoirInitial((_S969)));
-        int2  _S976 = sampleNeighbor_0(_S969, _S975.seed);
-        fcptStoreTemporalNeighbor((_S969), (_S976));
+        Reservoir _S1040 = (fcptLoadReservoirInitial((_S1034)));
+        int2  _S1041 = sampleNeighbor_0(_S1034, _S1040.seed);
+        fcptStoreTemporalNeighbor((_S1034), (_S1041));
     }
-    FixedArray<uint, 3>  _S977;
-    temporalBins_0(_S969, &_S977);
-    FixedArray<uint, 3>  _S978 = _S977;
-    countShifts_0(&_S978, local_invocation_index_9);
+    FixedArray<uint, 3>  _S1042;
+    temporalBins_0(_S1034, &_S1042);
+    FixedArray<uint, 3>  _S1043 = _S1042;
+    countShifts_0(&_S1043, local_invocation_index_9);
     return;
 }
 
@@ -3581,295 +3785,295 @@ static __device__ float interpolate_0(float a_9, float b_3, float t_22)
 
 static __device__ void restir_temporal_0(uint3  global_invocation_id_7)
 {
-    uint2  _S979 = uint2 {global_invocation_id_7.x, global_invocation_id_7.y};
-    int2  _S980 = make_int2 ((int)_S979.x, (int)_S979.y);
-    float3  _S981 = make_float3 (0.0f);
-    FKHit _S982 = Hit_x24init_0(make_float2 (0.0f), 0U, 0U, 0U, 0.0f);
-    Domain _S983 = Domain_x24init_0(_S981, _S981, &_S982, 0.0f, 0.0f);
-    Domain dom_5 = _S983;
-    bool _S984 = (fcptCurrentDomain((_S980), (&dom_5)));
-    bool _S985 = !_S984;
-    if(_S985)
+    uint2  _S1044 = uint2 {global_invocation_id_7.x, global_invocation_id_7.y};
+    int2  _S1045 = make_int2 ((int)_S1044.x, (int)_S1044.y);
+    float3  _S1046 = make_float3 (0.0f);
+    FKHit _S1047 = Hit_x24init_0(make_float2 (0.0f), 0U, 0U, 0U, 0.0f);
+    Domain _S1048 = Domain_x24init_0(_S1046, _S1046, &_S1047, 0.0f, 0.0f);
+    Domain dom_5 = _S1048;
+    bool _S1049 = (fcptCurrentDomain((_S1045), (&dom_5)));
+    bool _S1050 = !_S1049;
+    if(_S1050)
     {
-        Reservoir _S986 = (Reservoir{});
-        fcptStoreReservoirTemporal((_S980), (_S986), ((&dom_5)->hit));
+        Reservoir _S1051 = (Reservoir{});
+        fcptStoreReservoirTemporal((_S1045), (_S1051), ((&dom_5)->hit));
         return;
     }
-    Reservoir _S987 = (fcptLoadReservoirInitial((_S980)));
-    bool _S988 = (fcptTemporalQueued());
-    bool _S989 = (fcptSceneUnchanged());
-    bool _S990;
-    if(_S989)
+    Reservoir _S1052 = (fcptLoadReservoirInitial((_S1045)));
+    bool _S1053 = (fcptTemporalQueued());
+    bool _S1054 = (fcptSceneUnchanged());
+    bool _S1055;
+    if(_S1054)
     {
-        _S990 = true;
+        _S1055 = true;
     }
     else
     {
-        _S990 = !_S988;
+        _S1055 = !_S1053;
     }
-    int2  _S991;
-    if(_S990)
+    int2  _S1056;
+    if(_S1055)
     {
-        int2  _S992 = sampleNeighbor_0(_S980, _S987.seed);
-        _S991 = _S992;
+        int2  _S1057 = sampleNeighbor_0(_S1045, _S1052.seed);
+        _S1056 = _S1057;
     }
     else
     {
-        int2  _S993 = (fcptLoadTemporalNeighbor((_S980)));
-        _S991 = _S993;
+        int2  _S1058 = (fcptLoadTemporalNeighbor((_S1045)));
+        _S1056 = _S1058;
     }
-    bool _S994 = (_S991.x) >= int(0);
+    bool _S1059 = (_S1056.x) >= int(0);
     Reservoir r_5;
-    if(_S994)
+    if(_S1059)
     {
-        Reservoir _S995 = (fcptLoadReservoirPrevious((_S991)));
-        uint4  _S996 = (fcptDuplication((_S991)));
-        float _S997 = (U32_asfloat((_S996.x)));
-        uint _S998 = (fcptRestirDecorrelation());
-        bool _S999 = _S998 == 1U;
-        float _S1000 = _slang_select(_S999, _S997,0.0f);
-        float _S1001 = interpolate_0(20.0f, 1.0f, (F32_pow((_S1000), (0.10000000149011612f))));
-        float _S1002 = (F32_min((_S995.c), (_S1001)));
-        bool _S1003 = (fcptSceneUnchanged());
-        float4  _S1004 = make_float4 (_S995.f.x, _S995.f.y, _S995.f.z, 1.0f);
-        bool _S1005 = !_S1003;
-        if(_S1005)
+        Reservoir _S1060 = (fcptLoadReservoirPrevious((_S1056)));
+        uint4  _S1061 = (fcptDuplication((_S1056)));
+        float _S1062 = (U32_asfloat((_S1061.x)));
+        uint _S1063 = (fcptRestirDecorrelation());
+        bool _S1064 = _S1063 == 1U;
+        float _S1065 = _slang_select(_S1064, _S1062,0.0f);
+        float _S1066 = interpolate_0(20.0f, 1.0f, (F32_pow((_S1065), (0.10000000149011612f))));
+        float _S1067 = (F32_min((_S1060.c), (_S1066)));
+        bool _S1068 = (fcptSceneUnchanged());
+        float4  _S1069 = make_float4 (_S1060.f.x, _S1060.f.y, _S1060.f.z, 1.0f);
+        bool _S1070 = !_S1068;
+        if(_S1070)
         {
-            _S990 = _S988;
+            _S1055 = _S1053;
         }
         else
         {
-            _S990 = false;
+            _S1055 = false;
         }
         float4  to_current_0;
-        if(_S990)
+        if(_S1055)
         {
-            uint4  _S1006 = (fcptShiftData((_S980), (0U)));
-            float4  _S1007 = asfloat_0(_S1006);
-            to_current_0 = _S1007;
+            uint4  _S1071 = (fcptShiftData((_S1045), (0U)));
+            float4  _S1072 = asfloat_0(_S1071);
+            to_current_0 = _S1072;
         }
         else
         {
-            if(_S1005)
+            if(_S1070)
             {
-                Shift _S1008 = temporalShiftAt_0(_S980, _S991, 0U);
-                float4  _S1009 = make_float4 (_S1008.f.x, _S1008.f.y, _S1008.f.z, _S1008.jac);
-                to_current_0 = _S1009;
+                Shift _S1073 = temporalShiftAt_0(_S1045, _S1056, 0U);
+                float4  _S1074 = make_float4 (_S1073.f.x, _S1073.f.y, _S1073.f.z, _S1073.jac);
+                to_current_0 = _S1074;
             }
             else
             {
-                to_current_0 = _S1004;
+                to_current_0 = _S1069;
             }
         }
-        Domain own_1 = _S983;
-        if(_S1003)
+        Domain own_1 = _S1048;
+        if(_S1068)
         {
-            _S990 = true;
-        }
-        else
-        {
-            bool _S1010 = (fcptPreviousScenes());
-            bool _S1011 = !_S1010;
-            if(_S1011)
-            {
-                _S990 = (_S987.w) > 0.0f;
-            }
-            else
-            {
-                _S990 = false;
-            }
-            if(_S990)
-            {
-                bool _S1012 = (fcptStoredDomainInitial((_S980), (_S987.seed), (&own_1)));
-                _S990 = _S1012;
-            }
-            else
-            {
-                _S990 = false;
-            }
-            if(_S990)
-            {
-                Domain _S1013 = (fcptPreviousDomain((_S991), (_S987.seed)));
-                Domain _S1014 = _S1013;
-                Domain _S1015 = own_1;
-                bool _S1016 = sameDomain_0(&_S1014, &_S1015);
-                _S990 = _S1016;
-            }
-            else
-            {
-                _S990 = false;
-            }
-        }
-        float4  _S1017 = make_float4 (_S987.f.x, _S987.f.y, _S987.f.z, 1.0f);
-        bool _S1018 = !_S990;
-        if(_S1018)
-        {
-            _S990 = _S988;
+            _S1055 = true;
         }
         else
         {
-            _S990 = false;
+            bool _S1075 = (fcptPreviousScenes());
+            bool _S1076 = !_S1075;
+            if(_S1076)
+            {
+                _S1055 = (_S1052.w) > 0.0f;
+            }
+            else
+            {
+                _S1055 = false;
+            }
+            if(_S1055)
+            {
+                bool _S1077 = (fcptStoredDomainInitial((_S1045), (_S1052.seed), (&own_1)));
+                _S1055 = _S1077;
+            }
+            else
+            {
+                _S1055 = false;
+            }
+            if(_S1055)
+            {
+                Domain _S1078 = (fcptPreviousDomain((_S1056), (_S1052.seed)));
+                Domain _S1079 = _S1078;
+                Domain _S1080 = own_1;
+                bool _S1081 = sameDomain_0(&_S1079, &_S1080);
+                _S1055 = _S1081;
+            }
+            else
+            {
+                _S1055 = false;
+            }
+        }
+        float4  _S1082 = make_float4 (_S1052.f.x, _S1052.f.y, _S1052.f.z, 1.0f);
+        bool _S1083 = !_S1055;
+        if(_S1083)
+        {
+            _S1055 = _S1053;
+        }
+        else
+        {
+            _S1055 = false;
         }
         float4  to_previous_0;
-        if(_S990)
+        if(_S1055)
         {
-            uint4  _S1019 = (fcptShiftData((_S980), (1U)));
-            float4  _S1020 = asfloat_0(_S1019);
-            to_previous_0 = _S1020;
+            uint4  _S1084 = (fcptShiftData((_S1045), (1U)));
+            float4  _S1085 = asfloat_0(_S1084);
+            to_previous_0 = _S1085;
         }
         else
         {
-            if(_S1018)
+            if(_S1083)
             {
-                Shift _S1021 = temporalShiftAt_0(_S980, _S991, 1U);
-                float4  _S1022 = make_float4 (_S1021.f.x, _S1021.f.y, _S1021.f.z, _S1021.jac);
-                to_previous_0 = _S1022;
+                Shift _S1086 = temporalShiftAt_0(_S1045, _S1056, 1U);
+                float4  _S1087 = make_float4 (_S1086.f.x, _S1086.f.y, _S1086.f.z, _S1086.jac);
+                to_previous_0 = _S1087;
             }
             else
             {
-                to_previous_0 = _S1017;
+                to_previous_0 = _S1082;
             }
         }
-        float _S1023 = resamplingTarget(_S987.f);
-        float _S1024 = resamplingTarget(_S995.f);
-        Selection _S1025 = (Selection{});
-        Selection sel_6 = _S1025;
-        uint _S1026 = (fcptFrame());
-        uint _S1027 = hash(_S1026);
-        uint _S1028 = global_invocation_id_7.x;
-        uint2  _S1029 = (fcptRenderSize());
-        uint _S1030 = stream(_S1027, _S1028 + _S1029.x * global_invocation_id_7.y);
-        uint _S1031 = stream(_S1030, 194U);
-        (&sel_6)->random_state = _S1031;
-        float _S1032 = _S987.c * _S1023;
-        float4  _S1033 = to_previous_0;
-        float _S1034 = resamplingTarget(float3 {_S1033.x, _S1033.y, _S1033.z});
-        float _S1035 = _S1032 / (_S1032 + _S1002 * _S1034);
-        float _S1036 = _S1002 * _S1024;
-        float4  _S1037 = to_current_0;
-        float3  _S1038 = float3 {_S1037.x, _S1037.y, _S1037.z};
-        float _S1039 = resamplingTarget(_S1038);
-        float _S1040 = _S1036 / (_S1036 + _S987.c * _S1039);
-        float2  _S1041 = make_float2 (_S1035, _S1040);
-        offerShifted(&sel_6, _S987, Shift_x24init_0(_S987.f, 1.0f), _S1035);
-        offerShifted(&sel_6, _S995, Shift_x24init_0(_S1038, to_current_0.w), _S1040);
-        Reservoir _S1042 = finalize(sel_6, _S987.c + _S1002);
-        r_5 = _S1042;
+        float _S1088 = resamplingTarget(_S1052.f);
+        float _S1089 = resamplingTarget(_S1060.f);
+        Selection _S1090 = (Selection{});
+        Selection sel_6 = _S1090;
+        uint _S1091 = (fcptFrame());
+        uint _S1092 = hash(_S1091);
+        uint _S1093 = global_invocation_id_7.x;
+        uint2  _S1094 = (fcptRenderSize());
+        uint _S1095 = stream(_S1092, _S1093 + _S1094.x * global_invocation_id_7.y);
+        uint _S1096 = stream(_S1095, 194U);
+        (&sel_6)->random_state = _S1096;
+        float _S1097 = _S1052.c * _S1088;
+        float4  _S1098 = to_previous_0;
+        float _S1099 = resamplingTarget(float3 {_S1098.x, _S1098.y, _S1098.z});
+        float _S1100 = _S1097 / (_S1097 + _S1067 * _S1099);
+        float _S1101 = _S1067 * _S1089;
+        float4  _S1102 = to_current_0;
+        float3  _S1103 = float3 {_S1102.x, _S1102.y, _S1102.z};
+        float _S1104 = resamplingTarget(_S1103);
+        float _S1105 = _S1101 / (_S1101 + _S1052.c * _S1104);
+        float2  _S1106 = make_float2 (_S1100, _S1105);
+        offerShifted(&sel_6, _S1052, Shift_x24init_0(_S1052.f, 1.0f), _S1100);
+        offerShifted(&sel_6, _S1060, Shift_x24init_0(_S1103, to_current_0.w), _S1105);
+        Reservoir _S1107 = finalize(sel_6, _S1052.c + _S1067);
+        r_5 = _S1107;
     }
     else
     {
-        r_5 = _S987;
+        r_5 = _S1052;
     }
-    fcptStoreReservoirTemporal((_S980), (r_5), ((&dom_5)->hit));
+    fcptStoreReservoirTemporal((_S1045), (r_5), ((&dom_5)->hit));
     return;
 }
 
 __device__ uint noiseOrigin(uint2  p_14, uint k_1)
 {
-    uint _S1043 = ((p_14.x) >> 11U) | (((p_14.y) >> 11U) << 4U);
-    uint2  _S1044 = noiseOffset(8192U + (k_1 >> 10U) + (_S1043 << 20U));
-    uint2  _S1045 = (p_14 + _S1044) & make_uint2 (2047U);
-    return ((_S1045.x) | ((_S1045.y) << 11U)) | ((k_1 & 1023U) << 22U);
+    uint _S1108 = ((p_14.x) >> 11U) | (((p_14.y) >> 11U) << 4U);
+    uint2  _S1109 = noiseOffset(8192U + (k_1 >> 10U) + (_S1108 << 20U));
+    uint2  _S1110 = (p_14 + _S1109) & make_uint2 (2047U);
+    return ((_S1110.x) | ((_S1110.y) << 11U)) | ((k_1 & 1023U) << 22U);
 }
 
 static __device__ uint insertBits_0(uint e_2, uint newbits_0, uint offset_1, uint count_6)
 {
-    uint _S1046 = (1U << count_6) - 1U;
-    return (e_2 & (~(_S1046 << offset_1))) | ((newbits_0 & _S1046) << offset_1);
+    uint _S1111 = (1U << count_6) - 1U;
+    return (e_2 & (~(_S1111 << offset_1))) | ((newbits_0 & _S1111) << offset_1);
 }
 
 static __device__ void restir_initial_0(uint3  global_invocation_id_8)
 {
-    uint2  _S1047 = uint2 {global_invocation_id_8.x, global_invocation_id_8.y};
-    int2  _S1048 = make_int2 ((int)_S1047.x, (int)_S1047.y);
-    float3  _S1049 = make_float3 (0.0f);
-    float2  _S1050 = make_float2 (0.0f);
-    FKHit _S1051 = Hit_x24init_0(_S1050, 0U, 0U, 0U, 0.0f);
-    Domain _S1052 = Domain_x24init_0(_S1049, _S1049, &_S1051, 0.0f, 0.0f);
-    Domain dom_6 = _S1052;
-    bool _S1053 = (fcptCurrentDomain((_S1048), (&dom_6)));
-    bool _S1054 = !_S1053;
-    if(_S1054)
+    uint2  _S1112 = uint2 {global_invocation_id_8.x, global_invocation_id_8.y};
+    int2  _S1113 = make_int2 ((int)_S1112.x, (int)_S1112.y);
+    float3  _S1114 = make_float3 (0.0f);
+    float2  _S1115 = make_float2 (0.0f);
+    FKHit _S1116 = Hit_x24init_0(_S1115, 0U, 0U, 0U, 0.0f);
+    Domain _S1117 = Domain_x24init_0(_S1114, _S1114, &_S1116, 0.0f, 0.0f);
+    Domain dom_6 = _S1117;
+    bool _S1118 = (fcptCurrentDomain((_S1113), (&dom_6)));
+    bool _S1119 = !_S1118;
+    if(_S1119)
     {
-        Reservoir _S1055 = (Reservoir{});
-        fcptStoreReservoirInitial((_S1048), (_S1055), ((&dom_6)->hit));
+        Reservoir _S1120 = (Reservoir{});
+        fcptStoreReservoirInitial((_S1113), (_S1120), ((&dom_6)->hit));
         return;
     }
-    uint _S1056 = (fcptFrame());
-    uint _S1057 = hash(_S1056);
-    uint _S1058 = global_invocation_id_8.x;
-    uint2  _S1059 = (fcptRenderSize());
-    uint _S1060 = global_invocation_id_8.y;
-    uint _S1061 = stream(_S1057, _S1058 + _S1059.x * _S1060);
-    uint2  _S1062 = (fcptRenderSize());
-    uint _S1063 = stream(_S1058 + _S1062.x * _S1060, 512U);
-    Selection _S1064 = (Selection{});
-    Selection initial_0 = _S1064;
-    uint _S1065 = stream(_S1061, 193U);
-    (&initial_0)->random_state = _S1065;
-    bool _S1066 = (fcptRestirUsed());
-    bool _S1067 = !_S1066;
-    (&initial_0)->sums = _S1067;
-    uint _S1068 = stream(_S1061, 0U);
-    (&(&initial_0)->r)->seed = _S1068;
-    FKHit _S1069 = Hit_x24init_0(_S1050, 4294967295U, 0U, 0U, 0.0f);
-    uint _S1070 = (fcptSamples());
-    float _S1071 = 1.0f / float(_S1070);
-    FKHit hit_2 = _S1069;
-    uint i_20 = 0U;
-    float3  seen_0 = _S1049;
+    uint _S1121 = (fcptFrame());
+    uint _S1122 = hash(_S1121);
+    uint _S1123 = global_invocation_id_8.x;
+    uint2  _S1124 = (fcptRenderSize());
+    uint _S1125 = global_invocation_id_8.y;
+    uint _S1126 = stream(_S1122, _S1123 + _S1124.x * _S1125);
+    uint2  _S1127 = (fcptRenderSize());
+    uint _S1128 = stream(_S1123 + _S1127.x * _S1125, 512U);
+    Selection _S1129 = (Selection{});
+    Selection initial_0 = _S1129;
+    uint _S1130 = stream(_S1126, 193U);
+    (&initial_0)->random_state = _S1130;
+    bool _S1131 = (fcptRestirUsed());
+    bool _S1132 = !_S1131;
+    (&initial_0)->sums = _S1132;
+    uint _S1133 = stream(_S1126, 0U);
+    (&(&initial_0)->r)->seed = _S1133;
+    FKHit _S1134 = Hit_x24init_0(_S1115, 4294967295U, 0U, 0U, 0.0f);
+    uint _S1135 = (fcptSamples());
+    float _S1136 = 1.0f / float(_S1135);
+    FKHit hit_2 = _S1134;
+    uint i_21 = 0U;
+    float3  seen_0 = _S1114;
     for(;;)
     {
-        uint _S1072 = (fcptSamples());
-        if(i_20 < _S1072)
+        uint _S1137 = (fcptSamples());
+        if(i_21 < _S1137)
         {
         }
         else
         {
             break;
         }
-        Reservoir _S1073 = (Reservoir{});
-        Reservoir r_6 = _S1073;
-        uint _S1074 = (fcptFrame());
-        uint _S1075 = (fcptSamples());
-        uint _S1076 = _S1074 * _S1075 + i_20;
-        uint _S1077 = noiseOrigin(_S1047, _S1076);
-        (&r_6)->seed = _S1077;
-        uint _S1078 = insertBits_0(0U, 1U, 24U, 1U);
-        uint _S1079 = insertBits_0(_S1078, (_S1063 + _S1076 * 2654435769U) >> 25U, 25U, 7U);
-        (&r_6)->path = _S1079;
-        Domain path_0 = _S1052;
-        bool _S1080 = (fcptStoredDomainInitial((_S1048), ((&r_6)->seed), (&path_0)));
-        bool _S1081 = !_S1080;
-        if(_S1081)
+        Reservoir _S1138 = (Reservoir{});
+        Reservoir r_6 = _S1138;
+        uint _S1139 = (fcptFrame());
+        uint _S1140 = (fcptSamples());
+        uint _S1141 = _S1139 * _S1140 + i_21;
+        uint _S1142 = noiseOrigin(_S1112, _S1141);
+        (&r_6)->seed = _S1142;
+        uint _S1143 = insertBits_0(0U, 1U, 24U, 1U);
+        uint _S1144 = insertBits_0(_S1143, (_S1128 + _S1141 * 2654435769U) >> 25U, 25U, 7U);
+        (&r_6)->path = _S1144;
+        Domain path_0 = _S1117;
+        bool _S1145 = (fcptStoredDomainInitial((_S1113), ((&r_6)->seed), (&path_0)));
+        bool _S1146 = !_S1145;
+        if(_S1146)
         {
-            float3  _S1082 = (fcptMissed((_S1048), (path_0), (_S1071)));
-            float3  seen_1 = seen_0 + _S1082;
+            float3  _S1147 = (fcptMissed((_S1113), (path_0), (_S1136)));
+            float3  seen_1 = seen_0 + _S1147;
             seen_0 = seen_1;
-            uint i_21 = i_20 + 1U;
-            i_20 = i_21;
+            uint i_22 = i_21 + 1U;
+            i_21 = i_22;
             continue;
         }
-        Domain _S1083 = path_0;
-        Reservoir _S1084 = r_6;
-        Shift _S1085 = passWalk_0(&_S1083, &_S1084, false, _S1071, &initial_0);
-        bool _S1086 = ((&(&initial_0)->r)->seed) == ((&r_6)->seed);
+        Domain _S1148 = path_0;
+        Reservoir _S1149 = r_6;
+        Shift _S1150 = passWalk_0(&_S1148, &_S1149, false, _S1136, &initial_0);
+        bool _S1151 = ((&(&initial_0)->r)->seed) == ((&r_6)->seed);
         FKHit hit_3;
-        if(_S1086)
+        if(_S1151)
         {
-            FKHit _S1087 = (&path_0)->hit;
-            hit_3 = _S1087;
+            FKHit _S1152 = (&path_0)->hit;
+            hit_3 = _S1152;
         }
         else
         {
             hit_3 = hit_2;
         }
         hit_2 = hit_3;
-        uint i_21 = i_20 + 1U;
-        i_20 = i_21;
+        uint i_22 = i_21 + 1U;
+        i_21 = i_22;
     }
-    uint _S1088 = (fcptSamples());
-    float3  seen_2 = seen_0 + (&initial_0)->glow / make_float3 (float(_S1088));
+    uint _S1153 = (fcptSamples());
+    float3  seen_2 = seen_0 + (&initial_0)->glow / make_float3 (float(_S1153));
     if((&initial_0)->sums)
     {
         seen_0 = seen_2 + (&initial_0)->color;
@@ -3878,21 +4082,21 @@ static __device__ void restir_initial_0(uint3  global_invocation_id_8)
     {
         seen_0 = seen_2;
     }
-    fcptAddColor((_S1048), (make_float4 (seen_0.x, seen_0.y, seen_0.z, 1.0f)));
-    Reservoir _S1089 = finalize(initial_0, 1.0f);
-    fcptStoreReservoirInitial((_S1048), (_S1089), (hit_2));
+    fcptAddColor((_S1113), (make_float4 (seen_0.x, seen_0.y, seen_0.z, 1.0f)));
+    Reservoir _S1154 = finalize(initial_0, 1.0f);
+    fcptStoreReservoirInitial((_S1113), (_S1154), (hit_2));
     return;
 }
 
 static __device__ NEEVertex NEEVertex_x24init_0(bool none_0, float pdf_3, float3  origin_5, float3  smooth_n_3, float3  start_6)
 {
-    NEEVertex _S1090;
-    (&_S1090)->none = none_0;
-    (&_S1090)->pdf = pdf_3;
-    (&_S1090)->origin = origin_5;
-    (&_S1090)->smooth_n = smooth_n_3;
-    (&_S1090)->start = start_6;
-    return _S1090;
+    NEEVertex _S1155;
+    (&_S1155)->none = none_0;
+    (&_S1155)->pdf = pdf_3;
+    (&_S1155)->origin = origin_5;
+    (&_S1155)->smooth_n = smooth_n_3;
+    (&_S1155)->start = start_6;
+    return _S1155;
 }
 
 struct Vertex
@@ -3906,275 +4110,41 @@ struct Vertex
 
 static __device__ Vertex Vertex_x24init_0(bool rough_0, uint lobe_1, float pdf_4, float cos_0, bool inside_0)
 {
-    Vertex _S1091;
-    (&_S1091)->rough = rough_0;
-    (&_S1091)->lobe = lobe_1;
-    (&_S1091)->pdf = pdf_4;
-    (&_S1091)->cos = cos_0;
-    (&_S1091)->inside = inside_0;
-    return _S1091;
+    Vertex _S1156;
+    (&_S1156)->rough = rough_0;
+    (&_S1156)->lobe = lobe_1;
+    (&_S1156)->pdf = pdf_4;
+    (&_S1156)->cos = cos_0;
+    (&_S1156)->inside = inside_0;
+    return _S1156;
 }
 
 __device__ uint noiseAddress(uint origin_6, uint bounce_0)
 {
-    uint2  _S1092 = make_uint2 (origin_6 & 2047U, (origin_6 >> 11U) & 2047U);
-    uint2  _S1093 = noiseOffset(64U + bounce_0 * 17U);
-    uint2  _S1094 = (_S1092 + _S1093) & make_uint2 (2047U);
-    return ((_S1094.x) | ((_S1094.y) << 11U)) | ((origin_6 >> 22U) << 22U);
+    uint2  _S1157 = make_uint2 (origin_6 & 2047U, (origin_6 >> 11U) & 2047U);
+    uint2  _S1158 = noiseOffset(64U + bounce_0 * 17U);
+    uint2  _S1159 = (_S1157 + _S1158) & make_uint2 (2047U);
+    return ((_S1159.x) | ((_S1159.y) << 11U)) | ((origin_6 >> 22U) << 22U);
 }
 
 __device__ float3  pathColor(float3  f_7, float3  weight_1, float wavelength_5)
 {
-    float3  _S1095;
+    float3  _S1160;
     if(wavelength_5 > 0.0f)
     {
-        float _S1096 = upsample(f_7, wavelength_5);
-        _S1095 = weight_1 * make_float3 (_S1096);
+        float _S1161 = upsample(f_7, wavelength_5);
+        _S1160 = weight_1 * make_float3 (_S1161);
     }
     else
     {
-        _S1095 = f_7;
+        _S1160 = f_7;
     }
-    return _S1095;
+    return _S1160;
 }
 
 static __device__ float3  exp_0(float3  x_22)
 {
     float3  result_11;
-    int i_22 = int(0);
-    for(;;)
-    {
-        if(i_22 < int(3))
-        {
-        }
-        else
-        {
-            break;
-        }
-        *_slang_vector_get_element_ptr(&result_11, i_22) = (F32_exp((_slang_vector_get_element(x_22, i_22))));
-        i_22 = i_22 + int(1);
-    }
-    return result_11;
-}
-
-static __device__ float3  flightWeight_0(float3  scatter_0, float3  extinction_0, float sigma_0, float distance_2, bool scatters_0)
-{
-    float3  _S1097 = exp_0((make_float3 (sigma_0) - extinction_0) * make_float3 (distance_2));
-    float3  _S1098 = scatter_0 * _S1097 / make_float3 (sigma_0);
-    float3  _S1099 = _slang_select(scatters_0, _S1098,_S1097);
-    return _S1099;
-}
-
-static __device__ uint arrivalLobe_0(uint b_4, uint prev_lobe_0)
-{
-    bool _S1100 = b_4 > 0U;
-    uint _S1101 = _slang_select(_S1100, prev_lobe_0,3U);
-    return _S1101;
-}
-
-static __device__ ShadowContext ShadowContext_x24init_0(float3  extinction_behind_0, float3  extinction_front_0, uint2  fillings_0, float3  side_0, uint depth_2, uint lobe_2, bool surface_5, float length_2, float width_1, FKHit * own_2, bool fiber_0)
-{
-    ShadowContext _S1102;
-    (&_S1102)->extinction_behind = extinction_behind_0;
-    (&_S1102)->extinction_front = extinction_front_0;
-    (&_S1102)->fillings = fillings_0;
-    (&_S1102)->side = side_0;
-    (&_S1102)->depth = depth_2;
-    (&_S1102)->lobe = lobe_2;
-    (&_S1102)->surface = surface_5;
-    (&_S1102)->length = length_2;
-    (&_S1102)->width = width_1;
-    (&_S1102)->own = *own_2;
-    (&_S1102)->fiber = fiber_0;
-    return _S1102;
-}
-
-static __device__ float phaseHG_0(float g_0, float mu_0)
-{
-    bool _S1103 = (F32_abs((g_0))) < 0.00100000004749745f;
-    if(_S1103)
-    {
-        return 0.07957746833562851f;
-    }
-    float _S1104 = g_0 * g_0;
-    return (1.0f - _S1104) * 0.25f * 0.31830987334251404f / (F32_pow((1.0f + _S1104 - 2.0f * g_0 * mu_0), (1.5f)));
-}
-
-__device__ float3  safeDivide(float3  a_10, float3  b_5)
-{
-    float3  _S1105 = a_10 / b_5;
-    float3  _S1106 = make_float3 (0.0f);
-    bool3  _S1107 = b_5 == _S1106;
-    float3  _S1108 = _slang_select(_S1107, _S1106,_S1105);
-    return _S1108;
-}
-
-__device__ Reservoir withEnd(Reservoir r_7, uint end_type_0, uint end_0, float3  f_8)
-{
-    Reservoir candidate_2 = r_7;
-    uint _S1109 = insertBits_0(r_7.path, end_0, 0U, 5U);
-    uint _S1110 = insertBits_0(_S1109, end_type_0, 12U, 3U);
-    (&candidate_2)->path = _S1110;
-    (&candidate_2)->f = f_8;
-    return candidate_2;
-}
-
-__device__ float survivalProbability(float3  throughput_0, float density_1)
-{
-    float3  _S1111 = throughput_0 / make_float3 (density_1);
-    return clamp_1((F32_max((_S1111.x), ((F32_max((_S1111.y), (_S1111.z)))))), 0.0f, 1.0f);
-}
-
-static __device__ float3  isotropic_0(uint random_state_9)
-{
-    Random _S1112 = draw(random_state_9, 11U);
-    Random _S1113 = draw(random_state_9, 2147483659U);
-    float _S1114 = 1.0f - 2.0f * _S1112.value;
-    float _S1115 = (F32_sqrt(((F32_max((1.0f - _S1114 * _S1114), (0.0f))))));
-    float _S1116 = 6.28318548202514648f * _S1113.value;
-    return make_float3 (_S1115 * (F32_cos((_S1116))), _S1115 * (F32_sin((_S1116))), _S1114);
-}
-
-static __device__ float3  samplePhase_0(float g_1, float3  dir_9, uint random_state_10, float * pdf_5)
-{
-    bool _S1117 = (F32_abs((g_1))) < 0.00100000004749745f;
-    if(_S1117)
-    {
-        *pdf_5 = 0.07957746833562851f;
-        float3  _S1118 = isotropic_0(random_state_10);
-        return _S1118;
-    }
-    Random _S1119 = draw(random_state_10, 11U);
-    Random _S1120 = draw(random_state_10, 2147483659U);
-    float _S1121 = g_1 * g_1;
-    float _S1122 = 2.0f * g_1;
-    float _S1123 = (1.0f - _S1121) / (1.0f - g_1 + _S1122 * _S1119.value);
-    float _S1124 = clamp_1((1.0f + _S1121 - _S1123 * _S1123) / _S1122, -1.0f, 1.0f);
-    float _S1125 = (F32_sqrt(((F32_max((1.0f - _S1124 * _S1124), (0.0f))))));
-    float _S1126 = 6.28318548202514648f * _S1120.value;
-    float _S1127 = phaseHG_0(g_1, _S1124);
-    *pdf_5 = _S1127;
-    float3  _S1128 = tangentToWorld(make_float3 (_S1125 * (F32_cos((_S1126))), _S1124, _S1125 * (F32_sin((_S1126)))), dir_9);
-    float3  _S1129 = ((((_S1128)) * make_float3(rnorm3df(((_S1128)).x, ((_S1128)).y, ((_S1128)).z))));
-    return _S1129;
-}
-
-static __device__ BSDFMaterial Material_x24init_0(float3  albedo_1, float3  emissive_0, float roughness_0, float metallic_0, float transmission_0, float ior_0, float3  absorption_0, float3  specular_tint_0, float specular_level_0, float3  translucent_0, float3  sheen_2, float sheen_roughness_0, float anisotropy_0, float anisotropic_rotation_0, float3  tangent_1, float velvet_0, float3  toon_2, float dispersion_0)
-{
-    BSDFMaterial _S1130;
-    (&_S1130)->albedo = albedo_1;
-    (&_S1130)->emissive = emissive_0;
-    (&_S1130)->roughness = roughness_0;
-    (&_S1130)->metallic = metallic_0;
-    (&_S1130)->transmission = transmission_0;
-    (&_S1130)->ior = ior_0;
-    (&_S1130)->absorption = absorption_0;
-    (&_S1130)->specular_tint = specular_tint_0;
-    (&_S1130)->specular_level = specular_level_0;
-    (&_S1130)->translucent = translucent_0;
-    (&_S1130)->sheen = sheen_2;
-    (&_S1130)->sheen_roughness = sheen_roughness_0;
-    (&_S1130)->anisotropy = anisotropy_0;
-    (&_S1130)->anisotropic_rotation = anisotropic_rotation_0;
-    (&_S1130)->tangent = tangent_1;
-    (&_S1130)->velvet = velvet_0;
-    (&_S1130)->toon = toon_2;
-    (&_S1130)->dispersion = dispersion_0;
-    return _S1130;
-}
-
-static __device__ FKMedium Medium_x24init_0(float3  scatter_1, float3  extinction_1, float g_2)
-{
-    FKMedium _S1131;
-    (&_S1131)->scatter = scatter_1;
-    (&_S1131)->extinction = extinction_1;
-    (&_S1131)->g = g_2;
-    return _S1131;
-}
-
-static __device__ FKSurface Surface_x24init_0(float3  smooth_n_4, float3  geometry_n_2, float geometry_offset_2, BSDFMaterial * material_13, bool skip_0, uint random_state_11, float coverage_0, bool encloses_0, FKMedium * volume_0, uint fills_0, float3  hair_0)
-{
-    FKSurface _S1132;
-    (&_S1132)->smooth_n = smooth_n_4;
-    (&_S1132)->geometry_n = geometry_n_2;
-    (&_S1132)->geometry_offset = geometry_offset_2;
-    (&_S1132)->material = *material_13;
-    (&_S1132)->skip = skip_0;
-    (&_S1132)->random_state = random_state_11;
-    (&_S1132)->coverage = coverage_0;
-    (&_S1132)->encloses = encloses_0;
-    (&_S1132)->volume = *volume_0;
-    (&_S1132)->fills = fills_0;
-    (&_S1132)->hair = hair_0;
-    return _S1132;
-}
-
-static __device__ FKSurface uncovered_0(FKSurface * surface_6, float u_1)
-{
-    float _S1133 = surface_6->coverage;
-    bool _S1134 = u_1 < _S1133;
-    if(_S1134)
-    {
-        return *surface_6;
-    }
-    float3  _S1135 = make_float3 (0.0f);
-    float3  _S1136 = make_float3 (1.0f);
-    BSDFMaterial _S1137 = Material_x24init_0(_S1135, _S1135, 0.0f, 0.0f, 0.0f, 0.0f, _S1135, _S1136, 1.0f, _S1135, _S1135, 0.5f, 0.0f, 0.0f, _S1135, 0.0f, _S1135, 0.0f);
-    BSDFMaterial material_14 = _S1137;
-    (&material_14)->albedo = _S1136;
-    (&material_14)->emissive = (&surface_6->material)->emissive;
-    (&material_14)->transmission = 1.0f;
-    (&material_14)->ior = 1.0f;
-    (&material_14)->absorption = (&surface_6->material)->absorption;
-    FKSurface through_0 = *surface_6;
-    (&through_0)->material = material_14;
-    return through_0;
-}
-
-__device__ float facingSign(float transmission_1, float3  face_0, float3  direction_0)
-{
-    bool _S1138 = transmission_1 > 0.0f;
-    bool _S1139;
-    if(_S1138)
-    {
-        _S1139 = true;
-    }
-    else
-    {
-        _S1139 = (dot_0(face_0, direction_0)) < 0.0f;
-    }
-    float _S1140;
-    if(_S1139)
-    {
-        _S1140 = 1.0f;
-    }
-    else
-    {
-        _S1140 = -1.0f;
-    }
-    return _S1140;
-}
-
-static __device__ bool arrivesBehind_0(float3  dir_10, float3  n_8)
-{
-    return (dot_0(dir_10, n_8)) > 0.0f;
-}
-
-static __device__ FKSurface facingRay_0(FKSurface * surface_7, float3  dir_11)
-{
-    float3  _S1141 = surface_7->geometry_n;
-    float _S1142 = facingSign((&surface_7->material)->transmission, surface_7->geometry_n, dir_11);
-    FKSurface faced_0 = *surface_7;
-    float3  _S1143 = surface_7->smooth_n * make_float3 (_S1142);
-    (&faced_0)->smooth_n = _S1143;
-    float3  _S1144 = _S1141 * make_float3 (_S1142);
-    (&faced_0)->geometry_n = _S1144;
-    return faced_0;
-}
-
-static __device__ float3  max_0(float3  x_23, float3  y_7)
-{
-    float3  result_12;
     int i_23 = int(0);
     for(;;)
     {
@@ -4185,15 +4155,235 @@ static __device__ float3  max_0(float3  x_23, float3  y_7)
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_12, i_23) = (F32_max((_slang_vector_get_element(x_23, i_23)), (_slang_vector_get_element(y_7, i_23))));
+        *_slang_vector_get_element_ptr(&result_11, i_23) = (F32_exp((_slang_vector_get_element(x_22, i_23))));
         i_23 = i_23 + int(1);
     }
-    return result_12;
+    return result_11;
 }
 
-static __device__ float3  log_0(float3  x_24)
+static __device__ float3  flightWeight_0(float3  scatter_0, float3  extinction_0, float sigma_0, float distance_2, bool scatters_0)
 {
-    float3  result_13;
+    float3  _S1162 = exp_0((make_float3 (sigma_0) - extinction_0) * make_float3 (distance_2));
+    float3  _S1163 = scatter_0 * _S1162 / make_float3 (sigma_0);
+    float3  _S1164 = _slang_select(scatters_0, _S1163,_S1162);
+    return _S1164;
+}
+
+static __device__ uint arrivalLobe_0(uint b_4, uint prev_lobe_0)
+{
+    bool _S1165 = b_4 > 0U;
+    uint _S1166 = _slang_select(_S1165, prev_lobe_0,3U);
+    return _S1166;
+}
+
+static __device__ ShadowContext ShadowContext_x24init_0(float3  extinction_behind_0, float3  extinction_front_0, uint2  fillings_0, float3  side_0, uint depth_2, uint lobe_2, bool surface_5, float length_2, float width_1, FKHit * own_2, bool fiber_0)
+{
+    ShadowContext _S1167;
+    (&_S1167)->extinction_behind = extinction_behind_0;
+    (&_S1167)->extinction_front = extinction_front_0;
+    (&_S1167)->fillings = fillings_0;
+    (&_S1167)->side = side_0;
+    (&_S1167)->depth = depth_2;
+    (&_S1167)->lobe = lobe_2;
+    (&_S1167)->surface = surface_5;
+    (&_S1167)->length = length_2;
+    (&_S1167)->width = width_1;
+    (&_S1167)->own = *own_2;
+    (&_S1167)->fiber = fiber_0;
+    return _S1167;
+}
+
+static __device__ float phaseHG_0(float g_0, float mu_0)
+{
+    bool _S1168 = (F32_abs((g_0))) < 0.00100000004749745f;
+    if(_S1168)
+    {
+        return 0.07957746833562851f;
+    }
+    float _S1169 = g_0 * g_0;
+    return (1.0f - _S1169) * 0.25f * 0.31830987334251404f / (F32_pow((1.0f + _S1169 - 2.0f * g_0 * mu_0), (1.5f)));
+}
+
+__device__ float3  safeDivide(float3  a_10, float3  b_5)
+{
+    float3  _S1170 = a_10 / b_5;
+    float3  _S1171 = make_float3 (0.0f);
+    bool3  _S1172 = b_5 == _S1171;
+    float3  _S1173 = _slang_select(_S1172, _S1171,_S1170);
+    return _S1173;
+}
+
+__device__ Reservoir withEnd(Reservoir r_7, uint end_type_0, uint end_0, float3  f_8)
+{
+    Reservoir candidate_2 = r_7;
+    uint _S1174 = insertBits_0(r_7.path, end_0, 0U, 5U);
+    uint _S1175 = insertBits_0(_S1174, end_type_0, 12U, 3U);
+    (&candidate_2)->path = _S1175;
+    (&candidate_2)->f = f_8;
+    return candidate_2;
+}
+
+__device__ float survivalProbability(float3  throughput_0, float density_1)
+{
+    float3  _S1176 = throughput_0 / make_float3 (density_1);
+    return clamp_1((F32_max((_S1176.x), ((F32_max((_S1176.y), (_S1176.z)))))), 0.0f, 1.0f);
+}
+
+static __device__ float3  isotropic_0(uint random_state_10)
+{
+    Random _S1177 = draw(random_state_10, 11U);
+    Random _S1178 = draw(random_state_10, 2147483659U);
+    float _S1179 = 1.0f - 2.0f * _S1177.value;
+    float _S1180 = (F32_sqrt(((F32_max((1.0f - _S1179 * _S1179), (0.0f))))));
+    float _S1181 = 6.28318548202514648f * _S1178.value;
+    return make_float3 (_S1180 * (F32_cos((_S1181))), _S1180 * (F32_sin((_S1181))), _S1179);
+}
+
+static __device__ float3  samplePhase_0(float g_1, float3  dir_9, uint random_state_11, float * pdf_5)
+{
+    bool _S1182 = (F32_abs((g_1))) < 0.00100000004749745f;
+    if(_S1182)
+    {
+        *pdf_5 = 0.07957746833562851f;
+        float3  _S1183 = isotropic_0(random_state_11);
+        return _S1183;
+    }
+    Random _S1184 = draw(random_state_11, 11U);
+    Random _S1185 = draw(random_state_11, 2147483659U);
+    float _S1186 = g_1 * g_1;
+    float _S1187 = 2.0f * g_1;
+    float _S1188 = (1.0f - _S1186) / (1.0f - g_1 + _S1187 * _S1184.value);
+    float _S1189 = clamp_1((1.0f + _S1186 - _S1188 * _S1188) / _S1187, -1.0f, 1.0f);
+    float _S1190 = (F32_sqrt(((F32_max((1.0f - _S1189 * _S1189), (0.0f))))));
+    float _S1191 = 6.28318548202514648f * _S1185.value;
+    float _S1192 = phaseHG_0(g_1, _S1189);
+    *pdf_5 = _S1192;
+    float3  _S1193 = tangentToWorld(make_float3 (_S1190 * (F32_cos((_S1191))), _S1189, _S1190 * (F32_sin((_S1191)))), dir_9);
+    float3  _S1194 = ((((_S1193)) * make_float3(rnorm3df(((_S1193)).x, ((_S1193)).y, ((_S1193)).z))));
+    return _S1194;
+}
+
+static __device__ BSDFMaterial Material_x24init_0(float3  albedo_1, float3  emissive_0, float roughness_0, float metallic_0, float transmission_0, float ior_1, float3  absorption_0, float3  specular_tint_0, float specular_level_0, float3  translucent_0, float3  sheen_2, float sheen_roughness_0, float anisotropy_0, float anisotropic_rotation_0, float3  tangent_1, float velvet_0, float3  toon_1, float dispersion_0, float coat_2, float coat_roughness_0, float coat_ior_0, float3  coat_tint_0, float3  coat_normal_0)
+{
+    BSDFMaterial _S1195;
+    (&_S1195)->albedo = albedo_1;
+    (&_S1195)->emissive = emissive_0;
+    (&_S1195)->roughness = roughness_0;
+    (&_S1195)->metallic = metallic_0;
+    (&_S1195)->transmission = transmission_0;
+    (&_S1195)->ior = ior_1;
+    (&_S1195)->absorption = absorption_0;
+    (&_S1195)->specular_tint = specular_tint_0;
+    (&_S1195)->specular_level = specular_level_0;
+    (&_S1195)->translucent = translucent_0;
+    (&_S1195)->sheen = sheen_2;
+    (&_S1195)->sheen_roughness = sheen_roughness_0;
+    (&_S1195)->anisotropy = anisotropy_0;
+    (&_S1195)->anisotropic_rotation = anisotropic_rotation_0;
+    (&_S1195)->tangent = tangent_1;
+    (&_S1195)->velvet = velvet_0;
+    (&_S1195)->toon = toon_1;
+    (&_S1195)->dispersion = dispersion_0;
+    (&_S1195)->coat = coat_2;
+    (&_S1195)->coat_roughness = coat_roughness_0;
+    (&_S1195)->coat_ior = coat_ior_0;
+    (&_S1195)->coat_tint = coat_tint_0;
+    (&_S1195)->coat_normal = coat_normal_0;
+    return _S1195;
+}
+
+static __device__ FKMedium Medium_x24init_0(float3  scatter_1, float3  extinction_1, float g_2)
+{
+    FKMedium _S1196;
+    (&_S1196)->scatter = scatter_1;
+    (&_S1196)->extinction = extinction_1;
+    (&_S1196)->g = g_2;
+    return _S1196;
+}
+
+static __device__ FKSurface Surface_x24init_0(float3  smooth_n_4, float3  geometry_n_2, float geometry_offset_2, BSDFMaterial * material_16, bool skip_0, uint random_state_12, float coverage_0, bool encloses_0, FKMedium * volume_0, uint fills_0, float3  hair_0)
+{
+    FKSurface _S1197;
+    (&_S1197)->smooth_n = smooth_n_4;
+    (&_S1197)->geometry_n = geometry_n_2;
+    (&_S1197)->geometry_offset = geometry_offset_2;
+    (&_S1197)->material = *material_16;
+    (&_S1197)->skip = skip_0;
+    (&_S1197)->random_state = random_state_12;
+    (&_S1197)->coverage = coverage_0;
+    (&_S1197)->encloses = encloses_0;
+    (&_S1197)->volume = *volume_0;
+    (&_S1197)->fills = fills_0;
+    (&_S1197)->hair = hair_0;
+    return _S1197;
+}
+
+static __device__ FKSurface uncovered_0(FKSurface * surface_6, float u_1)
+{
+    float _S1198 = surface_6->coverage;
+    bool _S1199 = u_1 < _S1198;
+    if(_S1199)
+    {
+        return *surface_6;
+    }
+    float3  _S1200 = make_float3 (0.0f);
+    float3  _S1201 = make_float3 (1.0f);
+    BSDFMaterial _S1202 = Material_x24init_0(_S1200, _S1200, 0.0f, 0.0f, 0.0f, 0.0f, _S1200, _S1201, 1.0f, _S1200, _S1200, 0.5f, 0.0f, 0.0f, _S1200, 0.0f, _S1200, 0.0f, 0.0f, 0.02999999932944775f, 1.5f, _S1201, _S1200);
+    BSDFMaterial material_17 = _S1202;
+    (&material_17)->albedo = _S1201;
+    (&material_17)->emissive = (&surface_6->material)->emissive;
+    (&material_17)->transmission = 1.0f;
+    (&material_17)->ior = 1.0f;
+    (&material_17)->absorption = (&surface_6->material)->absorption;
+    FKSurface through_1 = *surface_6;
+    (&through_1)->material = material_17;
+    return through_1;
+}
+
+__device__ float facingSign(float transmission_1, float3  face_0, float3  direction_0)
+{
+    bool _S1203 = transmission_1 > 0.0f;
+    bool _S1204;
+    if(_S1203)
+    {
+        _S1204 = true;
+    }
+    else
+    {
+        _S1204 = (dot_0(face_0, direction_0)) < 0.0f;
+    }
+    float _S1205;
+    if(_S1204)
+    {
+        _S1205 = 1.0f;
+    }
+    else
+    {
+        _S1205 = -1.0f;
+    }
+    return _S1205;
+}
+
+static __device__ bool arrivesBehind_0(float3  dir_10, float3  n_10)
+{
+    return (dot_0(dir_10, n_10)) > 0.0f;
+}
+
+static __device__ FKSurface facingRay_0(FKSurface * surface_7, float3  dir_11)
+{
+    float3  _S1206 = surface_7->geometry_n;
+    float _S1207 = facingSign((&surface_7->material)->transmission, surface_7->geometry_n, dir_11);
+    FKSurface faced_0 = *surface_7;
+    float3  _S1208 = surface_7->smooth_n * make_float3 (_S1207);
+    (&faced_0)->smooth_n = _S1208;
+    float3  _S1209 = _S1206 * make_float3 (_S1207);
+    (&faced_0)->geometry_n = _S1209;
+    return faced_0;
+}
+
+static __device__ float3  max_0(float3  x_23, float3  y_7)
+{
+    float3  result_12;
     int i_24 = int(0);
     for(;;)
     {
@@ -4204,31 +4394,50 @@ static __device__ float3  log_0(float3  x_24)
         {
             break;
         }
-        *_slang_vector_get_element_ptr(&result_13, i_24) = (F32_log((_slang_vector_get_element(x_24, i_24))));
+        *_slang_vector_get_element_ptr(&result_12, i_24) = (F32_max((_slang_vector_get_element(x_23, i_24)), (_slang_vector_get_element(y_7, i_24))));
         i_24 = i_24 + int(1);
+    }
+    return result_12;
+}
+
+static __device__ float3  log_0(float3  x_24)
+{
+    float3  result_13;
+    int i_25 = int(0);
+    for(;;)
+    {
+        if(i_25 < int(3))
+        {
+        }
+        else
+        {
+            break;
+        }
+        *_slang_vector_get_element_ptr(&result_13, i_25) = (F32_log((_slang_vector_get_element(x_24, i_25))));
+        i_25 = i_25 + int(1);
     }
     return result_13;
 }
 
 __device__ float3  beerLambert(float distance_3, float3  absorption_1)
 {
-    float3  _S1145 = max_0(absorption_1, make_float3 (0.0000152587890625f));
-    return exp_0(make_float3 (distance_3) * log_0(_S1145));
+    float3  _S1210 = max_0(absorption_1, make_float3 (0.0000152587890625f));
+    return exp_0(make_float3 (distance_3) * log_0(_S1210));
 }
 
-__device__ bool dispersive(BSDFMaterial material_15)
+__device__ bool dispersive(BSDFMaterial material_18)
 {
-    bool _S1146 = (material_15.dispersion) > 0.0f;
-    bool _S1147;
-    if(_S1146)
+    bool _S1211 = (material_18.dispersion) > 0.0f;
+    bool _S1212;
+    if(_S1211)
     {
-        _S1147 = (material_15.ior) != 1.0f;
+        _S1212 = (material_18.ior) != 1.0f;
     }
     else
     {
-        _S1147 = false;
+        _S1212 = false;
     }
-    return _S1147;
+    return _S1212;
 }
 
 __device__ static const FixedArray<float, 81>  WAVELENGTH_CDF_0 = { {
@@ -4247,21 +4456,21 @@ __device__ float2  sampleWavelength(float u_2)
         {
             break;
         }
-        uint _S1148 = (low_1 + high_1 + 1U) / 2U;
-        bool _S1149 = (WAVELENGTH_CDF_0[_S1148]) <= u_2;
-        if(_S1149)
+        uint _S1213 = (low_1 + high_1 + 1U) / 2U;
+        bool _S1214 = (WAVELENGTH_CDF_0[_S1213]) <= u_2;
+        if(_S1214)
         {
-            low_1 = _S1148;
+            low_1 = _S1213;
         }
         else
         {
-            uint _S1150 = _S1148 - 1U;
-            high_1 = _S1150;
+            uint _S1215 = _S1213 - 1U;
+            high_1 = _S1215;
         }
     }
-    uint _S1151 = low_1;
-    float _S1152 = WAVELENGTH_CDF_0[low_1 + 1U] - WAVELENGTH_CDF_0[low_1];
-    return make_float2 (0.37999999523162842f + 0.00499999988824129f * (float(low_1) + (u_2 - WAVELENGTH_CDF_0[_S1151]) / _S1152), _S1152 / 0.00499999988824129f);
+    uint _S1216 = low_1;
+    float _S1217 = WAVELENGTH_CDF_0[low_1 + 1U] - WAVELENGTH_CDF_0[low_1];
+    return make_float2 (0.37999999523162842f + 0.00499999988824129f * (float(low_1) + (u_2 - WAVELENGTH_CDF_0[_S1216]) / _S1217), _S1217 / 0.00499999988824129f);
 }
 
 __device__ static const FixedArray<float, 243>  WAVELENGTH_WEIGHTS_0 = { {
@@ -4269,66 +4478,66 @@ __device__ static const FixedArray<float, 243>  WAVELENGTH_WEIGHTS_0 = { {
 } };
 __device__ float3  wavelengthWeights(float wavelength_6)
 {
-    float _S1153 = clamp_1((wavelength_6 - 0.37999999523162842f) / 0.00499999988824129f, 0.0f, 80.0f);
-    uint _S1154 = (U32_min((uint(_S1153)), (79U)));
-    uint _S1155 = 3U * _S1154;
-    float3  _S1156 = make_float3 (WAVELENGTH_WEIGHTS_0[_S1155], WAVELENGTH_WEIGHTS_0[_S1155 + 1U], WAVELENGTH_WEIGHTS_0[_S1155 + 2U]);
-    float3  _S1157 = make_float3 (WAVELENGTH_WEIGHTS_0[_S1155 + 3U], WAVELENGTH_WEIGHTS_0[_S1155 + 4U], WAVELENGTH_WEIGHTS_0[_S1155 + 5U]);
-    return _S1156 + (_S1157 - _S1156) * make_float3 (_S1153 - float(_S1154));
+    float _S1218 = clamp_1((wavelength_6 - 0.37999999523162842f) / 0.00499999988824129f, 0.0f, 80.0f);
+    uint _S1219 = (U32_min((uint(_S1218)), (79U)));
+    uint _S1220 = 3U * _S1219;
+    float3  _S1221 = make_float3 (WAVELENGTH_WEIGHTS_0[_S1220], WAVELENGTH_WEIGHTS_0[_S1220 + 1U], WAVELENGTH_WEIGHTS_0[_S1220 + 2U]);
+    float3  _S1222 = make_float3 (WAVELENGTH_WEIGHTS_0[_S1220 + 3U], WAVELENGTH_WEIGHTS_0[_S1220 + 4U], WAVELENGTH_WEIGHTS_0[_S1220 + 5U]);
+    return _S1221 + (_S1222 - _S1221) * make_float3 (_S1218 - float(_S1219));
 }
 
-__device__ float dispersedIor(float ior_1, float dispersion_1, float wavelength_7)
+__device__ float dispersedIor(float ior_2, float dispersion_1, float wavelength_7)
 {
-    float _S1158 = (ior_1 - 1.0f) * dispersion_1 / 1.90962409973144531f;
-    float _S1159 = _S1158 * (1.0f / (wavelength_7 * wavelength_7) - 2.89662933349609375f);
-    bool _S1160 = dispersion_1 > 0.0f;
-    float _S1161 = _slang_select(_S1160, _S1159,0.0f);
-    return ior_1 + _S1161;
+    float _S1223 = (ior_2 - 1.0f) * dispersion_1 / 1.90962409973144531f;
+    float _S1224 = _S1223 * (1.0f / (wavelength_7 * wavelength_7) - 2.89662933349609375f);
+    bool _S1225 = dispersion_1 > 0.0f;
+    float _S1226 = _slang_select(_S1225, _S1224,0.0f);
+    return ior_2 + _S1226;
 }
 
-__device__ float2  vertexEta(BSDFMaterial material_16, float n_dot_v_0)
+__device__ float2  vertexEta(BSDFMaterial material_19, float n_dot_v_0)
 {
-    bool _S1162 = n_dot_v_0 < 0.0f;
-    float _S1163 = _slang_select(_S1162, material_16.ior,1.0f);
-    float _S1164 = _slang_select(_S1162, 1.0f,material_16.ior);
-    return make_float2 (_S1163, _S1164);
+    bool _S1227 = n_dot_v_0 < 0.0f;
+    float _S1228 = _slang_select(_S1227, material_19.ior,1.0f);
+    float _S1229 = _slang_select(_S1227, 1.0f,material_19.ior);
+    return make_float2 (_S1228, _S1229);
 }
 
-__device__ float2  wavelengthEta(BSDFMaterial material_17, float n_dot_v_1, float wavelength_8)
+__device__ float2  wavelengthEta(BSDFMaterial material_20, float n_dot_v_1, float wavelength_8)
 {
-    BSDFMaterial refractive_0 = material_17;
-    float _S1165 = dispersedIor(material_17.ior, material_17.dispersion, wavelength_8);
-    bool _S1166 = wavelength_8 > 0.0f;
-    float _S1167 = _slang_select(_S1166, _S1165,material_17.ior);
-    (&refractive_0)->ior = _S1167;
-    float2  _S1168 = vertexEta(refractive_0, n_dot_v_1);
-    return _S1168;
+    BSDFMaterial refractive_0 = material_20;
+    float _S1230 = dispersedIor(material_20.ior, material_20.dispersion, wavelength_8);
+    bool _S1231 = wavelength_8 > 0.0f;
+    float _S1232 = _slang_select(_S1231, _S1230,material_20.ior);
+    (&refractive_0)->ior = _S1232;
+    float2  _S1233 = vertexEta(refractive_0, n_dot_v_1);
+    return _S1233;
 }
 
-__device__ bool neeDecision(BSDFMaterial material_18, float n_dot_v_2, float eta_i_5, float eta_o_5)
+__device__ bool neeDecision(BSDFMaterial material_21, float n_dot_v_2, float eta_i_6, float eta_o_5)
 {
-    float _S1169 = fresnel((F32_abs((n_dot_v_2))), eta_i_5, eta_o_5);
-    float3  _S1170 = mix_0(make_float3 (_S1169), material_18.albedo, material_18.metallic);
-    float _S1171 = rgb_to_greyscale(_S1170);
-    float _S1172 = (F32_max(((1.0f - _S1171) * (1.0f - material_18.metallic) * (1.0f - material_18.transmission)), (0.0f)));
-    bool _S1173 = _S1172 > 0.03999999910593033f;
-    bool _S1174;
-    if(_S1173)
+    float _S1234 = fresnel((F32_abs((n_dot_v_2))), eta_i_6, eta_o_5);
+    float3  _S1235 = mix_0(make_float3 (_S1234), material_21.albedo, material_21.metallic);
+    float _S1236 = rgb_to_greyscale(_S1235);
+    float _S1237 = (F32_max(((1.0f - _S1236) * (1.0f - material_21.metallic) * (1.0f - material_21.transmission)), (0.0f)));
+    bool _S1238 = _S1237 > 0.03999999910593033f;
+    bool _S1239;
+    if(_S1238)
     {
-        _S1174 = true;
+        _S1239 = true;
     }
     else
     {
-        _S1174 = (material_18.roughness) > 0.20000000298023224f;
+        _S1239 = (material_21.roughness) > 0.20000000298023224f;
     }
-    return _S1174;
+    return _S1239;
 }
 
-static __device__ bool isTranslucent_0(BSDFMaterial * material_19)
+static __device__ bool isTranslucent_0(BSDFMaterial * material_22)
 {
-    float _S1175 = rgb_to_greyscale(material_19->translucent);
-    bool _S1176 = _S1175 > 0.0f;
-    return _S1176;
+    float _S1240 = rgb_to_greyscale(material_22->translucent);
+    bool _S1241 = _S1240 > 0.0f;
+    return _S1241;
 }
 
 struct MediumSides
@@ -4338,26 +4547,26 @@ struct MediumSides
     uint2  fillings;
 };
 
-static __device__ MediumSides MediumSides_x24init_0(FKMedium * behind_0, FKMedium * front_0, uint2  fillings_1)
+static __device__ MediumSides MediumSides_x24init_0(FKMedium * behind_1, FKMedium * front_0, uint2  fillings_1)
 {
-    MediumSides _S1177;
-    (&_S1177)->behind = *behind_0;
-    (&_S1177)->front = *front_0;
-    (&_S1177)->fillings = fillings_1;
-    return _S1177;
+    MediumSides _S1242;
+    (&_S1242)->behind = *behind_1;
+    (&_S1242)->front = *front_0;
+    (&_S1242)->fillings = fillings_1;
+    return _S1242;
 }
 
 static __device__ MediumSides mediumSides_0(FKSurface * surface_8, FKMedium * medium_0, uint filling_0, float3  dir_12, FKMedium * outside_0)
 {
-    MediumSides _S1178 = MediumSides_x24init_0(medium_0, medium_0, make_uint2 (filling_0));
-    MediumSides sides_0 = _S1178;
-    bool _S1179 = surface_8->encloses;
-    if(_S1179)
+    MediumSides _S1243 = MediumSides_x24init_0(medium_0, medium_0, make_uint2 (filling_0));
+    MediumSides sides_0 = _S1243;
+    bool _S1244 = surface_8->encloses;
+    if(_S1244)
     {
         (&sides_0)->behind = surface_8->volume;
         *&((&(&sides_0)->fillings)->x) = surface_8->fills;
-        bool _S1180 = (dot_0(dir_12, surface_8->geometry_n)) > 0.0f;
-        if(_S1180)
+        bool _S1245 = (dot_0(dir_12, surface_8->geometry_n)) > 0.0f;
+        if(_S1245)
         {
             (&sides_0)->front = *outside_0;
             *&((&(&sides_0)->fillings)->y) = 4294967295U;
@@ -4368,35 +4577,35 @@ static __device__ MediumSides mediumSides_0(FKSurface * surface_8, FKMedium * me
 
 static __device__ ShadowContext shadowContext_0(FKSurface * surface_9, bool turned_0, float3  extinction_2, uint filling_1, float3  dir_13, uint depth_3, uint lobe_3, float length_3, float width_2, FKHit * own_3, bool fiber_1, FKMedium * outside_1)
 {
-    float3  _S1181 = surface_9->geometry_n;
-    ShadowContext _S1182 = ShadowContext_x24init_0(extinction_2, extinction_2, make_uint2 (filling_1), surface_9->geometry_n, depth_3, lobe_3, true, length_3, width_2, own_3, fiber_1);
-    bool _S1183 = surface_9->encloses;
+    float3  _S1246 = surface_9->geometry_n;
+    ShadowContext _S1247 = ShadowContext_x24init_0(extinction_2, extinction_2, make_uint2 (filling_1), surface_9->geometry_n, depth_3, lobe_3, true, length_3, width_2, own_3, fiber_1);
+    bool _S1248 = surface_9->encloses;
     ShadowContext context_4;
-    if(_S1183)
+    if(_S1248)
     {
         FKSurface faced_1 = *surface_9;
-        float3  _S1184 = - _S1181;
-        float3  _S1185 = _slang_select(turned_0, _S1184,_S1181);
-        (&faced_1)->geometry_n = _S1185;
-        FKMedium _S1186 = Medium_x24init_0(make_float3 (0.0f), extinction_2, 0.0f);
-        FKSurface _S1187 = faced_1;
-        FKMedium _S1188 = _S1186;
-        MediumSides _S1189 = mediumSides_0(&_S1187, &_S1188, filling_1, dir_13, outside_1);
-        ShadowContext _S1190 = ShadowContext_x24init_0(_S1189.behind.extinction, _S1189.front.extinction, _S1189.fillings, _S1181, depth_3, lobe_3, true, length_3, width_2, own_3, fiber_1);
+        float3  _S1249 = - _S1246;
+        float3  _S1250 = _slang_select(turned_0, _S1249,_S1246);
+        (&faced_1)->geometry_n = _S1250;
+        FKMedium _S1251 = Medium_x24init_0(make_float3 (0.0f), extinction_2, 0.0f);
+        FKSurface _S1252 = faced_1;
+        FKMedium _S1253 = _S1251;
+        MediumSides _S1254 = mediumSides_0(&_S1252, &_S1253, filling_1, dir_13, outside_1);
+        ShadowContext _S1255 = ShadowContext_x24init_0(_S1254.behind.extinction, _S1254.front.extinction, _S1254.fillings, _S1246, depth_3, lobe_3, true, length_3, width_2, own_3, fiber_1);
         if(turned_0)
         {
-            uint2  _S1191 = _S1189.fillings;
-            ShadowContext _S1192 = ShadowContext_x24init_0(_S1189.front.extinction, _S1189.behind.extinction, uint2 {_S1191.y, _S1191.x}, _S1181, depth_3, lobe_3, true, length_3, width_2, own_3, fiber_1);
-            context_4 = _S1192;
+            uint2  _S1256 = _S1254.fillings;
+            ShadowContext _S1257 = ShadowContext_x24init_0(_S1254.front.extinction, _S1254.behind.extinction, uint2 {_S1256.y, _S1256.x}, _S1246, depth_3, lobe_3, true, length_3, width_2, own_3, fiber_1);
+            context_4 = _S1257;
         }
         else
         {
-            context_4 = _S1190;
+            context_4 = _S1255;
         }
     }
     else
     {
-        context_4 = _S1182;
+        context_4 = _S1247;
     }
     return context_4;
 }
@@ -4404,10 +4613,10 @@ static __device__ ShadowContext shadowContext_0(FKSurface * surface_9, bool turn
 static __device__ bool any_1(bool3  x_25)
 {
     bool result_14 = false;
-    int i_25 = int(0);
+    int i_26 = int(0);
     for(;;)
     {
-        if(i_25 < int(3))
+        if(i_26 < int(3))
         {
         }
         else
@@ -4420,98 +4629,116 @@ static __device__ bool any_1(bool3  x_25)
         }
         else
         {
-            result_14 = (bool((_slang_vector_get_element(x_25, i_25))));
+            result_14 = (bool((_slang_vector_get_element(x_25, i_26))));
         }
-        i_25 = i_25 + int(1);
+        i_26 = i_26 + int(1);
     }
     return result_14;
 }
 
-static __device__ SampleBSDF SampleBSDF_x24init_0(float3  unit_direction_1, float3  throughput_1, uint random_state_12, bool refracted_3, uint lobe_4, float pdf_6)
+static __device__ SampleBSDF SampleBSDF_x24init_0(float3  unit_direction_1, float3  throughput_1, uint random_state_13, bool refracted_3, uint lobe_4, float pdf_6)
 {
-    SampleBSDF _S1193;
-    (&_S1193)->unit_direction = unit_direction_1;
-    (&_S1193)->throughput = throughput_1;
-    (&_S1193)->random_state = random_state_12;
-    (&_S1193)->refracted = refracted_3;
-    (&_S1193)->lobe = lobe_4;
-    (&_S1193)->pdf = pdf_6;
-    return _S1193;
+    SampleBSDF _S1258;
+    (&_S1258)->unit_direction = unit_direction_1;
+    (&_S1258)->throughput = throughput_1;
+    (&_S1258)->random_state = random_state_13;
+    (&_S1258)->refracted = refracted_3;
+    (&_S1258)->lobe = lobe_4;
+    (&_S1258)->pdf = pdf_6;
+    return _S1258;
 }
 
-__device__ __forceinline__ SampleBSDF sheenVelvetSample(float3  v_9, float3  n_i_13, float n_i_dot_v_3, BSDFMaterial material_20, Weights w_13, uint random_state_13)
+__device__ __forceinline__ SampleBSDF sheenVelvetSample(float3  v_12, float3  n_i_13, float n_i_dot_v_3, BSDFMaterial material_23, Weights w_15, uint random_state_14)
 {
-    float3  _S1194 = make_float3 (1.0f);
-    SampleBSDF _S1195 = SampleBSDF_x24init_0(_S1194, _S1194, 0U, false, 0U, 0.0f);
-    SampleBSDF sample_1 = _S1195;
-    Random _S1196 = draw(random_state_13, 3U);
-    Random _S1197 = draw(random_state_13, 2147483651U);
-    (&sample_1)->random_state = _S1197.state;
-    float _S1198 = _S1196.value;
-    float _S1199 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S1198 * _S1198))))));
-    float _S1200 = 6.28318548202514648f * _S1197.value;
-    float3  _S1201 = tangentToWorld(make_float3 (_S1199 * (F32_cos((_S1200))), _S1196.value, _S1199 * (F32_sin((_S1200)))), n_i_13);
-    (&sample_1)->unit_direction = _S1201;
+    float3  _S1259 = make_float3 (1.0f);
+    SampleBSDF _S1260 = SampleBSDF_x24init_0(_S1259, _S1259, 0U, false, 0U, 0.0f);
+    SampleBSDF sample_1 = _S1260;
+    Random _S1261 = draw(random_state_14, 3U);
+    Random _S1262 = draw(random_state_14, 2147483651U);
+    (&sample_1)->random_state = _S1262.state;
+    float _S1263 = _S1261.value;
+    float _S1264 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S1263 * _S1263))))));
+    float _S1265 = 6.28318548202514648f * _S1262.value;
+    float3  _S1266 = tangentToWorld(make_float3 (_S1264 * (F32_cos((_S1265))), _S1261.value, _S1264 * (F32_sin((_S1265)))), n_i_13);
+    (&sample_1)->unit_direction = _S1266;
     (&sample_1)->lobe = 4U;
-    float3  _S1202 = sheenVelvetBSDF((&sample_1)->unit_direction, v_9, n_i_13, material_20, w_13);
-    (&sample_1)->throughput = _S1202;
-    float _S1203 = sheenVelvetPDF(_S1196.value, n_i_dot_v_3, w_13);
-    (&sample_1)->pdf = _S1203;
+    float3  _S1267 = sheenVelvetBSDF((&sample_1)->unit_direction, v_12, n_i_13, material_23, w_15);
+    (&sample_1)->throughput = _S1267;
+    float _S1268 = sheenVelvetPDF(_S1261.value, n_i_dot_v_3, w_15);
+    (&sample_1)->pdf = _S1268;
     return sample_1;
+}
+
+__device__ __forceinline__ SampleBSDF coatSample(float3  in_dir_8, float3  coat_h_3, CoatFrame coat_frame_7, Weights w_16, uint random_state_15)
+{
+    float3  _S1269 = make_float3 (1.0f);
+    SampleBSDF _S1270 = SampleBSDF_x24init_0(_S1269, _S1269, 0U, false, 0U, 0.0f);
+    SampleBSDF sample_2 = _S1270;
+    float3  _S1271 = reflect_0(in_dir_8, coat_h_3);
+    float3  _S1272 = ((((_S1271)) * make_float3(rnorm3df(((_S1271)).x, ((_S1271)).y, ((_S1271)).z))));
+    (&sample_2)->unit_direction = _S1272;
+    (&sample_2)->random_state = random_state_15;
+    (&sample_2)->lobe = 5U;
+    float3  _S1273 = coatBSDF(w_16);
+    (&sample_2)->throughput = _S1273;
+    float3  _S1274 = negate_0(in_dir_8);
+    float _S1275 = coatPDF(_S1274, coat_h_3, coat_frame_7, w_16);
+    (&sample_2)->pdf = _S1275;
+    return sample_2;
 }
 
 __device__ float3  sampleCosWeightedHemisphere(float random_1_0, float random_2_0)
 {
-    float _S1204 = (F32_sqrt((random_1_0)));
-    float _S1205 = 6.28318548202514648f * random_2_0;
-    float _S1206 = _S1204 * (F32_cos((_S1205)));
-    float _S1207 = _S1204 * (F32_sin((_S1205)));
-    float _S1208 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S1206 * _S1206 - _S1207 * _S1207))))));
-    return make_float3 (_S1206, _S1208, _S1207);
+    float _S1276 = (F32_sqrt((random_1_0)));
+    float _S1277 = 6.28318548202514648f * random_2_0;
+    float _S1278 = _S1276 * (F32_cos((_S1277)));
+    float _S1279 = _S1276 * (F32_sin((_S1277)));
+    float _S1280 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S1278 * _S1278 - _S1279 * _S1279))))));
+    return make_float3 (_S1278, _S1280, _S1279);
 }
 
-__device__ __forceinline__ SampleBSDF diffuseSample(float u_3, float3  n_i_14, float n_i_dot_v_4, BSDFMaterial material_21, Weights w_14, uint random_state_14)
+__device__ __forceinline__ SampleBSDF diffuseSample(float u_3, float3  n_i_14, float n_i_dot_v_4, BSDFMaterial material_24, Weights w_17, uint random_state_16)
 {
-    float3  _S1209 = make_float3 (1.0f);
-    SampleBSDF _S1210 = SampleBSDF_x24init_0(_S1209, _S1209, 0U, false, 0U, 0.0f);
-    SampleBSDF sample_2 = _S1210;
-    Random _S1211 = draw(random_state_14, 3U);
-    Random _S1212 = draw(random_state_14, 2147483651U);
-    (&sample_2)->random_state = _S1212.state;
-    float3  _S1213 = sampleCosWeightedHemisphere(_S1211.value, _S1212.value);
-    float _S1214 = translucentShare(material_21);
-    bool _S1215 = u_3 < (w_14.p_diffuse * _S1214);
-    float _S1216 = _S1213.y;
-    float _S1217 = - _S1216;
-    float _S1218 = _slang_select(_S1215, _S1217,_S1216);
-    float3  _S1219 = tangentToWorld(make_float3 (_S1213.x, _S1218, _S1213.z), n_i_14);
-    (&sample_2)->unit_direction = _S1219;
-    (&sample_2)->refracted = _S1215;
-    (&sample_2)->lobe = 0U;
-    float3  _S1220 = diffuseBSDF((&sample_2)->unit_direction, n_i_14, material_21, w_14);
-    (&sample_2)->throughput = _S1220;
-    float _S1221 = diffusePDF(_S1218, n_i_dot_v_4, material_21, w_14);
-    (&sample_2)->pdf = _S1221;
-    return sample_2;
+    float3  _S1281 = make_float3 (1.0f);
+    SampleBSDF _S1282 = SampleBSDF_x24init_0(_S1281, _S1281, 0U, false, 0U, 0.0f);
+    SampleBSDF sample_3 = _S1282;
+    Random _S1283 = draw(random_state_16, 3U);
+    Random _S1284 = draw(random_state_16, 2147483651U);
+    (&sample_3)->random_state = _S1284.state;
+    float3  _S1285 = sampleCosWeightedHemisphere(_S1283.value, _S1284.value);
+    float _S1286 = translucentShare(material_24);
+    bool _S1287 = u_3 < (w_17.p_diffuse * _S1286);
+    float _S1288 = _S1285.y;
+    float _S1289 = - _S1288;
+    float _S1290 = _slang_select(_S1287, _S1289,_S1288);
+    float3  _S1291 = tangentToWorld(make_float3 (_S1285.x, _S1290, _S1285.z), n_i_14);
+    (&sample_3)->unit_direction = _S1291;
+    (&sample_3)->refracted = _S1287;
+    (&sample_3)->lobe = 0U;
+    float3  _S1292 = diffuseBSDF((&sample_3)->unit_direction, n_i_14, material_24, w_17);
+    (&sample_3)->throughput = _S1292;
+    float _S1293 = diffusePDF(_S1290, n_i_dot_v_4, material_24, w_17);
+    (&sample_3)->pdf = _S1293;
+    return sample_3;
 }
 
-__device__ __forceinline__ SampleBSDF toonSample(float3  n_i_15, ToonProfile profile_2, Weights w_15, uint random_state_15)
+__device__ __forceinline__ SampleBSDF toonSample(float3  n_i_15, ToonProfile profile_2, Weights w_18, uint random_state_17)
 {
-    float3  _S1222 = make_float3 (1.0f);
-    SampleBSDF _S1223 = SampleBSDF_x24init_0(_S1222, _S1222, 0U, false, 0U, 0.0f);
-    SampleBSDF sample_3 = _S1223;
-    Random _S1224 = draw(random_state_15, 3U);
-    Random _S1225 = draw(random_state_15, 2147483651U);
-    (&sample_3)->random_state = _S1225.state;
-    float _S1226 = _S1224.value * profile_2.norm / 6.28318548202514648f;
+    float3  _S1294 = make_float3 (1.0f);
+    SampleBSDF _S1295 = SampleBSDF_x24init_0(_S1294, _S1294, 0U, false, 0U, 0.0f);
+    SampleBSDF sample_4 = _S1295;
+    Random _S1296 = draw(random_state_17, 3U);
+    Random _S1297 = draw(random_state_17, 2147483651U);
+    (&sample_4)->random_state = _S1297.state;
+    float _S1298 = _S1296.value * profile_2.norm / 6.28318548202514648f;
     float t_23;
     if(profile_2.glossy)
     {
-        t_23 = (F32_acos((clamp_1(1.0f - _S1226, -1.0f, 1.0f))));
+        t_23 = (F32_acos((clamp_1(1.0f - _S1298, -1.0f, 1.0f))));
     }
     else
     {
-        t_23 = (F32_asin(((F32_min(((F32_sqrt((2.0f * _S1226)))), (1.0f))))));
+        t_23 = (F32_asin(((F32_min(((F32_sqrt((2.0f * _S1298)))), (1.0f))))));
     }
     if(t_23 < (profile_2.a))
     {
@@ -4530,124 +4757,144 @@ __device__ __forceinline__ SampleBSDF toonSample(float3  n_i_15, ToonProfile pro
         {
             break;
         }
-        float _S1227 = toonP(t_23, profile_2.a, profile_2.s);
-        float _S1228 = _S1227 * (F32_sin((t_23)));
-        float _S1229;
+        float _S1299 = toonP(t_23, profile_2.a, profile_2.s);
+        float _S1300 = _S1299 * (F32_sin((t_23)));
+        float _S1301;
         if(profile_2.glossy)
         {
-            _S1229 = 1.0f;
+            _S1301 = 1.0f;
         }
         else
         {
-            _S1229 = (F32_cos((t_23)));
+            _S1301 = (F32_cos((t_23)));
         }
-        float _S1230 = _S1228 * _S1229;
-        float _S1231 = toonIntegral(t_23, profile_2.a, profile_2.s, profile_2.glossy);
-        float _S1232 = (_S1231 - _S1226) / _S1230;
-        bool _S1233 = _S1230 > 0.0f;
-        float _S1234 = _slang_select(_S1233, _S1232,0.0f);
-        float _S1235 = clamp_1(t_23 - _S1234, 0.0f, profile_2.b);
+        float _S1302 = _S1300 * _S1301;
+        float _S1303 = toonIntegral(t_23, profile_2.a, profile_2.s, profile_2.glossy);
+        float _S1304 = (_S1303 - _S1298) / _S1302;
+        bool _S1305 = _S1302 > 0.0f;
+        float _S1306 = _slang_select(_S1305, _S1304,0.0f);
+        float _S1307 = clamp_1(t_23 - _S1306, 0.0f, profile_2.b);
         int k_3 = k_2 + int(1);
-        t_23 = _S1235;
+        t_23 = _S1307;
         k_2 = k_3;
     }
-    float _S1236 = 6.28318548202514648f * _S1225.value;
-    float _S1237 = (F32_sin((t_23)));
-    float3  _S1238 = tangentToWorld(make_float3 (_S1237 * (F32_cos((_S1236))), (F32_cos((t_23))), _S1237 * (F32_sin((_S1236)))), profile_2.axis);
-    (&sample_3)->unit_direction = _S1238;
-    bool _S1239 = (dot_0(n_i_15, (&sample_3)->unit_direction)) < 0.0f;
-    (&sample_3)->refracted = _S1239;
-    (&sample_3)->lobe = 6U;
-    float3  _S1240 = toonBSDF((&sample_3)->unit_direction, n_i_15, profile_2, w_15);
-    (&sample_3)->throughput = _S1240;
-    float _S1241 = toonPDF((&sample_3)->unit_direction, n_i_15, profile_2, w_15);
-    (&sample_3)->pdf = _S1241;
-    return sample_3;
-}
-
-__device__ __forceinline__ SampleBSDF refractSample(float3  ggx_n_1, float3  n_i_16, float alpha_8, AnisotropicFrame frame_6, BSDFMaterial material_22, Weights w_16, float pdf_h_3, float eta_i_6, float eta_o_6, uint random_state_16)
-{
-    float3  _S1242 = make_float3 (1.0f);
-    SampleBSDF _S1243 = SampleBSDF_x24init_0(_S1242, _S1242, 0U, false, 0U, 0.0f);
-    SampleBSDF sample_4 = _S1243;
-    (&sample_4)->unit_direction = w_16.refracted;
-    (&sample_4)->random_state = random_state_16;
-    (&sample_4)->refracted = true;
-    (&sample_4)->lobe = 1U;
-    float3  _S1244 = refractBSDF((&sample_4)->unit_direction, n_i_16, alpha_8, frame_6, material_22, w_16);
-    (&sample_4)->throughput = _S1244;
-    float _S1245 = refractPDF(dot_0((&sample_4)->unit_direction, ggx_n_1), pdf_h_3, w_16, eta_i_6, eta_o_6);
-    (&sample_4)->pdf = _S1245;
+    float _S1308 = 6.28318548202514648f * _S1297.value;
+    float _S1309 = (F32_sin((t_23)));
+    float3  _S1310 = tangentToWorld(make_float3 (_S1309 * (F32_cos((_S1308))), (F32_cos((t_23))), _S1309 * (F32_sin((_S1308)))), profile_2.axis);
+    (&sample_4)->unit_direction = _S1310;
+    bool _S1311 = (dot_0(n_i_15, (&sample_4)->unit_direction)) < 0.0f;
+    (&sample_4)->refracted = _S1311;
+    (&sample_4)->lobe = 6U;
+    float3  _S1312 = toonBSDF((&sample_4)->unit_direction, n_i_15, profile_2, w_18);
+    (&sample_4)->throughput = _S1312;
+    float _S1313 = toonPDF((&sample_4)->unit_direction, n_i_15, profile_2, w_18);
+    (&sample_4)->pdf = _S1313;
     return sample_4;
 }
 
-static __device__ float3  reflect_0(float3  i_26, float3  n_9)
+__device__ __forceinline__ SampleBSDF refractSample(float3  ggx_n_1, float3  n_i_16, float alpha_9, AnisotropicFrame frame_6, BSDFMaterial material_25, Weights w_19, float pdf_h_3, float eta_i_7, float eta_o_6, uint random_state_18)
 {
-    return i_26 - make_float3 (2.0f * dot_0(n_9, i_26)) * n_9;
-}
-
-__device__ __forceinline__ SampleBSDF reflectSample(float3  in_dir_7, float3  ggx_n_2, float3  n_i_17, float alpha_9, AnisotropicFrame frame_7, Weights w_17, float pdf_h_4, uint random_state_17)
-{
-    float3  _S1246 = make_float3 (1.0f);
-    SampleBSDF _S1247 = SampleBSDF_x24init_0(_S1246, _S1246, 0U, false, 0U, 0.0f);
-    SampleBSDF sample_5 = _S1247;
-    float3  _S1248 = reflect_0(in_dir_7, ggx_n_2);
-    float3  _S1249 = ((((_S1248)) * make_float3(rnorm3df(((_S1248)).x, ((_S1248)).y, ((_S1248)).z))));
-    (&sample_5)->unit_direction = _S1249;
-    (&sample_5)->random_state = random_state_17;
-    (&sample_5)->lobe = 2U;
-    float3  _S1250 = reflectBSDF((&sample_5)->unit_direction, n_i_17, alpha_9, frame_7, w_17);
-    (&sample_5)->throughput = _S1250;
-    float _S1251 = reflectPDF(pdf_h_4, w_17);
-    (&sample_5)->pdf = _S1251;
+    float3  _S1314 = make_float3 (1.0f);
+    SampleBSDF _S1315 = SampleBSDF_x24init_0(_S1314, _S1314, 0U, false, 0U, 0.0f);
+    SampleBSDF sample_5 = _S1315;
+    (&sample_5)->unit_direction = w_19.refracted;
+    (&sample_5)->random_state = random_state_18;
+    (&sample_5)->refracted = true;
+    (&sample_5)->lobe = 1U;
+    float3  _S1316 = refractBSDF((&sample_5)->unit_direction, n_i_16, alpha_9, frame_6, material_25, w_19);
+    (&sample_5)->throughput = _S1316;
+    float _S1317 = refractPDF(dot_0((&sample_5)->unit_direction, ggx_n_1), pdf_h_3, w_19, eta_i_7, eta_o_6);
+    (&sample_5)->pdf = _S1317;
     return sample_5;
 }
 
-__device__ __forceinline__ SampleBSDF sampleBSDF(float3  in_dir_8, float3  n_10, BSDFMaterial material_23, float eta_i_7, float eta_o_7, uint random_init_0)
+__device__ __forceinline__ SampleBSDF reflectSample(float3  in_dir_9, float3  ggx_n_2, float3  n_i_17, float alpha_10, AnisotropicFrame frame_7, Weights w_20, float pdf_h_4, uint random_state_19)
 {
-    uint random_state_18 = random_init_0;
-    float3  _S1252 = negate_0(in_dir_8);
-    float _S1253 = dot_0(n_10, _S1252);
-    float _S1254 = sign_0(_S1253);
-    float3  n_i_18 = n_10 * make_float3 (_S1254);
-    float _S1255 = (F32_abs((_S1253)));
-    float _S1256 = material_23.roughness;
-    float _S1257 = _S1256 * _S1256;
-    AnisotropicFrame _S1258 = anisotropicFrame(material_23, n_i_18);
-    float _S1259 = sheenAlbedo(_S1252, n_i_18, material_23);
-    float3  _S1260 = sampleHalfVector(_S1252, n_i_18, _S1257, _S1258, &random_state_18);
-    Weights _S1261 = lobeWeights(in_dir_8, _S1252, n_i_18, _S1260, _S1258, _S1259, material_23, eta_i_7, eta_o_7);
-    Random _S1262 = draw(random_state_18, 2U);
-    random_state_18 = _S1262.state;
-    bool _S1263 = (_S1262.value) < (_S1261.p_sheen_velvet);
-    if(_S1263)
+    float3  _S1318 = make_float3 (1.0f);
+    SampleBSDF _S1319 = SampleBSDF_x24init_0(_S1318, _S1318, 0U, false, 0U, 0.0f);
+    SampleBSDF sample_6 = _S1319;
+    float3  _S1320 = reflect_0(in_dir_9, ggx_n_2);
+    float3  _S1321 = ((((_S1320)) * make_float3(rnorm3df(((_S1320)).x, ((_S1320)).y, ((_S1320)).z))));
+    (&sample_6)->unit_direction = _S1321;
+    (&sample_6)->random_state = random_state_19;
+    (&sample_6)->lobe = 2U;
+    float3  _S1322 = reflectBSDF((&sample_6)->unit_direction, n_i_17, alpha_10, frame_7, w_20);
+    (&sample_6)->throughput = _S1322;
+    float _S1323 = reflectPDF(pdf_h_4, w_20);
+    (&sample_6)->pdf = _S1323;
+    return sample_6;
+}
+
+__device__ __forceinline__ SampleBSDF sampleBSDF(float3  in_dir_10, float3  n_11, BSDFMaterial material_26, float eta_i_8, float eta_o_7, uint random_init_0)
+{
+    uint random_state_20 = random_init_0;
+    float3  _S1324 = negate_0(in_dir_10);
+    float _S1325 = dot_0(n_11, _S1324);
+    float _S1326 = sign_0(_S1325);
+    float3  n_i_18 = n_11 * make_float3 (_S1326);
+    float _S1327 = (F32_abs((_S1325)));
+    float _S1328 = material_26.roughness;
+    float _S1329 = _S1328 * _S1328;
+    AnisotropicFrame _S1330 = anisotropicFrame(material_26, n_i_18);
+    float _S1331 = sheenAlbedo(_S1324, n_i_18, material_26);
+    float3  _S1332 = make_float3 (0.0f);
+    CoatFrame _S1333 = CoatFrame_x24init_0(_S1332, 0.0f, 0.0f);
+    bool _S1334 = (material_26.coat) > 0.0f;
+    CoatFrame coat_frame_8;
+    float3  coat_series_2;
+    if(_S1334)
     {
-        SampleBSDF _S1264 = sheenVelvetSample(_S1252, n_i_18, _S1255, material_23, _S1261, random_state_18);
-        return _S1264;
+        CoatFrame coat_frame_9 = coatFrame(material_26, n_i_18);
+        float3  _S1335 = coatSeries(coat_frame_9, material_26);
+        coat_frame_8 = coat_frame_9;
+        coat_series_2 = _S1335;
     }
-    float _S1265 = _S1262.value - _S1261.p_sheen_velvet;
-    bool _S1266 = _S1265 < (_S1261.p_diffuse);
-    if(_S1266)
+    else
     {
-        SampleBSDF _S1267 = diffuseSample(_S1265, n_i_18, _S1255, material_23, _S1261, random_state_18);
-        return _S1267;
+        coat_frame_8 = _S1333;
+        coat_series_2 = _S1332;
     }
-    bool _S1268 = _S1265 < (_S1261.p_diffuse + _S1261.p_toon);
-    if(_S1268)
+    float3  _S1336 = sampleHalfVector(_S1324, n_i_18, _S1329, _S1330, &random_state_20, 0U);
+    float3  _S1337 = coatHalf(_S1324, coat_frame_8, material_26, random_init_0);
+    Weights _S1338 = lobeWeights(in_dir_10, _S1324, n_i_18, _S1336, _S1337, _S1330, _S1331, coat_frame_8, coat_series_2, material_26, eta_i_8, eta_o_7);
+    Random _S1339 = draw(random_state_20, 2U);
+    random_state_20 = _S1339.state;
+    bool _S1340 = (_S1339.value) < (_S1338.p_sheen_velvet);
+    if(_S1340)
     {
-        ToonProfile _S1269 = toonProfile(_S1252, n_i_18, material_23);
-        SampleBSDF _S1270 = toonSample(n_i_18, _S1269, _S1261, random_state_18);
-        return _S1270;
+        SampleBSDF _S1341 = sheenVelvetSample(_S1324, n_i_18, _S1327, material_26, _S1338, random_state_20);
+        return _S1341;
     }
-    float _S1271 = vndfPDF(_S1252, _S1260, n_i_18, _S1255, _S1257, _S1258, _S1261.v_dot_h);
-    bool _S1272 = (_S1265 - _S1261.p_toon) < (_S1261.p_diffuse + _S1261.p_refract);
-    if(_S1272)
+    float _S1342 = _S1339.value - _S1338.p_sheen_velvet;
+    bool _S1343 = _S1342 < (_S1338.p_coat);
+    if(_S1343)
     {
-        SampleBSDF _S1273 = refractSample(_S1260, n_i_18, _S1257, _S1258, material_23, _S1261, _S1271, eta_i_7, eta_o_7, random_state_18);
-        return _S1273;
+        SampleBSDF _S1344 = coatSample(in_dir_10, _S1337, coat_frame_8, _S1338, random_state_20);
+        return _S1344;
     }
-    SampleBSDF _S1274 = reflectSample(in_dir_8, _S1260, n_i_18, _S1257, _S1258, _S1261, _S1271, random_state_18);
-    return _S1274;
+    float _S1345 = _S1342 - _S1338.p_coat;
+    bool _S1346 = _S1345 < (_S1338.p_diffuse);
+    if(_S1346)
+    {
+        SampleBSDF _S1347 = diffuseSample(_S1345, n_i_18, _S1327, material_26, _S1338, random_state_20);
+        return _S1347;
+    }
+    bool _S1348 = _S1345 < (_S1338.p_diffuse + _S1338.p_toon);
+    if(_S1348)
+    {
+        ToonProfile _S1349 = toonProfile(_S1324, n_i_18, material_26);
+        SampleBSDF _S1350 = toonSample(n_i_18, _S1349, _S1338, random_state_20);
+        return _S1350;
+    }
+    float _S1351 = vndfPDF(_S1324, _S1336, n_i_18, _S1327, _S1329, _S1330, _S1338.v_dot_h);
+    bool _S1352 = (_S1345 - _S1338.p_toon) < (_S1338.p_diffuse + _S1338.p_refract);
+    if(_S1352)
+    {
+        SampleBSDF _S1353 = refractSample(_S1336, n_i_18, _S1329, _S1330, material_26, _S1338, _S1351, eta_i_8, eta_o_7, random_state_20);
+        return _S1353;
+    }
+    SampleBSDF _S1354 = reflectSample(in_dir_10, _S1336, n_i_18, _S1329, _S1330, _S1338, _S1351, random_state_20);
+    return _S1354;
 }
 
 static __device__ bool boundsVolume_0(FKSurface * surface_10)
@@ -4661,8 +4908,8 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
     bool turned_1;
     bool is_inside_5;
     bool viewed_0;
-    bool _S1275;
-    bool _S1276;
+    bool _S1355;
+    bool _S1356;
     float density_2;
     float wavelength_9;
     float width_3;
@@ -4673,7 +4920,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
     float3  throughput_2;
     float3  spectral_weight_0;
     TreeSample light_2;
-    int _S1277;
+    int _S1357;
     Shift ended_0;
     float density_3;
     float spread_2;
@@ -4681,21 +4928,21 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
     float sky_pdf_1;
     float spread_3;
     float width_5;
-    float3  _S1278 = make_float3 (0.0f);
-    Shift _S1279 = Shift_x24init_0(_S1278, 0.0f);
-    uint _S1280 = r_8->path;
-    uint _S1281 = extractBits_0(r_8->path, 0U, 5U);
-    uint _S1282 = extractBits_0(_S1280, 5U, 5U);
-    uint _S1283 = extractBits_0(_S1280, 10U, 2U);
-    uint _S1284 = extractBits_0(_S1280, 12U, 3U);
+    float3  _S1358 = make_float3 (0.0f);
+    Shift _S1359 = Shift_x24init_0(_S1358, 0.0f);
+    uint _S1360 = r_8->path;
+    uint _S1361 = extractBits_0(r_8->path, 0U, 5U);
+    uint _S1362 = extractBits_0(_S1360, 5U, 5U);
+    uint _S1363 = extractBits_0(_S1360, 10U, 2U);
+    uint _S1364 = extractBits_0(_S1360, 12U, 3U);
     bool passes_0;
     if(replay_1)
     {
-        bool _S1285 = _S1284 >= 3U;
-        uint _S1286 = _slang_select(_S1285, 1U,0U);
-        uint _S1287 = _S1281 + _S1286;
-        uint _S1288 = (fcptMaxBounces());
-        passes_0 = _S1287 > _S1288;
+        bool _S1365 = _S1364 >= 3U;
+        uint _S1366 = _slang_select(_S1365, 1U,0U);
+        uint _S1367 = _S1361 + _S1366;
+        uint _S1368 = (fcptMaxBounces());
+        passes_0 = _S1367 > _S1368;
     }
     else
     {
@@ -4703,60 +4950,60 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
     }
     if(passes_0)
     {
-        return _S1279;
+        return _S1359;
     }
-    uint _S1289 = _S1282 - 1U;
-    bool _S1290 = _S1284 == 3U;
-    uint _S1291 = _slang_select(_S1290, 1U,0U);
-    uint _S1292 = _S1281 + _S1291;
-    bool _S1293 = _S1283 == 0U;
-    uint _S1294 = _slang_select(_S1293, _S1292,_S1289);
-    FKHit _S1295 = (fcptReservoirHit((*r_8)));
-    float3  _S1296 = dom_7->x0;
-    float3  _S1297 = dom_7->x1 - dom_7->x0;
-    float3  _S1298 = ((((_S1297)) * make_float3(rnorm3df(((_S1297)).x, ((_S1297)).y, ((_S1297)).z))));
-    FKRay _S1299 = Ray_x24init_0(dom_7->x1, _S1298);
-    FKRay ray_2 = _S1299;
+    uint _S1369 = _S1362 - 1U;
+    bool _S1370 = _S1364 == 3U;
+    uint _S1371 = _slang_select(_S1370, 1U,0U);
+    uint _S1372 = _S1361 + _S1371;
+    bool _S1373 = _S1363 == 0U;
+    uint _S1374 = _slang_select(_S1373, _S1372,_S1369);
+    FKHit _S1375 = (fcptReservoirHit((*r_8)));
+    float3  _S1376 = dom_7->x0;
+    float3  _S1377 = dom_7->x1 - dom_7->x0;
+    float3  _S1378 = ((((_S1377)) * make_float3(rnorm3df(((_S1377)).x, ((_S1377)).y, ((_S1377)).z))));
+    FKRay _S1379 = Ray_x24init_0(dom_7->x1, _S1378);
+    FKRay ray_2 = _S1379;
     FKHit hit_4 = dom_7->hit;
-    float3  scatter_in_0 = _S1278;
+    float3  scatter_in_0 = _S1358;
     float3  throughput_3 = make_float3 (1.0f);
     float3  weight_2 = throughput_3;
-    float3  glowed_0 = _S1278;
-    float3  extinction_in_0 = _S1278;
+    float3  glowed_0 = _S1358;
+    float3  extinction_in_0 = _S1358;
     float g_in_0 = 0.0f;
     uint filling_2 = 4294967295U;
-    float _S1300 = dom_7->spread;
-    float _S1301 = dom_7->width;
-    float _S1302 = length_0(_S1297);
-    NEEVertex _S1303 = NEEVertex_x24init_0(true, 0.0f, _S1278, _S1278, _S1278);
-    NEEVertex nee_vertex_0 = _S1303;
-    Vertex _S1304 = Vertex_x24init_0(false, 0U, 0.0f, 0.0f, false);
-    Vertex prev_0 = _S1304;
-    Reservoir _S1305 = (Reservoir{});
-    Reservoir chain_0 = _S1305;
-    uint _S1306 = r_8->seed;
+    float _S1380 = dom_7->spread;
+    float _S1381 = dom_7->width;
+    float _S1382 = length_0(_S1377);
+    NEEVertex _S1383 = NEEVertex_x24init_0(true, 0.0f, _S1358, _S1358, _S1358);
+    NEEVertex nee_vertex_0 = _S1383;
+    Vertex _S1384 = Vertex_x24init_0(false, 0U, 0.0f, 0.0f, false);
+    Vertex prev_0 = _S1384;
+    Reservoir _S1385 = (Reservoir{});
+    Reservoir chain_0 = _S1385;
+    uint _S1386 = r_8->seed;
     (&chain_0)->seed = r_8->seed;
-    uint _S1307 = extractBits_0(_S1280, 24U, 8U);
-    uint _S1308 = insertBits_0(0U, _S1307, 24U, 8U);
-    (&chain_0)->path = _S1308;
-    (&ray_2)->origin = _S1296;
-    (&hit_4)->distance = _S1302;
-    FKMedium _S1309 = (fcptCameraMedium(((&ray_2)->unit_direction), ((&hit_4)->distance), (&filling_2)));
-    uint _S1310 = filling_2;
-    bool _S1311 = (fcptVaryingUsed());
-    uint _S1312 = _slang_select(_S1311, _S1310,4294967295U);
-    filling_2 = _S1312;
-    scatter_in_0 = _S1309.scatter;
-    extinction_in_0 = _S1309.extinction;
-    g_in_0 = _S1309.g;
-    Reservoir _S1313 = chain_0;
-    uint _S1314 = filling_2;
+    uint _S1387 = extractBits_0(_S1360, 24U, 8U);
+    uint _S1388 = insertBits_0(0U, _S1387, 24U, 8U);
+    (&chain_0)->path = _S1388;
+    (&ray_2)->origin = _S1376;
+    (&hit_4)->distance = _S1382;
+    FKMedium _S1389 = (fcptCameraMedium(((&ray_2)->unit_direction), ((&hit_4)->distance), (&filling_2)));
+    uint _S1390 = filling_2;
+    bool _S1391 = (fcptVaryingUsed());
+    uint _S1392 = _slang_select(_S1391, _S1390,4294967295U);
+    filling_2 = _S1392;
+    scatter_in_0 = _S1389.scatter;
+    extinction_in_0 = _S1389.extinction;
+    g_in_0 = _S1389.g;
+    Reservoir _S1393 = chain_0;
+    uint _S1394 = filling_2;
     for(;;)
     {
-        bool _S1315 = (fcptVaryingUsed());
-        if(_S1315)
+        bool _S1395 = (fcptVaryingUsed());
+        if(_S1395)
         {
-            passes_0 = _S1314 != 4294967295U;
+            passes_0 = _S1394 != 4294967295U;
         }
         else
         {
@@ -4764,8 +5011,8 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         }
         if(passes_0)
         {
-            float _S1316 = (fcptMajorant((_S1314)));
-            spread_1 = _S1316;
+            float _S1396 = (fcptMajorant((_S1394)));
+            spread_1 = _S1396;
         }
         else
         {
@@ -4773,7 +5020,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         }
         if(replay_1)
         {
-            turned_1 = 4294967295U == _S1294;
+            turned_1 = 4294967295U == _S1374;
         }
         else
         {
@@ -4781,7 +5028,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         }
         if(turned_1)
         {
-            turned_1 = _S1283 == 1U;
+            turned_1 = _S1363 == 1U;
         }
         else
         {
@@ -4797,18 +5044,18 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         }
         if(turned_1)
         {
-            ended_0 = _S1279;
+            ended_0 = _S1359;
             sky_pdf_0 = 0.0f;
-            spread_1 = _S1300;
-            width_3 = _S1301;
+            spread_1 = _S1380;
+            width_3 = _S1381;
             density_2 = 1.0f;
             throughput_2 = throughput_3;
             b_6 = 4294967295U;
             passes_0 = true;
             break;
         }
-        bool _S1317 = (&prev_0)->rough;
-        if(_S1317)
+        bool _S1397 = (&prev_0)->rough;
+        if(_S1397)
         {
             turned_1 = !(spread_1 > 0.0f);
         }
@@ -4817,15 +5064,15 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             turned_1 = false;
         }
         (&prev_0)->rough = turned_1;
-        uint _S1318 = stream(_S1306, 384U);
-        uint tracking_0 = _S1318;
+        uint _S1398 = stream(_S1386, 384U);
+        uint tracking_0 = _S1398;
         weight_2 = throughput_3;
-        glowed_0 = _S1278;
+        glowed_0 = _S1358;
         b_6 = 4294967295U;
         throughput_2 = throughput_3;
         density_2 = 1.0f;
-        wavelength_9 = _S1300;
-        width_3 = _S1301;
+        wavelength_9 = _S1380;
+        width_3 = _S1381;
         sky_pdf_0 = 0.0f;
         for(;;)
         {
@@ -4834,32 +5081,32 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             else
             {
-                _S1277 = int(1);
+                _S1357 = int(1);
                 break;
             }
-            uint _S1319 = noiseAddress(_S1306, b_6);
-            Random _S1320 = draw(_S1319, 10U);
-            float _S1321 = - (F32_log((1.0f - _S1320.value))) / spread_1;
+            uint _S1399 = noiseAddress(_S1386, b_6);
+            Random _S1400 = draw(_S1399, 10U);
+            float _S1401 = - (F32_log((1.0f - _S1400.value))) / spread_1;
             if(passes_0)
             {
-                float3  _S1322 = (&ray_2)->origin;
-                float3  _S1323 = (&ray_2)->unit_direction;
-                float _S1324 = (&hit_4)->distance;
-                bool _S1325 = b_6 == 4294967295U;
-                uint _S1326 = _slang_select(_S1325, 0U,b_6);
-                uint _S1327 = (&prev_0)->lobe;
-                uint _S1328 = _slang_select(_S1325, 3U,_S1327);
-                float _S1329 = (fcptTrackMedium((_S1314), (_S1322), (_S1323), (_S1324), (&tracking_0), (&weight_2), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (&g_in_0), (_S1326), (_S1328), (_S1325)));
-                threshold_0 = _S1329;
+                float3  _S1402 = (&ray_2)->origin;
+                float3  _S1403 = (&ray_2)->unit_direction;
+                float _S1404 = (&hit_4)->distance;
+                bool _S1405 = b_6 == 4294967295U;
+                uint _S1406 = _slang_select(_S1405, 0U,b_6);
+                uint _S1407 = (&prev_0)->lobe;
+                uint _S1408 = _slang_select(_S1405, 3U,_S1407);
+                float _S1409 = (fcptTrackMedium((_S1394), (_S1402), (_S1403), (_S1404), (&tracking_0), (&weight_2), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (&g_in_0), (_S1406), (_S1408), (_S1405)));
+                threshold_0 = _S1409;
             }
             else
             {
-                threshold_0 = _S1321;
+                threshold_0 = _S1401;
             }
-            bool _S1330 = !(threshold_0 < ((&hit_4)->distance));
-            if(_S1330)
+            bool _S1410 = !(threshold_0 < ((&hit_4)->distance));
+            if(_S1410)
             {
-                _S1277 = int(1);
+                _S1357 = int(1);
                 break;
             }
             if(passes_0)
@@ -4872,39 +5119,39 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(turned_1)
             {
-                float3  _S1331 = pathColor(throughput_2 * glowed_0, throughput_3, 0.0f);
-                float3  _S1332 = _S1331 / make_float3 (density_2);
-                float3  _S1333 = sel_7->glow + _S1332;
-                sel_7->glow = _S1333;
+                float3  _S1411 = pathColor(throughput_2 * glowed_0, throughput_3, 0.0f);
+                float3  _S1412 = _S1411 / make_float3 (density_2);
+                float3  _S1413 = sel_7->glow + _S1412;
+                sel_7->glow = _S1413;
             }
             else
             {
             }
-            glowed_0 = _S1278;
+            glowed_0 = _S1358;
             uint b_7 = b_6 + 1U;
-            float3  _S1334 = (&ray_2)->origin + make_float3 (threshold_0) * (&ray_2)->unit_direction;
-            (&ray_2)->origin = _S1334;
-            float3  _S1335 = flightWeight_0(scatter_in_0, extinction_in_0, spread_1, threshold_0, true);
-            float3  _S1336 = weight_2;
-            float _S1337 = upsample(weight_2, 0.0f);
-            float3  _S1338 = make_float3 (_S1337);
-            float3  _S1339 = _slang_select(false, _S1338,_S1336);
-            float3  _S1340 = _slang_select(passes_0, _S1339,_S1335);
-            float3  throughput_4 = throughput_2 * _S1340;
-            uint _S1341 = stream(_S1306, b_7 + 320U);
-            tracking_0 = _S1341;
+            float3  _S1414 = (&ray_2)->origin + make_float3 (threshold_0) * (&ray_2)->unit_direction;
+            (&ray_2)->origin = _S1414;
+            float3  _S1415 = flightWeight_0(scatter_in_0, extinction_in_0, spread_1, threshold_0, true);
+            float3  _S1416 = weight_2;
+            float _S1417 = upsample(weight_2, 0.0f);
+            float3  _S1418 = make_float3 (_S1417);
+            float3  _S1419 = _slang_select(false, _S1418,_S1416);
+            float3  _S1420 = _slang_select(passes_0, _S1419,_S1415);
+            float3  throughput_4 = throughput_2 * _S1420;
+            uint _S1421 = stream(_S1386, b_7 + 320U);
+            tracking_0 = _S1421;
             weight_2 = throughput_3;
             float width_6 = width_3 + wavelength_9 * threshold_0;
-            float _S1342 = wavelength_9 + 3.14159274101257324f;
-            bool _S1343 = !replay_1;
-            if(_S1343)
+            float _S1422 = wavelength_9 + 3.14159274101257324f;
+            bool _S1423 = !replay_1;
+            if(_S1423)
             {
                 is_inside_5 = true;
             }
             else
             {
-                bool _S1344 = b_7 == _S1294;
-                if(_S1344)
+                bool _S1424 = b_7 == _S1374;
+                if(_S1424)
                 {
                     is_inside_5 = !passes_0;
                 }
@@ -4913,33 +5160,33 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                     is_inside_5 = false;
                 }
             }
-            TreeSample _S1345 = TreeSample_x24init_0(_S1278, _S1278, 0.0f, 0U);
+            TreeSample _S1425 = TreeSample_x24init_0(_S1358, _S1358, 0.0f, 0U);
             if(is_inside_5)
             {
-                float3  _S1346 = (&ray_2)->origin;
-                float3  _S1347 = (&ray_2)->unit_direction;
-                float3  _S1348 = (&ray_2)->unit_direction;
-                uint _S1349 = noiseAddress(_S1306, b_7);
-                float3  _S1350 = extinction_in_0;
-                float3  _S1351 = extinction_in_0;
-                uint2  _S1352 = make_uint2 (_S1314);
-                float3  _S1353 = (&ray_2)->unit_direction;
-                uint _S1354 = arrivalLobe_0(b_7, (&prev_0)->lobe);
-                FKHit _S1355 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
-                FKHit _S1356 = _S1355;
-                ShadowContext _S1357 = ShadowContext_x24init_0(_S1350, _S1351, _S1352, _S1353, b_7, _S1354, false, threshold_0, width_6, &_S1356, false);
-                ShadowContext _S1358 = _S1357;
-                TreeSample _S1359 = sampleLightTree_0(_S1346, _S1347, _S1348, 0.0f, true, _S1349, &_S1358);
-                light_2 = _S1359;
+                float3  _S1426 = (&ray_2)->origin;
+                float3  _S1427 = (&ray_2)->unit_direction;
+                float3  _S1428 = (&ray_2)->unit_direction;
+                uint _S1429 = noiseAddress(_S1386, b_7);
+                float3  _S1430 = extinction_in_0;
+                float3  _S1431 = extinction_in_0;
+                uint2  _S1432 = make_uint2 (_S1394);
+                float3  _S1433 = (&ray_2)->unit_direction;
+                uint _S1434 = arrivalLobe_0(b_7, (&prev_0)->lobe);
+                FKHit _S1435 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
+                FKHit _S1436 = _S1435;
+                ShadowContext _S1437 = ShadowContext_x24init_0(_S1430, _S1431, _S1432, _S1433, b_7, _S1434, false, threshold_0, width_6, &_S1436, false);
+                ShadowContext _S1438 = _S1437;
+                TreeSample _S1439 = sampleLightTree_0(_S1426, _S1427, _S1428, 0.0f, true, _S1429, &_S1438);
+                light_2 = _S1439;
             }
             else
             {
-                light_2 = _S1345;
+                light_2 = _S1425;
             }
-            float _S1360 = phaseHG_0(g_in_0, dot_0((&ray_2)->unit_direction, light_2.dir));
-            uint _S1361 = (fcptMaxBounces());
-            bool _S1362 = b_7 < _S1361;
-            if(_S1362)
+            float _S1440 = phaseHG_0(g_in_0, dot_0((&ray_2)->unit_direction, light_2.dir));
+            uint _S1441 = (fcptMaxBounces());
+            bool _S1442 = b_7 < _S1441;
+            if(_S1442)
             {
                 viewed_0 = (light_2.density) > 0.0f;
             }
@@ -4947,26 +5194,26 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             {
                 viewed_0 = false;
             }
-            float _S1363 = _slang_select(viewed_0, _S1360,0.0f);
-            float3  _S1364 = throughput_4 * light_2.radiance;
-            float _S1365 = powerHeuristic(light_2.density, _S1363);
-            float3  _S1366 = pathColor(_S1364 * make_float3 (_S1360 * _S1365), throughput_3, 0.0f);
-            float3  _S1367 = _slang_select(is_inside_5, _S1366,_S1278);
+            float _S1443 = _slang_select(viewed_0, _S1440,0.0f);
+            float3  _S1444 = throughput_4 * light_2.radiance;
+            float _S1445 = powerHeuristic(light_2.density, _S1443);
+            float3  _S1446 = pathColor(_S1444 * make_float3 (_S1440 * _S1445), throughput_3, 0.0f);
+            float3  _S1447 = _slang_select(is_inside_5, _S1446,_S1358);
             if(replay_1)
             {
-                _S1275 = b_7 == _S1294;
+                _S1355 = b_7 == _S1374;
             }
             else
             {
-                _S1275 = false;
+                _S1355 = false;
             }
-            if(_S1275)
+            if(_S1355)
             {
-                bool _S1368 = _S1283 == 2U;
-                if(_S1368)
+                bool _S1448 = _S1363 == 2U;
+                if(_S1448)
                 {
-                    float _S1369 = resamplingTarget(_S1367);
-                    passes_0 = _S1369 > 0.0f;
+                    float _S1449 = resamplingTarget(_S1447);
+                    passes_0 = _S1449 > 0.0f;
                 }
                 else
                 {
@@ -4974,92 +5221,92 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    Shift _S1370 = Shift_x24init_0(_S1367, 1.0f);
-                    _S1277 = int(0);
-                    ended_0 = _S1370;
-                    spread_1 = _S1342;
+                    Shift _S1450 = Shift_x24init_0(_S1447, 1.0f);
+                    _S1357 = int(0);
+                    ended_0 = _S1450;
+                    spread_1 = _S1422;
                     threshold_0 = width_6;
                     spectral_weight_0 = throughput_4;
                     layer_0 = b_7;
                     break;
                 }
-                _S1277 = int(0);
-                ended_0 = _S1279;
-                spread_1 = _S1342;
+                _S1357 = int(0);
+                ended_0 = _S1359;
+                spread_1 = _S1422;
                 threshold_0 = width_6;
                 spectral_weight_0 = throughput_4;
                 layer_0 = b_7;
                 break;
             }
-            if(_S1343)
+            if(_S1423)
             {
-                Reservoir candidate_3 = _S1313;
-                uint _S1371 = extractBits_0(_S1313.path, 24U, 8U);
-                uint _S1372 = insertBits_0(0U, _S1371, 24U, 8U);
-                uint _S1373 = extractBits_0(_S1313.path, 10U, 2U);
-                bool _S1374 = _S1373 == 1U;
-                if(_S1374)
+                Reservoir candidate_3 = _S1393;
+                uint _S1451 = extractBits_0(_S1393.path, 24U, 8U);
+                uint _S1452 = insertBits_0(0U, _S1451, 24U, 8U);
+                uint _S1453 = extractBits_0(_S1393.path, 10U, 2U);
+                bool _S1454 = _S1453 == 1U;
+                if(_S1454)
                 {
-                    float3  _S1375 = safeDivide(_S1367, _S1278);
-                    (&candidate_3)->radiance = _S1375;
+                    float3  _S1455 = safeDivide(_S1447, _S1358);
+                    (&candidate_3)->radiance = _S1455;
                 }
                 else
                 {
-                    uint _S1376 = insertBits_0(_S1372, b_7 + 1U, 5U, 5U);
-                    uint _S1377 = insertBits_0(_S1376, 2U, 10U, 2U);
-                    (&candidate_3)->path = _S1377;
+                    uint _S1456 = insertBits_0(_S1452, b_7 + 1U, 5U, 5U);
+                    uint _S1457 = insertBits_0(_S1456, 2U, 10U, 2U);
+                    (&candidate_3)->path = _S1457;
                 }
-                Reservoir _S1378 = withEnd(candidate_3, 0U, b_7, _S1367);
-                offer(sel_7, _S1378, _S1367 * make_float3 (scale_3) / make_float3 (density_2));
-                float _S1379 = survivalProbability(abs_0(throughput_4), density_2);
-                uint _S1380 = noiseAddress(_S1306, b_7);
-                Random _S1381 = draw(_S1380, 8U);
-                bool _S1382 = _S1379 < (_S1381.value);
-                if(_S1382)
+                Reservoir _S1458 = withEnd(candidate_3, 0U, b_7, _S1447);
+                offer(sel_7, _S1458, _S1447 * make_float3 (scale_3) / make_float3 (density_2));
+                float _S1459 = survivalProbability(abs_0(throughput_4), density_2);
+                uint _S1460 = noiseAddress(_S1386, b_7);
+                Random _S1461 = draw(_S1460, 8U);
+                bool _S1462 = _S1459 < (_S1461.value);
+                if(_S1462)
                 {
-                    _S1276 = true;
+                    _S1356 = true;
                 }
                 else
                 {
-                    uint _S1383 = (fcptMaxBounces());
-                    _S1276 = b_7 >= _S1383;
+                    uint _S1463 = (fcptMaxBounces());
+                    _S1356 = b_7 >= _S1463;
                 }
-                if(_S1276)
+                if(_S1356)
                 {
-                    _S1277 = int(0);
-                    ended_0 = _S1279;
-                    spread_1 = _S1342;
+                    _S1357 = int(0);
+                    ended_0 = _S1359;
+                    spread_1 = _S1422;
                     threshold_0 = width_6;
                     spectral_weight_0 = throughput_4;
                     layer_0 = b_7;
                     break;
                 }
-                float _S1384 = density_2 * _S1379;
-                density_2 = _S1384;
+                float _S1464 = density_2 * _S1459;
+                density_2 = _S1464;
             }
             else
             {
             }
             float phase_pdf_0 = 0.0f;
-            uint _S1385 = noiseAddress(_S1306, b_7);
-            float3  _S1386 = samplePhase_0(g_in_0, (&ray_2)->unit_direction, _S1385, &phase_pdf_0);
-            (&ray_2)->unit_direction = _S1386;
-            NEEVertex _S1387 = NEEVertex_x24init_0(false, phase_pdf_0, (&ray_2)->origin, _S1278, (&ray_2)->origin);
-            nee_vertex_0 = _S1387;
-            Vertex _S1388 = Vertex_x24init_0(false, 0U, 0.0f, 1.0f, false);
-            prev_0 = _S1388;
-            float _S1389 = (&prev_0)->pdf;
-            FKRay _S1390 = ray_2;
-            FKHit _S1391 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
-            FKHit _S1392 = (fcptTraverseInstanceBVH((_S1390), (true), (4.294967296e+09f), (false), (_S1391), (false)));
-            hit_4 = _S1392;
+            uint _S1465 = noiseAddress(_S1386, b_7);
+            float3  _S1466 = samplePhase_0(g_in_0, (&ray_2)->unit_direction, _S1465, &phase_pdf_0);
+            (&ray_2)->unit_direction = _S1466;
+            NEEVertex _S1467 = NEEVertex_x24init_0(false, phase_pdf_0, (&ray_2)->origin, _S1358, (&ray_2)->origin);
+            nee_vertex_0 = _S1467;
+            Vertex _S1468 = Vertex_x24init_0(false, 0U, 0.0f, 1.0f, false);
+            prev_0 = _S1468;
+            float _S1469 = (&prev_0)->pdf;
+            FKRay _S1470 = ray_2;
+            FKHit _S1471 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
+            FKHit _S1472 = (fcptTraverseInstanceBVH((_S1470), (true), (4.294967296e+09f), (false), (_S1471), (false)));
+            hit_4 = _S1472;
             b_6 = b_7;
             throughput_2 = throughput_4;
-            wavelength_9 = _S1342;
+            wavelength_9 = _S1422;
             width_3 = width_6;
-            sky_pdf_0 = _S1389;
+            sky_pdf_0 = _S1469;
         }
-        if(_S1277 != int(1))
+        if(_S1357 != int(1))
         {
             width_3 = threshold_0;
             throughput_2 = spectral_weight_0;
@@ -5067,7 +5314,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             passes_0 = true;
             break;
         }
-        ended_0 = _S1279;
+        ended_0 = _S1359;
         spread_1 = wavelength_9;
         passes_0 = false;
         break;
@@ -5076,21 +5323,21 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
     {
         return ended_0;
     }
-    bool _S1393 = b_6 == 4294967295U;
-    bool _S1394 = ((&hit_4)->instance_index) == 4294967295U;
-    if(_S1394)
+    bool _S1473 = b_6 == 4294967295U;
+    bool _S1474 = ((&hit_4)->instance_index) == 4294967295U;
+    if(_S1474)
     {
-        bool _S1395 = !(&nee_vertex_0)->none;
-        float _S1396 = _slang_select(_S1395, sky_pdf_0,0.0f);
-        float _S1397 = escapeWeight_0(_S1396, (&ray_2)->unit_direction);
-        float3  _S1398 = environment_0((&ray_2)->unit_direction, b_6, (&prev_0)->lobe);
-        float3  _S1399 = pathColor(throughput_2 * _S1398, throughput_3, 0.0f);
+        bool _S1475 = !(&nee_vertex_0)->none;
+        float _S1476 = _slang_select(_S1475, sky_pdf_0,0.0f);
+        float _S1477 = escapeWeight_0(_S1476, (&ray_2)->unit_direction);
+        float3  _S1478 = environment_0((&ray_2)->unit_direction, b_6, (&prev_0)->lobe);
+        float3  _S1479 = pathColor(throughput_2 * _S1478, throughput_3, 0.0f);
         if(replay_1)
         {
-            bool _S1400 = b_6 == _S1294;
-            if(_S1400)
+            bool _S1480 = b_6 == _S1374;
+            if(_S1480)
             {
-                passes_0 = _S1283 == 3U;
+                passes_0 = _S1363 == 3U;
             }
             else
             {
@@ -5098,11 +5345,11 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(passes_0)
             {
-                return Shift_x24init_0(_S1399 * make_float3 (_S1397) / make_float3 (r_8->jac), density_2 / r_8->jac);
+                return Shift_x24init_0(_S1479 * make_float3 (_S1477) / make_float3 (r_8->jac), density_2 / r_8->jac);
             }
-            if(_S1293)
+            if(_S1373)
             {
-                passes_0 = _S1290;
+                passes_0 = _S1370;
             }
             else
             {
@@ -5110,7 +5357,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(passes_0)
             {
-                passes_0 = b_6 == _S1281;
+                passes_0 = b_6 == _S1361;
             }
             else
             {
@@ -5126,46 +5373,46 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(passes_0)
             {
-                return Shift_x24init_0(_S1399 * make_float3 (_S1397), 1.0f);
+                return Shift_x24init_0(_S1479 * make_float3 (_S1477), 1.0f);
             }
-            return _S1279;
+            return _S1359;
         }
         Reservoir candidate_4 = chain_0;
-        uint _S1401 = extractBits_0((&chain_0)->path, 10U, 2U);
-        bool _S1402 = _S1401 == 1U;
-        if(_S1402)
+        uint _S1481 = extractBits_0((&chain_0)->path, 10U, 2U);
+        bool _S1482 = _S1481 == 1U;
+        if(_S1482)
         {
-            uint _S1403 = extractBits_0((&chain_0)->path, 5U, 5U);
-            bool _S1404 = _S1403 == b_6;
-            float _S1405 = _slang_select(_S1404, 1.0f,_S1397);
-            float3  _S1406 = safeDivide(_S1399 * make_float3 (_S1405), _S1278);
-            (&candidate_4)->radiance = _S1406;
+            uint _S1483 = extractBits_0((&chain_0)->path, 5U, 5U);
+            bool _S1484 = _S1483 == b_6;
+            float _S1485 = _slang_select(_S1484, 1.0f,_S1477);
+            float3  _S1486 = safeDivide(_S1479 * make_float3 (_S1485), _S1358);
+            (&candidate_4)->radiance = _S1486;
         }
         else
         {
-            bool _S1407 = (&prev_0)->rough;
-            if(_S1407)
+            bool _S1487 = (&prev_0)->rough;
+            if(_S1487)
             {
-                uint _S1408 = insertBits_0(_S1308, b_6 + 1U, 5U, 5U);
-                uint _S1409 = insertBits_0(_S1408, 3U, 10U, 2U);
-                uint _S1410 = insertBits_0(_S1409, (&prev_0)->lobe, 15U, 3U);
-                bool _S1411 = (&prev_0)->inside;
-                uint _S1412 = _slang_select(_S1411, 1U,0U);
-                uint _S1413 = insertBits_0(_S1410, _S1412, 22U, 1U);
-                (&candidate_4)->path = _S1413;
+                uint _S1488 = insertBits_0(_S1388, b_6 + 1U, 5U, 5U);
+                uint _S1489 = insertBits_0(_S1488, 3U, 10U, 2U);
+                uint _S1490 = insertBits_0(_S1489, (&prev_0)->lobe, 15U, 3U);
+                bool _S1491 = (&prev_0)->inside;
+                uint _S1492 = _slang_select(_S1491, 1U,0U);
+                uint _S1493 = insertBits_0(_S1490, _S1492, 22U, 1U);
+                (&candidate_4)->path = _S1493;
                 (&candidate_4)->jac = (&prev_0)->pdf;
                 (&candidate_4)->dir = (&ray_2)->unit_direction;
             }
         }
-        float3  _S1414 = _S1399 * make_float3 (_S1397);
-        Reservoir _S1415 = withEnd(candidate_4, 3U, b_6, _S1414);
-        offer(sel_7, _S1415, _S1414 * make_float3 (scale_3) / make_float3 (density_2));
-        return _S1279;
+        float3  _S1494 = _S1479 * make_float3 (_S1477);
+        Reservoir _S1495 = withEnd(candidate_4, 3U, b_6, _S1494);
+        offer(sel_7, _S1495, _S1494 * make_float3 (scale_3) / make_float3 (density_2));
+        return _S1359;
     }
-    float3  _S1416 = (&ray_2)->origin + make_float3 ((&hit_4)->distance) * (&ray_2)->unit_direction;
-    (&ray_2)->origin = _S1416;
-    bool _S1417 = (fcptVaryingUsed());
-    if(_S1417)
+    float3  _S1496 = (&ray_2)->origin + make_float3 ((&hit_4)->distance) * (&ray_2)->unit_direction;
+    (&ray_2)->origin = _S1496;
+    bool _S1497 = (fcptVaryingUsed());
+    if(_S1497)
     {
         passes_0 = filling_2 != 4294967295U;
     }
@@ -5175,120 +5422,120 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
     }
     if(passes_0)
     {
-        bool _S1418 = !replay_1;
-        if(_S1418)
+        bool _S1498 = !replay_1;
+        if(_S1498)
         {
-            float3  _S1419 = pathColor(throughput_2 * glowed_0, throughput_3, 0.0f);
-            float3  _S1420 = _S1419 / make_float3 (density_2);
-            float3  _S1421 = sel_7->glow + _S1420;
-            sel_7->glow = _S1421;
+            float3  _S1499 = pathColor(throughput_2 * glowed_0, throughput_3, 0.0f);
+            float3  _S1500 = _S1499 / make_float3 (density_2);
+            float3  _S1501 = sel_7->glow + _S1500;
+            sel_7->glow = _S1501;
         }
-        float3  _S1422 = throughput_2 * weight_2;
-        throughput_2 = _S1422;
+        float3  _S1502 = throughput_2 * weight_2;
+        throughput_2 = _S1502;
     }
     else
     {
-        float3  _S1423 = flightWeight_0(scatter_in_0, extinction_in_0, (scatter_in_0.x + scatter_in_0.y + scatter_in_0.z) / 3.0f, (&hit_4)->distance, false);
-        float3  _S1424 = throughput_2 * _S1423;
-        throughput_2 = _S1424;
+        float3  _S1503 = flightWeight_0(scatter_in_0, extinction_in_0, (scatter_in_0.x + scatter_in_0.y + scatter_in_0.z) / 3.0f, (&hit_4)->distance, false);
+        float3  _S1504 = throughput_2 * _S1503;
+        throughput_2 = _S1504;
     }
-    float _S1425 = width_3 + spread_1 * (&hit_4)->distance;
-    uint _S1426 = b_6 + 1U;
-    b_6 = _S1426;
+    float _S1505 = width_3 + spread_1 * (&hit_4)->distance;
+    uint _S1506 = b_6 + 1U;
+    b_6 = _S1506;
     layer_0 = 0U;
-    width_3 = _S1425;
+    width_3 = _S1505;
     passes_0 = false;
     wavelength_9 = 0.0f;
     threshold_0 = 0.0f;
     turned_1 = false;
     is_inside_5 = false;
     spectral_weight_0 = throughput_3;
-    float3  chain_throughput_0 = _S1278;
-    float3  reconnection_0 = _S1278;
-    viewed_0 = _S1393;
+    float3  chain_throughput_0 = _S1358;
+    float3  reconnection_0 = _S1358;
+    viewed_0 = _S1473;
     for(;;)
     {
-        bool _S1427 = ((&hit_4)->is_point_light) == 1U;
+        bool _S1507 = ((&hit_4)->is_point_light) == 1U;
         if(replay_1)
         {
-            _S1275 = _S1283 == 1U;
+            _S1355 = _S1363 == 1U;
         }
         else
         {
-            _S1275 = false;
+            _S1355 = false;
         }
-        if(_S1275)
+        if(_S1355)
         {
-            _S1276 = b_6 == _S1282;
+            _S1356 = b_6 == _S1362;
         }
         else
         {
-            _S1276 = false;
+            _S1356 = false;
         }
-        bool _S1428;
-        if(_S1276)
+        bool _S1508;
+        if(_S1356)
         {
-            bool _S1429 = ((&hit_4)->instance_index) != (_S1295.instance_index);
-            if(_S1429)
+            bool _S1509 = ((&hit_4)->instance_index) != (_S1375.instance_index);
+            if(_S1509)
             {
-                _S1428 = true;
+                _S1508 = true;
             }
             else
             {
-                _S1428 = ((&hit_4)->triangle_index) != (_S1295.triangle_index);
+                _S1508 = ((&hit_4)->triangle_index) != (_S1375.triangle_index);
             }
         }
         else
         {
-            _S1428 = false;
+            _S1508 = false;
         }
-        if(_S1428)
+        if(_S1508)
         {
-            return _S1279;
+            return _S1359;
         }
-        FKMedium _S1430 = Medium_x24init_0(_S1278, _S1278, 0.0f);
-        BSDFMaterial _S1431 = Material_x24init_0(_S1278, _S1278, 0.0f, 0.0f, 0.0f, 0.0f, _S1278, throughput_3, 1.0f, _S1278, _S1278, 0.5f, 0.0f, 0.0f, _S1278, 0.0f, _S1278, 0.0f);
-        FKMedium _S1432 = _S1430;
-        FKSurface _S1433 = Surface_x24init_0(_S1278, _S1278, 0.0f, &_S1431, false, 0U, 1.0f, false, &_S1432, 4294967295U, _S1278);
-        FKSurface surface_11 = _S1433;
-        bool _S1434 = !_S1427;
+        FKMedium _S1510 = Medium_x24init_0(_S1358, _S1358, 0.0f);
+        BSDFMaterial _S1511 = Material_x24init_0(_S1358, _S1358, 0.0f, 0.0f, 0.0f, 0.0f, _S1358, throughput_3, 1.0f, _S1358, _S1358, 0.5f, 0.0f, 0.0f, _S1358, 0.0f, _S1358, 0.0f, 0.0f, 0.02999999932944775f, 1.5f, throughput_3, _S1358);
+        FKMedium _S1512 = _S1510;
+        FKSurface _S1513 = Surface_x24init_0(_S1358, _S1358, 0.0f, &_S1511, false, 0U, 1.0f, false, &_S1512, 4294967295U, _S1358);
+        FKSurface surface_11 = _S1513;
+        bool _S1514 = !_S1507;
         bool scatter_2;
         bool is_inside_6;
         float geometry_density_0;
         float3  throughput_5;
-        if(_S1434)
+        if(_S1514)
         {
-            uint _S1435 = noiseAddress(_S1306, b_6);
-            uint _S1436 = arrivalLobe_0(b_6, (&prev_0)->lobe);
-            FKSurface _S1437 = (fcptSurfaceAtPath((hit_4), ((&ray_2)->origin), (_S1435), (width_3), (layer_0), (b_6), (_S1436), ((&ray_2)->unit_direction)));
-            surface_11 = _S1437;
-            float3  _S1438 = (&(&surface_11)->material)->emissive;
-            float3  _S1439 = _slang_select(passes_0, _S1278,_S1438);
-            (&(&surface_11)->material)->emissive = _S1439;
-            uint _S1440 = noiseAddress(_S1306, b_6);
-            Random _S1441 = draw(_S1440, 9U);
-            FKSurface _S1442 = surface_11;
-            FKSurface _S1443 = uncovered_0(&_S1442, _S1441.value);
-            surface_11 = _S1443;
-            float _S1444 = facingSign((&(&surface_11)->material)->transmission, (&surface_11)->geometry_n, (&ray_2)->unit_direction);
-            bool _S1445 = _S1444 < 0.0f;
-            bool _S1446 = ((&(&surface_11)->material)->transmission) > 0.0f;
-            if(_S1446)
+            uint _S1515 = noiseAddress(_S1386, b_6);
+            uint _S1516 = arrivalLobe_0(b_6, (&prev_0)->lobe);
+            FKSurface _S1517 = (fcptSurfaceAtPath((hit_4), ((&ray_2)->origin), (_S1515), (width_3), (layer_0), (b_6), (_S1516), ((&ray_2)->unit_direction)));
+            surface_11 = _S1517;
+            float3  _S1518 = (&(&surface_11)->material)->emissive;
+            float3  _S1519 = _slang_select(passes_0, _S1358,_S1518);
+            (&(&surface_11)->material)->emissive = _S1519;
+            uint _S1520 = noiseAddress(_S1386, b_6);
+            Random _S1521 = draw(_S1520, 9U);
+            FKSurface _S1522 = surface_11;
+            FKSurface _S1523 = uncovered_0(&_S1522, _S1521.value);
+            surface_11 = _S1523;
+            float _S1524 = facingSign((&(&surface_11)->material)->transmission, (&surface_11)->geometry_n, (&ray_2)->unit_direction);
+            bool _S1525 = _S1524 < 0.0f;
+            bool _S1526 = ((&(&surface_11)->material)->transmission) > 0.0f;
+            if(_S1526)
             {
-                bool _S1447 = arrivesBehind_0((&ray_2)->unit_direction, (&surface_11)->geometry_n);
-                scatter_2 = _S1447;
+                bool _S1527 = arrivesBehind_0((&ray_2)->unit_direction, (&surface_11)->geometry_n);
+                scatter_2 = _S1527;
             }
             else
             {
                 scatter_2 = false;
             }
-            FKSurface _S1448 = surface_11;
-            FKSurface _S1449 = facingRay_0(&_S1448, (&ray_2)->unit_direction);
-            surface_11 = _S1449;
+            FKSurface _S1528 = surface_11;
+            FKSurface _S1529 = facingRay_0(&_S1528, (&ray_2)->unit_direction);
+            surface_11 = _S1529;
             if(passes_0)
             {
-                bool _S1450 = arrivesBehind_0((&ray_2)->unit_direction, (&surface_11)->geometry_n);
-                is_inside_6 = _S1450;
+                bool _S1530 = arrivesBehind_0((&ray_2)->unit_direction, (&surface_11)->geometry_n);
+                is_inside_6 = _S1530;
             }
             else
             {
@@ -5296,37 +5543,37 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(is_inside_6)
             {
-                float _S1451 = (&hit_4)->distance;
-                float3  _S1452 = (&(&surface_11)->material)->absorption;
-                float _S1453 = upsample((&(&surface_11)->material)->absorption, wavelength_9);
-                float3  _S1454 = make_float3 (_S1453);
-                bool _S1455 = wavelength_9 > 0.0f;
-                float3  _S1456 = _slang_select(_S1455, _S1454,_S1452);
-                float3  _S1457 = beerLambert(_S1451, _S1456);
-                float3  _S1458 = throughput_2 * _S1457;
-                throughput_5 = _S1458;
+                float _S1531 = (&hit_4)->distance;
+                float3  _S1532 = (&(&surface_11)->material)->absorption;
+                float _S1533 = upsample((&(&surface_11)->material)->absorption, wavelength_9);
+                float3  _S1534 = make_float3 (_S1533);
+                bool _S1535 = wavelength_9 > 0.0f;
+                float3  _S1536 = _slang_select(_S1535, _S1534,_S1532);
+                float3  _S1537 = beerLambert(_S1531, _S1536);
+                float3  _S1538 = throughput_2 * _S1537;
+                throughput_5 = _S1538;
             }
             else
             {
                 throughput_5 = throughput_2;
             }
-            bool _S1459 = !(&surface_11)->skip;
+            bool _S1539 = !(&surface_11)->skip;
             float geometry_density_1 = (F32_abs((dot_0((&surface_11)->geometry_n, (&ray_2)->unit_direction)))) / ((&hit_4)->distance * (&hit_4)->distance);
-            bool _S1460 = b_6 == _S1426;
-            if(_S1460)
+            bool _S1540 = b_6 == _S1506;
+            if(_S1540)
             {
-                float _S1461 = 0.00251327408477664f / geometry_density_1;
-                geometry_density_0 = _S1461;
+                float _S1541 = 0.00251327408477664f / geometry_density_1;
+                geometry_density_0 = _S1541;
             }
             else
             {
                 geometry_density_0 = threshold_0;
             }
-            float _S1462 = geometry_density_0;
-            scatter_2 = _S1459;
+            float _S1542 = geometry_density_0;
+            scatter_2 = _S1539;
             geometry_density_0 = geometry_density_1;
-            threshold_0 = _S1462;
-            turned_1 = _S1445;
+            threshold_0 = _S1542;
+            turned_1 = _S1525;
         }
         else
         {
@@ -5335,527 +5582,527 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             throughput_5 = throughput_2;
             is_inside_6 = is_inside_5;
         }
-        bool _S1463;
+        bool _S1543;
         if(scatter_2)
         {
-            _S1463 = (&prev_0)->rough;
+            _S1543 = (&prev_0)->rough;
         }
         else
         {
-            _S1463 = false;
+            _S1543 = false;
         }
-        bool _S1464;
-        if(_S1463)
+        bool _S1544;
+        if(_S1543)
         {
-            _S1464 = ((&prev_0)->pdf * geometry_density_0 * threshold_0) <= 1.0f;
-        }
-        else
-        {
-            _S1464 = false;
-        }
-        float _S1465 = dot_0((&surface_11)->smooth_n, - (&ray_2)->unit_direction);
-        bool _S1466 = (fcptDispersionUsed());
-        bool _S1467;
-        if(_S1466)
-        {
-            _S1467 = wavelength_9 == 0.0f;
+            _S1544 = ((&prev_0)->pdf * geometry_density_0 * threshold_0) <= 1.0f;
         }
         else
         {
-            _S1467 = false;
+            _S1544 = false;
         }
-        bool _S1468;
-        if(_S1467)
+        float _S1545 = dot_0((&surface_11)->smooth_n, - (&ray_2)->unit_direction);
+        bool _S1546 = (fcptDispersionUsed());
+        bool _S1547;
+        if(_S1546)
         {
-            _S1468 = scatter_2;
-        }
-        else
-        {
-            _S1468 = false;
-        }
-        bool _S1469;
-        if(_S1468)
-        {
-            bool _S1470 = dispersive((&surface_11)->material);
-            _S1469 = _S1470;
+            _S1547 = wavelength_9 == 0.0f;
         }
         else
         {
-            _S1469 = false;
+            _S1547 = false;
+        }
+        bool _S1548;
+        if(_S1547)
+        {
+            _S1548 = scatter_2;
+        }
+        else
+        {
+            _S1548 = false;
+        }
+        bool _S1549;
+        if(_S1548)
+        {
+            bool _S1550 = dispersive((&surface_11)->material);
+            _S1549 = _S1550;
+        }
+        else
+        {
+            _S1549 = false;
         }
         float3  throughput_6;
-        if(_S1469)
+        if(_S1549)
         {
-            uint _S1471 = stream(_S1306, 512U);
-            Random _S1472 = pcg(_S1471);
-            uint _S1473 = extractBits_0(_S1280, 25U, 7U);
-            float _S1474 = (float(_S1473) + _S1472.value) / 128.0f;
-            uint _S1475 = extractBits_0(_S1280, 24U, 1U);
-            bool _S1476 = _S1475 == 1U;
-            float _S1477 = _slang_select(_S1476, _S1474,_S1472.value);
-            float2  _S1478 = sampleWavelength(_S1477);
-            float wavelength_10 = _S1478.x;
-            float3  _S1479 = wavelengthWeights(wavelength_10);
-            float3  _S1480 = _S1479 / make_float3 (_S1478.y);
-            float _S1481 = upsample(throughput_5, wavelength_10);
-            float3  _S1482 = make_float3 (_S1481);
-            float _S1483 = upsample(scatter_in_0, wavelength_10);
-            float3  _S1484 = make_float3 (_S1483);
-            scatter_in_0 = _S1484;
-            float _S1485 = upsample(extinction_in_0, wavelength_10);
-            float3  _S1486 = make_float3 (_S1485);
-            extinction_in_0 = _S1486;
+            uint _S1551 = stream(_S1386, 512U);
+            Random _S1552 = pcg(_S1551);
+            uint _S1553 = extractBits_0(_S1360, 25U, 7U);
+            float _S1554 = (float(_S1553) + _S1552.value) / 128.0f;
+            uint _S1555 = extractBits_0(_S1360, 24U, 1U);
+            bool _S1556 = _S1555 == 1U;
+            float _S1557 = _slang_select(_S1556, _S1554,_S1552.value);
+            float2  _S1558 = sampleWavelength(_S1557);
+            float wavelength_10 = _S1558.x;
+            float3  _S1559 = wavelengthWeights(wavelength_10);
+            float3  _S1560 = _S1559 / make_float3 (_S1558.y);
+            float _S1561 = upsample(throughput_5, wavelength_10);
+            float3  _S1562 = make_float3 (_S1561);
+            float _S1563 = upsample(scatter_in_0, wavelength_10);
+            float3  _S1564 = make_float3 (_S1563);
+            scatter_in_0 = _S1564;
+            float _S1565 = upsample(extinction_in_0, wavelength_10);
+            float3  _S1566 = make_float3 (_S1565);
+            extinction_in_0 = _S1566;
             wavelength_9 = wavelength_10;
-            throughput_6 = _S1482;
-            spectral_weight_0 = _S1480;
+            throughput_6 = _S1562;
+            spectral_weight_0 = _S1560;
         }
         else
         {
             throughput_6 = throughput_5;
         }
-        BSDFMaterial _S1487 = pathMaterial((&surface_11)->material, wavelength_9);
-        float2  _S1488 = wavelengthEta(_S1487, _S1465, wavelength_9);
-        bool _S1489;
+        BSDFMaterial _S1567 = pathMaterial((&surface_11)->material, wavelength_9);
+        float2  _S1568 = wavelengthEta(_S1567, _S1545, wavelength_9);
+        bool _S1569;
         if(scatter_2)
         {
-            bool _S1490 = neeDecision(_S1487, _S1465, _S1488.x, _S1488.y);
-            _S1489 = _S1490;
+            bool _S1570 = neeDecision(_S1567, _S1545, _S1568.x, _S1568.y);
+            _S1569 = _S1570;
         }
         else
         {
-            _S1489 = false;
+            _S1569 = false;
         }
-        bool _S1491;
+        bool _S1571;
         if(passes_0)
         {
-            _S1491 = true;
+            _S1571 = true;
         }
         else
         {
-            _S1491 = layer_0 != 0U;
+            _S1571 = layer_0 != 0U;
         }
         bool nee_0;
-        if(_S1491)
+        if(_S1571)
         {
             nee_0 = false;
         }
         else
         {
-            nee_0 = _S1489;
+            nee_0 = _S1569;
         }
-        bool _S1492 = (fcptHairUsed());
-        bool _S1493;
-        if(_S1492)
+        bool _S1572 = (fcptHairUsed());
+        bool _S1573;
+        if(_S1572)
         {
-            _S1493 = (dot_0((&surface_11)->hair, (&surface_11)->hair)) > 0.0f;
-        }
-        else
-        {
-            _S1493 = false;
-        }
-        bool _S1494;
-        if(_S1493)
-        {
-            _S1494 = true;
+            _S1573 = (dot_0((&surface_11)->hair, (&surface_11)->hair)) > 0.0f;
         }
         else
         {
-            BSDFMaterial _S1495 = _S1487;
-            bool _S1496 = isTranslucent_0(&_S1495);
-            _S1494 = _S1496;
+            _S1573 = false;
         }
-        bool _S1497;
-        if(_S1494)
+        bool _S1574;
+        if(_S1573)
         {
-            _S1497 = true;
+            _S1574 = true;
         }
         else
         {
-            bool _S1498 = (_S1487.transmission) > 0.0f;
-            if(_S1498)
+            BSDFMaterial _S1575 = _S1567;
+            bool _S1576 = isTranslucent_0(&_S1575);
+            _S1574 = _S1576;
+        }
+        bool _S1577;
+        if(_S1574)
+        {
+            _S1577 = true;
+        }
+        else
+        {
+            bool _S1578 = (_S1567.transmission) > 0.0f;
+            if(_S1578)
             {
-                uint _S1499 = (fcptLayers((hit_4)));
-                _S1497 = _S1499 == 1U;
+                uint _S1579 = (fcptLayers((hit_4)));
+                _S1577 = _S1579 == 1U;
             }
             else
             {
-                _S1497 = false;
+                _S1577 = false;
             }
         }
         float3  emission_0;
-        if(_S1427)
+        if(_S1507)
         {
-            float3  _S1500 = (fcptCalculatePointLightContrib(((&hit_4)->instance_index)));
-            emission_0 = _S1500;
+            float3  _S1580 = (fcptCalculatePointLightContrib(((&hit_4)->instance_index)));
+            emission_0 = _S1580;
         }
         else
         {
-            emission_0 = _S1487.emissive;
+            emission_0 = _S1567.emissive;
         }
-        bool _S1501 = !replay_1;
-        bool _S1502;
-        if(_S1501)
+        bool _S1581 = !replay_1;
+        bool _S1582;
+        if(_S1581)
         {
-            _S1502 = true;
-        }
-        else
-        {
-            _S1502 = b_6 >= _S1294;
-        }
-        bool _S1503;
-        if(_S1502)
-        {
-            float _S1504 = rgb_to_greyscale(emission_0);
-            _S1503 = _S1504 > 0.0f;
+            _S1582 = true;
         }
         else
         {
-            _S1503 = false;
+            _S1582 = b_6 >= _S1374;
+        }
+        bool _S1583;
+        if(_S1582)
+        {
+            float _S1584 = rgb_to_greyscale(emission_0);
+            _S1583 = _S1584 > 0.0f;
+        }
+        else
+        {
+            _S1583 = false;
         }
         float3  emission_1;
-        if(_S1503)
+        if(_S1583)
         {
-            NEEVertex _S1505 = nee_vertex_0;
-            FKHit _S1506 = hit_4;
-            float _S1507 = emissionWeight_0(&_S1505, &_S1506, (&ray_2)->origin);
-            float3  emission_2 = emission_0 * make_float3 (_S1507);
+            NEEVertex _S1585 = nee_vertex_0;
+            FKHit _S1586 = hit_4;
+            float _S1587 = emissionWeight_0(&_S1585, &_S1586, (&ray_2)->origin);
+            float3  emission_2 = emission_0 * make_float3 (_S1587);
             emission_1 = emission_2;
         }
         else
         {
             emission_1 = emission_0;
         }
-        bool _S1508;
+        bool _S1588;
         if(replay_1)
         {
-            _S1508 = _S1283 == 1U;
+            _S1588 = _S1363 == 1U;
         }
         else
         {
-            _S1508 = false;
+            _S1588 = false;
         }
-        bool _S1509;
-        if(_S1508)
+        bool _S1589;
+        if(_S1588)
         {
-            _S1509 = b_6 > _S1282;
-        }
-        else
-        {
-            _S1509 = false;
-        }
-        bool _S1510;
-        if(_S1509)
-        {
-            _S1510 = b_6 == _S1281;
+            _S1589 = b_6 > _S1362;
         }
         else
         {
-            _S1510 = false;
+            _S1589 = false;
         }
-        bool _S1511;
-        if(_S1510)
+        bool _S1590;
+        if(_S1589)
         {
-            bool _S1512 = _S1284 == 1U;
-            if(_S1512)
+            _S1590 = b_6 == _S1361;
+        }
+        else
+        {
+            _S1590 = false;
+        }
+        bool _S1591;
+        if(_S1590)
+        {
+            bool _S1592 = _S1364 == 1U;
+            if(_S1592)
             {
-                _S1511 = true;
+                _S1591 = true;
             }
             else
             {
-                _S1511 = _S1284 == 2U;
+                _S1591 = _S1364 == 2U;
             }
         }
         else
         {
-            _S1511 = false;
+            _S1591 = false;
         }
-        if(_S1511)
+        if(_S1591)
         {
-            bool _S1513 = _S1427 != (_S1284 == 2U);
-            if(_S1513)
+            bool _S1593 = _S1507 != (_S1364 == 2U);
+            if(_S1593)
             {
-                return _S1279;
+                return _S1359;
             }
-            float3  _S1514 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
-            return Shift_x24init_0(_S1514 / make_float3 (r_8->jac), density_2 / r_8->jac);
+            float3  _S1594 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
+            return Shift_x24init_0(_S1594 / make_float3 (r_8->jac), density_2 / r_8->jac);
         }
-        uint _S1515 = extractBits_0((&chain_0)->path, 10U, 2U);
-        bool _S1516 = _S1515 == 1U;
+        uint _S1595 = extractBits_0((&chain_0)->path, 10U, 2U);
+        bool _S1596 = _S1595 == 1U;
         Reservoir here_0 = chain_0;
-        uint _S1517 = insertBits_0(_S1308, b_6, 5U, 5U);
-        uint _S1518 = insertBits_0(_S1517, 1U, 10U, 2U);
-        uint _S1519 = insertBits_0(_S1518, (&prev_0)->lobe, 15U, 3U);
-        bool _S1520 = (&prev_0)->inside;
-        uint _S1521 = _slang_select(_S1520, 1U,0U);
-        uint _S1522 = insertBits_0(_S1519, _S1521, 22U, 1U);
-        (&here_0)->path = _S1522;
-        uint _S1523 = (&here_0)->path;
-        bool _S1524 = wavelength_9 > 0.0f;
-        uint _S1525 = _slang_select(_S1524, 1U,0U);
-        uint _S1526 = insertBits_0(_S1523, _S1525, 23U, 1U);
-        (&here_0)->path = _S1526;
-        float _S1527 = (&prev_0)->pdf * geometry_density_0;
-        (&here_0)->jac = _S1527;
+        uint _S1597 = insertBits_0(_S1388, b_6, 5U, 5U);
+        uint _S1598 = insertBits_0(_S1597, 1U, 10U, 2U);
+        uint _S1599 = insertBits_0(_S1598, (&prev_0)->lobe, 15U, 3U);
+        bool _S1600 = (&prev_0)->inside;
+        uint _S1601 = _slang_select(_S1600, 1U,0U);
+        uint _S1602 = insertBits_0(_S1599, _S1601, 22U, 1U);
+        (&here_0)->path = _S1602;
+        uint _S1603 = (&here_0)->path;
+        bool _S1604 = wavelength_9 > 0.0f;
+        uint _S1605 = _slang_select(_S1604, 1U,0U);
+        uint _S1606 = insertBits_0(_S1603, _S1605, 23U, 1U);
+        (&here_0)->path = _S1606;
+        float _S1607 = (&prev_0)->pdf * geometry_density_0;
+        (&here_0)->jac = _S1607;
         fcptWithReservoirHit((&here_0), (&hit_4));
-        bool _S1528;
+        bool _S1608;
         if(replay_1)
         {
-            _S1528 = _S1283 == 1U;
+            _S1608 = _S1363 == 1U;
         }
         else
         {
-            _S1528 = false;
+            _S1608 = false;
         }
-        bool _S1529;
-        if(_S1528)
+        bool _S1609;
+        if(_S1608)
         {
-            _S1529 = b_6 == _S1282;
+            _S1609 = b_6 == _S1362;
         }
         else
         {
-            _S1529 = false;
+            _S1609 = false;
         }
-        bool _S1530 = b_6 == _S1294;
-        bool _S1531;
-        if(_S1530)
+        bool _S1610 = b_6 == _S1374;
+        bool _S1611;
+        if(_S1610)
         {
-            bool _S1532 = !scatter_2;
-            if(_S1532)
+            bool _S1612 = !scatter_2;
+            if(_S1612)
             {
-                _S1531 = true;
+                _S1611 = true;
             }
             else
             {
-                bool _S1533 = _S1283 != 1U;
-                if(_S1533)
+                bool _S1613 = _S1363 != 1U;
+                if(_S1613)
                 {
-                    _S1531 = _S1283 != 3U;
+                    _S1611 = _S1363 != 3U;
                 }
                 else
                 {
-                    _S1531 = false;
+                    _S1611 = false;
                 }
             }
         }
         else
         {
-            _S1531 = false;
+            _S1611 = false;
         }
-        bool _S1534;
-        if(_S1531)
+        bool _S1614;
+        if(_S1611)
         {
-            _S1534 = _S1283 == 2U;
+            _S1614 = _S1363 == 2U;
         }
         else
         {
-            _S1534 = false;
+            _S1614 = false;
         }
-        bool _S1535;
-        if(_S1534)
+        bool _S1615;
+        if(_S1614)
         {
-            _S1535 = !_S1464;
+            _S1615 = !_S1544;
         }
         else
         {
-            _S1535 = false;
+            _S1615 = false;
         }
-        bool _S1536;
-        if(_S1535)
+        bool _S1616;
+        if(_S1615)
         {
-            _S1536 = _S1284 != 4U;
+            _S1616 = _S1364 != 4U;
         }
         else
         {
-            _S1536 = false;
+            _S1616 = false;
         }
-        bool _S1537 = _S1282 == _S1281;
-        bool _S1538;
-        if(_S1537)
+        bool _S1617 = _S1362 == _S1361;
+        bool _S1618;
+        if(_S1617)
         {
-            _S1538 = _S1284 == 0U;
+            _S1618 = _S1364 == 0U;
         }
         else
         {
-            _S1538 = false;
+            _S1618 = false;
         }
-        bool _S1539;
-        if(_S1538)
+        bool _S1619;
+        if(_S1618)
         {
-            _S1539 = ((&hit_4)->instance_index) == (_S1295.instance_index);
+            _S1619 = ((&hit_4)->instance_index) == (_S1375.instance_index);
         }
         else
         {
-            _S1539 = false;
+            _S1619 = false;
         }
-        bool _S1540;
-        if(_S1539)
+        bool _S1620;
+        if(_S1619)
         {
-            _S1540 = ((&hit_4)->triangle_index) == (_S1295.triangle_index);
+            _S1620 = ((&hit_4)->triangle_index) == (_S1375.triangle_index);
         }
         else
         {
-            _S1540 = false;
+            _S1620 = false;
         }
-        bool _S1541;
-        if(_S1540)
+        bool _S1621;
+        if(_S1620)
         {
-            _S1541 = _S1464;
+            _S1621 = _S1544;
         }
         else
         {
-            _S1541 = false;
+            _S1621 = false;
         }
-        bool _S1542 = _slang_select(_S1529, _S1541,_S1536);
-        bool _S1543;
+        bool _S1622 = _slang_select(_S1609, _S1621,_S1616);
+        bool _S1623;
         if(nee_0)
         {
-            _S1543 = _slang_select(replay_1, _S1542,scatter_2);
+            _S1623 = _slang_select(replay_1, _S1622,scatter_2);
         }
         else
         {
-            _S1543 = false;
+            _S1623 = false;
         }
-        TreeSample _S1544 = TreeSample_x24init_0(_S1278, _S1278, 0.0f, 0U);
-        uint2  _S1545 = make_uint2 (0U);
-        FKHit _S1546 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
-        FKHit _S1547 = _S1546;
-        ShadowContext _S1548 = ShadowContext_x24init_0(_S1278, _S1278, _S1545, _S1278, 0U, 0U, false, 0.0f, 0.0f, &_S1547, false);
-        bool _S1549;
+        TreeSample _S1624 = TreeSample_x24init_0(_S1358, _S1358, 0.0f, 0U);
+        uint2  _S1625 = make_uint2 (0U);
+        FKHit _S1626 = Hit_x24init_0(make_float2 (0.0f), 4294967295U, 0U, 0U, 0.0f);
+        FKHit _S1627 = _S1626;
+        ShadowContext _S1628 = ShadowContext_x24init_0(_S1358, _S1358, _S1625, _S1358, 0U, 0U, false, 0.0f, 0.0f, &_S1627, false);
+        bool _S1629;
         if(nee_0)
         {
-            _S1549 = _S1502;
+            _S1629 = _S1582;
         }
         else
         {
-            _S1549 = false;
+            _S1629 = false;
         }
         ShadowContext context_5;
-        if(_S1549)
+        if(_S1629)
         {
-            uint _S1550 = arrivalLobe_0(b_6, (&prev_0)->lobe);
-            FKMedium _S1551 = (fcptOutsideMedium((hit_4)));
-            FKSurface _S1552 = surface_11;
-            FKHit _S1553 = hit_4;
-            FKMedium _S1554 = _S1551;
-            ShadowContext _S1555 = shadowContext_0(&_S1552, turned_1, extinction_in_0, filling_2, (&ray_2)->unit_direction, b_6, _S1550, (&hit_4)->distance, width_3, &_S1553, _S1493, &_S1554);
-            context_5 = _S1555;
+            uint _S1630 = arrivalLobe_0(b_6, (&prev_0)->lobe);
+            FKMedium _S1631 = (fcptOutsideMedium((hit_4)));
+            FKSurface _S1632 = surface_11;
+            FKHit _S1633 = hit_4;
+            FKMedium _S1634 = _S1631;
+            ShadowContext _S1635 = shadowContext_0(&_S1632, turned_1, extinction_in_0, filling_2, (&ray_2)->unit_direction, b_6, _S1630, (&hit_4)->distance, width_3, &_S1633, _S1573, &_S1634);
+            context_5 = _S1635;
         }
         else
         {
-            context_5 = _S1548;
+            context_5 = _S1628;
         }
         bool viewed_1;
         uint b_8;
         float3  throughput_7;
         float3  lit_0;
-        if(_S1543)
+        if(_S1623)
         {
-            float3  _S1556 = (&ray_2)->origin;
-            if(_S1493)
+            float3  _S1636 = (&ray_2)->origin;
+            if(_S1573)
             {
-                throughput_7 = _S1278;
+                throughput_7 = _S1358;
             }
             else
             {
                 throughput_7 = (&surface_11)->smooth_n;
             }
-            uint _S1557 = noiseAddress(_S1306, b_6);
-            ShadowContext _S1558 = context_5;
-            TreeSample _S1559 = sampleLightTree_0(_S1556, throughput_7, (&surface_11)->geometry_n, (&surface_11)->geometry_offset, _S1497, _S1557, &_S1558);
-            bool _S1560 = any_1((_S1559.radiance) != _S1278);
-            if(_S1560)
+            uint _S1637 = noiseAddress(_S1386, b_6);
+            ShadowContext _S1638 = context_5;
+            TreeSample _S1639 = sampleLightTree_0(_S1636, throughput_7, (&surface_11)->geometry_n, (&surface_11)->geometry_offset, _S1577, _S1637, &_S1638);
+            bool _S1640 = any_1((_S1639.radiance) != _S1358);
+            if(_S1640)
             {
-                if(_S1493)
+                if(_S1573)
                 {
-                    uint _S1561 = (fcptMaxBounces());
-                    bool _S1562 = b_6 < _S1561;
-                    FKSurface _S1563 = surface_11;
-                    TreeSample _S1564 = _S1559;
-                    float3  _S1565 = hairLight_0(&_S1563, (&ray_2)->unit_direction, &_S1564, _S1562);
-                    lit_0 = _S1565;
+                    uint _S1641 = (fcptMaxBounces());
+                    bool _S1642 = b_6 < _S1641;
+                    FKSurface _S1643 = surface_11;
+                    TreeSample _S1644 = _S1639;
+                    float3  _S1645 = hairLight_0(&_S1643, (&ray_2)->unit_direction, &_S1644, _S1642);
+                    lit_0 = _S1645;
                 }
                 else
                 {
-                    FixedArray<float3 , 5>  throughputs_3;
-                    FixedArray<float, 5>  pdfs_3;
-                    float3  _S1566 = BSDF((&ray_2)->unit_direction, _S1559.dir, (&surface_11)->smooth_n, _S1487, _S1488.x, _S1488.y, (dot_0((&surface_11)->geometry_n, - (&ray_2)->unit_direction) * dot_0((&surface_11)->geometry_n, _S1559.dir)) <= 0.0f, (&surface_11)->random_state, 4294967295U, &throughputs_3, &pdfs_3);
-                    uint _S1567 = (fcptMaxBounces());
-                    bool _S1568 = !(b_6 < _S1567);
-                    if(_S1568)
+                    FixedArray<float3 , 6>  throughputs_3;
+                    FixedArray<float, 6>  pdfs_3;
+                    float3  _S1646 = BSDF((&ray_2)->unit_direction, _S1639.dir, (&surface_11)->smooth_n, _S1567, _S1568.x, _S1568.y, (dot_0((&surface_11)->geometry_n, - (&ray_2)->unit_direction) * dot_0((&surface_11)->geometry_n, _S1639.dir)) <= 0.0f, (&surface_11)->random_state, 4294967295U, &throughputs_3, &pdfs_3);
+                    uint _S1647 = (fcptMaxBounces());
+                    bool _S1648 = !(b_6 < _S1647);
+                    if(_S1648)
                     {
                         viewed_1 = true;
                     }
                     else
                     {
-                        viewed_1 = (_S1559.density) == 0.0f;
+                        viewed_1 = (_S1639.density) == 0.0f;
                     }
                     if(viewed_1)
                     {
-                        float3  _S1569 = _S1566 * _S1559.radiance;
-                        lit_0 = _S1569;
+                        float3  _S1649 = _S1646 * _S1639.radiance;
+                        lit_0 = _S1649;
                     }
                     else
                     {
                         b_8 = 0U;
-                        lit_0 = _S1278;
+                        lit_0 = _S1358;
                         for(;;)
                         {
-                            if(b_8 < 5U)
+                            if(b_8 < 6U)
                             {
                             }
                             else
                             {
                                 break;
                             }
-                            bool _S1570 = (pdfs_3[b_8]) > 0.0f;
-                            if(_S1570)
+                            bool _S1650 = (pdfs_3[b_8]) > 0.0f;
+                            if(_S1650)
                             {
-                                float _S1571 = pdfs_3[b_8] / _S1559.density;
-                                float3  lit_1 = lit_0 + throughputs_3[b_8] * make_float3 (pdfs_3[b_8]) / make_float3 (_S1559.density * (1.0f + _S1571 * _S1571));
+                                float _S1651 = pdfs_3[b_8] / _S1639.density;
+                                float3  lit_1 = lit_0 + throughputs_3[b_8] * make_float3 (pdfs_3[b_8]) / make_float3 (_S1639.density * (1.0f + _S1651 * _S1651));
                                 lit_0 = lit_1;
                             }
                             uint i_27 = b_8 + 1U;
                             b_8 = i_27;
                         }
-                        float3  _S1572 = lit_0 * _S1559.radiance * make_float3 (_S1559.density);
-                        lit_0 = _S1572;
+                        float3  _S1652 = lit_0 * _S1639.radiance * make_float3 (_S1639.density);
+                        lit_0 = _S1652;
                     }
                 }
             }
             else
             {
-                lit_0 = _S1278;
+                lit_0 = _S1358;
             }
-            light_2 = _S1559;
+            light_2 = _S1639;
         }
         else
         {
-            light_2 = _S1544;
-            lit_0 = _S1278;
+            light_2 = _S1624;
+            lit_0 = _S1358;
         }
         bool refracted_4;
         bool wrong_side_0;
-        bool _S1573;
-        bool _S1574;
+        bool _S1653;
+        bool _S1654;
         float density_4;
-        if(_S1529)
+        if(_S1609)
         {
-            bool _S1575 = !_S1464;
-            if(_S1575)
+            bool _S1655 = !_S1544;
+            if(_S1655)
             {
-                return _S1279;
+                return _S1359;
             }
-            uint _S1576 = extractBits_0(_S1280, 23U, 1U);
-            bool _S1577 = _S1524 != (_S1576 == 1U);
-            if(_S1577)
+            uint _S1656 = extractBits_0(_S1360, 23U, 1U);
+            bool _S1657 = _S1604 != (_S1656 == 1U);
+            if(_S1657)
             {
-                return _S1279;
+                return _S1359;
             }
             float3  throughput_8 = throughput_6 * make_float3 (geometry_density_0);
             float density_5 = density_2 * geometry_density_0;
-            if(_S1537)
+            if(_S1617)
             {
-                viewed_1 = _S1284 == 1U;
+                viewed_1 = _S1364 == 1U;
             }
             else
             {
@@ -5863,12 +6110,12 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(viewed_1)
             {
-                float3  _S1578 = pathColor(throughput_8 * emission_1, spectral_weight_0, wavelength_9);
-                return Shift_x24init_0(_S1578 / make_float3 (r_8->jac), density_5 / r_8->jac);
+                float3  _S1658 = pathColor(throughput_8 * emission_1, spectral_weight_0, wavelength_9);
+                return Shift_x24init_0(_S1658 / make_float3 (r_8->jac), density_5 / r_8->jac);
             }
-            if(_S1537)
+            if(_S1617)
             {
-                refracted_4 = _S1284 == 0U;
+                refracted_4 = _S1364 == 0U;
             }
             else
             {
@@ -5876,26 +6123,26 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(refracted_4)
             {
-                bool _S1579 = !nee_0;
-                if(_S1579)
+                bool _S1659 = !nee_0;
+                if(_S1659)
                 {
                     passes_0 = true;
                 }
                 else
                 {
-                    float _S1580 = rgb_to_greyscale(light_2.radiance);
-                    passes_0 = !(_S1580 > 0.0f);
+                    float _S1660 = rgb_to_greyscale(light_2.radiance);
+                    passes_0 = !(_S1660 > 0.0f);
                 }
                 if(passes_0)
                 {
-                    return _S1279;
+                    return _S1359;
                 }
-                float3  _S1581 = pathColor(throughput_8 * lit_0, spectral_weight_0, wavelength_9);
-                return Shift_x24init_0(_S1581 / make_float3 (r_8->jac), density_5 / r_8->jac);
+                float3  _S1661 = pathColor(throughput_8 * lit_0, spectral_weight_0, wavelength_9);
+                return Shift_x24init_0(_S1661 / make_float3 (r_8->jac), density_5 / r_8->jac);
             }
-            if(_S1537)
+            if(_S1617)
             {
-                wrong_side_0 = _S1284 == 4U;
+                wrong_side_0 = _S1364 == 4U;
             }
             else
             {
@@ -5903,34 +6150,34 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(wrong_side_0)
             {
-                bool _S1582 = !nee_0;
-                if(_S1582)
+                bool _S1662 = !nee_0;
+                if(_S1662)
                 {
-                    return _S1279;
+                    return _S1359;
                 }
-                float3  _S1583 = r_8->dir;
-                float _S1584 = environmentPdf_0(r_8->dir);
-                bool _S1585 = (fcptWorldReadsPath());
-                if(_S1585)
+                float3  _S1663 = r_8->dir;
+                float _S1664 = environmentPdf_0(r_8->dir);
+                bool _S1665 = (fcptWorldReadsPath());
+                if(_S1665)
                 {
-                    uint _S1586 = b_6 + 1U;
-                    FKSurface _S1587 = surface_11;
-                    float3  _S1588 = skyColor_0((&ray_2)->unit_direction, _S1583, &_S1587, wavelength_9, _S1488, is_inside_6, _S1584, (&surface_11)->random_state, _S1586);
-                    throughput_2 = _S1588;
+                    uint _S1666 = b_6 + 1U;
+                    FKSurface _S1667 = surface_11;
+                    float3  _S1668 = skyColor_0((&ray_2)->unit_direction, _S1663, &_S1667, wavelength_9, _S1568, is_inside_6, _S1664, (&surface_11)->random_state, _S1666);
+                    throughput_2 = _S1668;
                 }
                 else
                 {
-                    float3  _S1589 = skyBSDF((&ray_2)->unit_direction, _S1583, surface_11, _S1487, _S1488, is_inside_6, _S1584, (&surface_11)->random_state);
-                    throughput_2 = _S1589;
+                    float3  _S1669 = skyBSDF((&ray_2)->unit_direction, _S1663, surface_11, _S1567, _S1568, is_inside_6, _S1664, (&surface_11)->random_state);
+                    throughput_2 = _S1669;
                 }
-                float3  _S1590 = pathColor(throughput_8 * throughput_2 * r_8->radiance, spectral_weight_0, wavelength_9);
-                return Shift_x24init_0(_S1590 / make_float3 (r_8->jac), density_5 / r_8->jac);
+                float3  _S1670 = pathColor(throughput_8 * throughput_2 * r_8->radiance, spectral_weight_0, wavelength_9);
+                return Shift_x24init_0(_S1670 / make_float3 (r_8->jac), density_5 / r_8->jac);
             }
-            uint _S1591 = extractBits_0(_S1280, 21U, 1U);
-            bool _S1592 = nee_0 != (_S1591 == 1U);
-            if(_S1592)
+            uint _S1671 = extractBits_0(_S1360, 21U, 1U);
+            bool _S1672 = nee_0 != (_S1671 == 1U);
+            if(_S1672)
             {
-                return _S1279;
+                return _S1359;
             }
             throughput_7 = throughput_8;
             density_4 = density_5;
@@ -5939,7 +6186,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         {
             if(replay_1)
             {
-                viewed_1 = _S1530;
+                viewed_1 = _S1610;
             }
             else
             {
@@ -5947,17 +6194,17 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(viewed_1)
             {
-                bool _S1593 = !scatter_2;
-                if(_S1593)
+                bool _S1673 = !scatter_2;
+                if(_S1673)
                 {
                     refracted_4 = true;
                 }
                 else
                 {
-                    bool _S1594 = _S1283 != 1U;
-                    if(_S1594)
+                    bool _S1674 = _S1363 != 1U;
+                    if(_S1674)
                     {
-                        refracted_4 = _S1283 != 3U;
+                        refracted_4 = _S1363 != 3U;
                     }
                     else
                     {
@@ -5971,8 +6218,8 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(refracted_4)
             {
-                bool _S1595 = _S1283 == 2U;
-                if(_S1595)
+                bool _S1675 = _S1363 == 2U;
+                if(_S1675)
                 {
                     passes_0 = nee_0;
                 }
@@ -5982,7 +6229,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    passes_0 = !_S1464;
+                    passes_0 = !_S1544;
                 }
                 else
                 {
@@ -5990,7 +6237,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    passes_0 = _S1284 == 4U;
+                    passes_0 = _S1364 == 4U;
                 }
                 else
                 {
@@ -5998,19 +6245,19 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    if(_S1493)
+                    if(_S1573)
                     {
-                        return _S1279;
+                        return _S1359;
                     }
-                    uint _S1596 = noiseAddress(_S1306, b_6);
-                    FKRay _S1597 = ray_2;
-                    FKSurface _S1598 = surface_11;
-                    ShadowContext _S1599 = context_5;
-                    SkySample _S1600 = sampleSky_0(&_S1597, &_S1598, wavelength_9, _S1488, is_inside_6, _S1596, (&surface_11)->random_state, &_S1599);
-                    float3  _S1601 = pathColor(throughput_6 * _S1600.color, spectral_weight_0, wavelength_9);
-                    return Shift_x24init_0(_S1601, 1.0f);
+                    uint _S1676 = noiseAddress(_S1386, b_6);
+                    FKRay _S1677 = ray_2;
+                    FKSurface _S1678 = surface_11;
+                    ShadowContext _S1679 = context_5;
+                    SkySample _S1680 = sampleSky_0(&_S1677, &_S1678, wavelength_9, _S1568, is_inside_6, _S1676, (&surface_11)->random_state, &_S1679);
+                    float3  _S1681 = pathColor(throughput_6 * _S1680.color, spectral_weight_0, wavelength_9);
+                    return Shift_x24init_0(_S1681, 1.0f);
                 }
-                if(_S1595)
+                if(_S1675)
                 {
                     passes_0 = nee_0;
                 }
@@ -6020,7 +6267,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    passes_0 = !_S1464;
+                    passes_0 = !_S1544;
                 }
                 else
                 {
@@ -6028,26 +6275,18 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    float _S1602 = rgb_to_greyscale(light_2.radiance);
-                    bool _S1603 = !(_S1602 > 0.0f);
-                    if(_S1603)
+                    float _S1682 = rgb_to_greyscale(light_2.radiance);
+                    bool _S1683 = !(_S1682 > 0.0f);
+                    if(_S1683)
                     {
-                        return _S1279;
+                        return _S1359;
                     }
-                    float3  _S1604 = pathColor(throughput_6 * lit_0, spectral_weight_0, wavelength_9);
-                    return Shift_x24init_0(_S1604, 1.0f);
+                    float3  _S1684 = pathColor(throughput_6 * lit_0, spectral_weight_0, wavelength_9);
+                    return Shift_x24init_0(_S1684, 1.0f);
                 }
-                if(_S1293)
+                if(_S1373)
                 {
-                    passes_0 = _S1284 == 2U;
-                }
-                else
-                {
-                    passes_0 = false;
-                }
-                if(passes_0)
-                {
-                    passes_0 = _S1427;
+                    passes_0 = _S1364 == 2U;
                 }
                 else
                 {
@@ -6055,12 +6294,20 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    float3  _S1605 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
-                    return Shift_x24init_0(_S1605, 1.0f);
+                    passes_0 = _S1507;
                 }
-                if(_S1293)
+                else
                 {
-                    passes_0 = _S1284 == 1U;
+                    passes_0 = false;
+                }
+                if(passes_0)
+                {
+                    float3  _S1685 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
+                    return Shift_x24init_0(_S1685, 1.0f);
+                }
+                if(_S1373)
+                {
+                    passes_0 = _S1364 == 1U;
                 }
                 else
                 {
@@ -6076,7 +6323,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    passes_0 = !_S1464;
+                    passes_0 = !_S1544;
                 }
                 else
                 {
@@ -6084,14 +6331,14 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    float3  _S1606 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
-                    return Shift_x24init_0(_S1606, 1.0f);
+                    float3  _S1686 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
+                    return Shift_x24init_0(_S1686, 1.0f);
                 }
-                return _S1279;
+                return _S1359;
             }
             else
             {
-                if(_S1501)
+                if(_S1581)
                 {
                     wrong_side_0 = scatter_2;
                 }
@@ -6101,142 +6348,142 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(wrong_side_0)
                 {
-                    bool _S1607 = b_6 > 0U;
-                    if(_S1607)
+                    bool _S1687 = b_6 > 0U;
+                    if(_S1687)
                     {
                         Reservoir candidate_5 = chain_0;
-                        if(_S1516)
+                        if(_S1596)
                         {
-                            float3  _S1608 = safeDivide(throughput_6 * emission_1, chain_throughput_0);
-                            (&candidate_5)->radiance = _S1608;
+                            float3  _S1688 = safeDivide(throughput_6 * emission_1, chain_throughput_0);
+                            (&candidate_5)->radiance = _S1688;
                         }
                         else
                         {
-                            if(_S1464)
+                            if(_S1544)
                             {
                                 candidate_5 = here_0;
                             }
                         }
-                        float3  _S1609 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
-                        Reservoir _S1610 = withEnd(candidate_5, 1U, b_6, _S1609);
-                        offer(sel_7, _S1610, _S1609 * make_float3 (scale_3) / make_float3 (density_2));
+                        float3  _S1689 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
+                        Reservoir _S1690 = withEnd(candidate_5, 1U, b_6, _S1689);
+                        offer(sel_7, _S1690, _S1689 * make_float3 (scale_3) / make_float3 (density_2));
                     }
                     else
                     {
-                        float3  _S1611 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
-                        float3  _S1612 = sel_7->glow + _S1611;
-                        sel_7->glow = _S1612;
+                        float3  _S1691 = pathColor(throughput_6 * emission_1, spectral_weight_0, wavelength_9);
+                        float3  _S1692 = sel_7->glow + _S1691;
+                        sel_7->glow = _S1692;
                     }
                     if(nee_0)
                     {
-                        float3  _S1613 = pathColor(throughput_6 * lit_0, spectral_weight_0, wavelength_9);
+                        float3  _S1693 = pathColor(throughput_6 * lit_0, spectral_weight_0, wavelength_9);
                         Reservoir candidate_6 = chain_0;
-                        if(_S1516)
+                        if(_S1596)
                         {
-                            float3  _S1614 = safeDivide(_S1613, chain_throughput_0);
-                            (&candidate_6)->radiance = _S1614;
+                            float3  _S1694 = safeDivide(_S1693, chain_throughput_0);
+                            (&candidate_6)->radiance = _S1694;
                         }
                         else
                         {
-                            if(_S1464)
+                            if(_S1544)
                             {
                                 candidate_6 = here_0;
-                                uint _S1615 = insertBits_0((&candidate_6)->path, 1U, 21U, 1U);
-                                (&candidate_6)->path = _S1615;
+                                uint _S1695 = insertBits_0((&candidate_6)->path, 1U, 21U, 1U);
+                                (&candidate_6)->path = _S1695;
                                 (&candidate_6)->dir = light_2.dir;
                                 (&candidate_6)->radiance = light_2.radiance;
                             }
                             else
                             {
-                                uint _S1616 = insertBits_0(_S1308, b_6 + 1U, 5U, 5U);
-                                uint _S1617 = insertBits_0(_S1616, 2U, 10U, 2U);
-                                (&candidate_6)->path = _S1617;
+                                uint _S1696 = insertBits_0(_S1388, b_6 + 1U, 5U, 5U);
+                                uint _S1697 = insertBits_0(_S1696, 2U, 10U, 2U);
+                                (&candidate_6)->path = _S1697;
                             }
                         }
-                        Reservoir _S1618 = withEnd(candidate_6, 0U, b_6, _S1613);
-                        offer(sel_7, _S1618, _S1613 * make_float3 (scale_3) / make_float3 (density_2));
+                        Reservoir _S1698 = withEnd(candidate_6, 0U, b_6, _S1693);
+                        offer(sel_7, _S1698, _S1693 * make_float3 (scale_3) / make_float3 (density_2));
                     }
                     if(nee_0)
                     {
-                        if(_S1493)
+                        if(_S1573)
                         {
-                            _S1573 = false;
+                            _S1653 = false;
                         }
                         else
                         {
-                            bool _S1619 = environmentMapped_0();
-                            _S1573 = _S1619;
+                            bool _S1699 = environmentMapped_0();
+                            _S1653 = _S1699;
                         }
                     }
                     else
                     {
-                        _S1573 = false;
+                        _S1653 = false;
                     }
-                    if(_S1573)
+                    if(_S1653)
                     {
-                        uint _S1620 = (fcptMaxBounces());
-                        _S1574 = b_6 < _S1620;
+                        uint _S1700 = (fcptMaxBounces());
+                        _S1654 = b_6 < _S1700;
                     }
                     else
                     {
-                        _S1574 = false;
+                        _S1654 = false;
                     }
-                    if(_S1574)
+                    if(_S1654)
                     {
-                        uint _S1621 = noiseAddress(_S1306, b_6);
-                        FKRay _S1622 = ray_2;
-                        FKSurface _S1623 = surface_11;
-                        ShadowContext _S1624 = context_5;
-                        SkySample _S1625 = sampleSky_0(&_S1622, &_S1623, wavelength_9, _S1488, is_inside_6, _S1621, (&surface_11)->random_state, &_S1624);
-                        float3  _S1626 = pathColor(throughput_6 * _S1625.color, spectral_weight_0, wavelength_9);
+                        uint _S1701 = noiseAddress(_S1386, b_6);
+                        FKRay _S1702 = ray_2;
+                        FKSurface _S1703 = surface_11;
+                        ShadowContext _S1704 = context_5;
+                        SkySample _S1705 = sampleSky_0(&_S1702, &_S1703, wavelength_9, _S1568, is_inside_6, _S1701, (&surface_11)->random_state, &_S1704);
+                        float3  _S1706 = pathColor(throughput_6 * _S1705.color, spectral_weight_0, wavelength_9);
                         Reservoir candidate_7 = chain_0;
-                        if(_S1516)
+                        if(_S1596)
                         {
-                            float3  _S1627 = safeDivide(_S1626, chain_throughput_0);
-                            (&candidate_7)->radiance = _S1627;
+                            float3  _S1707 = safeDivide(_S1706, chain_throughput_0);
+                            (&candidate_7)->radiance = _S1707;
                         }
                         else
                         {
-                            if(_S1464)
+                            if(_S1544)
                             {
                                 candidate_7 = here_0;
-                                uint _S1628 = insertBits_0((&candidate_7)->path, 1U, 21U, 1U);
-                                (&candidate_7)->path = _S1628;
-                                (&candidate_7)->dir = _S1625.dir;
-                                (&candidate_7)->radiance = _S1625.radiance;
+                                uint _S1708 = insertBits_0((&candidate_7)->path, 1U, 21U, 1U);
+                                (&candidate_7)->path = _S1708;
+                                (&candidate_7)->dir = _S1705.dir;
+                                (&candidate_7)->radiance = _S1705.radiance;
                             }
                             else
                             {
-                                uint _S1629 = insertBits_0(_S1308, b_6 + 1U, 5U, 5U);
-                                uint _S1630 = insertBits_0(_S1629, 2U, 10U, 2U);
-                                (&candidate_7)->path = _S1630;
+                                uint _S1709 = insertBits_0(_S1388, b_6 + 1U, 5U, 5U);
+                                uint _S1710 = insertBits_0(_S1709, 2U, 10U, 2U);
+                                (&candidate_7)->path = _S1710;
                             }
                         }
-                        Reservoir _S1631 = withEnd(candidate_7, 4U, b_6, _S1626);
-                        offer(sel_7, _S1631, _S1626 * make_float3 (scale_3) / make_float3 (density_2));
+                        Reservoir _S1711 = withEnd(candidate_7, 4U, b_6, _S1706);
+                        offer(sel_7, _S1711, _S1706 * make_float3 (scale_3) / make_float3 (density_2));
                     }
                 }
             }
             throughput_7 = throughput_6;
             density_4 = density_2;
         }
-        bool _S1632;
-        bool _S1633;
-        bool _S1634;
+        bool _S1712;
+        bool _S1713;
+        bool _S1714;
         bool straight_0;
-        bool _S1635;
-        bool _S1636;
-        bool _S1637;
-        bool _S1638;
-        bool _S1639;
-        bool _S1640;
-        bool _S1641;
-        bool _S1642;
-        bool _S1643;
-        bool _S1644;
-        bool _S1645;
-        bool _S1646;
-        bool _S1647;
+        bool _S1715;
+        bool _S1716;
+        bool _S1717;
+        bool _S1718;
+        bool _S1719;
+        bool _S1720;
+        bool _S1721;
+        bool _S1722;
+        bool _S1723;
+        bool _S1724;
+        bool _S1725;
+        bool _S1726;
+        bool _S1727;
         float density_6;
         float sky_pdf_2;
         float spread_4;
@@ -6248,33 +6495,33 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         {
             if(replay_1)
             {
-                viewed_1 = _S1530;
+                viewed_1 = _S1610;
             }
             else
             {
                 viewed_1 = false;
             }
-            uint _S1648 = extractBits_0(_S1280, 15U, 3U);
-            uint _S1649 = extractBits_0(_S1280, 18U, 3U);
-            uint _S1650 = _slang_select(_S1529, _S1649,_S1648);
-            float3  _S1651 = r_8->dir;
-            bool refracted_5 = _S1650 == 1U;
-            SampleBSDF _S1652 = SampleBSDF_x24init_0(_S1278, _S1278, 0U, false, 0U, 0.0f);
-            SampleBSDF lobe_5 = _S1652;
+            uint _S1728 = extractBits_0(_S1360, 15U, 3U);
+            uint _S1729 = extractBits_0(_S1360, 18U, 3U);
+            uint _S1730 = _slang_select(_S1609, _S1729,_S1728);
+            float3  _S1731 = r_8->dir;
+            bool refracted_5 = _S1730 == 1U;
+            SampleBSDF _S1732 = SampleBSDF_x24init_0(_S1358, _S1358, 0U, false, 0U, 0.0f);
+            SampleBSDF lobe_5 = _S1732;
             float3  reconnection_1;
             if(viewed_1)
             {
-                uint _S1653 = extractBits_0(_S1280, 22U, 1U);
-                bool _S1654 = is_inside_6 != (_S1653 == 1U);
-                if(_S1654)
+                uint _S1733 = extractBits_0(_S1360, 22U, 1U);
+                bool _S1734 = is_inside_6 != (_S1733 == 1U);
+                if(_S1734)
                 {
-                    return _S1279;
+                    return _S1359;
                 }
-                bool _S1655 = _S1283 == 1U;
-                if(_S1655)
+                bool _S1735 = _S1363 == 1U;
+                if(_S1735)
                 {
-                    float3  _S1656 = (fcptHitPosition((_S1295)));
-                    throughput_9 = _S1656;
+                    float3  _S1736 = (fcptHitPosition((_S1375)));
+                    throughput_9 = _S1736;
                 }
                 else
                 {
@@ -6286,11 +6533,11 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 else
                 {
-                    BSDFMaterial _S1657 = _S1487;
-                    bool _S1658 = isTranslucent_0(&_S1657);
-                    if(_S1658)
+                    BSDFMaterial _S1737 = _S1567;
+                    bool _S1738 = isTranslucent_0(&_S1737);
+                    if(_S1738)
                     {
-                        refracted_4 = _S1650 == 0U;
+                        refracted_4 = _S1730 == 0U;
                     }
                     else
                     {
@@ -6298,10 +6545,10 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                     }
                     if(refracted_4)
                     {
-                        float3  _S1659 = (&surface_11)->smooth_n;
-                        float3  _S1660 = throughput_9 - (&ray_2)->origin;
-                        float3  _S1661 = _slang_select(_S1655, _S1660,_S1651);
-                        wrong_side_0 = (dot_0(_S1659, _S1661) * _S1465) < 0.0f;
+                        float3  _S1739 = (&surface_11)->smooth_n;
+                        float3  _S1740 = throughput_9 - (&ray_2)->origin;
+                        float3  _S1741 = _slang_select(_S1735, _S1740,_S1731);
+                        wrong_side_0 = (dot_0(_S1739, _S1741) * _S1545) < 0.0f;
                     }
                     else
                     {
@@ -6309,60 +6556,60 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                     }
                     refracted_4 = wrong_side_0;
                 }
-                if(_S1655)
+                if(_S1735)
                 {
-                    float3  _S1662 = (&ray_2)->origin;
-                    float _S1663 = (&surface_11)->geometry_offset;
-                    float3  _S1664 = (&surface_11)->smooth_n;
-                    float3  _S1665 = - (&surface_11)->smooth_n;
-                    bool _S1666 = is_inside_6 != refracted_4;
-                    float3  _S1667 = _slang_select(_S1666, _S1665,_S1664);
-                    float3  _S1668 = throughput_9 - (_S1662 + make_float3 (_S1663) * _S1667);
-                    float3  _S1669 = ((((_S1668)) * make_float3(rnorm3df(((_S1668)).x, ((_S1668)).y, ((_S1668)).z))));
-                    reconnection_1 = _S1669;
+                    float3  _S1742 = (&ray_2)->origin;
+                    float _S1743 = (&surface_11)->geometry_offset;
+                    float3  _S1744 = (&surface_11)->smooth_n;
+                    float3  _S1745 = - (&surface_11)->smooth_n;
+                    bool _S1746 = is_inside_6 != refracted_4;
+                    float3  _S1747 = _slang_select(_S1746, _S1745,_S1744);
+                    float3  _S1748 = throughput_9 - (_S1742 + make_float3 (_S1743) * _S1747);
+                    float3  _S1749 = ((((_S1748)) * make_float3(rnorm3df(((_S1748)).x, ((_S1748)).y, ((_S1748)).z))));
+                    reconnection_1 = _S1749;
                 }
                 else
                 {
-                    reconnection_1 = _S1651;
+                    reconnection_1 = _S1731;
                 }
-                if(_S1493)
+                if(_S1573)
                 {
                     wrong_side_0 = false;
                 }
                 else
                 {
-                    bool _S1670 = wrongSide_0(is_inside_6, refracted_4, reconnection_1, (&surface_11)->geometry_n);
-                    wrong_side_0 = _S1670;
+                    bool _S1750 = wrongSide_0(is_inside_6, refracted_4, reconnection_1, (&surface_11)->geometry_n);
+                    wrong_side_0 = _S1750;
                 }
                 if(wrong_side_0)
                 {
-                    return _S1279;
+                    return _S1359;
                 }
-                float3  _S1671 = throughput_9;
+                float3  _S1751 = throughput_9;
                 throughput_9 = reconnection_1;
-                b_8 = _S1650;
+                b_8 = _S1730;
                 wrong_side_0 = false;
-                reconnection_1 = _S1671;
+                reconnection_1 = _S1751;
             }
             else
             {
-                bool _S1672 = !_S1529;
-                if(_S1672)
+                bool _S1752 = !_S1609;
+                if(_S1752)
                 {
                     SampleBSDF bsdf_sampled_0;
-                    SampleBSDF _S1673;
-                    if(_S1493)
+                    SampleBSDF _S1753;
+                    if(_S1573)
                     {
-                        SampleBSDF _S1674 = (fcptSampleHair(((&surface_11)->hair), (_S1487.albedo), (_S1487.specular_tint), ((&ray_2)->unit_direction), ((&surface_11)->random_state)));
-                        _S1673 = _S1674;
+                        SampleBSDF _S1754 = (fcptSampleHair(((&surface_11)->hair), (_S1567.albedo), (_S1567.specular_tint), ((&ray_2)->unit_direction), ((&surface_11)->random_state)));
+                        _S1753 = _S1754;
                     }
                     else
                     {
-                        SampleBSDF _S1675 = sampleBSDF((&ray_2)->unit_direction, (&surface_11)->smooth_n, _S1487, _S1488.x, _S1488.y, (&surface_11)->random_state);
-                        _S1673 = _S1675;
+                        SampleBSDF _S1755 = sampleBSDF((&ray_2)->unit_direction, (&surface_11)->smooth_n, _S1567, _S1568.x, _S1568.y, (&surface_11)->random_state);
+                        _S1753 = _S1755;
                     }
-                    bsdf_sampled_0 = _S1673;
-                    if(_S1493)
+                    bsdf_sampled_0 = _S1753;
+                    if(_S1573)
                     {
                         refracted_4 = !(((&bsdf_sampled_0)->pdf) > 0.0f);
                     }
@@ -6374,57 +6621,57 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                     {
                         if(replay_1)
                         {
-                            return _S1279;
+                            return _S1359;
                         }
                         break;
                     }
-                    if(_S1493)
+                    if(_S1573)
                     {
                         wrong_side_0 = false;
                     }
                     else
                     {
-                        bool _S1676 = wrongSide_0(is_inside_6, (&bsdf_sampled_0)->refracted, (&bsdf_sampled_0)->unit_direction, (&surface_11)->geometry_n);
-                        wrong_side_0 = _S1676;
+                        bool _S1756 = wrongSide_0(is_inside_6, (&bsdf_sampled_0)->refracted, (&bsdf_sampled_0)->unit_direction, (&surface_11)->geometry_n);
+                        wrong_side_0 = _S1756;
                     }
                     if(wrong_side_0)
                     {
-                        _S1573 = (_S1487.transmission) > 0.0f;
+                        _S1653 = (_S1567.transmission) > 0.0f;
                     }
                     else
                     {
-                        _S1573 = false;
+                        _S1653 = false;
                     }
-                    if(_S1573)
+                    if(_S1653)
                     {
-                        SampleBSDF _S1677 = sampleBSDF((&bsdf_sampled_0)->unit_direction, (&surface_11)->geometry_n, _S1487, _S1488.x, _S1488.y, (&bsdf_sampled_0)->random_state);
-                        (&bsdf_sampled_0)->unit_direction = _S1677.unit_direction;
-                        (&bsdf_sampled_0)->refracted = _S1677.refracted;
-                        (&bsdf_sampled_0)->throughput = _S1677.throughput;
+                        SampleBSDF _S1757 = sampleBSDF((&bsdf_sampled_0)->unit_direction, (&surface_11)->geometry_n, _S1567, _S1568.x, _S1568.y, (&bsdf_sampled_0)->random_state);
+                        (&bsdf_sampled_0)->unit_direction = _S1757.unit_direction;
+                        (&bsdf_sampled_0)->refracted = _S1757.refracted;
+                        (&bsdf_sampled_0)->throughput = _S1757.throughput;
                     }
                     else
                     {
                         if(wrong_side_0)
                         {
-                            float3  _S1678 = (&bsdf_sampled_0)->unit_direction - make_float3 (2.0f * dot_0((&bsdf_sampled_0)->unit_direction, (&surface_11)->geometry_n)) * (&surface_11)->geometry_n;
-                            (&bsdf_sampled_0)->unit_direction = _S1678;
+                            float3  _S1758 = (&bsdf_sampled_0)->unit_direction - make_float3 (2.0f * dot_0((&bsdf_sampled_0)->unit_direction, (&surface_11)->geometry_n)) * (&surface_11)->geometry_n;
+                            (&bsdf_sampled_0)->unit_direction = _S1758;
                         }
                     }
-                    uint _S1679 = (&bsdf_sampled_0)->lobe;
-                    float3  _S1680 = (&bsdf_sampled_0)->unit_direction;
-                    bool _S1681 = (&bsdf_sampled_0)->refracted;
+                    uint _S1759 = (&bsdf_sampled_0)->lobe;
+                    float3  _S1760 = (&bsdf_sampled_0)->unit_direction;
+                    bool _S1761 = (&bsdf_sampled_0)->refracted;
                     lobe_5 = bsdf_sampled_0;
-                    float _S1682 = (&bsdf_sampled_0)->pdf;
-                    float _S1683 = _slang_select(wrong_side_0, 0.0f,_S1682);
-                    (&lobe_5)->pdf = _S1683;
-                    throughput_9 = _S1680;
-                    b_8 = _S1679;
-                    refracted_4 = _S1681;
+                    float _S1762 = (&bsdf_sampled_0)->pdf;
+                    float _S1763 = _slang_select(wrong_side_0, 0.0f,_S1762);
+                    (&lobe_5)->pdf = _S1763;
+                    throughput_9 = _S1760;
+                    b_8 = _S1759;
+                    refracted_4 = _S1761;
                 }
                 else
                 {
-                    throughput_9 = _S1651;
-                    b_8 = _S1650;
+                    throughput_9 = _S1731;
+                    b_8 = _S1730;
                     wrong_side_0 = false;
                     refracted_4 = refracted_5;
                 }
@@ -6432,18 +6679,18 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(viewed_1)
             {
-                _S1573 = true;
+                _S1653 = true;
             }
             else
             {
-                _S1573 = _S1529;
+                _S1653 = _S1609;
             }
-            if(_S1573)
+            if(_S1653)
             {
-                if(_S1493)
+                if(_S1573)
                 {
-                    SampleBSDF _S1684 = (fcptConnectHair(((&surface_11)->hair), (_S1487.albedo), (_S1487.specular_tint), ((&ray_2)->unit_direction), (throughput_9)));
-                    lobe_5 = _S1684;
+                    SampleBSDF _S1764 = (fcptConnectHair(((&surface_11)->hair), (_S1567.albedo), (_S1567.specular_tint), ((&ray_2)->unit_direction), (throughput_9)));
+                    lobe_5 = _S1764;
                 }
                 else
                 {
@@ -6462,81 +6709,83 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                             b_9 = b_8;
                         }
                     }
-                    float _S1685 = _S1488.x;
-                    float _S1686 = _S1488.y;
-                    bool _S1687 = wrongSide_0(is_inside_6, false, throughput_9, (&surface_11)->geometry_n);
-                    FixedArray<float3 , 5>  throughputs_4;
-                    FixedArray<float, 5>  pdfs_4;
-                    float3  _S1688 = BSDF((&ray_2)->unit_direction, throughput_9, (&surface_11)->smooth_n, _S1487, _S1685, _S1686, _S1687, (&surface_11)->random_state, 1U << b_9, &throughputs_4, &pdfs_4);
-                    bool _S1689 = (pdfs_4[b_9]) > 0.0f;
-                    if(_S1689)
+                    float _S1765 = _S1568.x;
+                    float _S1766 = _S1568.y;
+                    bool _S1767 = wrongSide_0(is_inside_6, false, throughput_9, (&surface_11)->geometry_n);
+                    FixedArray<float3 , 6>  throughputs_4;
+                    FixedArray<float, 6>  pdfs_4;
+                    float3  _S1768 = BSDF((&ray_2)->unit_direction, throughput_9, (&surface_11)->smooth_n, _S1567, _S1765, _S1766, _S1767, (&surface_11)->random_state, 1U << b_9, &throughputs_4, &pdfs_4);
+                    bool _S1769 = (pdfs_4[b_9]) > 0.0f;
+                    if(_S1769)
                     {
-                        SampleBSDF _S1690 = SampleBSDF_x24init_0(throughput_9, throughputs_4[b_9], (&surface_11)->random_state, b_8 == 1U, b_8, pdfs_4[b_9]);
-                        lobe_5 = _S1690;
+                        SampleBSDF _S1770 = SampleBSDF_x24init_0(throughput_9, throughputs_4[b_9], (&surface_11)->random_state, b_8 == 1U, b_8, pdfs_4[b_9]);
+                        lobe_5 = _S1770;
                     }
                 }
             }
-            bool _S1691 = b_8 == 0U;
-            if(_S1691)
+            bool _S1771 = b_8 == 0U;
+            if(_S1771)
             {
-                _S1574 = true;
+                _S1654 = true;
             }
             else
             {
-                _S1574 = b_8 == 4U;
+                _S1654 = b_8 == 4U;
             }
-            if(_S1574)
+            if(_S1654)
             {
-                _S1632 = true;
-            }
-            else
-            {
-                _S1632 = b_8 == 6U;
-            }
-            if(_S1493)
-            {
-                _S1633 = false;
+                _S1712 = true;
             }
             else
             {
-                bool _S1692 = !_S1632;
-                if(_S1692)
+                _S1712 = b_8 == 6U;
+            }
+            bool _S1772 = b_8 == 5U;
+            float _S1773 = _slang_select(_S1772, _S1567.coat_roughness,_S1567.roughness);
+            if(_S1573)
+            {
+                _S1713 = false;
+            }
+            else
+            {
+                bool _S1774 = !_S1712;
+                if(_S1774)
                 {
-                    bool _S1693 = (_S1487.roughness) == 0.0f;
-                    if(_S1693)
+                    bool _S1775 = _S1773 == 0.0f;
+                    if(_S1775)
                     {
-                        _S1633 = true;
+                        _S1713 = true;
                     }
                     else
                     {
-                        bool _S1694 = b_8 == 1U;
-                        if(_S1694)
+                        bool _S1776 = b_8 == 1U;
+                        if(_S1776)
                         {
-                            _S1633 = (_S1488.x) == (_S1488.y);
+                            _S1713 = (_S1568.x) == (_S1568.y);
                         }
                         else
                         {
-                            _S1633 = false;
+                            _S1713 = false;
                         }
                     }
                 }
                 else
                 {
-                    _S1633 = false;
+                    _S1713 = false;
                 }
             }
-            bool _S1695 = !_S1493;
-            if(_S1695)
+            bool _S1777 = !_S1573;
+            if(_S1777)
             {
-                _S1634 = b_8 == 1U;
+                _S1714 = b_8 == 1U;
             }
             else
             {
-                _S1634 = false;
+                _S1714 = false;
             }
-            if(_S1634)
+            if(_S1714)
             {
-                straight_0 = (_S1487.ior) == 1.0f;
+                straight_0 = (_S1567.ior) == 1.0f;
             }
             else
             {
@@ -6544,290 +6793,290 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(viewed_0)
             {
-                _S1635 = _S1695;
+                _S1715 = _S1777;
             }
             else
             {
-                _S1635 = false;
+                _S1715 = false;
             }
-            if(_S1635)
+            if(_S1715)
             {
-                _S1636 = b_8 == 1U;
-            }
-            else
-            {
-                _S1636 = false;
-            }
-            if(_S1636)
-            {
-                _S1637 = (_S1488.x) == (_S1488.y);
+                _S1716 = b_8 == 1U;
             }
             else
             {
-                _S1637 = false;
+                _S1716 = false;
             }
-            BSDFMaterial _S1696 = _S1487;
-            bool _S1697 = isTranslucent_0(&_S1696);
-            if(_S1697)
+            if(_S1716)
             {
-                _S1638 = _S1691;
+                _S1717 = (_S1568.x) == (_S1568.y);
             }
             else
             {
-                _S1638 = false;
+                _S1717 = false;
             }
-            if(_S1638)
+            BSDFMaterial _S1778 = _S1567;
+            bool _S1779 = isTranslucent_0(&_S1778);
+            if(_S1779)
             {
-                _S1639 = (dot_0(throughput_9, (&surface_11)->geometry_n)) < 0.0f;
+                _S1718 = _S1771;
             }
             else
             {
-                _S1639 = false;
+                _S1718 = false;
+            }
+            if(_S1718)
+            {
+                _S1719 = (dot_0(throughput_9, (&surface_11)->geometry_n)) < 0.0f;
+            }
+            else
+            {
+                _S1719 = false;
             }
             if(nee_0)
             {
-                _S1640 = !_S1633;
+                _S1720 = !_S1713;
             }
             else
             {
-                _S1640 = false;
+                _S1720 = false;
             }
-            if(_S1640)
+            if(_S1720)
             {
-                _S1641 = !wrong_side_0;
-            }
-            else
-            {
-                _S1641 = false;
-            }
-            if(_S1641)
-            {
-                float _S1698 = (&lobe_5)->pdf;
-                float3  _S1699 = (&ray_2)->origin;
-                float3  _S1700 = (&surface_11)->smooth_n;
-                float3  _S1701 = _slang_select(_S1497, _S1278,_S1700);
-                float3  _S1702 = (&ray_2)->origin;
-                float _S1703 = (&surface_11)->geometry_offset;
-                float3  _S1704 = (&surface_11)->smooth_n;
-                float3  _S1705 = - (&surface_11)->smooth_n;
-                float3  _S1706 = _slang_select(_S1639, _S1705,_S1704);
-                NEEVertex _S1707 = NEEVertex_x24init_0(false, _S1698, _S1699, _S1701, _S1702 + make_float3 (_S1703) * _S1706);
-                nee_vertex_0 = _S1707;
+                _S1721 = !wrong_side_0;
             }
             else
             {
-                if(_S1493)
+                _S1721 = false;
+            }
+            if(_S1721)
+            {
+                float _S1780 = (&lobe_5)->pdf;
+                float3  _S1781 = (&ray_2)->origin;
+                float3  _S1782 = (&surface_11)->smooth_n;
+                float3  _S1783 = _slang_select(_S1577, _S1358,_S1782);
+                float3  _S1784 = (&ray_2)->origin;
+                float _S1785 = (&surface_11)->geometry_offset;
+                float3  _S1786 = (&surface_11)->smooth_n;
+                float3  _S1787 = - (&surface_11)->smooth_n;
+                float3  _S1788 = _slang_select(_S1719, _S1787,_S1786);
+                NEEVertex _S1789 = NEEVertex_x24init_0(false, _S1780, _S1781, _S1783, _S1784 + make_float3 (_S1785) * _S1788);
+                nee_vertex_0 = _S1789;
+            }
+            else
+            {
+                if(_S1573)
                 {
-                    _S1642 = true;
+                    _S1722 = true;
                 }
                 else
                 {
-                    bool _S1708 = b_8 != 1U;
-                    if(_S1708)
+                    bool _S1790 = b_8 != 1U;
+                    if(_S1790)
                     {
-                        _S1642 = true;
+                        _S1722 = true;
                     }
                     else
                     {
-                        _S1642 = (_S1488.x) != (_S1488.y);
+                        _S1722 = (_S1568.x) != (_S1568.y);
                     }
                 }
-                if(_S1642)
+                if(_S1722)
                 {
                     (&nee_vertex_0)->none = true;
                 }
             }
-            bool _S1709 = ((&lobe_5)->pdf) > 0.0f;
-            if(_S1709)
+            bool _S1791 = ((&lobe_5)->pdf) > 0.0f;
+            if(_S1791)
             {
-                if(_S1632)
-                {
-                    _S1642 = true;
-                }
-                else
-                {
-                    _S1642 = ((&lobe_5)->pdf * (&prev_0)->cos / ((&hit_4)->distance * (&hit_4)->distance) * threshold_0) <= 1.0f;
-                }
-            }
-            else
-            {
-                _S1642 = false;
-            }
-            bool _S1710 = ((&lobe_5)->pdf) > 0.0f;
-            if(_S1710)
-            {
-                if(_S1632)
-                {
-                    _S1643 = true;
-                }
-                else
-                {
-                    _S1643 = (_S1487.roughness) >= 0.20000000298023224f;
-                }
-            }
-            else
-            {
-                _S1643 = false;
-            }
-            if(_S1529)
-            {
-                bool _S1711 = !_S1642;
-                if(_S1711)
-                {
-                    return _S1279;
-                }
-                bool _S1712 = _S1284 != 1U;
                 if(_S1712)
                 {
-                    _S1644 = _S1284 != 2U;
+                    _S1722 = true;
                 }
                 else
                 {
-                    _S1644 = false;
+                    _S1722 = ((&lobe_5)->pdf * (&prev_0)->cos / ((&hit_4)->distance * (&hit_4)->distance) * threshold_0) <= 1.0f;
                 }
-                if(_S1644)
+            }
+            else
+            {
+                _S1722 = false;
+            }
+            bool _S1792 = ((&lobe_5)->pdf) > 0.0f;
+            if(_S1792)
+            {
+                if(_S1712)
                 {
-                    float _S1713 = (&lobe_5)->pdf;
-                    float _S1714 = _slang_select(nee_0, _S1713,0.0f);
-                    float _S1715 = escapeWeight_0(_S1714, _S1651);
-                    if(_S1537)
+                    _S1723 = true;
+                }
+                else
+                {
+                    _S1723 = _S1773 >= 0.20000000298023224f;
+                }
+            }
+            else
+            {
+                _S1723 = false;
+            }
+            if(_S1609)
+            {
+                bool _S1793 = !_S1722;
+                if(_S1793)
+                {
+                    return _S1359;
+                }
+                bool _S1794 = _S1364 != 1U;
+                if(_S1794)
+                {
+                    _S1724 = _S1364 != 2U;
+                }
+                else
+                {
+                    _S1724 = false;
+                }
+                if(_S1724)
+                {
+                    float _S1795 = (&lobe_5)->pdf;
+                    float _S1796 = _slang_select(nee_0, _S1795,0.0f);
+                    float _S1797 = escapeWeight_0(_S1796, _S1731);
+                    if(_S1617)
                     {
-                        passes_0 = _S1290;
+                        passes_0 = _S1370;
                     }
                     else
                     {
                         passes_0 = false;
                     }
-                    float _S1716 = _slang_select(passes_0, _S1715,1.0f);
-                    return Shift_x24init_0(throughput_7 * ((&lobe_5)->throughput * make_float3 ((&lobe_5)->pdf)) * r_8->radiance * make_float3 (_S1716) / make_float3 (r_8->jac), density_4 * (&lobe_5)->pdf / r_8->jac);
+                    float _S1798 = _slang_select(passes_0, _S1797,1.0f);
+                    return Shift_x24init_0(throughput_7 * ((&lobe_5)->throughput * make_float3 ((&lobe_5)->pdf)) * r_8->radiance * make_float3 (_S1798) / make_float3 (r_8->jac), density_4 * (&lobe_5)->pdf / r_8->jac);
                 }
-                float3  _S1717 = throughput_7 * make_float3 ((&lobe_5)->pdf);
-                float _S1718 = density_4 * (&lobe_5)->pdf;
-                throughput_10 = _S1717;
-                density_6 = _S1718;
+                float3  _S1799 = throughput_7 * make_float3 ((&lobe_5)->pdf);
+                float _S1800 = density_4 * (&lobe_5)->pdf;
+                throughput_10 = _S1799;
+                density_6 = _S1800;
             }
             else
             {
                 throughput_10 = throughput_7;
                 density_6 = density_4;
             }
-            uint _S1719 = (fcptLayers((hit_4)));
-            bool _S1720 = _S1719 > 1U;
-            if(_S1720)
+            uint _S1801 = (fcptLayers((hit_4)));
+            bool _S1802 = _S1801 > 1U;
+            if(_S1802)
             {
-                _S1644 = (b_8 == 1U) != passes_0;
+                _S1724 = (b_8 == 1U) != passes_0;
             }
             else
             {
-                _S1644 = false;
+                _S1724 = false;
             }
             if(viewed_1)
             {
-                _S1645 = _S1644;
+                _S1725 = _S1724;
             }
             else
             {
-                _S1645 = false;
+                _S1725 = false;
             }
-            if(_S1645)
+            if(_S1725)
             {
-                return _S1279;
+                return _S1359;
             }
             if(replay_1)
             {
-                _S1646 = b_6 <= _S1294;
-            }
-            else
-            {
-                _S1646 = false;
-            }
-            if(_S1646)
-            {
-                _S1647 = _S1464;
-            }
-            else
-            {
-                _S1647 = false;
-            }
-            bool _S1721;
-            if(_S1647)
-            {
-                _S1721 = _S1642;
-            }
-            else
-            {
-                _S1721 = false;
-            }
-            bool _S1722;
-            if(_S1721)
-            {
-                _S1722 = true;
-            }
-            else
-            {
-                if(viewed_1)
-                {
-                    _S1722 = !_S1643;
-                }
-                else
-                {
-                    _S1722 = false;
-                }
-            }
-            if(_S1722)
-            {
-                return _S1279;
-            }
-            if(viewed_1)
-            {
-                float3  _S1723 = throughput_10 * ((&lobe_5)->throughput * make_float3 ((&lobe_5)->pdf));
-                float _S1724 = (&lobe_5)->pdf;
-                throughput_11 = _S1723;
-                sky_pdf_2 = _S1724;
-            }
-            else
-            {
-                float3  _S1725 = throughput_10 * max_0((&lobe_5)->throughput, _S1278);
-                throughput_11 = _S1725;
-                sky_pdf_2 = density_6;
-            }
-            bool _S1726;
-            if(_S1501)
-            {
-                _S1726 = !_S1516;
+                _S1726 = b_6 <= _S1374;
             }
             else
             {
                 _S1726 = false;
             }
-            bool _S1727;
             if(_S1726)
             {
-                _S1727 = _S1464;
+                _S1727 = _S1544;
             }
             else
             {
                 _S1727 = false;
             }
-            bool _S1728;
+            bool _S1803;
             if(_S1727)
             {
-                _S1728 = _S1642;
+                _S1803 = _S1722;
             }
             else
             {
-                _S1728 = false;
+                _S1803 = false;
+            }
+            bool _S1804;
+            if(_S1803)
+            {
+                _S1804 = true;
+            }
+            else
+            {
+                if(viewed_1)
+                {
+                    _S1804 = !_S1723;
+                }
+                else
+                {
+                    _S1804 = false;
+                }
+            }
+            if(_S1804)
+            {
+                return _S1359;
+            }
+            if(viewed_1)
+            {
+                float3  _S1805 = throughput_10 * ((&lobe_5)->throughput * make_float3 ((&lobe_5)->pdf));
+                float _S1806 = (&lobe_5)->pdf;
+                throughput_11 = _S1805;
+                sky_pdf_2 = _S1806;
+            }
+            else
+            {
+                float3  _S1807 = throughput_10 * max_0((&lobe_5)->throughput, _S1358);
+                throughput_11 = _S1807;
+                sky_pdf_2 = density_6;
+            }
+            bool _S1808;
+            if(_S1581)
+            {
+                _S1808 = !_S1596;
+            }
+            else
+            {
+                _S1808 = false;
+            }
+            bool _S1809;
+            if(_S1808)
+            {
+                _S1809 = _S1544;
+            }
+            else
+            {
+                _S1809 = false;
+            }
+            bool _S1810;
+            if(_S1809)
+            {
+                _S1810 = _S1722;
+            }
+            else
+            {
+                _S1810 = false;
             }
             float3  chain_throughput_1;
-            if(_S1728)
+            if(_S1810)
             {
                 chain_0 = here_0;
-                uint _S1729 = insertBits_0((&chain_0)->path, b_8, 18U, 3U);
-                uint _S1730 = _slang_select(nee_0, 1U,0U);
-                uint _S1731 = insertBits_0(_S1729, _S1730, 21U, 1U);
-                (&chain_0)->path = _S1731;
-                float _S1732 = (&chain_0)->jac * (&lobe_5)->pdf;
-                (&chain_0)->jac = _S1732;
+                uint _S1811 = insertBits_0((&chain_0)->path, b_8, 18U, 3U);
+                uint _S1812 = _slang_select(nee_0, 1U,0U);
+                uint _S1813 = insertBits_0(_S1811, _S1812, 21U, 1U);
+                (&chain_0)->path = _S1813;
+                float _S1814 = (&chain_0)->jac * (&lobe_5)->pdf;
+                (&chain_0)->jac = _S1814;
                 (&chain_0)->dir = throughput_9;
                 chain_throughput_1 = throughput_11;
             }
@@ -6835,112 +7084,112 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             {
                 chain_throughput_1 = chain_throughput_0;
             }
-            Vertex _S1733 = Vertex_x24init_0(_S1643, b_8, (&lobe_5)->pdf, (F32_abs((dot_0((&surface_11)->geometry_n, throughput_9)))), is_inside_6);
-            prev_0 = _S1733;
-            float _S1734 = (&lobe_5)->pdf;
-            bool _S1735 = b_8 == 1U;
-            bool _S1736;
-            if(_S1735)
+            Vertex _S1815 = Vertex_x24init_0(_S1723, b_8, (&lobe_5)->pdf, (F32_abs((dot_0((&surface_11)->geometry_n, throughput_9)))), is_inside_6);
+            prev_0 = _S1815;
+            float _S1816 = (&lobe_5)->pdf;
+            bool _S1817 = b_8 == 1U;
+            bool _S1818;
+            if(_S1817)
             {
-                _S1736 = (_S1488.x) == (_S1488.y);
+                _S1818 = (_S1568.x) == (_S1568.y);
             }
             else
             {
-                _S1736 = false;
+                _S1818 = false;
             }
-            float sky_pdf_3 = _slang_select(_S1736, sky_pdf_0,_S1734);
-            float _S1737 = _slang_select(_S1493, 0.0f,sky_pdf_3);
-            float _S1738 = (F32_min((2.0f * (F32_sqrt((1.0f / (3.14159274101257324f * (&lobe_5)->pdf))))), (3.14159274101257324f)));
-            bool _S1739 = !_S1633;
-            float _S1740 = _slang_select(_S1739, _S1738,0.0f);
-            float _S1741 = spread_1 + _S1740;
-            bool _S1742;
+            float sky_pdf_3 = _slang_select(_S1818, sky_pdf_0,_S1816);
+            float _S1819 = _slang_select(_S1573, 0.0f,sky_pdf_3);
+            float _S1820 = (F32_min((2.0f * (F32_sqrt((1.0f / (3.14159274101257324f * (&lobe_5)->pdf))))), (3.14159274101257324f)));
+            bool _S1821 = !_S1713;
+            float _S1822 = _slang_select(_S1821, _S1820,0.0f);
+            float _S1823 = spread_1 + _S1822;
+            bool _S1824;
             if(refracted_4)
             {
-                _S1742 = !_S1639;
+                _S1824 = !_S1719;
             }
             else
             {
-                _S1742 = false;
+                _S1824 = false;
             }
             bool is_inside_7;
-            if(_S1742)
+            if(_S1824)
             {
-                bool _S1743 = !is_inside_6;
-                is_inside_7 = _S1743;
+                bool _S1825 = !is_inside_6;
+                is_inside_7 = _S1825;
             }
             else
             {
                 is_inside_7 = is_inside_6;
             }
-            FKSurface _S1744 = surface_11;
-            bool _S1745 = boundsVolume_0(&_S1744);
-            bool _S1746;
-            if(_S1745)
+            FKSurface _S1826 = surface_11;
+            bool _S1827 = boundsVolume_0(&_S1826);
+            bool _S1828;
+            if(_S1827)
             {
-                _S1746 = !_S1644;
+                _S1828 = !_S1724;
             }
             else
             {
-                _S1746 = false;
+                _S1828 = false;
             }
-            if(_S1746)
+            if(_S1828)
             {
                 FKSurface faced_2 = surface_11;
-                float3  _S1747 = (&surface_11)->geometry_n;
-                float3  _S1748 = - (&surface_11)->geometry_n;
-                float3  _S1749 = _slang_select(turned_1, _S1748,_S1747);
-                (&faced_2)->geometry_n = _S1749;
-                FKMedium _S1750 = Medium_x24init_0(scatter_in_0, extinction_in_0, g_in_0);
-                FKMedium _S1751 = (fcptOutsideMedium((hit_4)));
-                FKSurface _S1752 = faced_2;
-                FKMedium _S1753 = _S1750;
-                FKMedium _S1754 = _S1751;
-                MediumSides _S1755 = mediumSides_0(&_S1752, &_S1753, filling_2, (&ray_2)->unit_direction, &_S1754);
-                bool _S1756 = ((dot_0(throughput_9, (&surface_11)->geometry_n)) > 0.0f) == ((dot_0((&surface_11)->geometry_n, (&faced_2)->geometry_n)) > 0.0f);
-                float3  _S1757 = _slang_select(_S1756, _S1755.front.scatter,_S1755.behind.scatter);
-                scatter_in_0 = _S1757;
-                float3  _S1758 = scatter_in_0;
-                float _S1759 = upsample(scatter_in_0, wavelength_9);
-                float3  _S1760 = make_float3 (_S1759);
-                float3  _S1761 = _slang_select(_S1524, _S1760,_S1758);
-                scatter_in_0 = _S1761;
-                float3  _S1762 = _slang_select(_S1756, _S1755.front.extinction,_S1755.behind.extinction);
-                extinction_in_0 = _S1762;
-                float3  _S1763 = extinction_in_0;
-                float _S1764 = upsample(extinction_in_0, wavelength_9);
-                float3  _S1765 = make_float3 (_S1764);
-                float3  _S1766 = _slang_select(_S1524, _S1765,_S1763);
-                extinction_in_0 = _S1766;
-                float _S1767 = _slang_select(_S1756, _S1755.front.g,_S1755.behind.g);
-                g_in_0 = _S1767;
-                uint _S1768 = _S1755.fillings.x;
-                uint _S1769 = _S1755.fillings.y;
-                uint _S1770 = _slang_select(_S1756, _S1769,_S1768);
-                bool _S1771 = (fcptVaryingUsed());
-                uint _S1772 = _slang_select(_S1771, _S1770,4294967295U);
-                filling_2 = _S1772;
+                float3  _S1829 = (&surface_11)->geometry_n;
+                float3  _S1830 = - (&surface_11)->geometry_n;
+                float3  _S1831 = _slang_select(turned_1, _S1830,_S1829);
+                (&faced_2)->geometry_n = _S1831;
+                FKMedium _S1832 = Medium_x24init_0(scatter_in_0, extinction_in_0, g_in_0);
+                FKMedium _S1833 = (fcptOutsideMedium((hit_4)));
+                FKSurface _S1834 = faced_2;
+                FKMedium _S1835 = _S1832;
+                FKMedium _S1836 = _S1833;
+                MediumSides _S1837 = mediumSides_0(&_S1834, &_S1835, filling_2, (&ray_2)->unit_direction, &_S1836);
+                bool _S1838 = ((dot_0(throughput_9, (&surface_11)->geometry_n)) > 0.0f) == ((dot_0((&surface_11)->geometry_n, (&faced_2)->geometry_n)) > 0.0f);
+                float3  _S1839 = _slang_select(_S1838, _S1837.front.scatter,_S1837.behind.scatter);
+                scatter_in_0 = _S1839;
+                float3  _S1840 = scatter_in_0;
+                float _S1841 = upsample(scatter_in_0, wavelength_9);
+                float3  _S1842 = make_float3 (_S1841);
+                float3  _S1843 = _slang_select(_S1604, _S1842,_S1840);
+                scatter_in_0 = _S1843;
+                float3  _S1844 = _slang_select(_S1838, _S1837.front.extinction,_S1837.behind.extinction);
+                extinction_in_0 = _S1844;
+                float3  _S1845 = extinction_in_0;
+                float _S1846 = upsample(extinction_in_0, wavelength_9);
+                float3  _S1847 = make_float3 (_S1846);
+                float3  _S1848 = _slang_select(_S1604, _S1847,_S1845);
+                extinction_in_0 = _S1848;
+                float _S1849 = _slang_select(_S1838, _S1837.front.g,_S1837.behind.g);
+                g_in_0 = _S1849;
+                uint _S1850 = _S1837.fillings.x;
+                uint _S1851 = _S1837.fillings.y;
+                uint _S1852 = _slang_select(_S1838, _S1851,_S1850);
+                bool _S1853 = (fcptVaryingUsed());
+                uint _S1854 = _slang_select(_S1853, _S1852,4294967295U);
+                filling_2 = _S1854;
             }
             (&ray_2)->unit_direction = throughput_9;
-            bool _S1773 = !_S1644;
-            if(_S1773)
+            bool _S1855 = !_S1724;
+            if(_S1855)
             {
-                float _S1774 = (&surface_11)->geometry_offset;
-                float _S1775 = _slang_select(straight_0, 0.0f,_S1774);
-                float3  _S1776 = (&surface_11)->smooth_n;
-                float3  _S1777 = - (&surface_11)->smooth_n;
-                bool _S1778 = is_inside_7 != _S1639;
-                float3  _S1779 = _slang_select(_S1778, _S1777,_S1776);
-                float3  _S1780 = (&ray_2)->origin + make_float3 (_S1775) * _S1779;
-                (&ray_2)->origin = _S1780;
+                float _S1856 = (&surface_11)->geometry_offset;
+                float _S1857 = _slang_select(straight_0, 0.0f,_S1856);
+                float3  _S1858 = (&surface_11)->smooth_n;
+                float3  _S1859 = - (&surface_11)->smooth_n;
+                bool _S1860 = is_inside_7 != _S1719;
+                float3  _S1861 = _slang_select(_S1860, _S1859,_S1858);
+                float3  _S1862 = (&ray_2)->origin + make_float3 (_S1857) * _S1861;
+                (&ray_2)->origin = _S1862;
             }
             throughput_10 = throughput_11;
             chain_throughput_0 = chain_throughput_1;
             density_6 = sky_pdf_2;
-            passes_0 = _S1644;
-            viewed_1 = _S1637;
-            sky_pdf_2 = _S1737;
-            spread_4 = _S1741;
+            passes_0 = _S1724;
+            viewed_1 = _S1717;
+            sky_pdf_2 = _S1819;
+            spread_4 = _S1823;
             reconnection_0 = reconnection_1;
             is_inside_5 = is_inside_7;
         }
@@ -6958,23 +7207,23 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             is_inside_5 = is_inside_6;
         }
         float density_7;
-        if(_S1501)
+        if(_S1581)
         {
-            if(_S1427)
+            if(_S1507)
             {
-                float3  _S1781 = pathColor(throughput_10 * emission_1, spectral_weight_0, wavelength_9);
+                float3  _S1863 = pathColor(throughput_10 * emission_1, spectral_weight_0, wavelength_9);
                 Reservoir candidate_8 = chain_0;
-                uint _S1782 = extractBits_0((&chain_0)->path, 10U, 2U);
-                bool _S1783 = _S1782 == 1U;
-                if(_S1783)
+                uint _S1864 = extractBits_0((&chain_0)->path, 10U, 2U);
+                bool _S1865 = _S1864 == 1U;
+                if(_S1865)
                 {
-                    float3  _S1784 = safeDivide(_S1781, chain_throughput_0);
-                    (&candidate_8)->radiance = _S1784;
+                    float3  _S1866 = safeDivide(_S1863, chain_throughput_0);
+                    (&candidate_8)->radiance = _S1866;
                 }
-                Reservoir _S1785 = withEnd(candidate_8, 2U, b_6, _S1781);
-                offer(sel_7, _S1785, _S1781 * make_float3 (scale_3) / make_float3 (density_6));
+                Reservoir _S1867 = withEnd(candidate_8, 2U, b_6, _S1863);
+                offer(sel_7, _S1867, _S1863 * make_float3 (scale_3) / make_float3 (density_6));
             }
-            if(_S1427)
+            if(_S1507)
             {
                 refracted_4 = true;
             }
@@ -6984,38 +7233,38 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             }
             if(refracted_4)
             {
-                float _S1786 = survivalProbability(abs_0(throughput_10), density_6);
-                density_7 = _S1786;
+                float _S1868 = survivalProbability(abs_0(throughput_10), density_6);
+                density_7 = _S1868;
             }
             else
             {
                 density_7 = 1.0f;
             }
-            uint _S1787 = noiseAddress(_S1306, b_6);
-            Random _S1788 = draw(_S1787, 8U);
-            bool _S1789 = density_7 < (_S1788.value);
-            if(_S1789)
+            uint _S1869 = noiseAddress(_S1386, b_6);
+            Random _S1870 = draw(_S1869, 8U);
+            bool _S1871 = density_7 < (_S1870.value);
+            if(_S1871)
             {
                 wrong_side_0 = true;
             }
             else
             {
-                uint _S1790 = (fcptMaxBounces());
-                wrong_side_0 = b_6 >= _S1790;
+                uint _S1872 = (fcptMaxBounces());
+                wrong_side_0 = b_6 >= _S1872;
             }
             if(wrong_side_0)
             {
                 break;
             }
-            float _S1791 = density_6 * density_7;
-            density_7 = _S1791;
+            float _S1873 = density_6 * density_7;
+            density_7 = _S1873;
         }
         else
         {
             density_7 = density_6;
         }
-        uint _S1792 = layer_0 ^ 1U;
-        uint _S1793 = _slang_select(passes_0, _S1792,0U);
+        uint _S1874 = layer_0 ^ 1U;
+        uint _S1875 = _slang_select(passes_0, _S1874,0U);
         if(passes_0)
         {
             (&prev_0)->rough = false;
@@ -7026,16 +7275,16 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
             density_2 = density_7;
             sky_pdf_0 = sky_pdf_2;
             spread_1 = spread_4;
-            uint _S1794 = b_8 + 1U;
-            b_6 = _S1794;
-            layer_0 = _S1793;
+            uint _S1876 = b_8 + 1U;
+            b_6 = _S1876;
+            layer_0 = _S1875;
             continue;
         }
-        FKRay _S1795 = ray_2;
-        float _S1796 = distance_1(reconnection_0, (&ray_2)->origin) * 1.0010000467300415f;
+        FKRay _S1877 = ray_2;
+        float _S1878 = distance_1(reconnection_0, (&ray_2)->origin) * 1.0010000467300415f;
         if(replay_1)
         {
-            refracted_4 = _S1530;
+            refracted_4 = _S1610;
         }
         else
         {
@@ -7043,175 +7292,175 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
         }
         if(refracted_4)
         {
-            wrong_side_0 = _S1283 == 1U;
+            wrong_side_0 = _S1363 == 1U;
         }
         else
         {
             wrong_side_0 = false;
         }
-        float _S1797 = _slang_select(wrong_side_0, _S1796,4.294967296e+09f);
-        bool _S1798 = !_S1493;
+        float _S1879 = _slang_select(wrong_side_0, _S1878,4.294967296e+09f);
+        bool _S1880 = !_S1573;
         if(straight_0)
         {
-            _S1573 = true;
+            _S1653 = true;
         }
         else
         {
-            _S1573 = _S1493;
+            _S1653 = _S1573;
         }
-        FKHit _S1799;
-        if(_S1573)
+        FKHit _S1881;
+        if(_S1653)
         {
-            _S1799 = hit_4;
+            _S1881 = hit_4;
         }
         else
         {
-            _S1799 = _S1546;
+            _S1881 = _S1626;
         }
-        FKHit _S1800 = (fcptTraverseInstanceBVH((_S1795), (_S1434), (_S1797), (_S1798), (_S1799), (viewed_1)));
-        hit_4 = _S1800;
+        FKHit _S1882 = (fcptTraverseInstanceBVH((_S1877), (_S1514), (_S1879), (_S1880), (_S1881), (viewed_1)));
+        hit_4 = _S1882;
         if(replay_1)
         {
-            _S1574 = _S1530;
+            _S1654 = _S1610;
         }
         else
         {
-            _S1574 = false;
+            _S1654 = false;
         }
-        if(_S1574)
+        if(_S1654)
         {
-            _S1632 = _S1283 == 1U;
-        }
-        else
-        {
-            _S1632 = false;
-        }
-        if(_S1632)
-        {
-            _S1633 = ((&hit_4)->instance_index) == (_S1295.instance_index);
+            _S1712 = _S1363 == 1U;
         }
         else
         {
-            _S1633 = false;
+            _S1712 = false;
         }
-        if(_S1633)
+        if(_S1712)
         {
-            _S1634 = ((&hit_4)->triangle_index) == (_S1295.triangle_index);
+            _S1713 = ((&hit_4)->instance_index) == (_S1375.instance_index);
         }
         else
         {
-            _S1634 = false;
+            _S1713 = false;
         }
-        if(_S1634)
+        if(_S1713)
         {
-            (&hit_4)->uv = _S1295.uv;
-            float _S1801 = distance_1(reconnection_0, (&ray_2)->origin);
-            (&hit_4)->distance = _S1801;
+            _S1714 = ((&hit_4)->triangle_index) == (_S1375.triangle_index);
+        }
+        else
+        {
+            _S1714 = false;
+        }
+        if(_S1714)
+        {
+            (&hit_4)->uv = _S1375.uv;
+            float _S1883 = distance_1(reconnection_0, (&ray_2)->origin);
+            (&hit_4)->distance = _S1883;
         }
         if(replay_1)
         {
-            _S1635 = _S1530;
+            _S1715 = _S1610;
         }
         else
         {
-            _S1635 = false;
+            _S1715 = false;
         }
-        if(_S1635)
+        if(_S1715)
         {
-            _S1636 = _S1283 == 3U;
+            _S1716 = _S1363 == 3U;
         }
         else
         {
-            _S1636 = false;
+            _S1716 = false;
         }
-        if(_S1636)
+        if(_S1716)
         {
-            _S1637 = ((&hit_4)->instance_index) != 4294967295U;
+            _S1717 = ((&hit_4)->instance_index) != 4294967295U;
         }
         else
         {
-            _S1637 = false;
+            _S1717 = false;
         }
-        if(_S1637)
+        if(_S1717)
         {
-            return _S1279;
+            return _S1359;
         }
-        Reservoir _S1802 = chain_0;
-        uint _S1803 = filling_2;
+        Reservoir _S1884 = chain_0;
+        uint _S1885 = filling_2;
         for(;;)
         {
-            bool _S1804 = (fcptVaryingUsed());
-            if(_S1804)
+            bool _S1886 = (fcptVaryingUsed());
+            if(_S1886)
             {
-                _S1638 = _S1803 != 4294967295U;
+                _S1718 = _S1885 != 4294967295U;
             }
             else
             {
-                _S1638 = false;
+                _S1718 = false;
             }
-            float _S1805;
-            if(_S1638)
+            float _S1887;
+            if(_S1718)
             {
-                float _S1806 = (fcptMajorant((_S1803)));
-                _S1805 = _S1806;
+                float _S1888 = (fcptMajorant((_S1885)));
+                _S1887 = _S1888;
             }
             else
             {
-                _S1805 = (scatter_in_0.x + scatter_in_0.y + scatter_in_0.z) / 3.0f;
+                _S1887 = (scatter_in_0.x + scatter_in_0.y + scatter_in_0.z) / 3.0f;
             }
             if(replay_1)
             {
-                _S1639 = _S1530;
+                _S1719 = _S1610;
             }
             else
             {
-                _S1639 = false;
+                _S1719 = false;
             }
-            if(_S1639)
+            if(_S1719)
             {
-                _S1640 = _S1283 == 1U;
-            }
-            else
-            {
-                _S1640 = false;
-            }
-            if(_S1640)
-            {
-                _S1641 = _S1805 > 0.0f;
+                _S1720 = _S1363 == 1U;
             }
             else
             {
-                _S1641 = false;
+                _S1720 = false;
             }
-            if(_S1641)
+            if(_S1720)
             {
-                ended_0 = _S1279;
+                _S1721 = _S1887 > 0.0f;
+            }
+            else
+            {
+                _S1721 = false;
+            }
+            if(_S1721)
+            {
+                ended_0 = _S1359;
                 sky_pdf_1 = sky_pdf_2;
                 spread_2 = spread_4;
                 width_4 = width_3;
                 density_3 = density_7;
                 throughput_11 = throughput_10;
                 b_8 = b_6;
-                _S1642 = true;
+                _S1722 = true;
                 break;
             }
-            bool _S1807 = (&prev_0)->rough;
-            if(_S1807)
+            bool _S1889 = (&prev_0)->rough;
+            if(_S1889)
             {
-                _S1642 = !(_S1805 > 0.0f);
+                _S1722 = !(_S1887 > 0.0f);
             }
             else
             {
-                _S1642 = false;
+                _S1722 = false;
             }
-            (&prev_0)->rough = _S1642;
-            uint _S1808 = b_6 + 320U;
-            bool _S1809 = b_6 == 4294967295U;
-            uint _S1810 = _slang_select(_S1809, 384U,_S1808);
-            uint _S1811 = stream(_S1306, _S1810);
-            uint tracking_1 = _S1811;
+            (&prev_0)->rough = _S1722;
+            uint _S1890 = b_6 + 320U;
+            bool _S1891 = b_6 == 4294967295U;
+            uint _S1892 = _slang_select(_S1891, 384U,_S1890);
+            uint _S1893 = stream(_S1386, _S1892);
+            uint tracking_1 = _S1893;
             weight_2 = throughput_3;
-            glowed_0 = _S1278;
+            glowed_0 = _S1358;
             b_8 = b_6;
             throughput_11 = throughput_10;
             density_3 = density_7;
@@ -7225,267 +7474,267 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 else
                 {
-                    _S1277 = int(2);
+                    _S1357 = int(2);
                     break;
                 }
-                uint _S1812 = noiseAddress(_S1306, b_8);
-                Random _S1813 = draw(_S1812, 10U);
-                float _S1814 = - (F32_log((1.0f - _S1813.value))) / _S1805;
-                if(_S1638)
+                uint _S1894 = noiseAddress(_S1386, b_8);
+                Random _S1895 = draw(_S1894, 10U);
+                float _S1896 = - (F32_log((1.0f - _S1895.value))) / _S1887;
+                if(_S1718)
                 {
-                    float3  _S1815 = (&ray_2)->origin;
-                    float3  _S1816 = (&ray_2)->unit_direction;
-                    float _S1817 = (&hit_4)->distance;
-                    bool _S1818 = b_8 == 4294967295U;
-                    uint _S1819 = _slang_select(_S1818, 0U,b_8);
-                    uint _S1820 = (&prev_0)->lobe;
-                    uint _S1821 = _slang_select(_S1818, 3U,_S1820);
-                    float _S1822 = (fcptTrackMedium((_S1803), (_S1815), (_S1816), (_S1817), (&tracking_1), (&weight_2), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (&g_in_0), (_S1819), (_S1821), (_S1818)));
-                    spread_3 = _S1822;
+                    float3  _S1897 = (&ray_2)->origin;
+                    float3  _S1898 = (&ray_2)->unit_direction;
+                    float _S1899 = (&hit_4)->distance;
+                    bool _S1900 = b_8 == 4294967295U;
+                    uint _S1901 = _slang_select(_S1900, 0U,b_8);
+                    uint _S1902 = (&prev_0)->lobe;
+                    uint _S1903 = _slang_select(_S1900, 3U,_S1902);
+                    float _S1904 = (fcptTrackMedium((_S1885), (_S1897), (_S1898), (_S1899), (&tracking_1), (&weight_2), (&glowed_0), (&scatter_in_0), (&extinction_in_0), (&g_in_0), (_S1901), (_S1903), (_S1900)));
+                    spread_3 = _S1904;
                 }
                 else
                 {
-                    spread_3 = _S1814;
+                    spread_3 = _S1896;
                 }
-                bool _S1823 = !(spread_3 < ((&hit_4)->distance));
-                if(_S1823)
+                bool _S1905 = !(spread_3 < ((&hit_4)->distance));
+                if(_S1905)
                 {
-                    _S1277 = int(2);
+                    _S1357 = int(2);
                     break;
                 }
-                if(_S1638)
+                if(_S1718)
                 {
-                    _S1643 = _S1501;
+                    _S1723 = _S1581;
                 }
                 else
                 {
-                    _S1643 = false;
+                    _S1723 = false;
                 }
-                if(_S1643)
+                if(_S1723)
                 {
-                    float3  _S1824 = pathColor(throughput_11 * glowed_0, spectral_weight_0, wavelength_9);
-                    float3  _S1825 = _S1824 / make_float3 (density_3);
-                    float3  _S1826 = sel_7->glow + _S1825;
-                    sel_7->glow = _S1826;
+                    float3  _S1906 = pathColor(throughput_11 * glowed_0, spectral_weight_0, wavelength_9);
+                    float3  _S1907 = _S1906 / make_float3 (density_3);
+                    float3  _S1908 = sel_7->glow + _S1907;
+                    sel_7->glow = _S1908;
                 }
                 else
                 {
                 }
-                glowed_0 = _S1278;
+                glowed_0 = _S1358;
                 uint b_10 = b_8 + 1U;
-                float3  _S1827 = (&ray_2)->origin + make_float3 (spread_3) * (&ray_2)->unit_direction;
-                (&ray_2)->origin = _S1827;
-                float3  _S1828 = flightWeight_0(scatter_in_0, extinction_in_0, _S1805, spread_3, true);
-                float3  _S1829 = weight_2;
-                float _S1830 = upsample(weight_2, wavelength_9);
-                float3  _S1831 = make_float3 (_S1830);
-                float3  _S1832 = _slang_select(_S1524, _S1831,_S1829);
-                float3  _S1833 = _slang_select(_S1638, _S1832,_S1828);
-                float3  throughput_12 = throughput_11 * _S1833;
-                uint _S1834 = stream(_S1306, b_10 + 320U);
-                tracking_1 = _S1834;
+                float3  _S1909 = (&ray_2)->origin + make_float3 (spread_3) * (&ray_2)->unit_direction;
+                (&ray_2)->origin = _S1909;
+                float3  _S1910 = flightWeight_0(scatter_in_0, extinction_in_0, _S1887, spread_3, true);
+                float3  _S1911 = weight_2;
+                float _S1912 = upsample(weight_2, wavelength_9);
+                float3  _S1913 = make_float3 (_S1912);
+                float3  _S1914 = _slang_select(_S1604, _S1913,_S1911);
+                float3  _S1915 = _slang_select(_S1718, _S1914,_S1910);
+                float3  throughput_12 = throughput_11 * _S1915;
+                uint _S1916 = stream(_S1386, b_10 + 320U);
+                tracking_1 = _S1916;
                 weight_2 = throughput_3;
                 float width_7 = width_4 + spread_2 * spread_3;
-                float _S1835 = spread_2 + 3.14159274101257324f;
-                if(_S1501)
+                float _S1917 = spread_2 + 3.14159274101257324f;
+                if(_S1581)
                 {
-                    _S1644 = true;
+                    _S1724 = true;
                 }
                 else
                 {
-                    bool _S1836 = b_10 == _S1294;
-                    if(_S1836)
+                    bool _S1918 = b_10 == _S1374;
+                    if(_S1918)
                     {
-                        _S1644 = !_S1638;
+                        _S1724 = !_S1718;
                     }
                     else
                     {
-                        _S1644 = false;
+                        _S1724 = false;
                     }
                 }
                 TreeSample light_3;
-                if(_S1644)
+                if(_S1724)
                 {
-                    float3  _S1837 = (&ray_2)->origin;
-                    float3  _S1838 = (&ray_2)->unit_direction;
-                    float3  _S1839 = (&ray_2)->unit_direction;
-                    uint _S1840 = noiseAddress(_S1306, b_10);
-                    float3  _S1841 = extinction_in_0;
-                    float3  _S1842 = extinction_in_0;
-                    uint2  _S1843 = make_uint2 (_S1803);
-                    float3  _S1844 = (&ray_2)->unit_direction;
-                    uint _S1845 = arrivalLobe_0(b_10, (&prev_0)->lobe);
-                    FKHit _S1846 = _S1546;
-                    ShadowContext _S1847 = ShadowContext_x24init_0(_S1841, _S1842, _S1843, _S1844, b_10, _S1845, false, spread_3, width_7, &_S1846, false);
-                    ShadowContext _S1848 = _S1847;
-                    TreeSample _S1849 = sampleLightTree_0(_S1837, _S1838, _S1839, 0.0f, true, _S1840, &_S1848);
-                    light_3 = _S1849;
+                    float3  _S1919 = (&ray_2)->origin;
+                    float3  _S1920 = (&ray_2)->unit_direction;
+                    float3  _S1921 = (&ray_2)->unit_direction;
+                    uint _S1922 = noiseAddress(_S1386, b_10);
+                    float3  _S1923 = extinction_in_0;
+                    float3  _S1924 = extinction_in_0;
+                    uint2  _S1925 = make_uint2 (_S1885);
+                    float3  _S1926 = (&ray_2)->unit_direction;
+                    uint _S1927 = arrivalLobe_0(b_10, (&prev_0)->lobe);
+                    FKHit _S1928 = _S1626;
+                    ShadowContext _S1929 = ShadowContext_x24init_0(_S1923, _S1924, _S1925, _S1926, b_10, _S1927, false, spread_3, width_7, &_S1928, false);
+                    ShadowContext _S1930 = _S1929;
+                    TreeSample _S1931 = sampleLightTree_0(_S1919, _S1920, _S1921, 0.0f, true, _S1922, &_S1930);
+                    light_3 = _S1931;
                 }
                 else
                 {
-                    light_3 = _S1544;
+                    light_3 = _S1624;
                 }
-                float _S1850 = phaseHG_0(g_in_0, dot_0((&ray_2)->unit_direction, light_3.dir));
-                uint _S1851 = (fcptMaxBounces());
-                bool _S1852 = b_10 < _S1851;
-                if(_S1852)
+                float _S1932 = phaseHG_0(g_in_0, dot_0((&ray_2)->unit_direction, light_3.dir));
+                uint _S1933 = (fcptMaxBounces());
+                bool _S1934 = b_10 < _S1933;
+                if(_S1934)
                 {
-                    _S1645 = (light_3.density) > 0.0f;
+                    _S1725 = (light_3.density) > 0.0f;
                 }
                 else
                 {
-                    _S1645 = false;
+                    _S1725 = false;
                 }
-                float _S1853 = _slang_select(_S1645, _S1850,0.0f);
-                float3  _S1854 = throughput_12 * light_3.radiance;
-                float _S1855 = powerHeuristic(light_3.density, _S1853);
-                float3  _S1856 = pathColor(_S1854 * make_float3 (_S1850 * _S1855), spectral_weight_0, wavelength_9);
-                float3  _S1857 = _slang_select(_S1644, _S1856,_S1278);
+                float _S1935 = _slang_select(_S1725, _S1932,0.0f);
+                float3  _S1936 = throughput_12 * light_3.radiance;
+                float _S1937 = powerHeuristic(light_3.density, _S1935);
+                float3  _S1938 = pathColor(_S1936 * make_float3 (_S1932 * _S1937), spectral_weight_0, wavelength_9);
+                float3  _S1939 = _slang_select(_S1724, _S1938,_S1358);
                 if(replay_1)
                 {
-                    _S1646 = b_10 == _S1294;
+                    _S1726 = b_10 == _S1374;
                 }
                 else
                 {
-                    _S1646 = false;
+                    _S1726 = false;
                 }
-                if(_S1646)
+                if(_S1726)
                 {
-                    bool _S1858 = _S1283 == 2U;
-                    if(_S1858)
+                    bool _S1940 = _S1363 == 2U;
+                    if(_S1940)
                     {
-                        float _S1859 = resamplingTarget(_S1857);
-                        _S1647 = _S1859 > 0.0f;
+                        float _S1941 = resamplingTarget(_S1939);
+                        _S1727 = _S1941 > 0.0f;
                     }
                     else
                     {
-                        _S1647 = false;
+                        _S1727 = false;
                     }
-                    if(_S1647)
+                    if(_S1727)
                     {
-                        Shift _S1860 = Shift_x24init_0(_S1857, 1.0f);
-                        _S1277 = int(1);
-                        ended_0 = _S1860;
-                        spread_3 = _S1835;
+                        Shift _S1942 = Shift_x24init_0(_S1939, 1.0f);
+                        _S1357 = int(1);
+                        ended_0 = _S1942;
+                        spread_3 = _S1917;
                         width_5 = width_7;
                         throughput_9 = throughput_12;
                         b_9 = b_10;
                         break;
                     }
-                    _S1277 = int(1);
-                    ended_0 = _S1279;
-                    spread_3 = _S1835;
+                    _S1357 = int(1);
+                    ended_0 = _S1359;
+                    spread_3 = _S1917;
                     width_5 = width_7;
                     throughput_9 = throughput_12;
                     b_9 = b_10;
                     break;
                 }
-                if(_S1501)
+                if(_S1581)
                 {
-                    Reservoir candidate_9 = _S1802;
-                    uint _S1861 = extractBits_0(_S1802.path, 24U, 8U);
-                    uint _S1862 = insertBits_0(0U, _S1861, 24U, 8U);
-                    uint _S1863 = extractBits_0(_S1802.path, 10U, 2U);
-                    bool _S1864 = _S1863 == 1U;
-                    if(_S1864)
+                    Reservoir candidate_9 = _S1884;
+                    uint _S1943 = extractBits_0(_S1884.path, 24U, 8U);
+                    uint _S1944 = insertBits_0(0U, _S1943, 24U, 8U);
+                    uint _S1945 = extractBits_0(_S1884.path, 10U, 2U);
+                    bool _S1946 = _S1945 == 1U;
+                    if(_S1946)
                     {
-                        float3  _S1865 = safeDivide(_S1857, chain_throughput_0);
-                        (&candidate_9)->radiance = _S1865;
+                        float3  _S1947 = safeDivide(_S1939, chain_throughput_0);
+                        (&candidate_9)->radiance = _S1947;
                     }
                     else
                     {
-                        uint _S1866 = insertBits_0(_S1862, b_10 + 1U, 5U, 5U);
-                        uint _S1867 = insertBits_0(_S1866, 2U, 10U, 2U);
-                        (&candidate_9)->path = _S1867;
+                        uint _S1948 = insertBits_0(_S1944, b_10 + 1U, 5U, 5U);
+                        uint _S1949 = insertBits_0(_S1948, 2U, 10U, 2U);
+                        (&candidate_9)->path = _S1949;
                     }
-                    Reservoir _S1868 = withEnd(candidate_9, 0U, b_10, _S1857);
-                    offer(sel_7, _S1868, _S1857 * make_float3 (scale_3) / make_float3 (density_3));
-                    float _S1869 = survivalProbability(abs_0(throughput_12), density_3);
-                    uint _S1870 = noiseAddress(_S1306, b_10);
-                    Random _S1871 = draw(_S1870, 8U);
-                    bool _S1872 = _S1869 < (_S1871.value);
-                    if(_S1872)
+                    Reservoir _S1950 = withEnd(candidate_9, 0U, b_10, _S1939);
+                    offer(sel_7, _S1950, _S1939 * make_float3 (scale_3) / make_float3 (density_3));
+                    float _S1951 = survivalProbability(abs_0(throughput_12), density_3);
+                    uint _S1952 = noiseAddress(_S1386, b_10);
+                    Random _S1953 = draw(_S1952, 8U);
+                    bool _S1954 = _S1951 < (_S1953.value);
+                    if(_S1954)
                     {
-                        _S1647 = true;
+                        _S1727 = true;
                     }
                     else
                     {
-                        uint _S1873 = (fcptMaxBounces());
-                        _S1647 = b_10 >= _S1873;
+                        uint _S1955 = (fcptMaxBounces());
+                        _S1727 = b_10 >= _S1955;
                     }
-                    if(_S1647)
+                    if(_S1727)
                     {
-                        _S1277 = int(1);
-                        ended_0 = _S1279;
-                        spread_3 = _S1835;
+                        _S1357 = int(1);
+                        ended_0 = _S1359;
+                        spread_3 = _S1917;
                         width_5 = width_7;
                         throughput_9 = throughput_12;
                         b_9 = b_10;
                         break;
                     }
-                    float _S1874 = density_3 * _S1869;
-                    density_3 = _S1874;
+                    float _S1956 = density_3 * _S1951;
+                    density_3 = _S1956;
                 }
                 else
                 {
                 }
                 float phase_pdf_1 = 0.0f;
-                uint _S1875 = noiseAddress(_S1306, b_10);
-                float3  _S1876 = samplePhase_0(g_in_0, (&ray_2)->unit_direction, _S1875, &phase_pdf_1);
-                (&ray_2)->unit_direction = _S1876;
-                NEEVertex _S1877 = NEEVertex_x24init_0(false, phase_pdf_1, (&ray_2)->origin, _S1278, (&ray_2)->origin);
-                nee_vertex_0 = _S1877;
-                Vertex _S1878 = Vertex_x24init_0(false, 0U, 0.0f, 1.0f, is_inside_5);
-                prev_0 = _S1878;
-                float _S1879 = (&prev_0)->pdf;
-                FKRay _S1880 = ray_2;
-                FKHit _S1881 = (fcptTraverseInstanceBVH((_S1880), (true), (4.294967296e+09f), (false), (_S1546), (false)));
-                hit_4 = _S1881;
+                uint _S1957 = noiseAddress(_S1386, b_10);
+                float3  _S1958 = samplePhase_0(g_in_0, (&ray_2)->unit_direction, _S1957, &phase_pdf_1);
+                (&ray_2)->unit_direction = _S1958;
+                NEEVertex _S1959 = NEEVertex_x24init_0(false, phase_pdf_1, (&ray_2)->origin, _S1358, (&ray_2)->origin);
+                nee_vertex_0 = _S1959;
+                Vertex _S1960 = Vertex_x24init_0(false, 0U, 0.0f, 1.0f, is_inside_5);
+                prev_0 = _S1960;
+                float _S1961 = (&prev_0)->pdf;
+                FKRay _S1962 = ray_2;
+                FKHit _S1963 = (fcptTraverseInstanceBVH((_S1962), (true), (4.294967296e+09f), (false), (_S1626), (false)));
+                hit_4 = _S1963;
                 b_8 = b_10;
                 throughput_11 = throughput_12;
-                spread_2 = _S1835;
+                spread_2 = _S1917;
                 width_4 = width_7;
-                sky_pdf_1 = _S1879;
+                sky_pdf_1 = _S1961;
             }
-            if(_S1277 != int(2))
+            if(_S1357 != int(2))
             {
                 spread_2 = spread_3;
                 width_4 = width_5;
                 throughput_11 = throughput_9;
                 b_8 = b_9;
-                _S1642 = true;
+                _S1722 = true;
                 break;
             }
-            ended_0 = _S1279;
-            _S1642 = false;
+            ended_0 = _S1359;
+            _S1722 = false;
             break;
         }
-        if(_S1642)
+        if(_S1722)
         {
             return ended_0;
         }
         if(viewed_1)
         {
-            _S1643 = b_8 == b_6;
+            _S1723 = b_8 == b_6;
         }
         else
         {
-            _S1643 = false;
+            _S1723 = false;
         }
-        bool _S1882 = ((&hit_4)->instance_index) == 4294967295U;
-        if(_S1882)
+        bool _S1964 = ((&hit_4)->instance_index) == 4294967295U;
+        if(_S1964)
         {
-            bool _S1883 = !(&nee_vertex_0)->none;
-            float _S1884 = _slang_select(_S1883, sky_pdf_1,0.0f);
-            float _S1885 = escapeWeight_0(_S1884, (&ray_2)->unit_direction);
-            float3  _S1886 = environment_0((&ray_2)->unit_direction, b_8, (&prev_0)->lobe);
-            float3  _S1887 = pathColor(throughput_11 * _S1886, spectral_weight_0, wavelength_9);
+            bool _S1965 = !(&nee_vertex_0)->none;
+            float _S1966 = _slang_select(_S1965, sky_pdf_1,0.0f);
+            float _S1967 = escapeWeight_0(_S1966, (&ray_2)->unit_direction);
+            float3  _S1968 = environment_0((&ray_2)->unit_direction, b_8, (&prev_0)->lobe);
+            float3  _S1969 = pathColor(throughput_11 * _S1968, spectral_weight_0, wavelength_9);
             if(replay_1)
             {
-                bool _S1888 = b_8 == _S1294;
-                if(_S1888)
+                bool _S1970 = b_8 == _S1374;
+                if(_S1970)
                 {
-                    passes_0 = _S1283 == 3U;
+                    passes_0 = _S1363 == 3U;
                 }
                 else
                 {
@@ -7493,11 +7742,11 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    return Shift_x24init_0(_S1887 * make_float3 (_S1885) / make_float3 (r_8->jac), density_3 / r_8->jac);
+                    return Shift_x24init_0(_S1969 * make_float3 (_S1967) / make_float3 (r_8->jac), density_3 / r_8->jac);
                 }
-                if(_S1293)
+                if(_S1373)
                 {
-                    passes_0 = _S1290;
+                    passes_0 = _S1370;
                 }
                 else
                 {
@@ -7505,7 +7754,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    passes_0 = b_8 == _S1281;
+                    passes_0 = b_8 == _S1361;
                 }
                 else
                 {
@@ -7521,83 +7770,83 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_1, f
                 }
                 if(passes_0)
                 {
-                    return Shift_x24init_0(_S1887 * make_float3 (_S1885), 1.0f);
+                    return Shift_x24init_0(_S1969 * make_float3 (_S1967), 1.0f);
                 }
-                return _S1279;
+                return _S1359;
             }
             Reservoir candidate_10 = chain_0;
-            uint _S1889 = extractBits_0((&chain_0)->path, 10U, 2U);
-            bool _S1890 = _S1889 == 1U;
-            if(_S1890)
+            uint _S1971 = extractBits_0((&chain_0)->path, 10U, 2U);
+            bool _S1972 = _S1971 == 1U;
+            if(_S1972)
             {
-                uint _S1891 = extractBits_0((&chain_0)->path, 5U, 5U);
-                bool _S1892 = _S1891 == b_8;
-                float _S1893 = _slang_select(_S1892, 1.0f,_S1885);
-                float3  _S1894 = safeDivide(_S1887 * make_float3 (_S1893), chain_throughput_0);
-                (&candidate_10)->radiance = _S1894;
+                uint _S1973 = extractBits_0((&chain_0)->path, 5U, 5U);
+                bool _S1974 = _S1973 == b_8;
+                float _S1975 = _slang_select(_S1974, 1.0f,_S1967);
+                float3  _S1976 = safeDivide(_S1969 * make_float3 (_S1975), chain_throughput_0);
+                (&candidate_10)->radiance = _S1976;
             }
             else
             {
-                bool _S1895 = (&prev_0)->rough;
-                if(_S1895)
+                bool _S1977 = (&prev_0)->rough;
+                if(_S1977)
                 {
-                    uint _S1896 = insertBits_0(_S1308, b_8 + 1U, 5U, 5U);
-                    uint _S1897 = insertBits_0(_S1896, 3U, 10U, 2U);
-                    uint _S1898 = insertBits_0(_S1897, (&prev_0)->lobe, 15U, 3U);
-                    bool _S1899 = (&prev_0)->inside;
-                    uint _S1900 = _slang_select(_S1899, 1U,0U);
-                    uint _S1901 = insertBits_0(_S1898, _S1900, 22U, 1U);
-                    (&candidate_10)->path = _S1901;
+                    uint _S1978 = insertBits_0(_S1388, b_8 + 1U, 5U, 5U);
+                    uint _S1979 = insertBits_0(_S1978, 3U, 10U, 2U);
+                    uint _S1980 = insertBits_0(_S1979, (&prev_0)->lobe, 15U, 3U);
+                    bool _S1981 = (&prev_0)->inside;
+                    uint _S1982 = _slang_select(_S1981, 1U,0U);
+                    uint _S1983 = insertBits_0(_S1980, _S1982, 22U, 1U);
+                    (&candidate_10)->path = _S1983;
                     (&candidate_10)->jac = (&prev_0)->pdf;
                     (&candidate_10)->dir = (&ray_2)->unit_direction;
                 }
             }
-            float3  _S1902 = _S1887 * make_float3 (_S1885);
-            Reservoir _S1903 = withEnd(candidate_10, 3U, b_8, _S1902);
-            offer(sel_7, _S1903, _S1902 * make_float3 (scale_3) / make_float3 (density_3));
+            float3  _S1984 = _S1969 * make_float3 (_S1967);
+            Reservoir _S1985 = withEnd(candidate_10, 3U, b_8, _S1984);
+            offer(sel_7, _S1985, _S1984 * make_float3 (scale_3) / make_float3 (density_3));
             break;
         }
-        float3  _S1904 = (&ray_2)->origin + make_float3 ((&hit_4)->distance) * (&ray_2)->unit_direction;
-        (&ray_2)->origin = _S1904;
-        bool _S1905 = (fcptVaryingUsed());
-        if(_S1905)
+        float3  _S1986 = (&ray_2)->origin + make_float3 ((&hit_4)->distance) * (&ray_2)->unit_direction;
+        (&ray_2)->origin = _S1986;
+        bool _S1987 = (fcptVaryingUsed());
+        if(_S1987)
         {
-            _S1644 = filling_2 != 4294967295U;
+            _S1724 = filling_2 != 4294967295U;
         }
         else
         {
-            _S1644 = false;
+            _S1724 = false;
         }
-        if(_S1644)
+        if(_S1724)
         {
-            if(_S1501)
+            if(_S1581)
             {
-                float3  _S1906 = pathColor(throughput_11 * glowed_0, spectral_weight_0, wavelength_9);
-                float3  _S1907 = _S1906 / make_float3 (density_3);
-                float3  _S1908 = sel_7->glow + _S1907;
-                sel_7->glow = _S1908;
+                float3  _S1988 = pathColor(throughput_11 * glowed_0, spectral_weight_0, wavelength_9);
+                float3  _S1989 = _S1988 / make_float3 (density_3);
+                float3  _S1990 = sel_7->glow + _S1989;
+                sel_7->glow = _S1990;
             }
-            float3  _S1909 = throughput_11 * weight_2;
-            throughput_9 = _S1909;
+            float3  _S1991 = throughput_11 * weight_2;
+            throughput_9 = _S1991;
         }
         else
         {
-            float3  _S1910 = flightWeight_0(scatter_in_0, extinction_in_0, (scatter_in_0.x + scatter_in_0.y + scatter_in_0.z) / 3.0f, (&hit_4)->distance, false);
-            float3  _S1911 = throughput_11 * _S1910;
-            throughput_9 = _S1911;
+            float3  _S1992 = flightWeight_0(scatter_in_0, extinction_in_0, (scatter_in_0.x + scatter_in_0.y + scatter_in_0.z) / 3.0f, (&hit_4)->distance, false);
+            float3  _S1993 = throughput_11 * _S1992;
+            throughput_9 = _S1993;
         }
-        float _S1912 = width_4 + spread_2 * (&hit_4)->distance;
-        viewed_0 = _S1643;
-        width_3 = _S1912;
+        float _S1994 = width_4 + spread_2 * (&hit_4)->distance;
+        viewed_0 = _S1723;
+        width_3 = _S1994;
         throughput_2 = throughput_9;
         density_2 = density_3;
         sky_pdf_0 = sky_pdf_1;
         spread_1 = spread_2;
-        uint _S1794 = b_8 + 1U;
-        b_6 = _S1794;
-        layer_0 = _S1793;
+        uint _S1876 = b_8 + 1U;
+        b_6 = _S1876;
+        layer_0 = _S1875;
     }
-    return _S1279;
+    return _S1359;
 }
 
 __device__ static const FixedArray<float, 4>  HAIR_TILTS_0 = { {
@@ -7649,13 +7898,13 @@ static __device__ float3  acos_0(float3  x_28)
     return result_16;
 }
 
-__device__ Random normal_distribution(uint state_4)
+__device__ Random normal_distribution(uint state_5)
 {
-    Random _S1913 = pcg(state_4);
-    Random _S1914 = pcg(_S1913.state);
-    float _S1915 = 6.28318548202514648f * _S1913.value;
-    float _S1916 = (F32_sqrt((-2.0f * clamp_1((F32_log((_S1914.value))), -8.388607e+06f, 0.0f))));
-    return Random_x24init_0(_S1914.state, _S1916 * (F32_cos((_S1915))));
+    Random _S1995 = pcg(state_5);
+    Random _S1996 = pcg(_S1995.state);
+    float _S1997 = 6.28318548202514648f * _S1995.value;
+    float _S1998 = (F32_sqrt((-2.0f * clamp_1((F32_log((_S1996.value))), -8.388607e+06f, 0.0f))));
+    return Random_x24init_0(_S1996.state, _S1998 * (F32_cos((_S1997))));
 }
 
 struct RandomSphere
@@ -7664,154 +7913,163 @@ struct RandomSphere
     float3  value;
 };
 
-static __device__ RandomSphere RandomSphere_x24init_0(uint state_5, float3  value_2)
+static __device__ RandomSphere RandomSphere_x24init_0(uint state_6, float3  value_2)
 {
-    RandomSphere _S1917;
-    (&_S1917)->state = state_5;
-    (&_S1917)->value = value_2;
-    return _S1917;
+    RandomSphere _S1999;
+    (&_S1999)->state = state_6;
+    (&_S1999)->value = value_2;
+    return _S1999;
 }
 
-__device__ RandomSphere random_sphere(uint state_6)
+__device__ RandomSphere random_sphere(uint state_7)
 {
-    Random _S1918 = normal_distribution(state_6);
-    Random _S1919 = normal_distribution(_S1918.state);
-    Random _S1920 = normal_distribution(_S1919.state);
-    float3  _S1921 = make_float3 (_S1918.value, _S1919.value, _S1920.value);
-    float3  _S1922 = ((((_S1921)) * make_float3(rnorm3df(((_S1921)).x, ((_S1921)).y, ((_S1921)).z))));
-    return RandomSphere_x24init_0(_S1920.state, _S1922);
+    Random _S2000 = normal_distribution(state_7);
+    Random _S2001 = normal_distribution(_S2000.state);
+    Random _S2002 = normal_distribution(_S2001.state);
+    float3  _S2003 = make_float3 (_S2000.value, _S2001.value, _S2002.value);
+    float3  _S2004 = ((((_S2003)) * make_float3(rnorm3df(((_S2003)).x, ((_S2003)).y, ((_S2003)).z))));
+    return RandomSphere_x24init_0(_S2002.state, _S2004);
 }
 
-__device__ Matrix<float, 3, 3>  normalMapTBN(float3  p0_0, float3  p1_0, float3  p2_0, float2  uv0_0, float2  uv1_0, float2  uv2_0, float3  n_11)
+__device__ Matrix<float, 3, 3>  normalMapTBN(float3  p0_0, float3  p1_0, float3  p2_0, float2  uv0_0, float2  uv1_0, float2  uv2_0, float3  n_12)
 {
-    float3  _S1923 = p1_0 - p0_0;
-    float3  _S1924 = p2_0 - p0_0;
-    float2  _S1925 = uv1_0 - uv0_0;
-    float2  _S1926 = uv2_0 - uv0_0;
-    float _S1927 = _S1925.x;
-    float _S1928 = _S1926.y;
-    float _S1929 = _S1925.y;
-    float _S1930 = _S1926.x;
-    float _S1931 = _S1927 * _S1928 - _S1929 * _S1930;
-    float _S1932 = 1.0f / _S1931;
-    float3  t_24 = (_S1923 * make_float3 (_S1928) - _S1924 * make_float3 (_S1929)) * make_float3 (_S1932);
-    float3  _S1933 = (_S1924 * make_float3 (_S1927) - _S1923 * make_float3 (_S1930)) * make_float3 (_S1932);
-    float3  _S1934 = t_24 - n_11 * make_float3 (dot_0(n_11, t_24));
-    float3  t_25 = ((((_S1934)) * make_float3(rnorm3df(((_S1934)).x, ((_S1934)).y, ((_S1934)).z))));
-    bool _S1935 = (dot_0(cross_0(n_11, t_25), _S1933)) > 0.0f;
+    float3  _S2005 = p1_0 - p0_0;
+    float3  _S2006 = p2_0 - p0_0;
+    float2  _S2007 = uv1_0 - uv0_0;
+    float2  _S2008 = uv2_0 - uv0_0;
+    float _S2009 = _S2007.x;
+    float _S2010 = _S2008.y;
+    float _S2011 = _S2007.y;
+    float _S2012 = _S2008.x;
+    float _S2013 = _S2009 * _S2010 - _S2011 * _S2012;
+    float _S2014 = 1.0f / _S2013;
+    float3  t_24 = (_S2005 * make_float3 (_S2010) - _S2006 * make_float3 (_S2011)) * make_float3 (_S2014);
+    float3  _S2015 = (_S2006 * make_float3 (_S2009) - _S2005 * make_float3 (_S2012)) * make_float3 (_S2014);
+    float3  _S2016 = t_24 - n_12 * make_float3 (dot_0(n_12, t_24));
+    float3  t_25 = ((((_S2016)) * make_float3(rnorm3df(((_S2016)).x, ((_S2016)).y, ((_S2016)).z))));
+    bool _S2017 = (dot_0(cross_0(n_12, t_25), _S2015)) > 0.0f;
     float3  t_26;
-    if(_S1935)
+    if(_S2017)
     {
-        float3  _S1936 = negate_0(t_25);
-        t_26 = _S1936;
+        float3  _S2018 = negate_0(t_25);
+        t_26 = _S2018;
     }
     else
     {
         t_26 = t_25;
     }
-    float3  _S1937 = cross_0(n_11, t_26);
-    return makeMatrix<float, 3, 3> (t_26, _S1937, n_11);
+    float3  _S2019 = cross_0(n_12, t_26);
+    return makeMatrix<float, 3, 3> (t_26, _S2019, n_12);
 }
 
-__device__ float3  tangentToWorldNormalMap(float3  v_10, Matrix<float, 3, 3>  tbn_0)
+__device__ float3  tangentToWorldNormalMap(float3  v_13, Matrix<float, 3, 3>  tbn_0)
 {
-    return mul_0(v_10, tbn_0);
+    return mul_0(v_13, tbn_0);
 }
 
 __device__ float geometryOffset(float3  t0_0, float3  t1_0, float3  t2_2, float3  n0_0, float3  n1_0, float3  n2_0, float3  geometry_n_3, float3  uvw_0, float3  position_0)
 {
-    float3  _S1938 = t1_0 - t0_0;
-    float3  _S1939 = t2_2 - t0_0;
-    float3  _S1940 = t2_2 - t1_0;
-    float _S1941 = (F32_min((length_0(_S1938)), ((F32_min((length_0(_S1939)), (length_0(_S1940)))))));
-    float3  _S1942 = make_float3 (distance_1(position_0, t0_0), distance_1(position_0, t1_0), distance_1(position_0, t2_2));
-    float3  _S1943 = ((((n0_0)) * make_float3(rnorm3df(((n0_0)).x, ((n0_0)).y, ((n0_0)).z))));
-    float _S1944 = dot_0(geometry_n_3, _S1943);
-    float3  _S1945 = ((((n1_0)) * make_float3(rnorm3df(((n1_0)).x, ((n1_0)).y, ((n1_0)).z))));
-    float _S1946 = dot_0(geometry_n_3, _S1945);
-    float3  _S1947 = ((((n2_0)) * make_float3(rnorm3df(((n2_0)).x, ((n2_0)).y, ((n2_0)).z))));
-    float3  _S1948 = acos_0(abs_0(make_float3 (_S1944, _S1946, dot_0(geometry_n_3, _S1947))));
-    float3  _S1949 = clamp_2(tan_0(_S1948), make_float3 (0.0f), make_float3 (0.78539818525314331f));
-    return clamp_1(dot_0(_S1942 * _S1949, uvw_0), 0.0f, _S1941 * 0.125f);
+    float3  _S2020 = t1_0 - t0_0;
+    float3  _S2021 = t2_2 - t0_0;
+    float3  _S2022 = t2_2 - t1_0;
+    float _S2023 = (F32_min((length_0(_S2020)), ((F32_min((length_0(_S2021)), (length_0(_S2022)))))));
+    float3  _S2024 = make_float3 (distance_1(position_0, t0_0), distance_1(position_0, t1_0), distance_1(position_0, t2_2));
+    float3  _S2025 = ((((n0_0)) * make_float3(rnorm3df(((n0_0)).x, ((n0_0)).y, ((n0_0)).z))));
+    float _S2026 = dot_0(geometry_n_3, _S2025);
+    float3  _S2027 = ((((n1_0)) * make_float3(rnorm3df(((n1_0)).x, ((n1_0)).y, ((n1_0)).z))));
+    float _S2028 = dot_0(geometry_n_3, _S2027);
+    float3  _S2029 = ((((n2_0)) * make_float3(rnorm3df(((n2_0)).x, ((n2_0)).y, ((n2_0)).z))));
+    float3  _S2030 = acos_0(abs_0(make_float3 (_S2026, _S2028, dot_0(geometry_n_3, _S2029))));
+    float3  _S2031 = clamp_2(tan_0(_S2030), make_float3 (0.0f), make_float3 (0.78539818525314331f));
+    return clamp_1(dot_0(_S2024 * _S2031, uvw_0), 0.0f, _S2023 * 0.125f);
 }
 
-__device__ float3  straightThrough(float3  dir_14, float3  n_12, BSDFMaterial material_24)
+__device__ float3  straightThrough(float3  dir_14, float3  n_13, BSDFMaterial material_27)
 {
-    float3  _S1950 = negate_0(dir_14);
-    float _S1951 = sign_0(dot_0(n_12, _S1950));
-    float3  _S1952 = n_12 * make_float3 (_S1951);
-    AnisotropicFrame _S1953 = anisotropicFrame(material_24, _S1952);
-    bool _S1954 = (_S1953.alphas.x) > 0.0f;
-    if(_S1954)
+    float3  _S2032 = negate_0(dir_14);
+    float _S2033 = sign_0(dot_0(n_13, _S2032));
+    float3  _S2034 = n_13 * make_float3 (_S2033);
+    AnisotropicFrame _S2035 = anisotropicFrame(material_27, _S2034);
+    bool _S2036 = (_S2035.alphas.x) > 0.0f;
+    if(_S2036)
     {
-        float _S1955 = material_24.transmission * (1.0f - material_24.metallic);
-        float3  _S1956 = negate_0(_S1952);
-        float3  _S1957 = anisotropicLocal(dir_14, _S1953.tangent, _S1956);
-        float _S1958 = anisotropicG1(_S1957, _S1953.alphas);
-        return make_float3 (_S1955 * _S1958) * material_24.albedo;
+        float _S2037 = material_27.transmission * (1.0f - material_27.metallic);
+        float3  _S2038 = negate_0(_S2034);
+        float3  _S2039 = anisotropicLocal(dir_14, _S2035.tangent, _S2038);
+        float _S2040 = anisotropicG1(_S2039, _S2035.alphas);
+        return make_float3 (_S2037 * _S2040) * material_27.albedo;
     }
-    float _S1959 = material_24.transmission * (1.0f - material_24.metallic);
-    float _S1960 = material_24.roughness;
-    float _S1961 = smithG1(_S1960 * _S1960, (F32_abs((dot_0(n_12, dir_14)))));
-    return make_float3 (_S1959 * _S1961) * material_24.albedo;
+    float _S2041 = material_27.transmission * (1.0f - material_27.metallic);
+    float _S2042 = material_27.roughness;
+    float _S2043 = smithG1(_S2042 * _S2042, (F32_abs((dot_0(n_13, dir_14)))));
+    return make_float3 (_S2041 * _S2043) * material_27.albedo;
 }
 
-__device__ float hairRow(float3  in_dir_9, float3  t_27, float3  out_dir_3, uint p_15, float w_18, float alpha_10, uint nt_0)
+__device__ float hairRow(float3  in_dir_11, float3  t_27, float3  out_dir_3, uint p_15, float w_21, float alpha_11, uint nt_0)
 {
-    uint _S1962 = p_15 % 4U;
-    float _S1963 = w_18 * HAIR_WIDTHS_0[_S1962];
-    float _S1964 = (F32_asin((clamp_1(dot_0(out_dir_3, t_27), -1.0f, 1.0f)))) - (F32_asin((clamp_1(dot_0(in_dir_9, t_27), -1.0f, 1.0f)))) - HAIR_TILTS_0[_S1962] * alpha_10;
-    return ((F32_asinh((_S1964 / _S1963))) / (F32_asinh((3.14159274101257324f / _S1963))) + 1.0f) * 0.5f * float(nt_0);
+    uint _S2044 = p_15 % 4U;
+    float _S2045 = w_21 * HAIR_WIDTHS_0[_S2044];
+    float _S2046 = (F32_asin((clamp_1(dot_0(out_dir_3, t_27), -1.0f, 1.0f)))) - (F32_asin((clamp_1(dot_0(in_dir_11, t_27), -1.0f, 1.0f)))) - HAIR_TILTS_0[_S2044] * alpha_11;
+    return ((F32_asinh((_S2046 / _S2045))) / (F32_asinh((3.14159274101257324f / _S2045))) + 1.0f) * 0.5f * float(nt_0);
 }
 
-__device__ float hairColumn(float3  in_dir_10, float3  t_28, float3  out_dir_4, uint np_0)
+__device__ float hairColumn(float3  in_dir_12, float3  t_28, float3  out_dir_4, uint np_0)
 {
-    float3  _S1965 = worldToTangent(out_dir_4, t_28);
-    float3  _S1966 = worldToTangent(in_dir_10, t_28);
-    return (F32_frac((((F32_atan2((_S1965.z), (_S1965.x + 1.17549435082228751e-38f))) - (F32_atan2((- _S1966.z), (1.17549435082228751e-38f - _S1966.x)))) / 6.28318548202514648f + 0.5f))) * float(np_0);
+    float3  _S2047 = worldToTangent(out_dir_4, t_28);
+    float3  _S2048 = worldToTangent(in_dir_12, t_28);
+    return (F32_frac((((F32_atan2((_S2047.z), (_S2047.x + 1.17549435082228751e-38f))) - (F32_atan2((- _S2048.z), (1.17549435082228751e-38f - _S2048.x)))) / 6.28318548202514648f + 0.5f))) * float(np_0);
 }
 
-__device__ float3  hairDirection(float3  in_dir_11, float3  t_29, uint p_16, float row_0, float column_0, float w_19, float alpha_11, uint nt_1, uint np_1)
+__device__ float3  hairDirection(float3  in_dir_13, float3  t_29, uint p_16, float row_0, float column_0, float w_22, float alpha_12, uint nt_1, uint np_1)
 {
-    float3  _S1967 = worldToTangent(in_dir_11, t_29);
-    uint _S1968 = p_16 % 4U;
-    float _S1969 = w_19 * HAIR_WIDTHS_0[_S1968];
-    float _S1970 = (F32_asin((clamp_1(dot_0(in_dir_11, t_29), -1.0f, 1.0f)))) + HAIR_TILTS_0[_S1968] * alpha_11 + _S1969 * (F32_sinh(((row_0 * 2.0f / float(nt_1) - 1.0f) * (F32_asinh((3.14159274101257324f / _S1969))))));
-    float _S1971 = column_0 * 2.0f * 3.14159274101257324f / float(np_1) - 3.14159274101257324f + (F32_atan2((- _S1967.z), (1.17549435082228751e-38f - _S1967.x)));
-    float _S1972 = (F32_cos((_S1970)));
-    float3  _S1973 = tangentToWorld(make_float3 (_S1972 * (F32_cos((_S1971))), (F32_sin((_S1970))), _S1972 * (F32_sin((_S1971)))), t_29);
-    return _S1973;
+    float3  _S2049 = worldToTangent(in_dir_13, t_29);
+    uint _S2050 = p_16 % 4U;
+    float _S2051 = w_22 * HAIR_WIDTHS_0[_S2050];
+    float _S2052 = (F32_asin((clamp_1(dot_0(in_dir_13, t_29), -1.0f, 1.0f)))) + HAIR_TILTS_0[_S2050] * alpha_12 + _S2051 * (F32_sinh(((row_0 * 2.0f / float(nt_1) - 1.0f) * (F32_asinh((3.14159274101257324f / _S2051))))));
+    float _S2053 = column_0 * 2.0f * 3.14159274101257324f / float(np_1) - 3.14159274101257324f + (F32_atan2((- _S2049.z), (1.17549435082228751e-38f - _S2049.x)));
+    float _S2054 = (F32_cos((_S2052)));
+    float3  _S2055 = tangentToWorld(make_float3 (_S2054 * (F32_cos((_S2053))), (F32_sin((_S2052))), _S2054 * (F32_sin((_S2053)))), t_29);
+    return _S2055;
 }
 
-__device__ float3  occluderTransmittance(float3  toward_1, float3  n_13, BSDFMaterial material_25, float coverage_1)
+__device__ float3  occluderTransmittance(float3  toward_1, float3  n_14, BSDFMaterial material_28, float coverage_1)
 {
-    float3  _S1974;
-    if((material_25.ior) == 1.0f)
+    float3  through_2;
+    if((material_28.ior) == 1.0f)
     {
-        float3  _S1975 = straightThrough(toward_1, n_13, material_25);
-        _S1974 = _S1975;
+        float3  _S2056 = straightThrough(toward_1, n_14, material_28);
+        through_2 = _S2056;
     }
     else
     {
-        _S1974 = make_float3 (0.0f);
+        through_2 = make_float3 (0.0f);
     }
-    return _S1974 * make_float3 (coverage_1) + make_float3 (1.0f - coverage_1);
+    bool _S2057 = (material_28.coat) > 0.0f;
+    if(_S2057)
+    {
+        CoatFrame _S2058 = coatFrame(material_28, n_14);
+        float _S2059 = fresnel((F32_abs((dot_0(_S2058.normal, toward_1)))), 1.0f, _S2058.ior);
+        float3  _S2060 = mix_0(make_float3 (1.0f), make_float3 (1.0f - _S2059) * material_28.coat_tint, material_28.coat);
+        float3  through_3 = through_2 * _S2060;
+        through_2 = through_3;
+    }
+    return through_2 * make_float3 (coverage_1) + make_float3 (1.0f - coverage_1);
 }
 
 __device__ Shift walk_hook(Domain dom_8, Reservoir r_9, bool replay_2, float scale_4, Selection * sel_8)
 {
-    Domain _S1976 = dom_8;
-    Reservoir _S1977 = r_9;
-    Shift _S1978 = walk_0(&_S1976, &_S1977, replay_2, scale_4, sel_8);
-    return _S1978;
+    Domain _S2061 = dom_8;
+    Reservoir _S2062 = r_9;
+    Shift _S2063 = walk_0(&_S2061, &_S2062, replay_2, scale_4, sel_8);
+    return _S2063;
 }
 
 __device__ Shift shift_hook(Domain dom_9, Reservoir r_10)
 {
-    Domain _S1979 = dom_9;
-    Reservoir _S1980 = r_10;
-    Shift _S1981 = shift_0(&_S1979, &_S1980);
-    return _S1981;
+    Domain _S2064 = dom_9;
+    Reservoir _S2065 = r_10;
+    Shift _S2066 = shift_0(&_S2064, &_S2065);
+    return _S2066;
 }
 
 __device__ void restir_initial_hook(uint3  global_invocation_id_9)
@@ -7887,16 +8145,16 @@ __device__ uint noiseWhite(uint x_29, uint y_8, uint t_30, uint size_0)
         {
             break;
         }
-        uint _S1982;
+        uint _S2067;
         if(i_30 < 2U)
         {
-            _S1982 = x_29;
+            _S2067 = x_29;
         }
         else
         {
-            _S1982 = (x_29 + size_0 / 2U) & (size_0 - 1U);
+            _S2067 = (x_29 + size_0 / 2U) & (size_0 - 1U);
         }
-        uint l_6 = _S1982;
+        uint l_6 = _S2067;
         uint r_11 = y_8;
         uint k_4 = 0U;
         for(;;)
@@ -7908,75 +8166,75 @@ __device__ uint noiseWhite(uint x_29, uint y_8, uint t_30, uint size_0)
             {
                 break;
             }
-            uint _S1983 = hash(((r_11 ^ (t_30 << 16U)) ^ (k_4 << 28U)) ^ ((i_30 & 1U) << 31U));
-            uint _S1984 = l_6 ^ (_S1983 & (size_0 - 1U));
+            uint _S2068 = hash(((r_11 ^ (t_30 << 16U)) ^ (k_4 << 28U)) ^ ((i_30 & 1U) << 31U));
+            uint _S2069 = l_6 ^ (_S2068 & (size_0 - 1U));
             uint k_5 = k_4 + 1U;
             l_6 = r_11;
-            r_11 = _S1984;
+            r_11 = _S2069;
             k_4 = k_5;
         }
-        uint _S1985 = l_6 + r_11 * size_0;
-        uint _S1986 = size_0 * size_0;
-        uint _S1987;
-        if(_S1986 >= 65536U)
+        uint _S2070 = l_6 + r_11 * size_0;
+        uint _S2071 = size_0 * size_0;
+        uint _S2072;
+        if(_S2071 >= 65536U)
         {
-            uint _S1988 = _S1985 / (_S1986 / 65536U);
-            _S1987 = _S1988;
+            uint _S2073 = _S2070 / (_S2071 / 65536U);
+            _S2072 = _S2073;
         }
         else
         {
-            uint _S1989 = 65536U / _S1986;
-            _S1987 = _S1985 * _S1989;
+            uint _S2074 = 65536U / _S2071;
+            _S2072 = _S2070 * _S2074;
         }
-        ranks_0[i_30] = _S1987;
+        ranks_0[i_30] = _S2072;
         uint i_31 = i_30 + 1U;
         i_30 = i_31;
     }
-    bool _S1990 = (ranks_0[int(0)]) == 65535U;
-    bool _S1991;
-    if(_S1990)
+    bool _S2075 = (ranks_0[int(0)]) == 65535U;
+    bool _S2076;
+    if(_S2075)
     {
-        _S1991 = (ranks_0[int(1)]) == 65535U;
+        _S2076 = (ranks_0[int(1)]) == 65535U;
     }
     else
     {
-        _S1991 = false;
+        _S2076 = false;
     }
-    bool _S1992 = (ranks_0[int(2)]) == 65535U;
-    bool _S1993;
-    if(_S1992)
+    bool _S2077 = (ranks_0[int(2)]) == 65535U;
+    bool _S2078;
+    if(_S2077)
     {
-        _S1993 = (ranks_0[int(3)]) == 65535U;
-    }
-    else
-    {
-        _S1993 = false;
-    }
-    if(_S1991)
-    {
-        _S1991 = (ranks_0[int(3)]) != 65535U;
+        _S2078 = (ranks_0[int(3)]) == 65535U;
     }
     else
     {
-        _S1991 = false;
+        _S2078 = false;
     }
-    if(_S1991)
+    if(_S2076)
     {
-        _S1991 = true;
+        _S2076 = (ranks_0[int(3)]) != 65535U;
     }
     else
     {
-        if(_S1993)
+        _S2076 = false;
+    }
+    if(_S2076)
+    {
+        _S2076 = true;
+    }
+    else
+    {
+        if(_S2078)
         {
-            _S1991 = (ranks_0[int(1)]) != 65535U;
+            _S2076 = (ranks_0[int(1)]) != 65535U;
         }
         else
         {
-            _S1991 = false;
+            _S2076 = false;
         }
     }
-    uint _S1994 = ranks_0[int(0)];
-    if(_S1991)
+    uint _S2079 = ranks_0[int(0)];
+    if(_S2076)
     {
         i_30 = ranks_0[int(3)];
     }
@@ -7984,7 +8242,7 @@ __device__ uint noiseWhite(uint x_29, uint y_8, uint t_30, uint size_0)
     {
         i_30 = ranks_0[int(1)];
     }
-    return _S1994 | (i_30 << 16U);
+    return _S2079 | (i_30 << 16U);
 }
 
 #undef Matrix
