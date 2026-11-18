@@ -24,10 +24,11 @@
 
 // Whether a scene's module, while it compiles, has the generic one stand in: OptiX's compile runs as tasks beside
 // frames; Vulkan compiles a pipeline whole, at once, so there each scene takes its own as before
+// Whether the temporal round queues its shifts, Vulkan's faster way; OptiX's restir_temporal makes them itself
 #ifdef VK_VERSION_1_0
-constexpr bool TIERED = false;
+constexpr bool TIERED = false, QUEUED_TEMPORAL = true;
 #else
-constexpr bool TIERED = true;
+constexpr bool TIERED = true, QUEUED_TEMPORAL = false;
 #endif
 
 // Kinds of what the extension pipes in
@@ -457,8 +458,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             walk[0].data = walk[1].data = scene, walk[2].data = anchored;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             // A view's later frames keep its camera and scene, where the temporal round's queue finds no job: only a
-            // view's first frame launches its count, queue and queued shifts
-            for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass] && (scene.frame == 0
+            // view's first frame launches its count, queue and queued shifts, where the round queues them
+            for (unsigned pass = 0; pass < PASSES; ++pass) if (depths[pass] && (QUEUED_TEMPORAL && scene.frame == 0
                 || pass < PASS_TEMPORAL_COUNT || pass > PASS_TEMPORAL_SHIFT)) {
                 if (pass == PASS_TEMPORAL_COUNT || pass == PASS_COUNT)
                     CHECK(cuMemsetD32((CUdeviceptr)scene.queue, 0, QUEUE_HEADER));
