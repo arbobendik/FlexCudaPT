@@ -15,6 +15,10 @@ SPREAD_ZERO = math.radians(5)  # An area light's spread of 0, a parallel beam no
 VIEWPORT_SAMPLES = 4  # Per redraw
 RENDER_SAMPLES = 64  # At most, per update of a final render
 SLOTS = 32  # Values a program keeps for reuse, as the shader's
+# Operations of two operands whose step takes a constant one as its own value, flagged IMMEDIATE, and LEFT if the first
+IMMEDIATES = ('ADD', 'SUBTRACT', 'MULTIPLY', 'DOT_PRODUCT', 'MAXIMUM', 'LOGARITHM', 'DIVIDE', 'POWER', 'MINIMUM',
+    'LESS_THAN', 'MODULO', 'ARCTAN2', 'CROSS_PRODUCT')
+CODE, IMMEDIATE, LEFT = 255, 1 << 31, 1 << 30
 LEVELS = numpy.arange(256, dtype='u1')
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 MODIFIED = os.path.getmtime(__file__)
@@ -704,9 +708,11 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
             for around in (0.25, 0.75)), rel_tol=1e-3) else jacobian(operands[0], 'UV')
         payload = (payload[0], payload[1] | (min(max(round(64 * math.log2(scale)), -2047), 2047) if 0 < scale < math.inf
             else -2048) % 4096 << 20, *payload[2:])
-    values = [emit(operand, ops, textures, texels, alphas, uses, slots,
+    own = next((k for k in (1, 0) if name in IMMEDIATES and not isinstance(operands[k], tuple)), None)  # Its constant
+    values = [operand if k == own else emit(operand, ops, textures, texels, alphas, uses, slots,
         operands[0] if name == 'SHIFTED' and k else shift, keys) for k, operand in enumerate(operands)]
-    ops.append(([*OPS].index(name), *payload[:3]))
+    ops.append(([*OPS].index(name), *payload[:3]) if own is None else ([*OPS].index(name) | IMMEDIATE
+        | LEFT * (own == 0), *numpy.resize(operands[own], 3).astype('f').view('I')))
     if name == 'LIGHT_PATH': return float(values[0] >= 8)  # Of no ray, length and depth one, as light sampling shades
     value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
     if slots is None: uses[key] = [1, value]
@@ -2614,7 +2620,7 @@ class Flex(bpy.types.RenderEngine):
             for row in layers], textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
             starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4  # the images they read apart, by their index,
-            read = {texel for code, texel, _, height in ops if [*OPS][code] in (*READS, 'GRID')  # in 31
+            read = {texel for code, texel, _, height in ops if [*OPS][code & CODE] in (*READS, 'GRID')  # in 31
                 and not height >> 28 & 1}
             image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
@@ -2630,14 +2636,14 @@ class Flex(bpy.types.RenderEngine):
             formats = {first: compact(entry) for first, entry, side in zip(starts, texels, apart)  # Bits 26 and 27: 2
                 if side == 2 and not image[first][1] >> 26 & 1 and first not in derived}  # halves, 3 16-bit UNORM
             form = lambda first: formats[first][1] << 26 if first in formats else 0
-            chained = {texel for code, texel, width, _ in ops if [*OPS][code] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
+            chained = {texel for code, texel, width, _ in ops if [*OPS][code & CODE] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
                 and width >> 20 != 2048}  # Read by a ray's cone at some level: a mip chain, flagged in bit 31 of width
             at, counts = {}, [0, 0, 0]
             for first, entry, side in zip(starts, texels, apart):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
             def relocated(ops):  # Of their reads' and tiles' firsts, those piped apart flagged
                 return [(code, at[texel][0], width, height | at[texel][1] << 30 | form(texel))
-                    if (code == 0 or [*OPS][code] in (*READS, 'GRID')) and not height >> 28 & 1
+                    if (code == 0 or [*OPS][code & CODE] in (*READS, 'GRID')) and not height >> 28 & 1
                     else (code, texel, width, height)
                     for code, texel, width, height in ops]
             ops[:], aside[0][:] = relocated(ops), relocated(aside[0])
@@ -2654,7 +2660,7 @@ class Flex(bpy.types.RenderEngine):
                 entry for entry, side in zip(texels, apart) if side == 1]
         piped, rows = self.piped if shaded else counts[0], len(ops)
         bakes, again = [k + rows for k in bakes], [k + rows for k in again]  # The bakes' steps after the materials'
-        ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code] in READS)
+        ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code & CODE] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
             ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic)) if any]
@@ -2666,7 +2672,7 @@ class Flex(bpy.types.RenderEngine):
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
                 return self.start(depsgraph, keeping)
-            read = {texel for code, texel, *_ in ops if [*OPS][code].startswith(('IMAGE', 'ALPHA'))}  # The tables
+            read = {texel for code, texel, *_ in ops if [*OPS][code & CODE][:5] in ('IMAGE', 'ALPHA')}  # The tables
             tables = {key: [] for key, entry in textures.items()
                 if not isinstance(key, (tuple, Bake)) and entry[0] in read}
             # read, rebuilt from their evaluated nodes; their means, which the hints take, as the renderer has them
