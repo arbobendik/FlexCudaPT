@@ -24,12 +24,13 @@ struct Projection { uint type; float range[4], shift[2]; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION };
+    TOON, SELECT, PANORAMA, DISPERSION, COAT };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera (CUDA's alone; its place kept, so the codes after it agree with the
 // exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
-// DISPERSION a transmission's IOR spread by wavelength
+// DISPERSION a transmission's IOR spread by wavelength; COAT a coat's weight, roughness and IOR, its tint
+// and normal following
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -44,7 +45,7 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
     float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase, velvet; float3 toon;
-    float dispersion;
+    float dispersion; float3 coat, coat_tint, coat_normal;
 };
 static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
 struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
@@ -110,6 +111,7 @@ float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
 static const uint LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
+static const uint LOBE_COAT = 5u;  // The coat's, a glossy reflection
 static const uint LOBE_TOON = 6u;  // The toon lobe, which Light Path reads as a diffuse reflection
 // Share of a ray cone's width a mip level covers, 2^-1.5
 static const float CONE_SHARE = 0.35355339;
@@ -121,9 +123,9 @@ float lightPath(Ray ray, int output) {
         case 0: return float(ray.camera);
         case 1: return float(ray.shadow);
         case 2: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET || ray.lobe == LOBE_TOON);
-        case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT);
+        case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_COAT);
         case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET
-            || ray.lobe == LOBE_TOON);
+            || ray.lobe == LOBE_TOON || ray.lobe == LOBE_COAT);
         case 6: return float(ray.lobe == LOBE_REFRACT);
         case 8: return ray.length;
         default: return ray.depth;
@@ -617,6 +619,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(VELVET) break;
         CASE(TOON) break;
         CASE(DISPERSION) break;
+        CASE(COAT) break;
         CASE(HAIR) stack[top - 1] = normalize(transform(scene, tbn[0], 1, info)) * stack[top - 1].x; break; // Its fiber
         CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
         CASE(GENERATED) stack[top++] = at.generated; break;
@@ -824,7 +827,10 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
         used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0),
         used(PHASE) && top > 21 ? stack[21].x : 0, used(VELVET) && top > 22 ? stack[22].x : 0,
-        used(TOON) && top > 23 ? stack[23] : float3(0, 0, 0), used(DISPERSION) && top > 24 ? stack[24].x : 0);
+        used(TOON) && top > 23 ? stack[23] : float3(0, 0, 0), used(DISPERSION) && top > 24 ? stack[24].x : 0,
+        used(COAT) && top > 27 ? stack[25] : float3(0, 0.03f, 1.5f),
+        used(COAT) && top > 27 ? stack[26] : float3(1, 1, 1),
+        used(COAT) && top > 27 ? stack[27] : float3(0, 0, 0));
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -1323,7 +1329,9 @@ FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, ui
         used(SHEEN) ? surface.sheen : float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
         used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0), used(VELVET) ? surface.velvet : 0,
-        used(TOON) ? surface.toon : float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0};
+        used(TOON) ? surface.toon : float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0,
+        used(COAT) ? surface.coat.x : 0, used(COAT) ? surface.coat.y : 0.03f, used(COAT) ? surface.coat.z : 1.5f,
+        used(COAT) ? surface.coat_tint : float3(1, 1, 1), used(COAT) ? surface.coat_normal : float3(0, 0, 0)};
     const bool enclosed = encloses(scene, surface, at.instance);  // The medium it fills, only where it encloses one
     const Medium filled = enclosed ? volume(surface) : Medium(float3(0, 0, 0), float3(0, 0, 0));
     const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0;  // Its fiber, which rays leave from the vertex
