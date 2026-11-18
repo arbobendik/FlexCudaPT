@@ -610,28 +610,38 @@ def strays(expression, low, span, size, cache):  # Whether a bake of size texels
     x, y = (q - numpy.floor(q)).T[..., None]
     return (abs((c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y - c[4]) > BAKE_TOLERANCE).any()
 
-def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone: the low corner, span and texels of
-    # the domain its bake covers, and whether it repeats there; aligned, with an odd count of samples a texel, to the
-    # texels of the image lattice its reads share, so their filtering's kinks are samples, and as fine as keeps it
-    # within BAKE_TOLERANCE of shading live, measured at points of it (noise alone: eight samples per period); None
-    # where 4K can't, or noise and reads mix, which can't be measured here
+def image_lattice(expression, cache):  # Of a unit of the UV alone, what uv_domain() takes of it whatever its UVs:
+    # whether it has noise, and of the image lattice its reads share its origin and step in the UV, texels a UV and
+    # whether it repeats with the UV, else None for those; None where noise and reads mix
     reads, noise, memo = [], [], {}
     def walk(e):
         if isinstance(e, tuple) and id(e) not in memo:
             memo[id(e)] = (reads if e[0] in READS and isinstance(e[-1], ImageRead) else noise if e[0] == 'NOISE'
                 else []).append(e) or [*map(walk, e[1:])]
     if walk(expression) or reads and noise: return None
-    low, span, base, repeat = uvs.min(0), numpy.ptp(uvs, 0).clip(1e-6), numpy.full(2, max(64, need)), False
     p = (point := reads and reads[0][1]) and shaded(point, numpy.array(((0, 0), (1, 0), (0, 1))), cache, {})  # At 3 UVs
     o, s = point and p[0, :2], point and numpy.array((p[1, 0], p[2, 1])) - p[0, :2]
-    if point and s.all() and len({(tuple(r[-1].node.image.size), expression_key(r[1])) for r in reads}) == 1:
-        base = abs(s) * reads[0][-1].node.image.size  # Texels a UV; repeating with the UV where shading shows it
-        q = numpy.random.default_rng(1).random((8, 2))
-        repeat = (base == numpy.round(base)).all() and all(numpy.allclose(shaded(expression, q, cache, {}), shaded(
-            expression, q + d, cache, {})) for d in numpy.eye(2))
+    if not (point and s.all() and len({(tuple(r[-1].node.image.size), expression_key(r[1])) for r in reads}) == 1):
+        return noise, None, None, None, False
+    base = abs(s) * reads[0][-1].node.image.size  # Texels a UV; repeating with the UV where shading shows it
+    q = numpy.random.default_rng(1).random((8, 2))
+    return noise, o, s, base, (base == numpy.round(base)).all() and all(numpy.allclose(shaded(expression, q, cache,
+        {}), shaded(expression, q + d, cache, {})) for d in numpy.eye(2))
+
+def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone: the low corner, span and texels of
+    # the domain its bake covers, and whether it repeats there; aligned, with an odd count of samples a texel, to the
+    # texels of the image lattice its reads share, so their filtering's kinks are samples, and as fine as keeps it
+    # within BAKE_TOLERANCE of shading live, measured at points of it (noise alone: eight samples per period); None
+    # where 4K can't, or noise and reads mix, which can't be measured here
+    key = 'odd', expression_key(expression, keys)  # Its samples a texel, as measured for another object of it
+    if (key, 'lattice') not in cache: cache[key, 'lattice'] = image_lattice(expression, cache)  # Once an export
+    if cache[key, 'lattice'] is None: return None
+    noise, o, s, base, repeat = cache[key, 'lattice']
+    low, span = uvs.min(0), numpy.ptp(uvs, 0).clip(1e-6)
+    if base is None: base = numpy.full(2, max(64, need))
+    else:
         low = -o / s + numpy.floor((low + o / s) * base) / base  # The corner of a texel at or below its UVs
         span = numpy.ones(2) if repeat else numpy.ceil((uvs.max(0) - low) * base).clip(1) / base
-    key = 'odd', expression_key(expression, keys)  # Its samples a texel, as measured for another object of it
     for k in [cache[key]] if key in cache else range(1, 9, 2):
         size = numpy.ceil(span * base * (k or 0) - 1e-6).astype(int)
         if not k or (size > 4096).any(): return None
