@@ -609,12 +609,14 @@ def shaded(expression, uv, cache, memo):  # Values, as shaded, of math and linea
         memo[id(expression)] = numpy.broadcast_to(numpy.asarray(value, 'f8'), (len(uv), 3))
     return memo[id(expression)]
 
-def strays(expression, low, span, size, cache):  # Whether a bake of size texels over the domain, read back linearly,
-    q = numpy.random.default_rng(0).random((64, 2)) * size - 0.5  # strays past BAKE_TOLERANCE from shading live, at
-    points = [numpy.floor(q) + (k % 2, k // 2) + 0.5 for k in range(4)] + [q + 0.5]  # 64 points: around each the
-    c = shaded(expression, low + numpy.concatenate(points) / size * span, cache, {}).reshape(5, 64, 3)  # texels baked
-    x, y = (q - numpy.floor(q)).T[..., None]
-    return (abs((c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y - c[4]) > BAKE_TOLERANCE).any()
+def strays(expression, low, span, sizes, cache):  # Per size of texels a bake over the domain may take, whether it,
+    qs = [numpy.random.default_rng(0).random((64, 2)) * size - 0.5 for size in sizes]  # read back linearly, strays
+    points = [low + numpy.concatenate([numpy.floor(q) + (k % 2, k // 2) + 0.5 for k in range(4)] + [q + 0.5]) / size
+        * span for q, size in zip(qs, sizes)]  # past BAKE_TOLERANCE from shading live, at 64 points: around each the
+    c = shaded(expression, numpy.concatenate(points), cache, {}).reshape(len(sizes), 5, 64, 3)  # texels baked; of all
+    xys = [(q - numpy.floor(q)).T[..., None] for q in qs]  # sizes in one evaluation
+    return [(abs((c[0] * (1 - x) + c[1] * x) * (1 - y) + (c[2] * (1 - x) + c[3] * x) * y - c[4]) > BAKE_TOLERANCE)
+        .any() for c, (x, y) in zip(c, xys)]
 
 def image_lattice(expression, cache):  # Of a unit of the UV alone, what uv_domain() takes of it whatever its UVs:
     # whether it has noise, and of the image lattice its reads share its origin and step in the UV, texels a UV and
@@ -634,27 +636,30 @@ def image_lattice(expression, cache):  # Of a unit of the UV alone, what uv_doma
     return noise, o, s, base, (base == numpy.round(base)).all() and all(numpy.allclose(shaded(expression, q, cache,
         {}), shaded(expression, q + d, cache, {})) for d in numpy.eye(2))
 
-def uv_domain(expression, uvs, need, cache, keys):  # Of a unit of the UV alone: the low corner, span and texels of
+def uv_domain(expression, uvs, need, cache, failed, keys):  # Of a unit of the UV alone: the low corner, span and texels of
     # the domain its bake covers, and whether it repeats there; aligned, with an odd count of samples a texel, to the
     # texels of the image lattice its reads share, so their filtering's kinks are samples, and as fine as keeps it
     # within BAKE_TOLERANCE of shading live, measured at points of it (noise alone: eight samples per period); None
     # where 4K can't, or noise and reads mix, which can't be measured here
     key = 'odd', expression_key(expression, keys)  # Its samples a texel, as measured for another object of it
     if (key, 'lattice') not in cache: cache[key, 'lattice'] = image_lattice(expression, cache)  # Once an export
-    if cache[key, 'lattice'] is None: return None
+    if cache[key, 'lattice'] is None or key in failed: return None
     noise, o, s, base, repeat = cache[key, 'lattice']
     low, span = uvs.min(0), numpy.ptp(uvs, 0).clip(1e-6)
     if base is None: base = numpy.full(2, max(64, need))
     else:
         low = -o / s + numpy.floor((low + o / s) * base) / base  # The corner of a texel at or below its UVs
         span = numpy.ones(2) if repeat else numpy.ceil((uvs.max(0) - low) * base).clip(1) / base
+    sized = lambda k: numpy.ceil(span * base * k - 1e-6).astype(int)
+    tried = [] if noise or key in cache else [k for k in range(1, 9, 2) if not (sized(k) > 4096).any()]
+    stray = dict(zip(tried, strays(expression, low, span, [*map(sized, tried)], cache) if tried else []))
     for k in [cache[key]] if key in cache else range(1, 9, 2):
-        size = numpy.ceil(span * base * (k or 0) - 1e-6).astype(int)
-        if not k or (size > 4096).any(): return None
-        if noise or key in cache or not strays(expression, low, span, size, cache):
+        size = sized(k)
+        if (size > 4096).any(): return None
+        if noise or key in cache or not stray[k]:
             return cache.setdefault(key, k) and (numpy.r_[cache.setdefault((key, 'low'), low) if repeat else low, 0],
                 numpy.r_[span, 1], size, repeat)  # Repeating, at the first object's corner, as it was baked there
-    cache[key] = None
+    failed.add(key)
 
 def mapped(expression, change, memo):  # The expression, or a surface, its parts changed where change gives a value
     if isinstance(expression, list): return [mapped(part, change, memo) for part in expression]  # (not None), each
@@ -2076,6 +2081,7 @@ class Flex(bpy.types.RenderEngine):
         # first texel and size, count from the baked texels, as halves two to a texel, flagged in their height's bit 28.
         images, keys = {None: None if shaded else (textures, texels)}, {}  # Images units over UVs read; parts' keys, a
         # memo of expression_key's for the export, holding its parts as it does, its keys made one with the last's
+        failed = set()  # Units of the UV alone no domain bakes
         current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the scales
         # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
@@ -2096,7 +2102,7 @@ class Flex(bpy.types.RenderEngine):
             unit = isinstance(expression, tuple) and expression[0] != 'UNASSOCIATE' and not (expression[0] in READS
                 and isinstance(expression[-1], ImageRead)) and not (affine and len(reads) == 1) and (cost or 0) >= 10 \
                 and current.get('scales')
-            domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, keys)
+            domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, failed, keys)
             size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
                 if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
             if size is None or (size > 4096).any():
