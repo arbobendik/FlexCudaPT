@@ -30,6 +30,9 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 constexpr unsigned CODE = 255, IMMEDIATE = 1u << 31, LEFT = 1u << 30;
+// With FROM an operand, the first with FIRST, is read from the slot in bits 8 on; with KEEP the result is kept in the
+// slot in bits 13 on
+constexpr unsigned FROM = 1u << 29, FIRST = 1u << 28, KEEP = 1u << 27;
 // Raygen programs of a frame's passes, numbered as renderer.slang's main runs them: each round's count, queue and
 // queued shifts before its reuse pass, the temporal round's, then the spatial round's
 constexpr const char* PROGRAMS[] = {"__raygen__initial", "__raygen__temporal_count", "__raygen__temporal_prepass",

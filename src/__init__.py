@@ -19,6 +19,9 @@ SLOTS = 32  # Values a program keeps for reuse, as the shader's
 IMMEDIATES = ('ADD', 'SUBTRACT', 'MULTIPLY', 'DOT_PRODUCT', 'MAXIMUM', 'LOGARITHM', 'DIVIDE', 'POWER', 'MINIMUM',
     'LESS_THAN', 'MODULO', 'ARCTAN2', 'CROSS_PRODUCT')
 CODE, IMMEDIATE, LEFT = 255, 1 << 31, 1 << 30
+# Of those, one whose operand is kept in a slot reads it there, flagged FROM, and FIRST if the first, its slot in bits 8
+# on; any step keeping its result in a slot, flagged KEEP, its slot in bits 13 on
+FROM, FIRST, KEEP = 1 << 29, 1 << 28, 1 << 27
 LEVELS = numpy.arange(256, dtype='u1')
 BINARY = os.path.join(os.path.dirname(__file__), 'renderer')
 MODIFIED = os.path.getmtime(__file__)
@@ -708,16 +711,22 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
         payload = (payload[0], payload[1] | (min(max(round(64 * math.log2(scale)), -2047), 2047) if 0 < scale < math.inf
             else -2048) % 4096 << 20, *payload[2:])
     own = next((k for k in (1, 0) if name in IMMEDIATES and not isinstance(operands[k], tuple)), None)  # Its constant
-    values = [operand if k == own else emit(operand, ops, textures, texels, alphas, uses, slots,
-        operands[0] if name == 'SHIFTED' and k else shift, keys) for k, operand in enumerate(operands)]
-    ops.append(([*OPS].index(name), *payload[:3]) if own is None else ([*OPS].index(name) | IMMEDIATE
-        | LEFT * (own == 0), *numpy.resize(operands[own], 3).astype('f').view('I')))
+    held = [slots.get((shift, expression_key(operand, keys))) if slots is not None and name in IMMEDIATES and k != own
+        and isinstance(operand, tuple) and operand[0] != 'SHIFT' else None for k, operand in enumerate(operands)]
+    kept = next((k for k in (1, 0) if name in IMMEDIATES and held[k] is not None), None)  # Its operand in a slot
+    values = [operand if k == own else uses[shift, expression_key(operand, keys)][1] if k == kept
+        else emit(operand, ops, textures, texels, alphas, uses, slots, operands[0] if name == 'SHIFTED' and k
+        else shift, keys) for k, operand in enumerate(operands)]
+    code = [*OPS].index(name) | (own is not None) * (IMMEDIATE | LEFT * (own == 0)) | (kept is not None) * (FROM
+        | FIRST * (kept == 0))
+    ops.append((code, *(payload[:3] if own is None else numpy.resize(operands[own], 3).astype('f').view('I')))
+        + (() if kept is None else (held[kept], None)))
     if name == 'LIGHT_PATH': return float(values[0] >= 8)  # Of no ray, length and depth one, as light sampling shades
     value = OPS[name](*values) if OPS[name] else numpy.resize(payload[3][3:] if 'ALPHA' in name else payload[3][:3], 3)
     if slots is None: uses[key] = [1, value]
     elif name != 'SHIFT' and uses[key][0] > 1:
         slots[key] = len(slots)
-        ops.append(([*OPS].index('STORE'), slots[key], 0, 0))
+        ops[-1] = (*ops[-1][:4], ops[-1][4] if len(ops[-1]) > 4 else None, slots[key])  # Kept by its step
     return value
 
 def fold(expression, memo=None):  # The expression with its operations on constants alone computed, as the shader would
@@ -2169,7 +2178,10 @@ class Flex(bpy.types.RenderEngine):
             if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
             if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
             emit(surface, [], textures, texels, alpha, uses, keys=keyed)
-            store, load = [*OPS].index('STORE'), [*OPS].index('LOAD')
+            load = [*OPS].index('LOAD')
+            # The slots a step reads, by a LOAD or as its operand, and keeps its result in, numbered once per value
+            reads = lambda op: [op[1]] if op[0] == load else [op[4]] if len(op) > 4 and op[4] is not None else []
+            keeps = lambda op: [op[5]] if len(op) > 4 and op[5] is not None else []
             # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
             # straight through, so a program needs only as many slots as it keeps values at once; while that is more
             # than SLOTS, the value kept longest of those live at the most crowded step is computed again where read
@@ -2177,16 +2189,20 @@ class Flex(bpy.types.RenderEngine):
                 del ops[first:]
                 slots.clear()
                 emitted = emit(surface, ops, textures, texels, alpha, uses, slots, keys=keyed)
-                last, taken, renamed = {op[1]: k for k, op in enumerate(ops[first:], first) if op[0] == load}, set(), {}
-                stored, crowded = {}, set()
+                last = {slot: k for k, op in enumerate(ops[first:], first) for slot in reads(op)}
+                taken, renamed, stored, crowded = set(), {}, {}, set()
                 for k in range(first, len(ops)):
-                    code, slot = ops[k][:2]
-                    if code == store: renamed[slot] = min(set(range(len(taken) + 1)) - taken); taken.add(renamed[slot])
-                    if code == store: stored[slot] = k
+                    for slot in keeps(ops[k]):
+                        renamed[slot] = min(set(range(len(taken) + 1)) - taken)
+                        taken.add(renamed[slot]), stored.update({slot: k})
                     if len(taken) > len(crowded): crowded = {s for s in stored if last[s] >= k}
-                    if code in (store, load): ops[k] = (code, renamed[slot], 0, 0)
-                    if code == load and last[slot] == k: taken.discard(renamed[slot])
-                if len(crowded) <= SLOTS: break
+                    for slot in reads(ops[k]):
+                        if last[slot] == k: taken.discard(renamed[slot])
+                if len(crowded) <= SLOTS:
+                    ops[first:] = [(code, renamed[op[0]], 0, 0) if code == load else (code | (op[3] is not None and
+                        renamed[op[3]] << 8) | (op[4] is not None and KEEP | renamed[op[4]] << 13), *op[:3])
+                        if len(op) > 3 else (code, *op) for code, *op in ops[first:]]
+                    break
                 spilled = max(crowded, key=lambda s: last[s] - stored[s])
                 uses[next(key for key, slot in slots.items() if slot == spilled)][0] = 1
             # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
