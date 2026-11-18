@@ -1548,20 +1548,6 @@ extern "C" __global__ void __raygen__spatial() { restir_spatial_hook(optixGetLau
 
 // Fraction of the 17 x 17 neighborhood sharing each pixel's sample (Sec. 5)
 extern "C" __global__ void __raygen__duplicates() {
-    const uint3 p = optixGetLaunchIndex();
-    const uint3 size = optixGetLaunchDimensions();
-    const unsigned index = p.y * size.x + p.x;
-    const Scene& scene = *(Scene*)optixGetSbtDataPointer();
-    const Reservoir& own = scene.previous[index];
-    unsigned count = 0u;
-    for (int y = int(p.y) - 8; y <= int(p.y) + 8; y++) {
-        for (int x = int(p.x) - 8; x <= int(p.x) + 8; x++) {
-            if (x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y)) {
-                const Reservoir& other = scene.previous[y * size.x + x];
-                count += other.w > 0.0f && other.seed == own.seed ? 1u : 0u;
-            }
-        }
-    }
-    scene.duplication[index] = own.w > 0.0f ? (count - 1u) / 288.0f : 0.0f;
+    restir_duplicates_hook(optixGetLaunchIndex(), make_uint3(0, 0, 0), 0);
 }
 #include "adapter.cuh"
