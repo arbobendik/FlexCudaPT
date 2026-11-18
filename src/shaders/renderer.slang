@@ -35,6 +35,11 @@ struct Op { Code code; float3 value; };
 static const uint CODE = 255;
 static const uint IMMEDIATE = 1u << 31;
 static const uint LEFT = 1u << 30;
+// With FROM an operand, the first with FIRST, is read from the slot in bits 8 on; with KEEP the result is kept in the
+// slot in bits 13 on
+static const uint FROM = 1u << 29;
+static const uint FIRST = 1u << 28;
+static const uint KEEP = 1u << 27;
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
@@ -583,17 +588,21 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
-// An operation on a and b: both on the stack, or the step's own value as b, with LEFT as a
-#define BINARY(name, result) CASE(name) { const bool own = (uint(op.code) & IMMEDIATE) != 0; \
-    const bool left = (uint(op.code) & LEFT) != 0; top -= own ? 0 : 1; const float3 a = own && left ? op.value \
-    : stack[top - 1], b = !own ? stack[top] : left ? stack[top - 1] : op.value; stack[top - 1] = result; } break;
+// An operation on a and b, each on the stack, the step's own value or read from a slot; the n on the stack replaced
+#define BINARY(name, result) CASE(name) { const uint c = uint(op.code); const bool own = (c & IMMEDIATE) != 0; \
+    const bool from = (c & FROM) != 0, left = (c & LEFT) != 0, first = (c & FIRST) != 0; \
+    const int p = top - 2 + int(own) + int(from); \
+    const float3 a = own && left ? op.value : from && first ? saved[c >> 8 & 31] : stack[p]; \
+    const float3 b = own && !left ? op.value : from && !first ? saved[c >> 8 & 31] : stack[top - 1]; \
+    top = p + 1; stack[top - 1] = result; } break;
 // Surface the program resolves to at the point
 [noinline] Surface shade(Scene* scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming,
     bool backfacing, Ray ray, Info info, float material = 0) {
     Point at = point;
     float3 stack[STACK], saved[SLOTS];
     int top = 0;
-    for (Op* op = scene.ops + program; op.code != END; ++op) switch (Code(uint(op.code) & CODE)) {
+    for (Op* op = scene.ops + program; op.code != END; ++op) {
+        const Code code = Code(uint(op.code) & CODE); switch (code) {
         CASE(PUSH) stack[top++] = op.value; break;
         CASE(STORE) saved[asuint(op.value.x)] = stack[top - 1]; break;
         CASE(LOAD) stack[top++] = saved[asuint(op.value.x)]; break;
@@ -617,7 +626,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             const float3 forward = normalize(cross(c.y, c.x));
             const float3 q = c.lens.ortho != 0 ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its
             // image plane
-            stack[top++] = op.code == CAMERA_POINT ? float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
+            stack[top++] = code == CAMERA_POINT ? float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
         CASE(VERTEX_COLOR) stack[top++] = at.color.xyz; break;
@@ -700,19 +709,19 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             float x = (repeat ? wrap(stack[top - 1].x) : stack[top - 1].x) * (width & 0xFFFFF);
             float y = (repeat ? wrap(stack[top - 1].y) : stack[top - 1].y) * (height & 0xFFFFFF);
             float4 color;
-            if (op.code == IMAGE || op.code == ALPHA) color = texel(scene, *op, image, int(floor(x)), int(floor(y)));
-            if ((op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) && height >> 31 != 0) // In hardware, by its
+            if (code == IMAGE || code == ALPHA) color = texel(scene, *op, image, int(floor(x)), int(floor(y)));
+            if ((code == IMAGE_LINEAR || code == ALPHA_LINEAR) && height >> 31 != 0) // In hardware, by its
                 color = filtered[NonUniformResourceIndex(uint(scene.images[2 * asuint(op.value.x) + 1]))].SampleLevel(
                     samplers[height >> 24 & 3], stack[top - 1].xy, ray.width > 0 ? ray.level + log2(float(width
                     & 0xFFFFF) * (height & 0xFFFFFF)) / 2 + (int(width) >> 20) / 64.0f : 0); // extension, at the level
                     // of its cone, its texels and the change of its point by the UVs
-            else if (op.code == IMAGE_LINEAR || op.code == ALPHA_LINEAR) {
+            else if (code == IMAGE_LINEAR || code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floor(x)), j = int(floor(y));
                 color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
                     mix(texel(scene, *op, image, i, j + 1), texel(scene, *op, image, i + 1, j + 1), x - i), y - j);
             }
-            if (op.code == IMAGE_CUBIC || op.code == ALPHA_CUBIC) {
+            if (code == IMAGE_CUBIC || code == ALPHA_CUBIC) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floor(x)), j = int(floor(y));
                 color = float4(0, 0, 0, 0);
@@ -722,7 +731,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                     color = float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
                 }
             }
-            stack[top - 1] = op.code == IMAGE || op.code == IMAGE_LINEAR || op.code == IMAGE_CUBIC
+            stack[top - 1] = code == IMAGE || code == IMAGE_LINEAR || code == IMAGE_CUBIC
                 ? color.xyz
                 : float3(1, 1, 1) * color.w;
         } break;
@@ -804,7 +813,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             stack[top - 1] = float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
         } break;
         CASE(DIELECTRIC) --top; stack[top - 1] = float3(1, 1, 1) * fresnel(abs(stack[top - 1].x), 1, stack[top].x); break;
-    }
+    } if ((uint(op.code) & KEEP) != 0) saved[uint(op.code) >> 13 & 31] = stack[top - 1]; } // Kept in its slot
     return Surface(normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
         used(TRANSLUCENT) && top > 13 ? stack[13] : float3(0, 0, 0), used(SHEEN) && top > 15 ? stack[14]
