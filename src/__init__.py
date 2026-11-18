@@ -93,9 +93,10 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
     return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
 
 # Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
-# emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD, SKY and PANORAMA steps past every
-# program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of one
-# with strands, of one whose world has a volume, of one whose world it samples by its luminance and of a panoramic camera
+# emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD, SKY, PANORAMA and WORLD_PATH steps past
+# every program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of
+# one with strands, of one whose world has a volume, of one whose world it samples by its luminance, of a panoramic
+# camera and of one whose world reads Light Path, which its sky samples then ask per lobe
 OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
@@ -118,7 +119,7 @@ OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
     'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
-    'DISPERSION': lambda k: k}
+    'DISPERSION': lambda k: k, 'WORLD_PATH': None}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -2784,6 +2785,7 @@ class Flex(bpy.types.RenderEngine):
             and node.image.size[0]] if world else []
         grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if world and \
             scene.world.flex_sample_light and isinstance(fold(surface)[4], tuple) else (0, 0)
+        world_path = grid[0] and any(marks(x, 'LIGHT_PATH') for x in surface)  # Its sky samples asked per lobe
         world = program(surface)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
@@ -2833,7 +2835,8 @@ class Flex(bpy.types.RenderEngine):
         ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code & CODE] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
         ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
-            ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic)) if any]
+            ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic),
+            ('WORLD_PATH', world_path)) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
                     self.hairs or any(  # textures, and hair tables,
