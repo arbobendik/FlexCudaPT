@@ -24,12 +24,13 @@ struct Projection { uint type; float range[4], shift[2]; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION };
+    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera (CUDA's alone; its place kept, so the codes after it agree with the
 // exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
-// DISPERSION a transmission's IOR spread by wavelength
+// DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes, a world that reads
+// Light Path
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -1373,6 +1374,8 @@ struct VkScene : IScene {
     }
     // The emitter shaded before its shadow query
     [ForceInline] bool shadowFirst() { return false; }
+    // Whether the world reads Light Path, its sky samples then asked per lobe
+    [ForceInline] bool worldReadsPath() { return used(WORLD_PATH); }
     // The surface at a path's hit
     FKSurface surfaceAtPath(FKHit hit, float3 origin, uint init_random_state, float width, uint layer, uint depth,
         uint lobe, float3 dir) {
