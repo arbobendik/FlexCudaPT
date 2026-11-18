@@ -549,6 +549,10 @@ __device__ float spread(const Projection& p, float u, float v, float du, float d
 }
 #endif
 #define CASE(code) case code: if (!used(code)) break;
+// An operation on a and b: both on the stack, or the step's own value as b, with LEFT as a
+#define BINARY(name, result) CASE(name) { const bool own = op->code & IMMEDIATE, left = op->code & LEFT; top -= !own; \
+    const float3 a = own && left ? op->value : top[-1], b = !own ? *top : left ? top[-1] : op->value; top[-1] = result; \
+    } break;
 // Surface the program resolves to at the point
 __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
@@ -561,7 +565,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
     };
     at(point);
     float3 stack[STACK], *top = stack, saved[SLOTS];
-    for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code) {
+    for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code & CODE) {
         CASE(PUSH) *top++ = op->value; break;
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
@@ -705,16 +709,16 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
             const float3 n = transform(scene, tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), 2, info);
             top[-1] = isfinite(dot(n, n)) ? n : normal;
         } break;
-        CASE(ADD) --top; top[-1] = top[-1] + *top; break;
-        CASE(SUBTRACT) --top; top[-1] = top[-1] - *top; break;
-        CASE(MULTIPLY) --top; top[-1] = top[-1] * *top; break;
-        CASE(DOT_PRODUCT) --top; top[-1] = make_float3(1, 1, 1) * dot(top[-1], *top); break;
-        CASE(MAXIMUM) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fmaxf(a, b); }); break;
-        CASE(LOGARITHM) --top; top[-1] = each(top[-1], *top, logarithm); break;
+        BINARY(ADD, a + b)
+        BINARY(SUBTRACT, a - b)
+        BINARY(MULTIPLY, a * b)
+        BINARY(DOT_PRODUCT, make_float3(1, 1, 1) * dot(a, b))
+        BINARY(MAXIMUM, each(a, b, [](float a, float b) { return fmaxf(a, b); }))
+        BINARY(LOGARITHM, each(a, b, logarithm))
         CASE(MULTIPLY_ADD) top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
         CASE(SELECT) top -= 2; top[-1] = make_float3(top[-1].x != 0 ? top[0].x : top[1].x,
             top[-1].y != 0 ? top[0].y : top[1].y, top[-1].z != 0 ? top[0].z : top[1].z); break;
-        CASE(DIVIDE) --top; top[-1] = divide(top[-1], *top); break;
+        BINARY(DIVIDE, divide(a, b))
         CASE(SNAP) { --top;
             const float3 q = divide(top[-1], *top);
             top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
@@ -726,13 +730,12 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(WHITE_NOISE) --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
         CASE(NOISE) top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
             break;
-        CASE(POWER) --top; top[-1] = each(top[-1], *top, power); break;
+        BINARY(POWER, each(a, b, power))
         CASE(EXPONENT) top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
-        CASE(MINIMUM) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return fminf(a, b); }); break;
-        CASE(LESS_THAN) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return float(a < b); }); break;
+        BINARY(MINIMUM, each(a, b, [](float a, float b) { return fminf(a, b); }))
+        BINARY(LESS_THAN, each(a, b, [](float a, float b) { return float(a < b); }))
         CASE(FLOOR) top[-1] = each(top[-1], [](float a) { return floorf(a); }); break;
-        CASE(MODULO) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; });
-            break;
+        BINARY(MODULO, each(a, b, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; }))
         // Reduced exactly
         CASE(SINE) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI); }); break;
         CASE(COSINE) top[-1] = each(top[-1], [](float a) { return cospif(a * INV_PI); }); break;
@@ -740,11 +743,11 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(ARCSINE) top[-1] = each(top[-1], [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
         CASE(ARCCOSINE) top[-1] = each(top[-1], [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
         CASE(ARCTANGENT) top[-1] = each(top[-1], [](float a) { return atanf(a); }); break;
-        CASE(ARCTAN2) --top; top[-1] = each(top[-1], *top, [](float a, float b) { return atan2f(a, b); }); break;
+        BINARY(ARCTAN2, each(a, b, [](float a, float b) { return atan2f(a, b); }))
         CASE(SINH) top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
         CASE(COSH) top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
         CASE(TANH) top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
-        CASE(CROSS_PRODUCT) --top; top[-1] = cross(top[-1], *top); break;
+        BINARY(CROSS_PRODUCT, cross(a, b))
         CASE(RGB_TO_HSV) top[-1] = toHsv(top[-1]); break;
         CASE(HSV_TO_RGB) top[-1] = fromHsv(top[-1]); break;
         CASE(RGB_TO_HSL) top[-1] = toHsl(top[-1]); break;

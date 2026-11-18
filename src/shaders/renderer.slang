@@ -31,6 +31,10 @@ struct Projection { uint type; float range[4], shift[2]; };
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
 // DISPERSION a transmission's IOR spread by wavelength
 struct Op { Code code; float3 value; };
+// A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
+static const uint CODE = 255;
+static const uint IMMEDIATE = 1u << 31;
+static const uint LEFT = 1u << 30;
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
@@ -580,13 +584,17 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
+// An operation on a and b: both on the stack, or the step's own value as b, with LEFT as a
+#define BINARY(name, result) CASE(name) { const bool own = (uint(op.code) & IMMEDIATE) != 0; \
+    const bool left = (uint(op.code) & LEFT) != 0; top -= own ? 0 : 1; const float3 a = own && left ? op.value \
+    : stack[top - 1], b = !own ? stack[top] : left ? stack[top - 1] : op.value; stack[top - 1] = result; } break;
 // Surface the program resolves to at the point
 [noinline] Surface shade(Scene* scene, uint program, float3 normal, float3x3 tbn, Point point, float3 incoming,
     bool backfacing, Ray ray, Info info, float material = 0) {
     Point at = point;
     float3 stack[STACK], saved[SLOTS];
     int top = 0;
-    for (Op* op = scene.ops + program; op.code != END; ++op) switch (op.code) {
+    for (Op* op = scene.ops + program; op.code != END; ++op) switch (Code(uint(op.code) & CODE)) {
         CASE(PUSH) stack[top++] = op.value; break;
         CASE(STORE) saved[asuint(op.value.x)] = stack[top - 1]; break;
         CASE(LOAD) stack[top++] = saved[asuint(op.value.x)]; break;
@@ -724,16 +732,16 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 info);
             stack[top - 1] = isfinite(dot(n, n)) ? n : normal;
         } break;
-        CASE(ADD) --top; stack[top - 1] = stack[top - 1] + stack[top]; break;
-        CASE(SUBTRACT) --top; stack[top - 1] = stack[top - 1] - stack[top]; break;
-        CASE(MULTIPLY) --top; stack[top - 1] = stack[top - 1] * stack[top]; break;
-        CASE(DOT_PRODUCT) --top; stack[top - 1] = float3(1, 1, 1) * dot(stack[top - 1], stack[top]); break;
-        CASE(MAXIMUM) --top; stack[top - 1] = max(stack[top - 1], stack[top]); break;
-        CASE(LOGARITHM) --top; stack[top - 1] = logarithm(stack[top - 1], stack[top]); break;
+        BINARY(ADD, a + b)
+        BINARY(SUBTRACT, a - b)
+        BINARY(MULTIPLY, a * b)
+        BINARY(DOT_PRODUCT, float3(1, 1, 1) * dot(a, b))
+        BINARY(MAXIMUM, max(a, b))
+        BINARY(LOGARITHM, logarithm(a, b))
         CASE(MULTIPLY_ADD) top -= 2; stack[top - 1] = stack[top - 1] * stack[top] + stack[top + 1]; break;
         CASE(SELECT) top -= 2; stack[top - 1] = select(stack[top - 1] != float3(0, 0, 0), stack[top], stack[top + 1]);
             break;
-        CASE(DIVIDE) --top; stack[top - 1] = divide(stack[top - 1], stack[top]); break;
+        BINARY(DIVIDE, divide(a, b))
         CASE(SNAP) { --top;
             const float3 q = divide(stack[top - 1], stack[top]);
             stack[top - 1] = floor(q) * stack[top];
@@ -751,16 +759,13 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             stack[top - 1] = float3(1, 1, 1) * fractal(stack[top - 1], stack[top], stack[top + 1], stack[top + 2].x,
                 int(stack[top + 2].y));
             break;
-        CASE(POWER) --top; stack[top - 1] = power(stack[top - 1], stack[top]); break;
+        BINARY(POWER, power(a, b))
         CASE(EXPONENT) stack[top - 1] = exp(stack[top - 1]); break;
-        CASE(MINIMUM) --top; stack[top - 1] = min(stack[top - 1], stack[top]); break;
-        CASE(LESS_THAN) --top; stack[top - 1] = float3(stack[top - 1] < stack[top]); break;
+        BINARY(MINIMUM, min(a, b))
+        BINARY(LESS_THAN, float3(a < b))
         CASE(FLOOR) stack[top - 1] = floor(stack[top - 1]); break;
-        CASE(MODULO) --top;
-            stack[top - 1] = float3(stack[top].x != 0 ? fmod(stack[top - 1].x, stack[top].x) : 0,
-                stack[top].y != 0 ? fmod(stack[top - 1].y, stack[top].y) : 0,
-                stack[top].z != 0 ? fmod(stack[top - 1].z, stack[top].z) : 0);
-            break;
+        BINARY(MODULO, float3(b.x != 0 ? fmod(a.x, b.x) : 0, b.y != 0 ? fmod(a.y, b.y) : 0,
+            b.z != 0 ? fmod(a.z, b.z) : 0))
         // Reduced exactly
         CASE(SINE) stack[top - 1] = float3(sinpi(stack[top - 1].x * INV_PI), sinpi(stack[top - 1].y * INV_PI),
             sinpi(stack[top - 1].z * INV_PI)); break;
@@ -772,11 +777,11 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(ARCSINE) stack[top - 1] = asin(min(max(stack[top - 1], -1), 1)); break;
         CASE(ARCCOSINE) stack[top - 1] = acos(min(max(stack[top - 1], -1), 1)); break;
         CASE(ARCTANGENT) stack[top - 1] = atan(stack[top - 1]); break;
-        CASE(ARCTAN2) --top; stack[top - 1] = atan2(stack[top - 1], stack[top]); break;
+        BINARY(ARCTAN2, atan2(a, b))
         CASE(SINH) stack[top - 1] = sinh(stack[top - 1]); break;
         CASE(COSH) stack[top - 1] = cosh(stack[top - 1]); break;
         CASE(TANH) stack[top - 1] = tanh(stack[top - 1]); break;
-        CASE(CROSS_PRODUCT) --top; stack[top - 1] = cross(stack[top - 1], stack[top]); break;
+        BINARY(CROSS_PRODUCT, cross(a, b))
         CASE(RGB_TO_HSV) stack[top - 1] = toHsv(stack[top - 1]); break;
         CASE(HSV_TO_RGB) stack[top - 1] = fromHsv(stack[top - 1]); break;
         CASE(RGB_TO_HSL) stack[top - 1] = toHsl(stack[top - 1]); break;
