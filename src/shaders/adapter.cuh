@@ -301,6 +301,8 @@ static __device__ void fcptStoreTemporalShift(int2 p, unsigned layer, uint4 valu
 static __device__ void fcptStoreTemporalNeighbor(int2 p, int2 q) {
     if (onImage(p)) hookScene().shifts[3 * pixelIndex(p) + 2].f.x = __int_as_float(q.x < 0 ? -1 : int(pixelIndex(q)));
 }
+// OptiX's temporal round unqueued: restir_temporal makes each pixel's two shifts itself
+static __device__ bool fcptTemporalQueued() { return false; }
 static __device__ int2 fcptLoadTemporalNeighbor(int2 p) {
     const int q = __float_as_int(hookScene().shifts[3 * pixelIndex(p) + 2].f.x);
     return q < 0 ? make_int2(-1, -1) : make_int2(q % int(hookScene().width), q / int(hookScene().width));
