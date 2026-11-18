@@ -549,10 +549,13 @@ __device__ float spread(const Projection& p, float u, float v, float du, float d
 }
 #endif
 #define CASE(code) case code: if (!used(code)) break;
-// An operation on a and b: both on the stack, or the step's own value as b, with LEFT as a
-#define BINARY(name, result) CASE(name) { const bool own = op->code & IMMEDIATE, left = op->code & LEFT; top -= !own; \
-    const float3 a = own && left ? op->value : top[-1], b = !own ? *top : left ? top[-1] : op->value; top[-1] = result; \
-    } break;
+// An operation on a and b, each on the stack, the step's own value or read from a slot; the n on the stack replaced
+#define BINARY(name, result) CASE(name) { const unsigned c = op->code; \
+    const bool own = c & IMMEDIATE, from = c & FROM, left = c & LEFT, first = c & FIRST; \
+    float3* const p = top - 2 + own + from; \
+    const float3 a = own && left ? op->value : from && first ? saved[c >> 8 & 31] : *p; \
+    const float3 b = own && !left ? op->value : from && !first ? saved[c >> 8 & 31] : top[-1]; \
+    top = p + 1, top[-1] = result; } break;
 // Surface the program resolves to at the point
 __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
@@ -565,7 +568,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
     };
     at(point);
     float3 stack[STACK], *top = stack, saved[SLOTS];
-    for (const Op* op = scene.ops + program; op->code; ++op) switch (op->code & CODE) {
+    for (const Op* op = scene.ops + program; op->code; ++op) { const unsigned code = op->code & CODE; switch (code) {
         CASE(PUSH) *top++ = op->value; break;
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
@@ -590,13 +593,13 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
             const float3 q = c.lens.ortho ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its
             // image plane
 #ifdef EXTENDED
-            if (op->code == WINDOW && PANORAMIC(scene.camera)) {
+            if (code == WINDOW && PANORAMIC(scene.camera)) {
                 const float2 uv = unpanorama(scene.cameraProjection, local(c, d));
                 *top++ = make_float3(uv.x, uv.y, 0);
                 break;
             }
 #endif
-            *top++ = op->code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
+            *top++ = code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
         CASE(VERTEX_COLOR) *top++ = make_float3(color.x, color.y, color.z); break;
@@ -679,19 +682,19 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
             float x = (repeat ? wrap(top[-1].x) : top[-1].x) * (op->width & 0xFFFFF);
             float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
             float4 color;
-            if (op->code == IMAGE || op->code == ALPHA)
+            if (code == IMAGE || code == ALPHA)
                 color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
-            if ((op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
+            if ((code == IMAGE_LINEAR || code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
                 color = tex2DLod<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y, ray.width > 0 // at the
                     ? ray.level + log2f(float(op->width & 0xFFFFF) * (op->height & 0xFFFFFF)) / 2 // level of its cone,
                     + (int(op->width) >> 20) / 64.0f : 0); // its texels and the change of its point by the UVs
-            else if (op->code == IMAGE_LINEAR || op->code == ALPHA_LINEAR) {
+            else if (code == IMAGE_LINEAR || code == ALPHA_LINEAR) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
                 color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
                     mix(texel(scene, *op, image, i, j + 1), texel(scene, *op, image, i + 1, j + 1), x - i), y - j);
             }
-            if (op->code == IMAGE_CUBIC || op->code == ALPHA_CUBIC) {
+            if (code == IMAGE_CUBIC || code == ALPHA_CUBIC) {
                 x -= 0.5f; y -= 0.5f;
                 const int i = int(floorf(x)), j = int(floorf(y));
                 color = make_float4(0, 0, 0, 0);
@@ -701,7 +704,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                     color = make_float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
                 }
             }
-            top[-1] = op->code == IMAGE || op->code == IMAGE_LINEAR || op->code == IMAGE_CUBIC
+            top[-1] = code == IMAGE || code == IMAGE_LINEAR || code == IMAGE_CUBIC
                 ? make_float3(color.x, color.y, color.z)
                 : make_float3(1, 1, 1) * color.w;
         } break;
@@ -771,7 +774,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
             top[-1] = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
         } break;
         CASE(DIELECTRIC) --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
-    }
+    } if (op->code & KEEP) saved[op->code >> 13 & 31] = top[-1]; } // A result kept in its slot
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
         used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0),
