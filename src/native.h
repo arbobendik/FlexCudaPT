@@ -43,7 +43,7 @@ struct Emitter { unsigned code; const char* name; char kind; int pops; const cha
 constexpr Emitter EMITTERS[] = {E(PUSH, 'p', 0, ""), E(STORE, 's', 0, ""), E(LOAD, 'l', 0, ""), E(SHIFT, 'h', 0, ""),
     E(SHIFTED, 'H', 0, ""), E(CAMERA_POINT, 'c', 0, ""), E(WINDOW, 'c', 0, ""),
     E(SPECULAR, 'm', 0, ""), E(TRANSLUCENT, 'm', 0, ""), E(SHEEN, 'm', 0, ""), E(ANISOTROPIC, 'm', 0, ""),
-    E(PHASE, 'm', 0, ""), E(VELVET, 'm', 0, ""), E(TOON, 'm', 0, ""), E(DISPERSION, 'm', 0, ""),
+    E(PHASE, 'm', 0, ""), E(VELVET, 'm', 0, ""), E(TOON, 'm', 0, ""), E(DISPERSION, 'm', 0, ""), E(COAT, 'm', 0, ""),
     E(UV, 'f', 0, "x"), E(GENERATED, 'f', 0, "x"), E(OBJECT, 'f', 0, "x"), E(VERTEX_COLOR, 'f', 0, "x"),
     E(VERTEX_ALPHA, 'f', 0, "x"), E(NORMAL, 'f', 0, "x"), E(POSITION, 'f', 0, "x"), E(INCOMING, 'f', 0, "x"),
     E(BACKFACING, 'f', 0, "x"), E(ADD, 'b', 2, ""), E(SUBTRACT, 'b', 2, ""), E(MULTIPLY, 'b', 2, ""),
@@ -118,7 +118,9 @@ inline std::string nativeProgram(const std::vector<Op>& ops, unsigned start, boo
         stack[12], opt(13, "TRANSLUCENT", 13, "", z), opt(14, "SHEEN", 15, "", z), opt(15, "SHEEN", 15, ".x", "0.5f"),
         opt(16, "ANISOTROPIC", 18, ".x", "0"), opt(17, "ANISOTROPIC", 18, ".x", "0"), opt(18, "ANISOTROPIC", 18, "", z),
         opt(19, "MEDIUM", 19, "", z), opt(20, "HAIR", 20, "", z), opt(21, "PHASE", 21, ".x", "0"),
-        opt(22, "VELVET", 22, ".x", "0"), opt(23, "TOON", 23, "", z), opt(24, "DISPERSION", 24, ".x", "0")};
+        opt(22, "VELVET", 22, ".x", "0"), opt(23, "TOON", 23, "", z), opt(24, "DISPERSION", 24, ".x", "0"),
+        opt(25, "COAT", 27, "", "make_float3(0, 0.03f, 1.5f)"), opt(26, "COAT", 27, "", "make_float3(1, 1, 1)"),
+        opt(27, "COAT", 27, "", z)};
     std::string text, words; // Each step as an Op, its fields' bits cast to its value's floats, as no word array read
     for (unsigned k = start; k < end; ++k) { // through an Op* may be (its loads folded by the compiler as undefined)
         char word[160];
