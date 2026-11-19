@@ -67,11 +67,10 @@ struct BSDFMaterial {
     coat_normal{0, 0, 0};
 };
 // Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
-// The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point; bit 1
-// marks a surface they pass whole, its instance outside their mask, bit 2 a light whose shadow rays pass all. Light
-// sampling shades the program of its emission alone.
+// Opaque ones block shadow rays whatever the point; bit 1 marks a surface they pass whole, its instance outside their
+// mask, bit 2 a light whose shadow rays pass all. Light sampling shades the program of its emission alone.
 constexpr unsigned SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
-struct Material { float emitted; unsigned program, hidden, layers, opaque, emission; };
+struct Material { float emitted; unsigned program, hidden, opaque, emission; };
 // Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index and its random
 // number, then its axes, which with its location transform it into the world
 struct Info { float location[3], color[4], index, random, axes[9]; unsigned attributes; };
