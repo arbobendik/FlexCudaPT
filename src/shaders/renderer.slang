@@ -51,7 +51,7 @@ struct Surface {
     float dispersion; float3 coat, coat_tint, coat_normal;
 };
 static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
-struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
+struct SceneMaterial { float emitted; uint program, hidden, opaque, emission; };
 struct Info { float location[3], color[4], index, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
 // texspace: location and size of the mesh's texture space; majorant: its volume's largest extinction
@@ -1507,7 +1507,7 @@ struct VkScene : IScene {
             dir, Ray(depth == 0, false, lobe, float(depth), hit.distance, width)),
             hitPosition(scene, scene.vertices, at), init_random_state);
     }
-    uint layers(FKHit hit) { return scene.materials[key(scene, nativeHit(hit))].layers; }
+    uint layers(FKHit hit) { return 1; }  // A material's one row
     // Its size: stored negative, it marks an extinction drawn exactly
     float majorant(uint filling) { return abs(scene.instances[owner(scene, filling)].majorant); }
     // Whether varying media are compiled in
