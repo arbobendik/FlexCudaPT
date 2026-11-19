@@ -125,9 +125,7 @@ static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 t
     fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
     return sampleHair(hookScene(), fiber, in_dir, random_state);
 }
-static __device__ unsigned fcptLayers(FKHit hit) {
-    return hookScene().materials[key(hookScene(), nativeHit(hit))].layers;
-}
+static __device__ unsigned fcptLayers(FKHit hit) { return 1; }  // A material's one row
 // Its size: stored negative, it marks an extinction drawn exactly
 static __device__ float fcptMajorant(unsigned filling) {
     return fabsf(hookScene().instances[owner(hookScene(), filling)].majorant);
