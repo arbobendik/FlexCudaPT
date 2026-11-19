@@ -1031,9 +1031,9 @@ Point shifted(Scene* scene, Point point, Ray ray, int axis) {
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Surface of an instance's triangle at its barycentrics, in a layer of its material
+// Surface of an instance's triangle at its barycentrics
 Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray,
-    uint layer = 0, bool emission = false) {
+    bool emission = false) {
     if (used(CURVES) && scene.instances[instance].world == STRANDS) { // A strand's segment, its frame along its axis
         float3 n; // and normal
         const float3 o = strandPoint(scene, triangle, float2(s, t), n);
@@ -1041,7 +1041,6 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
         const float3 along = normalize(scene.points[p + 1].xyz - scene.points[p].xyz);
         uint program = emission ? scene.materials[key(scene, instance, triangle)].emission
             : scene.materials[key(scene, instance, triangle)].program;
-        while (layer != 0) layer -= uint(scene.ops[program++].code == END);
         float4* root = scene.strands + 3 * scene.segments[2 * triangle + 1]; // Its UV and color, and generated point
         const Instance placed = scene.instances[instance]; // by its emitter's texture space
         const float3 low = float3(placed.texspace[0], placed.texspace[1], placed.texspace[2]);
@@ -1058,8 +1057,6 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
     const float3 c = objectNormal(scene, vertex.instance, normals[2]);
     const SceneMaterial material = scene.materials[key(scene, instance, triangle)];
     uint program = emission ? material.emission : material.program;
-    // Each layer's program follows the end of the one above it
-    while (layer != 0) layer -= uint(scene.ops[program++].code == END);
     // Footprint of the ray cone over the UVs (Akenine-Moller et al. 2019)
     // FOOTPRINT = width^2 / |cos| * UV_AREA / AREA, |cos| = |dot(face, direction)| / |face|
     // uv_cross = (uv[1] - uv[0]) x (uv[2] - uv[0]), UV_AREA / AREA = |uv_cross| / |face|
@@ -1377,7 +1374,7 @@ Medium outside(Scene* scene, uint instance) {
         first)[0], float3(0, 0, 1), Ray(false, false, LOBE_NONE, 0.0f, 0.0f)));
 }
 
-// Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
+// Whether a shadow ray is blocked; transmitted: the light passing its occluders and media
 [ForceInline] bool occluded(Scene* scene, float3 from, float3 toward, float left, Medium medium, uint filling,
     inout uint state, Ray ray, bool onSurface, out float3 transmitted, uint skip = NONE, uint mask = SHADOWS) {
     float before = 0, at = 0, occluder;
@@ -1393,22 +1390,19 @@ Medium outside(Scene* scene, uint instance) {
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque != 0) return true;  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
-        for (uint layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
-            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
-                smoothNormal(scene, hit), toward,
-                Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder), layer);
-            transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
-                surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
-                float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
-                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0), 0, float3(0), 0, used(COAT) ? surface.coat.x : 0,
-                used(COAT) ? surface.coat.y : 0.03f, used(COAT) ? surface.coat.z : 1.5f,
-                used(COAT) ? surface.coat_tint : float3(1), used(COAT) ? surface.coat_normal : float3(0)),
-                surface.coverage);
-            if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
-                    hit.triangle);
-            }
+        const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
+            toward, Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder));
+        transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
+            surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
+            float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0,
+            used(ANISOTROPIC) ? surface.anisotropic_rotation : 0, used(ANISOTROPIC) ? surface.tangent : float3(0), 0,
+            float3(0), 0, used(COAT) ? surface.coat.x : 0, used(COAT) ? surface.coat.y : 0.03f,
+            used(COAT) ? surface.coat.z : 1.5f, used(COAT) ? surface.coat_tint : float3(1),
+            used(COAT) ? surface.coat_normal : float3(0)), surface.coverage);
+        if (encloses(scene, surface, hit.instance)) {
+            const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+            medium = leaves ? outside(scene, hit.instance) : volume(surface);
+            filling = leaves ? NONE : fills(scene, hit.instance, hit.triangle);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return true;
@@ -1492,11 +1486,10 @@ struct VkScene : IScene {
     // A light sample's emission: its emission program toward the face, and its smooth normal
     FKSurface lightSurfaceAt(FKHit hit, float3 point, uint init_random_state, float3 dir, uint depth, float length) {
         const Hit at = nativeHit(hit);
-        const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
+        const float3 n = smoothNormal(scene, at);
         FKSurface light = walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
-            cross(corner[1] - corner[0], corner[2] - corner[0]), dir, Ray(false, false, LOBE_NONE, float(depth + 1),
-            length), 0, true), point, init_random_state);
-        light.smooth_n = smoothNormal(scene, at);
+            n, dir, Ray(false, false, LOBE_NONE, float(depth + 1), length), true), point, init_random_state);
+        light.smooth_n = n;
         return light;
     }
     // The emitter shaded before its shadow query
@@ -1508,7 +1501,7 @@ struct VkScene : IScene {
         uint lobe, float3 dir) {
         const Hit at = nativeHit(hit);
         return walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y, smoothNormal(scene, at),
-            dir, Ray(depth == 0, false, lobe, float(depth), hit.distance, width), layer),
+            dir, Ray(depth == 0, false, lobe, float(depth), hit.distance, width)),
             hitPosition(scene, scene.vertices, at), init_random_state);
     }
     uint layers(FKHit hit) { return scene.materials[key(scene, nativeHit(hit))].layers; }
@@ -1918,10 +1911,10 @@ void lights(uint3 p, Scene* scene) {
         const float side = sqrt((i + random(state)) / LIGHT_SAMPLES), along = random(state);
         const float3 n = faceNormal(scene, light.instance, light.triangle);
         float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, -n,
-            Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
+            Ray(false, false, LOBE_NONE, 0, 0), true).emissive;
         if (!(emission.x + emission.y + emission.z > 0)) // Its back's where its front emits nothing, as a portal's
             emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, n,
-                Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
+                Ray(false, false, LOBE_NONE, 0, 0), true).emissive;
         mean += max(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     scene.materials[triangle].emitted = max(mean, emitted * 0.001f);

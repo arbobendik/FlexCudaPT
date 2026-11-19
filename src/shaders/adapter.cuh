@@ -87,11 +87,10 @@ static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 po
     unsigned depth, float length) {
     const Scene& scene = hookScene();
     const Hit at = nativeHit(hit);
-    const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
+    const float3 n = smoothNormal(scene, at);
     FKSurface light = walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
-        cross(corner[1] - corner[0], corner[2] - corner[0]), dir,
-        Ray{false, false, LOBE_NONE, float(depth + 1), length}, 0, true), point, random_state);
-    light.smooth_n = smoothNormal(scene, at);
+        n, dir, Ray{false, false, LOBE_NONE, float(depth + 1), length}, true), point, random_state);
+    light.smooth_n = n;
     return light;
 }
 // The surface as the walk's loop shades a hit
@@ -100,7 +99,7 @@ static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 ori
     const Scene& scene = hookScene();
     const Hit at = nativeHit(hit);
     return walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
-        smoothNormal(scene, at), dir, Ray{depth == 0, false, lobe, float(depth), hit.distance, width}, layer),
+        smoothNormal(scene, at), dir, Ray{depth == 0, false, lobe, float(depth), hit.distance, width}),
         hitPosition(scene, scene.vertices, at), random_state);
 }
 // Whether hair is compiled in: the renderer's own switch, false in the PTX compiled without it, which folds the walk's
