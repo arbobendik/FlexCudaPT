@@ -1,6 +1,6 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, tempfile
-import hashlib, operator, time, types, _cycles
+import collections, hashlib, operator, time, types, _cycles
 import sys, threading
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
@@ -92,11 +92,12 @@ def mirror_ball(d):  # Image coordinates of a direction on a mirror ball, as Cyc
     d = d / (2 * math.sqrt(max(-0.5 * d[1], 0)) or 1)
     return numpy.array((0.5 * (d[0] + 1), 0.5 * (d[2] + 1), 0))
 
-# Steps of a program in the shader's order, operations named as Blender's with their functions; a surface's end sums its
-# emission, and a mark of its specular tint passes it on. MEDIUM, CURVES, WORLD, SKY, PANORAMA and WORLD_PATH steps past
-# every program's end, of a scene whose media vary from point to point, so the renderer tracks those it fills alone, of
-# one with strands, of one whose world has a volume, of one whose world it samples by its luminance, of a panoramic
-# camera and of one whose world reads Light Path, which its sky samples then ask per lobe
+def identity(x): return x
+MARKS = ('SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET', 'TOON', 'DISPERSION',
+    'COAT')  # Lobe marks
+# Steps by name: their functions; END sums the emission, a mark passes its input on. Past every program's end, per
+# scene: MEDIUM (media vary), CURVES (strands), WORLD (world volume), SKY (world sampled), PANORAMA, WORLD_PATH (world
+# reads Light Path)
 OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('PUSH', 'UV', 'NORMAL', 'IMAGE',
     'ALPHA', 'NORMAL_MAP')), 'ADD': numpy.add, 'SUBTRACT': numpy.subtract, 'MULTIPLY': numpy.multiply,
     'DOT_PRODUCT': dot, 'MAXIMUM': numpy.maximum, 'LOGARITHM': logarithm,
@@ -115,12 +116,15 @@ OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('
     **dict.fromkeys(('POSITION', 'INCOMING', 'BACKFACING', 'DIELECTRIC', 'LIGHT_PATH', 'WHITE_NOISE', 'VORONOI',
     'MAGIC', 'BRICK', 'OBJECT', 'VERTEX_COLOR', 'VERTEX_ALPHA', 'OBJECT_INFO', 'CAMERA_POINT', 'WINDOW',
     'TRANSFORM', 'BOX', 'SHIFT', 'SHIFTED', 'BUMP', 'STORE', 'LOAD', 'ANIMATED', 'BAKED')),
-    'SPECULAR': lambda tint: tint, 'TRANSLUCENT': lambda color: color, 'SHEEN': lambda color: color, 'INSTANCER': None,
-    'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
-    'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
-    'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
-    'DISPERSION': lambda k: k, 'WORLD_PATH': None, 'TRIANGLE': None, 'NOISE_EXTRA': None,
-    'COAT': lambda coat: coat}
+    'SPECULAR': identity, 'TRANSLUCENT': identity, 'SHEEN': identity, 'INSTANCER': None,
+    'ANISOTROPIC': identity, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
+    'HAIR': identity, 'PHASE': identity, 'WORLD': None, 'GRID': None, 'VELVET': identity,
+    'SKY': None, 'TOON': identity, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
+    'DISPERSION': identity, 'WORLD_PATH': None, 'TRIANGLE': None, 'NOISE_EXTRA': None,
+    'COAT': identity}
+NAMES = [*OPS]
+OP = {name: k for k, name in enumerate(NAMES)}
+def reads_texel(code): return NAMES[code & CODE] in (*READS, 'GRID')
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -190,7 +194,7 @@ def rebuilt(mapping):
     mapping.update() if ordered else mapping.initialize()
     return mapping
 
-# Hosek and Wilkie's sky model: its RGB dataset (hosek_wilkie.LICENSE) by channel, ground albedo, turbidity, coefficient
+# Hosek and Wilkie's sky model: its RGB dataset by channel, ground albedo, turbidity, coefficient
 # and Bezier point over the cube root of the sun's elevation
 HOSEK_WILKIE = numpy.load(os.path.join(os.path.dirname(__file__), 'hosek_wilkie.npy'))
 
@@ -411,7 +415,7 @@ def stretch(values, uvs):
     order = numpy.argsort(norms)
     return flat.any() and norms[order][numpy.searchsorted(numpy.cumsum(area[flat][order]), 0.9 * area[flat].sum())]
 
-# Whether a material's tree is trivial, as Bendik's rule has it, and so bakes nothing: its links only from flat Image
+# Whether a material's tree is trivial, and so bakes nothing: its links only from flat Image
 # Textures, Normal Maps, UV Maps, Texture Coordinates' UV, Mappings that change nothing, reroutes and a shader, not a
 # group, neither mixing, adding nor coated
 def trivial(material):
@@ -429,34 +433,33 @@ def trivial(material):
 # (None for any other step or input, a specular mark, kept live around what of its tint bakes, or a nearest or
 # clipped read, which a unit over UV space can't measure); its point
 # inputs; and the texels across the UVs it needs, eight per period of its noises' finest octave of at least a 256th of
-# the first's amplitude, as gradient noise holds more than its frequency and distortion adds to it (two left Fog of
-# tokyo's 0.1% bright).
+# the first's amplitude, as gradient noise holds more than its frequency and distortion adds to it.
+Summary = collections.namedtuple('Summary', 'reads affine cost inputs need')
 def summarize(expression, table, scales):
-    if not isinstance(expression, tuple): return set(), False, 1, set(), 0
+    if not isinstance(expression, tuple): return Summary(set(), False, 1, set(), 0)
     if id(expression) in table: return table[id(expression)]  # A part shared, summarized already
     name, *operands = expression
     parts = [summarize(operand, table, scales) for operand in operands]
     read, sub = name in READS and isinstance(operands[-1], ImageRead), parts[:-1] if name in READS else parts
     node, kind = read and operands[-1].node, name.replace('ALPHA', 'IMAGE')
     reads = {(kind, expression_key(operands[0]), tuple(node.image.size), getattr(node, 'extension', 'REPEAT'))} \
-        if read else set().union(*(part[0] for part in sub))
-    flags = [part[1] for part in sub]
+        if read else set().union(*(part.reads for part in sub))
+    flags = [part.affine for part in sub]
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
-    points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
-        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
-        'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET', 'TOON', 'DISPERSION', 'COAT') \
-        or any(part[2] is None for part in parts) \
-        else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
-    inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
-    along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
-    need = max([0, *(part[4] for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
+    cost = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
+        not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in MARKS \
+        or any(part.cost is None for part in parts) \
+        else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(part.cost for part in parts)
+    inputs = ({name} & {*POINTS}).union(*(part.inputs for part in parts))
+    along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0].inputs & scales.keys())
+    need = max([0, *(part.need for part in parts), *([max(node.image.size) * along()] if scales and read else [])])
     if scales and name == 'NOISE':
         detail, roughness, lacunarity = (0, 1, 1) if isinstance(operands[1], tuple) else triple(operands[1])
         rate = roughness * lacunarity if 'BUMP' in scales else roughness  # Under a bump of its gradient, at twice the
         octaves = detail if rate >= 1 else min(detail, math.log(1 / 256) / math.log(max(rate, 1e-3)))  # samples
         need = math.inf if isinstance(operands[1], tuple) else max(need, (16 if 'BUMP' in scales else 8) * lacunarity
             ** octaves * along())
-    table[id(expression)] = reads, affine, points, inputs, need
+    table[id(expression)] = Summary(reads, affine, cost, inputs, need)
     return table[id(expression)]
 
 def channel(expression, k):  # Of an expression, its kth channel when constant whatever its parts that vary: a product
@@ -639,11 +642,11 @@ def image_lattice(expression, cache):  # Of a unit of the UV alone, what uv_doma
     return noise, o, s, base, (base == numpy.round(base)).all() and all(numpy.allclose(shaded(expression, q, cache,
         {}), shaded(expression, q + d, cache, {})) for d in numpy.eye(2))
 
-def uv_domain(expression, uvs, need, cache, failed, keys):  # Of a unit of the UV alone: the low corner, span and texels of
-    # the domain its bake covers, and whether it repeats there; aligned, with an odd count of samples a texel, to the
-    # texels of the image lattice its reads share, so their filtering's kinks are samples, and as fine as keeps it
-    # within BAKE_TOLERANCE of shading live, measured at points of it (noise alone: eight samples per period); None
-    # where 4K can't, or noise and reads mix, which can't be measured here
+def uv_domain(expression, uvs, need, cache, failed, keys):  # Of a unit of the UV alone: the low corner, span and
+    # texels of the domain its bake covers, and whether it repeats there; aligned, with an odd count of samples a
+    # texel, to the texels of the image lattice its reads share, so their filtering's kinks are samples, and as fine as
+    # keeps it within BAKE_TOLERANCE of shading live, measured at points of it (noise alone: eight samples per
+    # period); None where 4K can't, or noise and reads mix, which can't be measured here
     key = 'odd', expression_key(expression, keys)  # Its samples a texel, as measured for another object of it
     if (key, 'lattice') not in cache: cache[key, 'lattice'] = image_lattice(expression, cache)  # Once an export
     if cache[key, 'lattice'] is None or key in failed: return None
@@ -719,7 +722,7 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
     key = shift, expression_key(expression, keys)
     if name != 'SHIFT' and key in (uses if slots is None else slots):
         if slots is None: uses[key][0] += 1
-        else: ops.append(([*OPS].index('LOAD'), slots[key], 0, 0))
+        else: ops.append((OP['LOAD'], slots[key], 0, 0))
         return uses[key][1]
     if name == 'UNASSOCIATE':
         return emit(('DIVIDE', *operands) if operands[1][-1].key in alphas else operands[0], ops, textures, texels,
@@ -741,7 +744,7 @@ def emit(expression, ops, textures, texels, alphas, uses, slots=None, shift=None
     values = [operand if k == own else uses[shift, expression_key(operand, keys)][1] if k == kept
         else emit(operand, ops, textures, texels, alphas, uses, slots, operands[0] if name == 'SHIFTED' and k
         else shift, keys) for k, operand in enumerate(operands)]
-    code = [*OPS].index(name) | (own is not None) * (IMMEDIATE | LEFT * (own == 0)) | (kept is not None) * (FROM
+    code = OP[name] | (own is not None) * (IMMEDIATE | LEFT * (own == 0)) | (kept is not None) * (FROM
         | FIRST * (kept == 0))
     ops.append((code, *(payload[:3] if own is None else triple(operands[own]).astype('f').view('I')))
         + (() if kept is None else (held[kept], None)))
@@ -762,8 +765,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
-    if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET',
-        'TOON', 'DISPERSION', 'COAT') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
+    if name != 'UNASSOCIATE' and name not in MARKS and OPS[name] and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(triple(operand) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
         for i, value in enumerate(operands):
@@ -1737,13 +1739,9 @@ def resolve(socket, groups=()):
             k = 'MULTIPLY', k, k
             albedo = 'DIVIDE', ('ADD', ('MULTIPLY', ('SUBTRACT', n, 1), ('SUBTRACT', n, 1)), k), \
                 ('ADD', ('MULTIPLY', ('ADD', n, 1), ('ADD', n, 1)), k)
-        # Hair renders by Chiang's far field, which the loader bakes per material and Random Roughness level (HAIRS):
-        # Huang's fitted onto it, its roughness both ways, its lobes' weights R, TT, TRT and the rest by its Reflection,
-        # Transmission and Secondary Reflection, no coat, its aspect ratio round; Blender's old Hair BSDF as Chiang of
-        # its RoughnessU and V, its Reflection lobe R tinted by its color through nothing (u = 0), its Transmission
-        # no R, its color absorbed. Its albedo is the fiber's transmittance u = e^(-2 sigma) per channel, sigma per hit:
-        # of its color at the radial roughness, its absorption, or its melanin, varied per strand by the random number,
-        # eumelanin's and pheomelanin's coefficients and its tint's, by the formulas Cycles' source reads them with
+        # Hair: far field per material and Random Roughness level (HAIRS); lobes R, TT, TRT weighted by Reflection,
+        # Transmission, Secondary Reflection; legacy: RoughnessU/V, R tinted (u = 0), TT without R
+        # sigma = (ln c / fit)^2, or absorption, or melanin; albedo u = e^(-2 sigma)
         hair, legacy, huang, hair_tint = node.type in ('BSDF_HAIR_PRINCIPLED', 'BSDF_HAIR'), node.type == 'BSDF_HAIR', \
             getattr(node, 'model', None) == 'HUANG', 1
         if hair:
@@ -1804,7 +1802,7 @@ def resolve(socket, groups=()):
                 get('Scale' if sss else 'Subsurface Scale'))
             root = 'POWER', ('ADD', 9.59217, ('MULTIPLY', albedo, ('ADD', 41.6808, ('MULTIPLY', 17.7126, albedo)))), 0.5
             single = 'SUBTRACT', 1, ('POWER', ('SUBTRACT', ('ADD', 4.09712, ('MULTIPLY', 4.20863, albedo)), root), 2)
-            # FlexKernels tints what refracts by the albedo, which the medium's color carries here alone
+            # Refraction tinted by the albedo: the medium's color carries it alone
             transparency, albedo = mix(transparency, 1, subsurface), mix(albedo, 1, subsurface)
             absorption = 'SUBTRACT', 1, ('DIVIDE', ('SUBTRACT', 1, single), path)
             density, scatter = 1, ('DIVIDE', single, path)
@@ -2003,8 +2001,8 @@ def sealed():
     SEALING['asked'] = True
     return SEALING['closed']
 
-# The material's surface as rows, one per layer from the top: the row of its surface, filled by its volume, under that
-# of a coat emitting in its place; black without an output; passing rays straight through without a surface shader
+# The material's surface as its row: the row of its surface, filled by its volume; black without an output; passing
+# rays straight through without a surface shader
 class Default:  # An input at its value, linked to nothing, as resolve() reads it
     links, is_output, enabled, id_data = (), False, True, types.SimpleNamespace(animation_data=None)
     def __init__(self, name, type, value): self.name, self.type, self.default_value = name, type, value
@@ -2025,7 +2023,9 @@ DEFAULT_VOLUME.links = [types.SimpleNamespace(is_valid=True, is_muted=False, fro
 # filler: a volume object's: no surface, and the default volume where no Volume output is linked
 def shade(material, program, filler=False):
     output = material and material.node_tree.get_output_node('CYCLES')
-    if not output and not filler: return [program(BLACK)]
+    if not output and not filler:
+        row = program(BLACK)
+        return *row, row[1]
     filling = output.inputs['Volume'] if output and output.inputs['Volume'].is_linked else filler and DEFAULT_VOLUME
     surface = resolve(output.inputs['Surface']) if output and not filler else BLACK
     # Its volume, or the medium its subsurface scattering fills
@@ -2044,28 +2044,23 @@ def shade(material, program, filler=False):
     # A coat over it drawn by FlexKernels' coat lobe: its weight, roughness and IOR marked, then its tint and normal;
     # two coats mixed, one lobe of their values mixed
     coat = surface[19] if len(surface) > 19 and surface[19] else None
-    layers = [surface[:10]]
     # FlexLight's BSDF transmits apart from metallic reflection: its transmission is the share transmitted of the share
     # not metallic, its ior that of the share not metallic
-    base = layers[-1]
+    base = surface[:10]
     metallic, share = base[2], base[5]
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
-    # The base layer transmits the surface's translucent color diffusely and carries its sheen, anisotropy, hair and
-    # coat; each filled by its volume's emission, its phase's asymmetry and its sheen's velvet mark
-    def tail(layer):  # Its hair, phase, velvet, toon, dispersion and coat after the glow, as far as the last there
-        marked = [surface[20] if layer is base and len(surface) > 20 else 0, phase or 0,
-            *(surface[k] if layer is base and len(surface) > k else 0 for k in (21, 22, 23)),
-            *((('COAT', vector(coat[9], coat[3], coat[6])), coat[1], coat[0]) if coat and layer is base else ())]
-        while marked and not marked[-1]: marked.pop()
-        return marked
-    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow, *tail(layer)]
-        for layer in layers]
-    # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
-    cut = [program(attribute, emitted=False) for attribute in attributes]
-    rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
-    # Light sampling reads the emission alone: the top layer's, its colors associated as in that layer's program
-    return [(*rows[0], program([*BLACK[:4], layers[0][4], *BLACK[5:]], [*layers[0], *volume])[1]), *rows[1:]]
+    # It transmits the surface's translucent color diffusely and carries its sheen, anisotropy, hair and coat; filled
+    # by its volume's emission, its phase's asymmetry and its sheen's velvet mark. Its hair, phase, velvet, toon,
+    # dispersion and coat after the glow, as far as the last there
+    marked = [surface[20] if len(surface) > 20 else 0, phase or 0, *(surface[k] if len(surface) > k else 0
+        for k in (21, 22, 23)), *((('COAT', vector(coat[9], coat[3], coat[6])), coat[1], coat[0]) if coat else ())]
+    while marked and not marked[-1]: marked.pop()
+    attribute = [*base, *volume, *surface[13:19], glow, *marked]
+    # Cut first, so the bakes the cut makes come before the row
+    row = program(program(attribute, emitted=False), attribute, cut=False)
+    # Light sampling reads the emission alone, its colors associated as in the row's program
+    return *row, program([*BLACK[:4], base[4], *BLACK[5:]], [*base, *volume])[1]
 
 class Boxed:  # The world as its box's material: its volume, behind faces passing rays straight
     def __init__(self, world):
@@ -2245,8 +2240,7 @@ class Flex(bpy.types.RenderEngine):
         self.shared = open(os.memfd_create('flex'), 'rb', 0)  # In memory file the renderer leaves its sums in
         self.spawn()
 
-    # The engine keeps only the renderer's pipes, taken off the Popen, which Python keeps alive while its process runs:
-    # once the engine drops them, the renderer reads the end of its input and exits.
+    # Pipes alone kept: dropped, the renderer reads end of input and exits
     def spawn(self):
         self.device = device()  # That of the renderer, which the preference may change since
         process = subprocess.Popen((BINARY + '-vulkan' * (self.device == 'VULKAN'), str(self.shared.fileno()),
@@ -2402,7 +2396,7 @@ class Flex(bpy.types.RenderEngine):
             for k in range(1 << len(stepping)):
                 variant = substituted(expression, {id(s): float(k >> i & 1) for i, s in enumerate(stepping)}, {})
                 alive.append(variant)
-                if (summarize(variant, summaries, current.get('scales'))[2] or 0) < 10: return None
+                if (summarize(variant, summaries, current.get('scales')).cost or 0) < 10: return None
                 variants.append(variant)
             shared = {}  # Each baked whole, none in part, or the chain as today
             variants = [bake(variant, shared, True) for variant in variants]
@@ -2422,7 +2416,8 @@ class Flex(bpy.types.RenderEngine):
             unit = isinstance(expression, tuple) and expression[0] != 'UNASSOCIATE' and not (expression[0] in READS
                 and isinstance(expression[-1], ImageRead)) and not (affine and len(reads) == 1) and (cost or 0) >= 10 \
                 and current.get('scales')
-            domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, failed, keys)
+            domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, images, failed,
+                keys)
             size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
                 if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
             if size is None or (size > 4096).any():
@@ -2430,8 +2425,9 @@ class Flex(bpy.types.RenderEngine):
                     return bumped(*expression[1:], memo, whole)
                 if whole: return expression
                 if variant := stepped(expression): return variant  # Baked by the steps it's live for
-                if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
-                        summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
+                if not isinstance(expression, tuple) or summaries[id(expression)].affine is None \
+                        and len(summaries[id(expression)].reads) == 1:  # Inexact on one image, live whole: baked parts
+                    # add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by
                 return (expression[0], *(bake(part, memo, whole) for part in expression[1:])) \
                     if expression[0] != 'UNASSOCIATE' else \
@@ -2478,10 +2474,11 @@ class Flex(bpy.types.RenderEngine):
         # height at its own point no matter; where no gradient bakes, its height baked on its images' lattice, else all
         def bumped(normal, height, first, second, factors, memo, whole):  # live, as a bake's texels differ none
             # between points a bump shifts by less than one
-            inputs = isinstance(height, tuple) and summaries[id(height)][2] is not None and summaries[id(height)][3]
+            summary = isinstance(height, tuple) and summaries[id(height)]
+            inputs = summary and summary.cost is not None and summary.inputs
             if inputs and len(inputs) == 1 and (point := next(iter(inputs))) in (current.get('scales') or ()):
                 scales = {**current['scales'], 'BUMP': 1}  # Central differences a quarter texel apart
-                step = scales[point] / 4 / max(64, summarize(height, {}, scales)[4])
+                step = scales[point] / 4 / max(64, summarize(height, {}, scales).need)
                 shifted = lambda d: moved_to(height, ('ADD', (point,), d), {}, point)
                 gradient = fold(vector(*(('DIVIDE', ('SUBTRACT', shifted(e * step), shifted(-e * step)), 2 * step)
                     if k < 2 or point != 'UV' else 0 for k, e in enumerate(numpy.eye(3)))))
@@ -2492,7 +2489,7 @@ class Flex(bpy.types.RenderEngine):
             seen = {}  # Of images alone, its texels' own gradient as live has it: the height baked on their lattice
             noisy = lambda e: isinstance(e, tuple) and (seen[id(e)] if id(e) in seen else seen.setdefault(id(e), e[0] ==
                 'NOISE' or any(map(noisy, e[1:]))))
-            if isinstance(height, tuple) and summaries[id(height)][0] and not noisy(height):
+            if isinstance(height, tuple) and summaries[id(height)].reads and not noisy(height):
                 return 'BUMP', *(bake(part, memo, whole) for part in (normal, height, first, second, factors))
             return 'BUMP', bake(normal, memo, whole), height, first, second, bake(factors, memo, whole)
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
@@ -2503,7 +2500,7 @@ class Flex(bpy.types.RenderEngine):
             derived.update(differentiated(surface))
             seen, table = set(), {}  # Reads of attributes shading isn't linear in, or that aren't affine in their reads
             for k, attribute in enumerate(surface):
-                if k % len(GRAY) in UNFILTERED or summarize(attribute, table, None)[1] is None:
+                if k % len(GRAY) in UNFILTERED or summarize(attribute, table, None).affine is None:
                     unfiltered(attribute, seen)
             if cut:  # Its expressions as units, all, then its units cut
                 summaries.clear()
@@ -2513,20 +2510,15 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
             # them out
-            if len(surface) == 28 and not marks(surface[25], 'COAT'): surface = surface[:25]  # Its coat
-            if len(surface) == 25 and not marks(surface[24], 'DISPERSION'): surface = surface[:24]  # Its dispersion
-            if len(surface) == 24 and not marks(surface[23], 'TOON'): surface = surface[:23]  # Its toon
-            if len(surface) == 23 and not marks(surface[22], 'VELVET'): surface = surface[:22]  # Its velvet
-            if len(surface) == 22 and not marks(surface[21], 'PHASE'): surface = surface[:21]  # Its phase's asymmetry
-            if len(surface) == 21 and not marks(surface[20], 'HAIR'): surface = surface[:20]  # Its hair too
-            if len(surface) == 20 and not nonzero(surface[19]): surface = surface[:19]  # Its volume's emission too
-            if len(surface) == 19 and not marks(surface[16], 'ANISOTROPIC'): surface = surface[:16]
-            if len(surface) == 16 and not marks(surface[14], 'SHEEN'): surface = surface[:14]
-            if len(surface) == 14 and not marks(surface[13], 'TRANSLUCENT'): surface = surface[:13]
+            for length, slot, mark in ((28, 25, 'COAT'), (25, 24, 'DISPERSION'), (24, 23, 'TOON'), (23, 22, 'VELVET'),
+                    (22, 21, 'PHASE'), (21, 20, 'HAIR'), (20, 19, None), (19, 16, 'ANISOTROPIC'), (16, 14, 'SHEEN'),
+                    (14, 13, 'TRANSLUCENT')):  # Cut from the slot of a mark absent; 19: the volume's emission, 0
+                if len(surface) == length and not (marks(surface[slot], mark) if mark else nonzero(surface[slot])):
+                    surface = surface[:slot]
             emit(surface, [], textures, texels, alpha, uses, keys=keyed)
-            load = [*OPS].index('LOAD')
+            load = OP['LOAD']
             # The slots a step reads, by a LOAD or as its operand, and keeps its result in, numbered once per value
-            reads = lambda op: [op[1]] if op[0] == load else [op[4]] if len(op) > 4 and op[4] is not None else []
+            slots_read = lambda op: [op[1]] if op[0] == load else [op[4]] if len(op) > 4 and op[4] is not None else []
             keeps = lambda op: [op[5]] if len(op) > 4 and op[5] is not None else []
             # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
             # straight through, so a program needs only as many slots as it keeps values at once; while that is more
@@ -2534,15 +2526,15 @@ class Flex(bpy.types.RenderEngine):
             while True:
                 del ops[first:]
                 slots.clear()
-                emitted = emit(surface, ops, textures, texels, alpha, uses, slots, keys=keyed)
-                last = {slot: k for k, op in enumerate(ops[first:], first) for slot in reads(op)}
+                radiant = emit(surface, ops, textures, texels, alpha, uses, slots, keys=keyed)
+                last = {slot: k for k, op in enumerate(ops[first:], first) for slot in slots_read(op)}
                 taken, renamed, stored, crowded = set(), {}, {}, set()
                 for k in range(first, len(ops)):
                     for slot in keeps(ops[k]):
                         renamed[slot] = min(set(range(len(taken) + 1)) - taken)
                         taken.add(renamed[slot]), stored.update({slot: k})
                     if len(taken) > len(crowded): crowded = {s for s in stored if last[s] >= k}
-                    for slot in reads(ops[k]):
+                    for slot in slots_read(ops[k]):
                         if last[slot] == k: taken.discard(renamed[slot])
                 if len(crowded) <= SLOTS:
                     ops[first:] = [(code, renamed[op[0]], 0, 0) if code == load else (code | (op[3] is not None and
@@ -2554,9 +2546,10 @@ class Flex(bpy.types.RenderEngine):
             # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
             scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(triple(surface[k])[0])
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
-            hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
+            hints[first] = max(radiant, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
-        rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
+        empty = program(GRAY)  # An empty slot renders gray
+        rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
         # An object's slots; a volume object without any, one empty slot the default volume fills
@@ -2588,7 +2581,7 @@ class Flex(bpy.types.RenderEngine):
                 for target, items in zip((ops, aside[0], bakes, placed, again), lists): target.extend(items)
                 for target, items in zip(ledgers(), dicts): target.update(items)
                 derived.update(sets[0]), subsurface.update(sets[1]), current.get('made', []).extend(made)
-                spans.append((key, context, kept[key]))
+                spans.append((key, context, kept[key], False))  # Kept as recorded
                 return row
             before, hairs = recording and ([dict(d) for d in ledgers()], dict(HAIRS), set(derived), set(subsurface),
                 len(current.get('made', ()))), dict(HAIRS)
@@ -2597,13 +2590,13 @@ class Flex(bpy.types.RenderEngine):
             if SEALING['asked']: subsurface.add(material)
             if recording and HAIRS == hairs: spans.append((key, context, (at, spots(), [{k: v for k, v in d.items()
                 if k not in b or b[k] is not v} for d, b in zip(ledgers(), before[0])], (derived - before[2],
-                subsurface - before[3]), current.get('made', [])[before[4]:], row)))
+                subsurface - before[3]), current.get('made', [])[before[4]:], row), True))  # Made, its spans to cut
             return row
         # This export's rows by key in the steps path's form: a scene's at its final texels, of textures the bakes'
         def recorded(moved):
             rows = {}
-            for key, context, record in spans:
-                if len(record) == 6:
+            for key, context, record, fresh in spans:
+                if fresh:
                     at, end, dicts, sets, made, row = record
                     steps = [(0, t, w, h & ~(3 << 30)) if moved is not None and c == 0 and not h >> 28 & 1
                         else (c, t, w, h) for c, t, w, h in aside[0][at[1]:end[1]]]
@@ -2625,9 +2618,9 @@ class Flex(bpy.types.RenderEngine):
         # per strand its first point, point count, random number, root's UV and color; per object its texture space
         # Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too
         dark = lambda ob: ob.type == 'LIGHT' and not ob.data.use_shadow
-        tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), 2 | dark(ob) << 2
-            if not ob.visible_shadow or dark(ob) else any(layer[2] for layer in row), row[0][3] if len(row[0]) > 3
-            else row[0][1]) for row in shades])  # Per slot a material
+        tabled = lambda shades, ob: numpy.array([(*row[:2], not ob.visible_camera, 2 | dark(ob) << 2
+            if not ob.visible_shadow or dark(ob) else row[2], row[3])
+            for row in shades])  # Per slot a material
         pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
             and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
             and (m.show_render if depsgraph.mode == 'RENDER' else m.show_viewport)]  # Its hair shown as paths
@@ -2903,22 +2896,22 @@ class Flex(bpy.types.RenderEngine):
                 # pass through it straight as Cycles' lights occlude none and what lies within it is lit; an area
                 # light, which its black back occludes all the same, and a sun stay black
                 sphere = light.type in ('POINT', 'SPOT')
-                shades = [[program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
-                    else [*BLACK[:4], emission, *BLACK[5:]])], [program(BLACK)]]
+                shades = [(*row, row[1]) for row in (program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
+                    else [*BLACK[:4], emission, *BLACK[5:]]), program(BLACK))]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
                 index = numpy.array([face.material_index for face in bm.faces], 'i')
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
-            world = ob.type == 'LIGHT' or i in volumes  # In world space: a light or filling a volume, kept apart
-            entry = (sum(map(len, columns[0])), len(index), world)
+            in_world = ob.type == 'LIGHT' or i in volumes  # In world space: a light or filling a volume, kept apart
+            entry = (sum(map(len, columns[0])), len(index), in_world)
             # Triangles, normals turned as the faces turn (by the renderer for those in object space), a material of its
             # row each
-            for column, array in zip(columns, (positions if world else point, (normals if world else
+            for column, array in zip(columns, (positions if in_world else point, (normals if in_world else
                 normal.reshape(-1, 3)[loops]).reshape(-1, 3, 3), orco, point, uv, color, tangent,
                 passes[numpy.minimum(index, len(passes) - 1)])): column.append(array)
             materials.append(tabled(shades, ob)[index])
-            if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
+            if key and not in_world: entries[key] = entry  # Not under an update, which pipes each mesh moved
             media = ((0,) * 6, 0)
             if i in volumes:  # Its volumes' bound inside its points: in the world, its object and their generated
                 # points
@@ -2975,23 +2968,23 @@ class Flex(bpy.types.RenderEngine):
                 instances[k][3][:21].astype('f')))))
             self.visible = visible
             return
-        world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
-        surface = resolve(world.inputs['Surface']) if world else BLACK
+        outlet = scene.world and scene.world.node_tree.get_output_node('CYCLES')
+        surface = resolve(outlet.inputs['Surface']) if outlet else BLACK
         # The grid the world bakes over: its largest Environment Texture's, else 1024 x 512; none where its emission is
         # the same every way or its light is not sampled
-        sizes = [tuple(node.image.size) for node in world.id_data.nodes if node.type == 'TEX_ENVIRONMENT' and node.image
-            and node.image.size[0]] if world else []
-        grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if world and \
+        sizes = [tuple(node.image.size) for node in outlet.id_data.nodes if node.type == 'TEX_ENVIRONMENT'
+            and node.image and node.image.size[0]] if outlet else []
+        grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if outlet and \
             scene.world.flex_sample_light and isinstance(fold(surface)[4], tuple) else (0, 0)
         world_path = grid[0] and any(marks(x, 'LIGHT_PATH') for x in surface)  # Its sky samples asked per lobe
-        world = program(surface)
-        materials.append([(*world[:2], 0, 1, 0, world[1])])
+        backdrop = program(surface)
+        materials.append([(*backdrop[:2], 0, 0, backdrop[1])])
         self.lensing = program(lensed(viewer, *size))[1] if custom else 0  # The custom camera's, run per sample
-        shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
-            for row in layers], textures
+        shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, row[3]) for row in rows.values()], \
+            textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
             starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4  # the images they read apart, by their index,
-            read = {texel for code, texel, _, height in ops if [*OPS][code & CODE] in (*READS, 'GRID')  # in 31
+            read = {texel for code, texel, _, height in ops if reads_texel(code)  # in 31
                 and not height >> 28 & 1}
             image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
@@ -3007,14 +3000,14 @@ class Flex(bpy.types.RenderEngine):
             formats = {first: compact(entry) for first, entry, side in zip(starts, texels, apart)  # Bits 26 and 27: 2
                 if side == 2 and not image[first][1] >> 26 & 1 and first not in derived}  # halves, 3 16-bit UNORM
             form = lambda first: formats[first][1] << 26 if first in formats else 0
-            chained = {texel for code, texel, width, _ in ops if [*OPS][code & CODE] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
+            chained = {texel for code, texel, width, _ in ops if NAMES[code & CODE] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
                 and width >> 20 != 2048}  # Read by a ray's cone at some level: a mip chain, flagged in bit 31 of width
             at, counts = {}, [0, 0, 0]
             for first, entry, side in zip(starts, texels, apart):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
             def relocated(ops):  # Of their reads' and tiles' firsts, those piped apart flagged
                 return [(code, at[texel][0], width, height | at[texel][1] << 30 | form(texel))
-                    if (code == 0 or [*OPS][code & CODE] in (*READS, 'GRID')) and not height >> 28 & 1
+                    if (code == 0 or reads_texel(code)) and not height >> 28 & 1
                     else (code, texel, width, height)
                     for code, texel, width, height in ops]
             ops[:], aside[0][:] = relocated(ops), relocated(aside[0])
@@ -3029,11 +3022,11 @@ class Flex(bpy.types.RenderEngine):
                 for first, entry, side in zip(starts, texels, apart) if side == 2]  # texels to a float4
             texels = [entry for entry, side in zip(texels, apart) if not side] + [
                 entry for entry, side in zip(texels, apart) if side == 1]
-        piped, rows = self.piped if shaded else counts[0], len(ops)
-        bakes, again = [k + rows for k in bakes], [k + rows for k in again]  # The bakes' steps after the materials'
-        ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or [*OPS][code & CODE] in READS)
+        piped, ahead = self.piped if shaded else counts[0], len(ops)
+        bakes, again = [k + ahead for k in bakes], [k + ahead for k in again]  # The bakes' steps after the materials'
+        ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or NAMES[code & CODE] in READS)
             and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
-        ops += [([*OPS].index(name), 0, 0, 0) for name, any in (('MEDIUM', varying),
+        ops += [(OP[name], 0, 0, 0) for name, any in (('MEDIUM', varying),
             ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic),
             ('WORLD_PATH', world_path)) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
@@ -3044,7 +3037,7 @@ class Flex(bpy.types.RenderEngine):
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
                 return self.start(depsgraph, keeping)
-            read = {texel for code, texel, *_ in ops if [*OPS][code & CODE][:5] in ('IMAGE', 'ALPHA')}  # The tables
+            read = {texel for code, texel, *_ in ops if NAMES[code & CODE][:5] in ('IMAGE', 'ALPHA')}  # The tables
             tables = {key: [] for key, entry in textures.items()
                 if not isinstance(key, (tuple, Bake)) and entry[0] in read}
             # read, rebuilt from their evaluated nodes; their means, which the hints take, as the renderer has them
@@ -3084,22 +3077,24 @@ class Flex(bpy.types.RenderEngine):
         # renderer compiles from them while the rest loads; per instance its mesh's first triangle, count and whether in
         # world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9 vertex, 9 normal, 9
         # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
-        # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); of strands
+        # emission, program, hidden flag, opaque flag and emission program (then the world's); of strands
         # the point and segment counts, per point its position and radius, per segment its first point and strand and
         # its bounds, per strand its first point, point count, random number, root's UV and color, and per segment its
         # strand's material; then the texels and the programs of the bakes; then each image's width and height, RGBA8
         # in its bit 26, and its texels; the hair tables' count and entries after the steps, baked as the rest loads;
         # last the instancer attributes and the world's grid
-        self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), rows,
+        self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), ahead,
             counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
             struct.pack('<I', len(HAIRS)), numpy.array([*HAIRS], 'f'),
-            *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
-            values)), *(numpy.concatenate(column, dtype='f') for column in columns),
+            *(part for first, count, in_world, values in instances
+            for part in (numpy.array((first, count, in_world), 'I'), values)),
+            *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             struct.pack('<3I', sum(map(len, points)), sum(map(len, segments)), sum(map(len, hairs))), *points,
             *segments, *bounds, *roots, *(
-            table[segment[:, 1]] for rows in [numpy.concatenate((numpy.empty((0, 6)), *hairs), dtype='f')] for table in [
-            numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
+            table[segment[:, 1]] for hair_rows in [numpy.concatenate((numpy.empty((0, 5)), *hairs), dtype='f')]
+            for table in [numpy.hstack((hair_rows[:, :1].view('I'), hair_rows[:, 1:].astype('I')))]
+            for segment in segments),
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
@@ -3344,10 +3339,7 @@ PROPERTIES = {
     'flex_jump_angle': bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
         'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
         max=math.pi, subtype='ANGLE')}
-# Flex keeps its scene from one frame of an animation to the next: Blender keeps an engine and its depsgraph for a job's
-# frames only with persistent data, which a Flex render sets as the job starts, for Blender's copy of the settings, and
-# gives the user's value back before the first frame, so no file ever saves it; the job done, setting the user's off
-# again frees the engine and its renderer, as Blender does when it is switched off
+# Persistent data set at a job's start, the user's value restored before its first frame
 users = {}  # The user's persistent data of each scene whose Flex render set it, until its first frame
 @bpy.app.handlers.persistent
 def persist(scene, *_):
