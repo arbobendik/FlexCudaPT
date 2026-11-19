@@ -885,13 +885,11 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Surface of an instance's triangle at its barycentrics, in a layer of its material
+// Surface of an instance's triangle at its barycentrics
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
-    float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
+    float3 normal, float3 direction, const Ray& ray, bool emission = false) {
     const Material& material = scene.materials[key(scene, instance, triangle)];
     unsigned program = emission ? material.emission : material.program;
-    // Each layer's program follows the end of the one above it
-    while (layer) layer -= scene.ops[program++].code == END;
 #ifdef EXTENDED
     if (STRAND(scene, instance)) { // A strand's segment, its frame along its axis and normal
         const Instance& placed = scene.instances[instance];
@@ -1229,7 +1227,7 @@ __device__ Medium outside(const Scene& scene, unsigned instance) {
         first)[0], make_float3(0, 0, 1), Ray{false, false, LOBE_NONE, 0.0f, 0.0f}));
 }
 
-// Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
+// Whether a shadow ray is blocked; transmitted: the light passing its occluders and media
 __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3 toward, float left, Medium medium,
     unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted, unsigned skip = NONE,
     unsigned mask = SHADOWS) {
@@ -1246,21 +1244,18 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque) return true;  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
-        for (unsigned layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
-            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
-                smoothNormal(scene, hit), toward,
-                Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
-            transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
-                .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
-                .transmission = surface.transparency, .ior = surface.ior,
-                .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
-                .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
-            if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
-                    hit.triangle);
-            }
+        const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
+            toward, Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder});
+        transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
+            .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
+            .transmission = surface.transparency, .ior = surface.ior,
+            .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
+            .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+            .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
+        if (encloses(scene, surface, hit.instance)) {
+            const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+            medium = leaves ? outside(scene, hit.instance) : volume(surface);
+            filling = leaves ? NONE : fills(scene, hit.instance, hit.triangle);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return true;
@@ -1503,10 +1498,10 @@ extern "C" __global__ void __raygen__lights() {
         const float side = sqrtf((i + random(state)) / LIGHT_SAMPLES), along = random(state);
         const float3 n = faceNormal(scene, light.instance, light.triangle);
         float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, -n,
-            {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
+            {false, false, LOBE_NONE, 0, 0}, true).emissive;
         if (!(emission.x + emission.y + emission.z > 0)) // Its back's where its front emits nothing, as a portal's
             emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, n,
-                {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
+                {false, false, LOBE_NONE, 0, 0}, true).emissive;
         mean += fmaxf(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     material.emitted = fmaxf(mean, material.emitted * 0.001f);
