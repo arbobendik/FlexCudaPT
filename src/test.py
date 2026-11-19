@@ -1594,6 +1594,13 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     behind.flex_bounces = 0
     seen = render(behind).mean()
     assert abs(seen - 1) < 0.01, ('in front of an area light', preferences.device, seen)
+    # Through a dim area light between them, facing up, the same, as Cycles' lights occlude none
+    dim = bpy.data.objects.new('behind dim', bpy.data.lights.new('behind dim', 'AREA'))
+    dim.data.energy, dim.location.z, dim.rotation_euler = 1e-6, 1.5, (math.pi, 0, 0)
+    behind.collection.objects.link(dim)
+    seen = render(behind).mean()
+    assert abs(seen - 1) < 0.01, ('through an area light', preferences.device, seen)
+    behind.collection.objects.unlink(dim)
 preferences.device = device
 
 # Light leaving a medium within a surface's margin of its face: the cube scattering all it meets, white, of density
