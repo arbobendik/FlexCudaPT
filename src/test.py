@@ -4475,6 +4475,64 @@ def closured():  # OSL closures
     bpy.context.window.scene = shown
 closured()
 
+# A Script node's texture() of a file exports as the Image Texture node on the same file does, byte for byte: at the
+# point (s, 1 - t), OSL's interp and wrap as the node's interpolation and extension; other options refused by name
+def textured():  # OSL texture()
+    shown, osl = bpy.context.window.scene, opened('osl texture')
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('textured'))
+    osl.collection.objects.link(bpy.data.objects.new('textured', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('textured'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    light = nodes.new('ShaderNodeEmission')
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    made = bpy.data.images.new('osl texture', 4, 4)
+    made.pixels = numpy.random.default_rng(7).random(64).tolist()
+    made.filepath_raw, made.file_format = os.path.join(bpy.app.tempdir, 'osl texture.png'), 'PNG'
+    made.save()
+    path = made.filepath_raw
+    bpy.data.images.remove(made)
+    def scripted(options, piping=True):  # The light's color a script's texture() of the file, its export's bytes
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('textured.osl')
+        script.script.write('shader textured(string File = "", output color Color = 0) {\n    point p;\n'
+            '    getattribute("geom:uv", p);\n    Color = texture(File, p[0], p[1]' + options + ');\n}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        script.inputs['File'].default_value = path
+        links.new(script.outputs['Color'], light.inputs['Color'])
+        if not piping: return script
+        piped = exported().requests.getvalue()
+        nodes.remove(script)
+        return piped
+    split, combined, flipped = (nodes.new(kind) for kind in ('ShaderNodeSeparateXYZ', 'ShaderNodeCombineXYZ',
+        'ShaderNodeMath'))
+    links.new(nodes.new('ShaderNodeTexCoord').outputs['UV'], split.inputs[0])
+    flipped.operation, flipped.inputs[0].default_value = 'SUBTRACT', 1
+    links.new(split.outputs['Y'], flipped.inputs[1])
+    links.new(split.outputs['X'], combined.inputs['X']), links.new(flipped.outputs[0], combined.inputs['Y'])
+    read = nodes.new('ShaderNodeTexImage')
+    read.image = bpy.data.images.load(path, check_existing=True)
+    links.new(combined.outputs[0], read.inputs['Vector'])
+    for options, interpolation, extension in ((', "interp", "closest", "wrap", "periodic"', 'Closest', 'REPEAT'),
+            (', "interp", "linear", "wrap", "black"', 'Linear', 'CLIP'), ('', 'Smart', 'REPEAT')):
+        piped = scripted(options)
+        read.interpolation, read.extension = interpolation, extension
+        links.new(read.outputs['Color'], light.inputs['Color'])
+        assert exported().requests.getvalue() == piped, ('osl texture', options)
+    # An option Flex lacks raises in the export, which Blender reports on stderr from a depsgraph handler
+    reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
+    bpy.app.handlers.depsgraph_update_post.append(export)
+    sys.stderr = reported
+    blurred = scripted(', "blur", 0.1', False)
+    bpy.context.view_layer.update()
+    nodes.remove(blurred)
+    sys.stderr = stderr
+    bpy.app.handlers.depsgraph_update_post.remove(export)
+    assert 'texture options' in reported.getvalue(), ('osl texture blur', reported.getvalue())
+    bpy.context.window.scene = shown
+textured()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
