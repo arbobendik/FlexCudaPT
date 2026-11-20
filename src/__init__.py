@@ -1930,8 +1930,10 @@ def panorama(camera):  # A camera's panorama: its number, 0 for none, range of d
             'panorama is not supported')
     return PANORAMAS.index(data.panorama_type) + 1, *ranges[data.panorama_type], data.shift_x, data.shift_y
 
-def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blades, rotation and anamorphic ratio
-    if camera is None or camera.type != 'CAMERA' or camera.data.type != 'PERSP' or not camera.data.dof.use_dof:
+def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blades, rotation and anamorphic ratio; an
+    # orthographic one's radius 1 / (2 f-stop), its rays of one scene unit to one at every depth as of a focal length 1
+    if camera is None or camera.type != 'CAMERA' or camera.data.type not in ('PERSP', 'ORTHO') \
+            or not camera.data.dof.use_dof:
         return 0, 0, 0, 0, 1
     dof = camera.data.dof
     distance = dof.focus_distance
@@ -1941,7 +1943,8 @@ def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blad
         bone = target.pose and target.pose.bones.get(dof.focus_subtarget)
         if bone: matrix = matrix @ bone.matrix
         distance = abs((camera.matrix_world.normalized().inverted() @ matrix).translation.z)
-    return camera.data.lens * 1e-3 / (2 * max(dof.aperture_fstop, 1e-5)), max(distance, 1e-5), \
+    return (camera.data.lens * 1e-3 if camera.data.type == 'PERSP' else 1) / (2 * max(dof.aperture_fstop, 1e-5)), \
+        max(distance, 1e-5), \
         dof.aperture_blades if dof.aperture_blades >= 3 else 0, dof.aperture_rotation, dof.aperture_ratio
 
 class Flex(bpy.types.RenderEngine):
