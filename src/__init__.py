@@ -1919,15 +1919,26 @@ def sampling(scene, follows):
 PANORAMAS = ('EQUIRECTANGULAR', 'EQUIANGULAR_CUBEMAP_FACE', 'MIRRORBALL', 'FISHEYE_EQUIDISTANT', 'FISHEYE_EQUISOLID',
     'FISHEYE_LENS_POLYNOMIAL', 'CENTRAL_CYLINDRICAL')  # Blender's panoramas, numbered from 1 in the renderer
 
-def panorama(camera):  # A camera's panorama: its number, 0 for none, range of directions over u and v, and shift
+# A camera's panorama on a width x height image: its number, 0 for none, its four parameters (a range of directions
+# over u and v, or a fisheye's field of view, focal length and frame) and shift
+def panorama(camera, width, height):
     data = camera and camera.type == 'CAMERA' and camera.data
     if data and data.type == 'CUSTOM': raise ValueError('Flex: custom cameras need OSL, which Flex does not run')
     if not data or data.type != 'PANO': return 0, *[0.0] * 6
     radius = data.central_cylindrical_radius
+    # A fisheye's frame in millimetres: the sensor's width or height along the side its fit names, the larger by
+    # default, the other side by the image's aspect
+    across = data.sensor_fit == 'HORIZONTAL' or data.sensor_fit == 'AUTO' and width >= height
+    fit = data.sensor_height if data.sensor_fit == 'VERTICAL' else data.sensor_width
+    frame = (fit, fit * height / width) if across else (fit * width / height, fit)
     ranges = {'EQUIRECTANGULAR': (data.longitude_min - data.longitude_max, -data.longitude_min,
         data.latitude_min - data.latitude_max, math.pi / 2 - data.latitude_min), 'CENTRAL_CYLINDRICAL': (
         -data.central_cylindrical_range_u_min, -data.central_cylindrical_range_u_max,
-        data.central_cylindrical_range_v_min / radius, data.central_cylindrical_range_v_max / radius)}
+        data.central_cylindrical_range_v_min / radius, data.central_cylindrical_range_v_max / radius),
+        # Equidistant: its field of view across its circle stretched over the whole frame, two radii each way (an
+        # ellipse on a non-square image)
+        'FISHEYE_EQUIDISTANT': (data.fisheye_fov, 0, 2, 2),
+        'FISHEYE_EQUISOLID': (data.fisheye_fov, data.fisheye_lens, *frame)}  # Its field of view and focal length
     if data.panorama_type not in ranges:
         raise ValueError(f"Flex: the {data.bl_rna.properties['panorama_type'].enum_items[data.panorama_type].name} "
             'panorama is not supported')
@@ -2819,7 +2830,7 @@ class Flex(bpy.types.RenderEngine):
         # offsets), then the thin lens and whether orthographic, the near and far planes' depths, and its panorama.
         self.requests.write(struct.pack(f'<3I2f{5 + len(settings)}I20fI6f', REQUEST, *sampling, launches, width,
             height, *settings, medium, self.box, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far,
-            *panorama(camera)))
+            *panorama(camera, width, height)))
         self.requests.flush()
         # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
         answer = self.answers.read(12)

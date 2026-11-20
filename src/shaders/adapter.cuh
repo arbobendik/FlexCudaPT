@@ -311,8 +311,10 @@ static __device__ int2 fcptLoadTemporalNeighbor(int2 p) {
     return q < 0 ? make_int2(-1, -1) : make_int2(q % int(hookScene().width), q / int(hookScene().width));
 }
 static __device__ bool fcptRestirUsed() { return hookScene().settings.restir; }
-// The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
+// The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths; none along a blind one
+// (spread -1), off a fisheye's circle
 static __device__ float3 fcptMissed(int2 p, FKDomain dom, float scale) {
+    if (dom.spread < 0) return make_float3(0, 0, 0);
     return environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
         / hookScene().settings.paths;
 }
