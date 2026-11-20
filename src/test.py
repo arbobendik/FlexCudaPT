@@ -4334,6 +4334,72 @@ def branched():  # A Script node's ifs and loops
     bpy.context.window.scene = shown
 branched()
 
+# A Script node's globals, attributes and spaces export as the nodes giving the same do, byte for byte: P, N and I as
+# the Geometry node's Position, Normal and Incoming turned in, time 0.5, getattribute as the Texture Coordinate and
+# Object Info nodes, transform as the Vector Transform node; a global, attribute or space Flex lacks is refused by name
+def globaled():  # OSL globals
+    shown, osl = bpy.context.window.scene, opened('osl globals')
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('globaled'))
+    osl.collection.objects.link(bpy.data.objects.new('globaled', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('globaled'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    light = nodes.new('ShaderNodeEmission')
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    def scripted(body):  # The light's color a script's Color, its export's bytes
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('globaled.osl')
+        script.script.write('shader globaled(output color Color = 0) {\n' + body + '}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['Color'], light.inputs['Color'])
+        piped = exported().requests.getvalue()
+        nodes.remove(script)
+        return piped
+    def noded(socket):  # The light's color a node's output, its export's bytes
+        links.new(socket, light.inputs['Color'])
+        return exported().requests.getvalue()
+    geometry, coordinates, info = (nodes.new(kind) for kind in ('ShaderNodeNewGeometry', 'ShaderNodeTexCoord',
+        'ShaderNodeObjectInfo'))
+    turned, moved = nodes.new('ShaderNodeVectorMath'), nodes.new('ShaderNodeVectorTransform')
+    turned.operation, turned.inputs['Scale'].default_value = 'SCALE', -1
+    links.new(geometry.outputs['Incoming'], turned.inputs[0])
+    moved.vector_type, moved.convert_from, moved.convert_to = 'POINT', 'WORLD', 'OBJECT'
+    links.new(geometry.outputs['Position'], next(socket for socket in moved.inputs if socket.enabled))
+    spaced = {}  # A vector and a normal between two named spaces each
+    for kind, source, target in (('VECTOR', 'OBJECT', 'CAMERA'), ('NORMAL', 'OBJECT', 'WORLD')):
+        spaced[kind] = nodes.new('ShaderNodeVectorTransform')
+        spaced[kind].vector_type, spaced[kind].convert_from, spaced[kind].convert_to = kind, source, target
+        links.new(geometry.outputs['Normal'], next(socket for socket in spaced[kind].inputs if socket.enabled))
+    for body, socket in (('Color = P;', geometry.outputs['Position']), ('Color = N;', geometry.outputs['Normal']),
+            ('Color = I;', turned.outputs['Vector']), ('getattribute("geom:generated", Color);',
+            coordinates.outputs['Generated']), ('getattribute("object:random", Color);', info.outputs['Random']),
+            ('Color = transform("object", P);', moved.outputs['Vector']),
+            ('Color = transform("object", "camera", vector(N));', spaced['VECTOR'].outputs['Vector']),
+            ('Color = transform("object", "world", N);', spaced['NORMAL'].outputs['Vector'])):
+        assert scripted('    ' + body + '\n') == noded(socket), ('osl global', body)
+    links.remove(light.inputs['Color'].links[0])
+    light.inputs['Color'].default_value = (0.5, 0.5, 0.5, 1)
+    assert scripted('    Color = time;\n') == exported().requests.getvalue(), 'osl time'
+    # What Flex lacks raises in the export, which Blender reports on stderr from a depsgraph handler and goes on from
+    for body, named in (('Color = Ng;', 'the global Ng'), ('getattribute("geom:name", Color);',
+            "getattribute of 'geom:name'"), ('Color = transform("raster", P);', "the space 'raster'")):
+        reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
+        bpy.app.handlers.depsgraph_update_post.append(export)
+        sys.stderr = reported
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('lacking.osl')
+        script.script.write('shader lacking(output color Color = 0) {\n    ' + body + '\n}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['Color'], light.inputs['Color'])
+        bpy.context.view_layer.update()
+        sys.stderr = stderr
+        bpy.app.handlers.depsgraph_update_post.remove(export)
+        nodes.remove(script)
+        assert named in reported.getvalue(), ('osl lacking', body, reported.getvalue())
+    bpy.context.window.scene = shown
+globaled()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
