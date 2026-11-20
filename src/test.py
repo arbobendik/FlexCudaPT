@@ -2040,6 +2040,55 @@ def volumed():  # Volume objects
         seen = quarters(render(made, 16).mean(2))
         assert numpy.abs(seen - quarters(due)).max() < 0.02, ('volume grid', preferences.device, seen, quarters(due))
     preferences.device = device
+    # A vector grid c = (0.5 + 0.4 x, 0.5 - 0.4 y, 0.3) over a 32^3 cube as the one above (of a varying density, as a
+    # constant one makes tiles of one value), saved to a .vdb file and rendered from it by its path as the color of a
+    # Volume Absorption of density 2: each quarter passes per channel exp(-2 (1 - c) x its depth through the box), c
+    # extended past the outermost voxels' centers out to its bounds
+    colored = opened('grid color', (1, 1, 1))
+    colored.render.resolution_x = colored.render.resolution_y = 16
+    colored.camera = made.camera
+    colored.collection.objects.link(made.camera)
+    painted = bpy.data.node_groups.new('grid color', 'GeometryNodeTree')
+    painted.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    box, density, field, position, scaled, store = (painted.nodes.new(kind) for kind in ('GeometryNodeVolumeCube',
+        'GeometryNodeGetNamedGrid', 'GeometryNodeFieldToGrid', 'GeometryNodeInputPosition', 'ShaderNodeVectorMath',
+        'GeometryNodeStoreNamedGrid'))
+    for k in 'XYZ': box.inputs['Resolution ' + k].default_value = 32
+    box.inputs['Min'].default_value, box.inputs['Max'].default_value = (-1, -1, -1), (1, 1, 1)
+    density.inputs['Name'].default_value, store.inputs['Name'].default_value = 'density', 'color'
+    field.grid_items.new('VECTOR', 'color'), setattr(store, 'data_type', 'VECTOR_FLOAT')
+    scaled.operation, scaled.inputs[1].default_value, scaled.inputs[2].default_value = 'MULTIPLY_ADD', (0.4, -0.4, 0), \
+        (0.5, 0.5, 0.3)
+    for out, to in ((box.outputs[0], density.inputs['Volume']), (density.outputs['Grid'], field.inputs['Topology']),
+        (position.outputs[0], scaled.inputs[0]), (scaled.outputs[0], field.inputs[1]),
+        (scaled.outputs[0], box.inputs['Density']), (density.outputs['Volume'], store.inputs['Volume']),
+        (field.outputs[0], store.inputs['Grid']),
+        (store.outputs[0], painted.nodes.new('NodeGroupOutput').inputs[0])): painted.links.new(out, to)
+    colored.collection.objects.link(source := bpy.data.objects.new('grid color', bpy.data.volumes.new('grid color')))
+    source.modifiers.new('grid color', 'NODES').node_group = painted
+    path = os.path.join(bpy.app.tempdir, 'grid color.vdb')
+    source.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.grids.save(path)
+    bpy.data.objects.remove(source)
+    colored.collection.objects.link(loaded := bpy.data.objects.new('grid file', bpy.data.volumes.new('grid file')))
+    loaded.data.filepath = path
+    loaded.data.materials.append(tinted := bpy.data.materials.new('grid color'))
+    nodes = tinted.node_tree.nodes
+    nodes.remove(nodes['Principled BSDF'])
+    absorbing, attribute = nodes.new('ShaderNodeVolumeAbsorption'), nodes.new('ShaderNodeAttribute')
+    attribute.attribute_name, absorbing.inputs['Density'].default_value = 'color', 2
+    tinted.node_tree.links.new(attribute.outputs['Color'], absorbing.inputs['Color'])
+    tinted.node_tree.links.new(absorbing.outputs[0], nodes['Material Output'].inputs['Volume'])
+    v = (numpy.arange(256) + 0.5) / 256 * 4 - 2  # Fine enough that the box's edge falls within a pixel as rendered
+    x, y = numpy.clip(v[None, :], -1, 1), numpy.clip(v[:, None], -1, 1)
+    inside = (numpy.abs(v[None, :]) <= high[0]) & (numpy.abs(v[:, None]) <= high[1])
+    c = numpy.stack(numpy.broadcast_arrays(0.5 + 0.4 * x, 0.5 - 0.4 * y, 0.3), -1)
+    due = numpy.stack([quarters(numpy.exp(-2 * (1 - c[..., k]) * 2 * high[2] * inside)) for k in range(3)], -1)
+    assert numpy.ptp(due[..., 0] - due[..., 1]) > 0.1, ('grid color', due)  # Its channels apart
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = render(colored, 16)
+        seen = numpy.stack([quarters(seen[..., k]) for k in range(3)], -1)
+        assert numpy.abs(seen - due).max() < 0.02, ('vector grid', preferences.device, seen, due)
+    preferences.device = device
     bpy.context.window.scene = shown
 volumed()
 # A black body's color, of luminance 1 in scene linear, lies on the Planckian locus within 3e-4 in xy, as Kim et al.
