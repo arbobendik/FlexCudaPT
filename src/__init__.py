@@ -2038,6 +2038,7 @@ def panorama(camera, width, height):
         # Equidistant: its field of view across its circle stretched over the whole frame, two radii each way (an
         # ellipse on a non-square image)
         'FISHEYE_EQUIDISTANT': (data.fisheye_fov, 0, 2, 2),
+        'EQUIANGULAR_CUBEMAP_FACE': (),  # The forward face, a right angle each way, no setting of its own
         'MIRRORBALL': (0, 0, 2, 2),  # Mirror ball: its disc stretched over the whole frame too
         'FISHEYE_EQUISOLID': (data.fisheye_fov, data.fisheye_lens, *frame),  # Its field of view and focal length
         # Lens polynomial: its coefficients k0 to k4, the angle off forward at a radius in millimetres their
