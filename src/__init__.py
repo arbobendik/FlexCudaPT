@@ -1,6 +1,6 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, tempfile
-import hashlib, time, types, _cycles
+import hashlib, operator, time, types, _cycles
 import sys, threading
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
@@ -2223,6 +2223,46 @@ class Flex(bpy.types.RenderEngine):
             memo = {} if memo is None else memo
             if id(expression) not in memo: memo[id(expression)] = baking(expression, memo)
             return memo[id(expression)]
+        # Steps of an object's own scalars (its alpha, pass indices, random number) or a vertex's alpha against
+        # constants alike in every channel: 0 or 1, equal in all three, so a chain live only for at most two of them
+        # equals, at every point, its bake with each step at 0 or 1 selected by the steps live
+        alive, leaves, found = [], {}, {}  # The variants kept while summaries holds their ids; per id, as below
+        ALIKE = {'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'MULTIPLY_ADD', 'MAXIMUM', 'MINIMUM', 'LESS_THAN', 'POWER',
+            'LOGARITHM', 'EXPONENT', 'FLOOR', 'SNAP', 'DOT_PRODUCT', 'SELECT'}  # Channels alike in, alike out
+        def leaf(x):  # Whether an expression varies only by such scalars, and by one
+            if not isinstance(x, tuple): return None if len(set(triple(x))) > 1 else False
+            if leaves.get(id(x), (None,))[0] is not x:  # Each part once, kept with it, as ids are reused
+                parts = [leaf(part) for part in x[1:]] if x[0] in ALIKE else [None]
+                leaves[id(x)] = x, x[0] == 'VERTEX_ALPHA' or x[0] == 'OBJECT_INFO' and not isinstance(x[1], tuple) and \
+                    triple(x[1])[0] >= 2 or None if x[0] in ('OBJECT_INFO', 'VERTEX_ALPHA') else None if None in \
+                    parts else any(parts)
+            return leaves[id(x)][1]
+        def stepwise(x):  # Its steps as above, outermost, by id
+            if not isinstance(x, tuple): return {}
+            if found.get(id(x), (None,))[0] is not x:
+                found[id(x)] = x, {id(x): x} if x[0] == 'LESS_THAN' and leaf(x) else {k: v for part in x[1:] for k, v
+                    in stepwise(part).items()}
+            return found[id(x)][1]
+        def substituted(x, values, memo):  # Each part once, as shared
+            if not isinstance(x, tuple): return x
+            if id(x) not in memo:  # The same where no step is in it
+                parts = [substituted(part, values, memo) for part in x[1:]]
+                memo[id(x)] = values[id(x)] if id(x) in values else x if all(map(operator.is_, parts, x[1:])) else \
+                    (x[0], *parts)
+            return memo[id(x)]
+        def stepped(expression, memo):  # Its select between such variants, each baked whole; None where not
+            if not 0 < len(stepwise(expression)) <= 2: return None
+            stepping, variants = list(stepwise(expression).values()), []
+            for k in range(1 << len(stepping)):
+                variant = substituted(expression, {id(s): float(k >> i & 1) for i, s in enumerate(stepping)}, {})
+                alive.append(variant)
+                if (summarize(variant, summaries, current.get('scales'))[2] or 0) < 10: return None
+                variants.append(variant)
+            whole = {'whole': True}  # Each baked whole, none in part, or the chain as today
+            variants = [bake(variant, whole) for variant in variants]
+            if any(variant[0] != 'BAKED' for variant in variants): return None
+            for s in stepping: variants = [('SELECT', s, b, a) for a, b in zip(variants[::2], variants[1::2])]
+            return variants[0]
         def baking(expression, memo):  # A unit of math, ramps, noise and linear reads on the point inputs, costing two
             # reads, baked up to 4K and read at the UV: of generated points without reads over its object's UVs, as
             # fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for every object
@@ -2241,6 +2281,7 @@ class Flex(bpy.types.RenderEngine):
             if size is None or (size > 4096).any():
                 if isinstance(expression, tuple) and expression[0] == 'BUMP': return bumped(*expression[1:], memo)
                 if memo.get('whole'): return expression  # Baked whole or not at all
+                if variant := stepped(expression, memo): return variant  # Baked by the steps it's live for
                 if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
                         summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by

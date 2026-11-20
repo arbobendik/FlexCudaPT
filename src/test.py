@@ -4608,6 +4608,48 @@ def textured():  # OSL texture()
     bpy.context.window.scene = shown
 textured()
 
+# Baking past a step of an object's own scalar: MAXIMUM(MIX(noise a, noise b, LESS_THAN(Object Info's Random, 2)),
+# noise c) of the UV into the emission, live only for the step, bakes once per step value: two bakes, selected by the
+# step live. With Object Info's Color in its place, which stays live, its three noises bake apart (main bakes them apart
+# either way). Both steps are 1, so the two render alike, within twice the bake tolerance, on both backends
+def stepped():
+    shown, made = bpy.context.window.scene, opened('stepped', (0, 0, 0))
+    made.render.resolution_x = made.render.resolution_y = 16
+    made.camera = bpy.data.objects.new('stepped camera', bpy.data.cameras.new('stepped camera'))
+    made.collection.objects.link(made.camera)
+    made.camera.location.z, made.camera.data.type, made.camera.data.ortho_scale = 1, 'ORTHO', 1
+    surface = plane('stepped', 0, 0)  # Into the test scene, moved to this one
+    scene.collection.objects.unlink(ob := bpy.data.objects['stepped']), made.collection.objects.link(ob)
+    nodes, links = surface.id_data.nodes, surface.id_data.links
+    surface.inputs['Base Color'].default_value, surface.inputs['Emission Strength'].default_value = (0, 0, 0, 1), 1
+    uv, info = nodes.new('ShaderNodeTexCoord').outputs['UV'], nodes.new('ShaderNodeObjectInfo')
+    noises = [nodes.new('ShaderNodeTexNoise') for _ in range(3)]
+    for k, noise in enumerate(noises):
+        noise.inputs['Scale'].default_value, noise.inputs['Detail'].default_value = 3 + 2 * k, 1
+        links.new(uv, noise.inputs['Vector'])
+    step, mix, top = nodes.new('ShaderNodeMath'), nodes.new('ShaderNodeMix'), nodes.new('ShaderNodeMix')
+    step.operation, step.inputs[1].default_value, mix.data_type = 'LESS_THAN', 2, 'RGBA'
+    top.data_type, top.blend_type, top.inputs['Factor'].default_value = 'RGBA', 'LIGHTEN', 1
+    links.new(info.outputs['Random'], step.inputs[0]), links.new(step.outputs[0], mix.inputs['Factor'])
+    links.new(noises[0].outputs['Color'], mix.inputs[6]), links.new(noises[1].outputs['Color'], mix.inputs[7])
+    links.new(mix.outputs[2], top.inputs[6]), links.new(noises[2].outputs['Color'], top.inputs[7])
+    links.new(top.outputs[2], surface.inputs['Emission Color'])
+    def bakes(output):
+        links.new(info.outputs[output], step.inputs[0])
+        return len(getattr(exported(bpy.context.evaluated_depsgraph_get()), 'placed', ()))
+    counts = bakes('Color'), bakes('Random')
+    assert counts == (3, 2), ('step baked', counts)
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        links.new(info.outputs['Color'], step.inputs[0])
+        live = render(made, 16)
+        links.new(info.outputs['Random'], step.inputs[0])
+        baked = render(made, 16)
+        assert numpy.abs(baked - live).max() < 2 * module['BAKE_TOLERANCE'], ('step baked render', preferences.device,
+            numpy.abs(baked - live).max())
+    preferences.device, bpy.context.window.scene = device, shown
+
+stepped()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
