@@ -3574,6 +3574,11 @@ def seen_directions(lens, u, v, width, height):  # Local directions, forward, le
             - lens.central_cylindrical_range_v_min)
         d = numpy.stack((numpy.cos(right), -numpy.sin(right), height / lens.central_cylindrical_radius), -1)
         return d / numpy.linalg.norm(d, axis=-1, keepdims=True)
+    if lens.panorama_type in ('EQUIANGULAR_CUBEMAP_FACE', 'TANGENT_FACE'):  # A cube's forward face, its angle over u
+        right, up = (u - 0.5) * math.pi / 2, (v - 0.5) * math.pi / 2  # and over v even across a right angle each way,
+        if lens.panorama_type == 'TANGENT_FACE': right, up = numpy.arctan(2 * u - 1), numpy.arctan(2 * v - 1)  # on
+        d = numpy.stack((numpy.ones_like(u), -numpy.tan(right), numpy.tan(up)), -1)  # any image (or, a control, not)
+        return d / numpy.linalg.norm(d, axis=-1, keepdims=True)
     across, up = frame(lens, width, height)[:2]
     x, y = (u - 0.5) * across, (v - 0.5) * up
     r = numpy.hypot(x, y)
@@ -3638,8 +3643,10 @@ def fisheye_row(kind, against=None, flip=False, width=64, height=64, **settings)
     for name, value in settings.items(): setattr(lens, name, value)
     bpy.ops.render.render(scene=scene.name, write_still=True)
     got = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(height, width, 4)[..., :3]
-    if against: lens.panorama_type = against
-    color, sees, blind = expected_panorama(lens, width, height)
+    held = types.SimpleNamespace(panorama_type=against, shift_x=lens.shift_x, shift_y=lens.shift_y) \
+        if against == 'TANGENT_FACE' else lens  # A plain perspective over a right angle, which Blender has no type for
+    if against and held is lens: lens.panorama_type = against
+    color, sees, blind = expected_panorama(held, width, height)
     if flip: color, sees, blind = color[:, ::-1], sees[:, ::-1], blind[:, ::-1]
     return abs(got - color)[sees].mean(), abs(got[blind]).max(initial=0), sees.sum(), blind.sum()
 # Positive controls, the panoramas #184 measured by a light's centroid, then the fisheyes at two settings each
@@ -3658,7 +3665,9 @@ for kind, settings in (('EQUIRECTANGULAR', dict(longitude_min=-math.pi / 2, long
             fisheye_polynomial_k2=0, fisheye_polynomial_k3=-2e-5, fisheye_polynomial_k4=0, shift_y=0.05)),
         ('FISHEYE_LENS_POLYNOMIAL', dict(fisheye_fov=2.0, width=96, height=64)),
         ('MIRRORBALL', dict()), ('MIRRORBALL', dict(shift_x=0.05, shift_y=-0.04)),
-        ('MIRRORBALL', dict(width=96, height=64))):  # An ellipse across the whole frame
+        ('MIRRORBALL', dict(width=96, height=64)),  # An ellipse across the whole frame
+        ('EQUIANGULAR_CUBEMAP_FACE', dict()), ('EQUIANGULAR_CUBEMAP_FACE', dict(shift_x=-0.06, shift_y=0.03)),
+        ('EQUIANGULAR_CUBEMAP_FACE', dict(width=96, height=64))):  # A right angle each way still
     error, stray, sees, blind = fisheye_row(kind, **settings)
     print('PANORAMA ROW', kind, settings, f'error {error:.2e} stray {stray:.2e} seeing {sees} blind {blind}')
     assert error < 1e-3 and stray < 1e-6 and sees > 1000, ('panorama row', kind, settings, error, stray, sees)
@@ -3671,6 +3680,11 @@ assert error > 1e-2 or stray > 0.1, ('panorama negative control', error, stray)
 error, stray, *_ = fisheye_row('MIRRORBALL', flip=True)
 print('PANORAMA ROW negative mirrored', f'error {error:.2e} stray {stray:.2e}')
 assert error > 1e-2, ('panorama mirrored negative control', error, stray)
+# And a cubemap face held to a plain perspective's directions over the same right angle fails: its pixels are even in
+# angle, not in the tangent
+error, stray, *_ = fisheye_row('EQUIANGULAR_CUBEMAP_FACE', 'TANGENT_FACE')
+print('PANORAMA ROW negative tangent', f'error {error:.2e} stray {stray:.2e}')
+assert error > 1e-3, ('panorama tangent negative control', error, stray)
 preferences.device = device
 # On Vulkan a panoramic camera is refused by name: its export raises before a scene is piped, so nothing is traced
 preferences.device, traced, trace = 'VULKAN', [], flex.Flex.trace
@@ -3684,8 +3698,8 @@ assert 'Flex: panoramic cameras render on OptiX only, not on Vulkan' in reported
     ('panorama on Vulkan', reported.getvalue()[-300:], traced)
 
 # An animation's frame reusing the last one's reservoirs reprojects them through its panorama: an equirectangular
-# camera, or a fisheye equidistant, equisolid or lens polynomial one or a mirror ball (back-projected inside its
-# circle), turned 5 degrees between frames, renders the second within 1% of that frame alone, on OptiX
+# camera, a fisheye equidistant, equisolid or lens polynomial one, a mirror ball (back-projected inside its circle) or
+# a cubemap face, turned 5 degrees between frames, renders the second within 1% of that frame alone, on OptiX
 scene = opened('turned panorama')
 scene.flex_samples, scene.flex_reuse_samples, scene.flex_reuse, scene.flex_denoise = 256, 192, True, False
 scene.frame_start, scene.frame_end = 1, 2
@@ -3701,7 +3715,7 @@ counts, trace = [], flex.Flex.trace
 flex.Flex.trace = lambda self, *args: (traced := trace(self, *args), counts.append(int(traced[1][0, 0, 3])))[0]
 preferences.device = 'OPTIX'
 for kind, height in (('EQUIRECTANGULAR', 32), ('FISHEYE_EQUIDISTANT', 64), ('FISHEYE_EQUISOLID', 64),
-        ('FISHEYE_LENS_POLYNOMIAL', 64), ('MIRRORBALL', 64)):
+        ('FISHEYE_LENS_POLYNOMIAL', 64), ('MIRRORBALL', 64), ('EQUIANGULAR_CUBEMAP_FACE', 64)):
     scene.camera.data.panorama_type, scene.render.resolution_x, scene.render.resolution_y = kind, 64, height
     scene.frame_set(1)
     bpy.ops.render.render(animation=True, scene=scene.name)
