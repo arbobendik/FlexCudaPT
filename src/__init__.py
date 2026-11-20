@@ -1716,10 +1716,13 @@ def lattice(ob, name):
     info, get, points, verts, out = (tree.nodes.new(t) for t in ('GeometryNodeObjectInfo', 'GeometryNodeGetNamedGrid',
         'GeometryNodeGridToPoints', 'GeometryNodePointsToVertices', 'NodeGroupOutput'))
     info.inputs['Object'].default_value, get.inputs['Name'].default_value = source, name
+    vector = ob.data.grids[name].data_type == 'VECTOR_FLOAT'  # Its three components, else its value
+    get.data_type = points.data_type = 'VECTOR' if vector else 'FLOAT'
     tree.links.new(info.outputs['Geometry'], get.inputs['Volume'])
     tree.links.new(get.outputs['Grid'], points.inputs[0])
     geometry = points.outputs['Points']
-    for field, kind in (('Value', 'FLOAT'), ('X', 'INT'), ('Y', 'INT'), ('Z', 'INT'), ('Extent', 'INT')):
+    for field, kind in (('Value', 'FLOAT_VECTOR' if vector else 'FLOAT'), ('X', 'INT'), ('Y', 'INT'), ('Z', 'INT'),
+        ('Extent', 'INT')):
         store = tree.nodes.new('GeometryNodeStoreNamedAttribute')
         store.data_type, store.inputs['Name'].default_value = kind, field.lower()
         tree.links.new(geometry, store.inputs['Geometry']), tree.links.new(points.outputs[field], store.inputs['Value'])
@@ -1731,9 +1734,11 @@ def lattice(ob, name):
     scene.view_layers[0].update()
     evaluated = holder.evaluated_get(scene.view_layers[0].depsgraph).data
     count = len(evaluated.vertices)  # None of a grid without an active voxel, read as one voxel of 0: no medium
-    read = {field: numpy.zeros(max(count, 1), kind) + (field == 'extent')
+    read = {field: numpy.zeros((max(count, 1), 3) if vector and field == 'value' else max(count, 1), kind) + (field
+        == 'extent')
         for field, kind in (('value', 'f'), ('x', 'i'), ('y', 'i'), ('z', 'i'), ('extent', 'i'))}
-    for field, values in (read.items() if count else ()): evaluated.attributes[field].data.foreach_get('value', values)
+    for field, values in (read.items() if count else ()):
+        evaluated.attributes[field].data.foreach_get(('value', 'vector')[values.ndim - 1], values.ravel())
     mesh, volume = holder.data, source.data
     bpy.data.objects.remove(holder), bpy.data.meshes.remove(mesh), bpy.data.node_groups.remove(tree)
     bpy.data.objects.remove(source), bpy.data.volumes.remove(volume), bpy.data.scenes.remove(scene), os.remove(path)
@@ -1746,13 +1751,13 @@ def dense(read, volume, name):  # The voxels and tiles read, dense over their ac
     index = numpy.column_stack((read['x'], read['y'], read['z']))
     low, size = index.min(0), (index + read['extent'][:, None]).max(0) - index.min(0)
     if message := oversized(volume, name, size): raise ValueError(message)
-    values = numpy.zeros(size[::-1], 'f')
+    values = numpy.zeros((*size[::-1], *read['value'].shape[1:]), 'f')
     one, (x, y, z) = read['extent'] == 1, (index - low).T
     values[z[one], y[one], x[one]] = read['value'][one]  # Voxels at once, then tiles, whose voxels all hold its value
     for k in numpy.flatnonzero(~one):
         e = read['extent'][k]
         values[z[k]:z[k] + e, y[k]:y[k] + e, x[k]:x[k] + e] = read['value'][k]
-    return values.ravel(), low, size
+    return values.reshape(size.prod(), *read['value'].shape[1:]), low, size
 # index = matrix_object⁻¹ · p, voxel k centred at index k, dense cell k − low centred at (k − low + 0.5) / size
 # => point = (index − low + 0.5) / size
 def volume_grid(ob, name, frame, lattices):
@@ -1760,7 +1765,8 @@ def volume_grid(ob, name, frame, lattices):
         lattices[ob.name, name] = frame, dense(on_main(lambda: lattice(ob, name), ob.name), ob.name, name)
     values, low, size = lattices[ob.name, name][1]
     point = transform(ob.data.grids[name].matrix_object.inverted(), ('OBJECT',))
-    return Grid(values, size.tolist(), ('DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size))
+    point = 'DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size
+    return [Grid(channel, size.tolist(), point) for channel in values.reshape(len(values), -1).T]
 # The box of a volume's bounds as a mesh: 12 triangles' corners, flat normals, texture space, no UVs or colors
 def boxed(ob):
     low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
@@ -1774,8 +1780,8 @@ def boxed(ob):
 def fluid(ob, frame, lattices):  # Of a gas domain or a volume object, its name, grids' names and how a grid is read
     if ob.type == 'VOLUME':
         ob.data.grids.load()
-        return {None: ob.name, 'names': [g.name for g in ob.data.grids if g.data_type == 'FLOAT'],
-            'read': lambda name: [volume_grid(ob, name, frame, lattices)]}
+        return {None: ob.name, 'names': [g.name for g in ob.data.grids if g.data_type in ('FLOAT', 'VECTOR_FLOAT')],
+            'read': lambda name: volume_grid(ob, name, frame, lattices)}
     domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'
         and m.domain_settings.domain_type == 'GAS'), None)
     if not domain: return {}
@@ -1796,9 +1802,11 @@ def grid(name, kind):  # Of the domain or volume shaded, its grid of that name, 
     if not GRIDS or name not in GRIDS['names']: return None
     if name not in GRIDS: GRIDS[name] = GRIDS['read'](name)
     reads = [('GRID', channel.point, channel) for channel in GRIDS[name]]
-    if name != 'color' or len(reads) == 1: return reads[0] if kind != 'alpha' else 1
-    color = vector(*(('DIVIDE', read, reads[3]) for read in reads[:3]))  # Interpolated, then unpremultiplied
-    return reads[3] if kind == 'alpha' else color if kind == 'color' else ('DOT_PRODUCT', color, numpy.full(3, 1 / 3))
+    if len(reads) == 1: return reads[0] if kind != 'alpha' else 1
+    # A vector grid's components; a domain's color interpolated, then unpremultiplied
+    color = vector(*reads) if len(reads) == 3 else vector(*(('DIVIDE', read, reads[3]) for read in reads[:3]))
+    alpha = reads[3] if len(reads) == 4 else 1
+    return alpha if kind == 'alpha' else color if kind == 'color' else ('DOT_PRODUCT', color, numpy.full(3, 1 / 3))
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
     SEALING['asked'] = True
