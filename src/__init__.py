@@ -1689,8 +1689,10 @@ HAIRS = {}  # Of each hair table, by its entry, its first level
 FOLDED = {}  # Of each sky's folded chain, by its expression's key, its table, until a full export
 SOURCES = {}  # Of each node's table, by its original, the evaluated node it was last read from
 MEDIA = {}  # Of each material shade() resolved, its volume's absorption, density, scattering color and emission
-GRIDS = {}  # Of the fluid domain shaded, its name and its grids by Cycles' attribute names
-media_key = lambda material: (material, GRIDS[None]) if GRIDS else material  # MEDIA's key, a domain's its own
+class Domain:  # A fluid domain or volume object: its name, its grids' names, how one is read, those read by name
+    def __init__(self, name, names, read): self.name, self.names, self.read, self.grids = name, names, read, {}
+DOMAIN = None  # The one shaded
+media_key = lambda material: (material, DOMAIN.name) if DOMAIN else material  # MEDIA's key, a domain's its own
 GRID_WAIT = 120  # Seconds a render's job waits for the main thread to read a volume's grids, as a script holds it
 def reading():  # Whether this thread is inside lattice(), whose temporary IDs make Blender update viewports
     frame = sys._getframe(1)
@@ -1718,10 +1720,13 @@ def lattice(ob, name):
     info, get, points, verts, out = (tree.nodes.new(t) for t in ('GeometryNodeObjectInfo', 'GeometryNodeGetNamedGrid',
         'GeometryNodeGridToPoints', 'GeometryNodePointsToVertices', 'NodeGroupOutput'))
     info.inputs['Object'].default_value, get.inputs['Name'].default_value = source, name
+    vector = ob.data.grids[name].data_type == 'VECTOR_FLOAT'  # Its three components, else its value
+    get.data_type = points.data_type = 'VECTOR' if vector else 'FLOAT'
     tree.links.new(info.outputs['Geometry'], get.inputs['Volume'])
     tree.links.new(get.outputs['Grid'], points.inputs[0])
     geometry = points.outputs['Points']
-    for field, kind in (('Value', 'FLOAT'), ('X', 'INT'), ('Y', 'INT'), ('Z', 'INT'), ('Extent', 'INT')):
+    for field, kind in (('Value', 'FLOAT_VECTOR' if vector else 'FLOAT'), ('X', 'INT'), ('Y', 'INT'), ('Z', 'INT'),
+        ('Extent', 'INT')):
         store = tree.nodes.new('GeometryNodeStoreNamedAttribute')
         store.data_type, store.inputs['Name'].default_value = kind, field.lower()
         tree.links.new(geometry, store.inputs['Geometry']), tree.links.new(points.outputs[field], store.inputs['Value'])
@@ -1733,9 +1738,11 @@ def lattice(ob, name):
     scene.view_layers[0].update()
     evaluated = holder.evaluated_get(scene.view_layers[0].depsgraph).data
     count = len(evaluated.vertices)  # None of a grid without an active voxel, read as one voxel of 0: no medium
-    read = {field: numpy.zeros(max(count, 1), kind) + (field == 'extent')
+    read = {field: numpy.zeros((max(count, 1), 3) if vector and field == 'value' else max(count, 1), kind) + (field
+        == 'extent')
         for field, kind in (('value', 'f'), ('x', 'i'), ('y', 'i'), ('z', 'i'), ('extent', 'i'))}
-    for field, values in (read.items() if count else ()): evaluated.attributes[field].data.foreach_get('value', values)
+    for field, values in (read.items() if count else ()):
+        evaluated.attributes[field].data.foreach_get(('value', 'vector')[values.ndim - 1], values.ravel())
     mesh, volume = holder.data, source.data
     bpy.data.objects.remove(holder), bpy.data.meshes.remove(mesh), bpy.data.node_groups.remove(tree)
     bpy.data.objects.remove(source), bpy.data.volumes.remove(volume), bpy.data.scenes.remove(scene), os.remove(path)
@@ -1748,13 +1755,13 @@ def dense(read, volume, name):  # The voxels and tiles read, dense over their ac
     index = numpy.column_stack((read['x'], read['y'], read['z']))
     low, size = index.min(0), (index + read['extent'][:, None]).max(0) - index.min(0)
     if message := oversized(volume, name, size): raise ValueError(message)
-    values = numpy.zeros(size[::-1], 'f')
+    values = numpy.zeros((*size[::-1], *read['value'].shape[1:]), 'f')
     one, (x, y, z) = read['extent'] == 1, (index - low).T
     values[z[one], y[one], x[one]] = read['value'][one]  # Voxels at once, then tiles, whose voxels all hold its value
     for k in numpy.flatnonzero(~one):
         e = read['extent'][k]
         values[z[k]:z[k] + e, y[k]:y[k] + e, x[k]:x[k] + e] = read['value'][k]
-    return values.ravel(), low, size
+    return values.reshape(size.prod(), *read['value'].shape[1:]), low, size
 # index = matrix_object⁻¹ · p, voxel k centred at index k, dense cell k − low centred at (k − low + 0.5) / size
 # => point = (index − low + 0.5) / size
 def volume_grid(ob, name, frame, lattices):
@@ -1762,7 +1769,8 @@ def volume_grid(ob, name, frame, lattices):
         lattices[ob.name, name] = frame, dense(on_main(lambda: lattice(ob, name), ob.name), ob.name, name)
     values, low, size = lattices[ob.name, name][1]
     point = transform(ob.data.grids[name].matrix_object.inverted(), ('OBJECT',))
-    return Grid(values, size.tolist(), ('DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size))
+    point = 'DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size
+    return [Grid(channel, size.tolist(), point) for channel in values.reshape(len(values), -1).T]
 # The box of a volume's bounds as a mesh: 12 triangles' corners, flat normals, texture space, no UVs or colors
 def boxed(ob):
     low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
@@ -1776,11 +1784,11 @@ def boxed(ob):
 def fluid(ob, frame, lattices):  # Of a gas domain or a volume object, its name, grids' names and how a grid is read
     if ob.type == 'VOLUME':
         ob.data.grids.load()
-        return {None: ob.name, 'names': [g.name for g in ob.data.grids if g.data_type == 'FLOAT'],
-            'read': lambda name: [volume_grid(ob, name, frame, lattices)]}
+        return Domain(ob.name, [g.name for g in ob.data.grids if g.data_type in ('FLOAT', 'VECTOR_FLOAT')],
+            lambda name: volume_grid(ob, name, frame, lattices))
     domain = next((m.domain_settings for m in ob.modifiers if m.type == 'FLUID' and m.fluid_type == 'DOMAIN'
         and m.domain_settings.domain_type == 'GAS'), None)
-    if not domain: return {}
+    if not domain: return None
     # The box the evaluated (adaptive) domain spans
     low, high = numpy.array(ob.bound_box).min(0), numpy.array(ob.bound_box).max(0)
     point = 'DIVIDE', ('SUBTRACT', ('OBJECT',), low), high - low
@@ -1793,14 +1801,16 @@ def fluid(ob, frame, lattices):  # Of a gas domain or a volume object, its name,
         alpha = name == 'color' and Grid(values[3::4], size, point)
         return [Grid(values[k::4], size, point, alpha) for k in range(3)] + [alpha] if alpha \
             else [Grid(values, size, point)]
-    return {None: ob.name, 'names': ('density', 'flame', 'heat', 'temperature', 'color'), 'read': read}
+    return Domain(ob.name, ('density', 'flame', 'heat', 'temperature', 'color'), read)
 def grid(name, kind):  # Of the domain or volume shaded, its grid of that name, read once, as a float, color or alpha
-    if not GRIDS or name not in GRIDS['names']: return None
-    if name not in GRIDS: GRIDS[name] = GRIDS['read'](name)
-    reads = [('GRID', channel.point, channel) for channel in GRIDS[name]]
-    if name != 'color' or len(reads) == 1: return reads[0] if kind != 'alpha' else 1
-    color = vector(*(('DIVIDE', read, reads[3]) for read in reads[:3]))  # Interpolated, then unpremultiplied
-    return reads[3] if kind == 'alpha' else color if kind == 'color' else ('DOT_PRODUCT', color, numpy.full(3, 1 / 3))
+    if not DOMAIN or name not in DOMAIN.names: return None
+    if name not in DOMAIN.grids: DOMAIN.grids[name] = DOMAIN.read(name)
+    reads = [('GRID', channel.point, channel) for channel in DOMAIN.grids[name]]
+    if len(reads) == 1: return reads[0] if kind != 'alpha' else 1
+    # A vector grid's components; a domain's color interpolated, then unpremultiplied
+    color = vector(*reads) if len(reads) == 3 else vector(*(('DIVIDE', read, reads[3]) for read in reads[:3]))
+    alpha = reads[3] if len(reads) == 4 else 1
+    return alpha if kind == 'alpha' else color if kind == 'color' else ('DOT_PRODUCT', color, numpy.full(3, 1 / 3))
 SIDE = {'volume': False}  # Whether resolve() resolves a material's Volume socket, where volume shaders emit
 def sealed():
     SEALING['asked'] = True
@@ -2004,6 +2014,7 @@ class Flex(bpy.types.RenderEngine):
     # visibility, those of their slots and a light's radiance, and its axes if it shapes its light by them.
     # keeping: whether a later export of this engine may take this one's rows again, as a kept engine's
     def start(self, depsgraph, keeping=False):
+        global DOMAIN
         visible = [instance.object.name for instance in depsgraph.object_instances]
         trees = (*bpy.data.node_groups, *(material.node_tree for material in (*bpy.data.materials, *bpy.data.worlds)))
         references = {node.object.name for tree in trees if tree for node in tree.nodes
@@ -2256,7 +2267,7 @@ class Flex(bpy.types.RenderEngine):
         kept, spans = self.kept if shaded else {}, []
         # Its row, apart for open objects of a material with subsurface scattering
         def shaded_row(material, filler=False):
-            recording, at = (shaded or keeping) and not GRIDS, spots()
+            recording, at = (shaded or keeping) and not DOMAIN, spots()
             context = recording and (material, filler, SEALING['closed'], material in subsurface, dict(current))
             key = shaded and recording and keyed(*context)
             if key in kept and kept[key][0] == at:
@@ -2497,11 +2508,10 @@ class Flex(bpy.types.RenderEngine):
                 point = co.reshape(-1, 3)[vertex[loops]].reshape(-1, 3, 3)
                 color = color[loops].reshape(-1, 3, 4)
                 SEALING['closed'] = sealing
-                GRIDS.clear()
-                GRIDS.update(fluid(ob, scene.frame_current, lattices))
+                DOMAIN = fluid(ob, scene.frame_current, lattices)
                 for slot in slotted(ob):  # Of a material with units baked over this object's UVs or filling a
                     # domain's grids, its own row
-                    if variant(slot.material) in rows and not (GRIDS and (slot.material or ob.type == 'VOLUME')) \
+                    if variant(slot.material) in rows and not (DOMAIN and (slot.material or ob.type == 'VOLUME')) \
                             or (slot.material, ob.name) in rows:
                         continue
                     mask = numpy.isin(index, [k for k, other in enumerate(slotted(ob))
@@ -2514,7 +2524,7 @@ class Flex(bpy.types.RenderEngine):
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
                     row = shaded_row(slot.material, ob.type == 'VOLUME')
-                    rows[(slot.material, ob.name) if current['made'] or GRIDS else variant(slot.material)] = row
+                    rows[(slot.material, ob.name) if current['made'] or DOMAIN else variant(slot.material)] = row
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
                     for slot in slotted(ob)] or [rows[None]]
@@ -2606,7 +2616,7 @@ class Flex(bpy.types.RenderEngine):
                 exact = kinds and kinds[0] < 0 and kinds.count(kinds[0]) == len(kinds)  # As all its volumes are, alike
                 media = (*space[0], *space[1]), kinds[0] if exact else max([0, *map(abs, kinds)])
                 if media[1]: varying.add(i)
-            GRIDS.clear()
+            DOMAIN = None
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
         if box:
