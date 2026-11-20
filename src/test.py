@@ -803,6 +803,13 @@ _, _, rotated = camera_render(aperture_rotation=math.pi / 2)
 assert abs(triangle[0]) > 0.3 and abs(triangle[1]) < 0.15, 'aperture blades'
 assert abs(rotated[1]) > 0.3 and abs(rotated[0]) < 0.15, 'aperture rotation'
 assert numpy.allclose(camera_render(focus_object=bpy.data.objects['textured'])[0], sharp, atol=0.01), 'focus object'
+# Orthographic, of radius 1 / (2 f-stop): at depth z a circle of radius r |z - F| / F, a disk's variance R^2 / 4 on each
+# axis; f-stop 1 and focus 2 blur the emitter 1 away by 0.25, 8 pixels at an ortho scale of 2 over 64
+scene.camera.data.type, scene.camera.data.ortho_scale = 'ORTHO', 2
+_, flat, _ = camera_render(use_dof=False, focus_object=None, aperture_blades=0, aperture_rotation=0)
+_, blurred, _ = camera_render(use_dof=True, aperture_fstop=1, focus_distance=2)
+assert numpy.all(numpy.abs(2 * numpy.sqrt(blurred - flat) / 8 - 1) < 0.1), ('orthographic depth of field', flat, blurred)
+scene.camera.data.type = 'PERSP'
 # Node regressions compared to Cycles through emission, independently of the engines' different BSDFs
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.camera.data.angle, scene.flex_samples, dof.use_dof = 0.1, 16, False
