@@ -520,17 +520,29 @@ __device__ bool used(unsigned code) {
 #define VIEWING(camera) const Camera& camera
 #define PANORAMIC(camera) false
 #endif
-#ifdef EXTENDED // A panorama's direction at u, v of its window and back: x forward, y left, z up
+#ifdef EXTENDED
+// A fisheye's frame, in its circle's radii (equidistant) or millimetres, and the angle off forward at a radius on it:
+// equidistant in proportion, equisolid 2 asin(radius / 2f), lens polynomial -(k0 + k1 r + ... + k4 r^4) (its field of
+// view last)
+__device__ float2 fisheyeFrame(const Projection& p) {
+    return p.type == 6 ? make_float2(p.range[5], p.range[6]) : make_float2(p.range[2], p.range[3]);
+}
+__device__ float fisheyeAngle(const Projection& p, float radius) {
+    const float* r = p.range;
+    if (p.type == 6) return -(r[0] + radius * (r[1] + radius * (r[2] + radius * (r[3] + radius * r[4]))));
+    return p.type == 4 ? radius * r[0] / 2 : 2 * asinf(fminf(radius / (2 * r[1]), 1.0f));
+}
+// A panorama's direction at u, v of its window and back: x forward, y left, z up
 __device__ float3 panorama(const Projection& p, float u, float v) {
     const float* r = p.range;
     if (p.type == 7) { // Central cylindrical: its angle about z over u, its height over v
         const float theta = r[0] + (r[1] - r[0]) * u;
         return make_float3(cosf(theta), sinf(theta), r[2] + (r[3] - r[2]) * v);
     }
-    if (p.type == 4 || p.type == 5) { // Fisheye: off forward by the angle its radius on the frame maps to, toward it
-        const float x = (u - 0.5f) * r[2], y = (v - 0.5f) * r[3], radius = sqrtf(x * x + y * y);
-        const float theta = p.type == 4 ? radius * r[0] / 2 : 2 * asinf(fminf(radius / (2 * r[1]), 1.0f));
-        const float s = radius > 0 ? sinf(theta) / radius : 0;
+    if (p.type >= 4 && p.type <= 6) { // Fisheye: off forward by the angle its radius on the frame maps to, toward it
+        const float2 f = fisheyeFrame(p);
+        const float x = (u - 0.5f) * f.x, y = (v - 0.5f) * f.y, radius = sqrtf(x * x + y * y);
+        const float theta = fisheyeAngle(p, radius), s = radius > 0 ? sinf(theta) / radius : 0;
         return make_float3(cosf(theta), -x * s, y * s);
     }
     const float phi = r[0] * u + r[1], theta = r[2] * v + r[3]; // Equirectangular: longitude and polar angle
@@ -538,19 +550,30 @@ __device__ float3 panorama(const Projection& p, float u, float v) {
 }
 // Whether a panorama sees anything at u, v: a fisheye only inside its circle and its field of view
 __device__ bool panoramaSees(const Projection& p, float u, float v) {
-    if (p.type != 4 && p.type != 5) return true;
+    if (p.type < 4 || p.type > 6) return true;
     const float* r = p.range;
-    const float x = (u - 0.5f) * r[2], y = (v - 0.5f) * r[3], radius = sqrtf(x * x + y * y);
+    const float2 f = fisheyeFrame(p);
+    const float x = (u - 0.5f) * f.x, y = (v - 0.5f) * f.y, radius = sqrtf(x * x + y * y);
+    if (p.type == 6) return fisheyeAngle(p, radius) <= r[7] / 2;
     return p.type == 4 ? radius <= 1 : radius <= 2 * r[1] && 2 * asinf(radius / (2 * r[1])) <= r[0] / 2;
 }
 __device__ float2 unpanorama(const Projection& p, float3 d) {
     const float* r = p.range;
-    if (p.type == 4 || p.type == 5) { // Fisheye: off the image past its field of view
+    if (p.type >= 4 && p.type <= 6) { // Fisheye: off the image past its field of view
         const float theta = acosf(fminf(fmaxf(d.x / length(d), -1.0f), 1.0f)), side = sqrtf(d.y * d.y + d.z * d.z);
-        if (theta > r[0] / 2) return make_float2(-1, -1);
-        const float radius = p.type == 4 ? 2 * theta / r[0] : 2 * r[1] * sinf(theta / 2);
+        if (theta > (p.type == 6 ? r[7] : r[0]) / 2) return make_float2(-1, -1);
+        float radius = p.type == 4 ? 2 * theta / r[0] : p.type == 5 ? 2 * r[1] * sinf(theta / 2)
+            : r[1] != 0 ? -theta / r[1] : 0;
+        if (p.type == 6) { // The polynomial's radius at the angle: Newton's from its slope at the centre
+            for (int i = 0; i < 8; ++i) {
+                const float slope = -(r[1] + radius * (2 * r[2] + radius * (3 * r[3] + radius * 4 * r[4])));
+                if (slope == 0) break;
+                radius -= (fisheyeAngle(p, radius) - theta) / slope;
+            }
+        }
+        const float2 f = fisheyeFrame(p);
         const float s = side > 0 ? radius / side : 0;
-        return make_float2(0.5f - d.y * s / r[2], 0.5f + d.z * s / r[3]);
+        return make_float2(0.5f - d.y * s / f.x, 0.5f + d.z * s / f.y);
     }
     const float phi = atan2f(d.y, d.x);
     if (p.type == 7) return make_float2((phi - r[0]) / (r[1] - r[0]),
