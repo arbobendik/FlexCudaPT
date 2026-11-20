@@ -7,8 +7,9 @@ struct Lens { float aperture, focus, blades, rotation, ratio, ortho, near, far; 
 // z's normal; rays start at the near plane's depth and end at the far one's
 // Perspective: the pinhole ray through NDC (u, v) leaves origin along x * u + y * v + z.
 struct Camera { float3 origin, x, y, z; Lens lens; };
-// A panorama: its number, 0 for none, the range of directions over u and v and the shift of its window
-struct Projection { unsigned type; float range[4], shift[2]; };
+// A panorama: its number, 0 for none, its parameters (the range of directions over u and v, or a fisheye's) and the
+// shift of its window
+struct Projection { unsigned type; float range[8], shift[2]; };
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
 // combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there, or a

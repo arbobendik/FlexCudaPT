@@ -3554,8 +3554,8 @@ for kind, d, uv in (('EQUIRECTANGULAR', (math.cos(up) * math.cos(right), -math.c
 # directions are taken from the camera settings as Blender documents them, apart from Flex, and where the manual leaves
 # a convention open, as settled for each type: the camera looks along y, left -x, up z; (x, y) is a point's offset
 # from the frame's centre, for equidistant in its radii across the whole frame on either axis (an ellipse on a
-# non-square image), for equisolid in millimetres of the sensor, its width or height along the side its fit names (the
-# larger by default), the other side by the image's aspect
+# non-square image), for equisolid and the lens polynomial in millimetres of the sensor, its width or height along the
+# side its fit names (the larger by default), the other side by the image's aspect
 def frame(lens, width, height):  # A fisheye's frame: its extent across and up, and its circle's radius there
     if lens.panorama_type == 'FISHEYE_EQUIDISTANT': return 2, 2, 1
     across = lens.sensor_fit == 'HORIZONTAL' or lens.sensor_fit == 'AUTO' and width >= height
@@ -3579,14 +3579,24 @@ def seen_directions(lens, u, v, width, height):  # Local directions, forward, le
     r = numpy.hypot(x, y)
     if lens.panorama_type == 'FISHEYE_EQUIDISTANT':  # Off forward in proportion to the radius, fov / 2 at the circle
         theta = numpy.where(r <= 1, r * lens.fisheye_fov / 2, numpy.nan)
+    elif lens.panorama_type == 'FISHEYE_LENS_POLYNOMIAL':  # The manual's k0 + k1 r + ... + k4 r^4, negated, so that
+        theta = -polynomial(lens, r)  # Blender's defaults (k1 < 0) look forward upright; cut at fov / 2
+        theta = numpy.where(theta <= lens.fisheye_fov / 2, theta, numpy.nan)
     else:  # Equisolid: a radius of 2 f sin(theta / 2), cut at fov / 2
         theta = 2 * numpy.arcsin(numpy.minimum(r / (2 * lens.fisheye_lens), 1))
         theta = numpy.where((r <= 2 * lens.fisheye_lens) & (theta <= lens.fisheye_fov / 2), theta, numpy.nan)
     s = numpy.where(r > 0, numpy.sin(theta) / numpy.maximum(r, 1e-30), 0)
     return numpy.stack((numpy.cos(theta), -x * s, y * s), -1)
+def polynomial(lens, r): return sum(getattr(lens, f'fisheye_polynomial_k{i}') * r ** i for i in range(5))
 def circle(lens, width, height):  # A fisheye's frame and the radius on it past which it sees nothing
     across, up = frame(lens, width, height)[:2]
     if lens.panorama_type == 'FISHEYE_EQUIDISTANT': return across, up, 1
+    if lens.panorama_type == 'FISHEYE_LENS_POLYNOMIAL':  # Where its angle reaches fov / 2, by bisection
+        low, high = 0, 4 * max(across, up)
+        for _ in range(100):
+            middle = (low + high) / 2
+            low, high = (middle, high) if -polynomial(lens, middle) <= lens.fisheye_fov / 2 else (low, middle)
+        return across, up, low
     return across, up, 2 * lens.fisheye_lens * math.sin(lens.fisheye_fov / 4)
 # Per pixel, bottom row first: its mean color, whether all its area sees and whether none of it does, by the fisheye's
 # circle against the pixel's rectangle on the frame: its farthest point inside, or its nearest outside
@@ -3636,7 +3646,11 @@ for kind, settings in (('EQUIRECTANGULAR', dict(longitude_min=-math.pi / 2, long
         ('FISHEYE_EQUISOLID', dict(fisheye_lens=10.5, fisheye_fov=math.pi, sensor_width=36)),
         ('FISHEYE_EQUISOLID', dict(fisheye_lens=8, fisheye_fov=2.8, sensor_width=30, shift_x=0.04)),
         ('FISHEYE_EQUIDISTANT', dict(fisheye_fov=math.pi, width=96, height=64)),  # An ellipse across the whole frame
-        ('FISHEYE_EQUISOLID', dict(fisheye_lens=10.5, fisheye_fov=math.pi, sensor_width=36, width=96, height=64))):
+        ('FISHEYE_EQUISOLID', dict(fisheye_lens=10.5, fisheye_fov=math.pi, sensor_width=36, width=96, height=64)),
+        ('FISHEYE_LENS_POLYNOMIAL', dict(sensor_width=36, fisheye_fov=math.pi)),  # Blender's default coefficients
+        ('FISHEYE_LENS_POLYNOMIAL', dict(fisheye_polynomial_k0=0, fisheye_polynomial_k1=-0.12,
+            fisheye_polynomial_k2=0, fisheye_polynomial_k3=-2e-5, fisheye_polynomial_k4=0, shift_y=0.05)),
+        ('FISHEYE_LENS_POLYNOMIAL', dict(fisheye_fov=2.0, width=96, height=64))):
     error, stray, sees, blind = fisheye_row(kind, **settings)
     print('PANORAMA ROW', kind, settings, f'error {error:.2e} stray {stray:.2e} seeing {sees} blind {blind}')
     assert error < 1e-3 and stray < 1e-6 and sees > 1000, ('panorama row', kind, settings, error, stray, sees)
@@ -3658,8 +3672,8 @@ assert 'Flex: panoramic cameras render on OptiX only, not on Vulkan' in reported
     ('panorama on Vulkan', reported.getvalue()[-300:], traced)
 
 # An animation's frame reusing the last one's reservoirs reprojects them through its panorama: an equirectangular
-# camera, or a fisheye equidistant or equisolid one (back-projected inside its circle), turned 5 degrees between frames
-# renders the second within 1% of that frame alone, on OptiX
+# camera, or a fisheye equidistant, equisolid or lens polynomial one (back-projected inside its circle), turned 5
+# degrees between frames, renders the second within 1% of that frame alone, on OptiX
 scene = opened('turned panorama')
 scene.flex_samples, scene.flex_reuse_samples, scene.flex_reuse, scene.flex_denoise = 256, 192, True, False
 scene.frame_start, scene.frame_end = 1, 2
@@ -3674,7 +3688,8 @@ add(bpy.data.lights.new('turned sun', 'SUN'), (0, 0, 0), (0.8, 0, 0.6)).data.ene
 counts, trace = [], flex.Flex.trace
 flex.Flex.trace = lambda self, *args: (traced := trace(self, *args), counts.append(int(traced[1][0, 0, 3])))[0]
 preferences.device = 'OPTIX'
-for kind, height in (('EQUIRECTANGULAR', 32), ('FISHEYE_EQUIDISTANT', 64), ('FISHEYE_EQUISOLID', 64)):
+for kind, height in (('EQUIRECTANGULAR', 32), ('FISHEYE_EQUIDISTANT', 64), ('FISHEYE_EQUISOLID', 64),
+        ('FISHEYE_LENS_POLYNOMIAL', 64)):
     scene.camera.data.panorama_type, scene.render.resolution_x, scene.render.resolution_y = kind, 64, height
     scene.frame_set(1)
     bpy.ops.render.render(animation=True, scene=scene.name)
