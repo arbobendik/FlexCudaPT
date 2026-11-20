@@ -527,11 +527,31 @@ __device__ float3 panorama(const Projection& p, float u, float v) {
         const float theta = r[0] + (r[1] - r[0]) * u;
         return make_float3(cosf(theta), sinf(theta), r[2] + (r[3] - r[2]) * v);
     }
+    if (p.type == 4 || p.type == 5) { // Fisheye: off forward by the angle its radius on the frame maps to, toward it
+        const float x = (u - 0.5f) * r[2], y = (v - 0.5f) * r[3], radius = sqrtf(x * x + y * y);
+        const float theta = p.type == 4 ? radius * r[0] / 2 : 2 * asinf(fminf(radius / (2 * r[1]), 1.0f));
+        const float s = radius > 0 ? sinf(theta) / radius : 0;
+        return make_float3(cosf(theta), -x * s, y * s);
+    }
     const float phi = r[0] * u + r[1], theta = r[2] * v + r[3]; // Equirectangular: longitude and polar angle
     return make_float3(sinf(theta) * cosf(phi), sinf(theta) * sinf(phi), cosf(theta));
 }
+// Whether a panorama sees anything at u, v: a fisheye only inside its circle and its field of view
+__device__ bool panoramaSees(const Projection& p, float u, float v) {
+    if (p.type != 4 && p.type != 5) return true;
+    const float* r = p.range;
+    const float x = (u - 0.5f) * r[2], y = (v - 0.5f) * r[3], radius = sqrtf(x * x + y * y);
+    return p.type == 4 ? radius <= 1 : radius <= 2 * r[1] && 2 * asinf(radius / (2 * r[1])) <= r[0] / 2;
+}
 __device__ float2 unpanorama(const Projection& p, float3 d) {
     const float* r = p.range;
+    if (p.type == 4 || p.type == 5) { // Fisheye: off the image past its field of view
+        const float theta = acosf(fminf(fmaxf(d.x / length(d), -1.0f), 1.0f)), side = sqrtf(d.y * d.y + d.z * d.z);
+        if (theta > r[0] / 2) return make_float2(-1, -1);
+        const float radius = p.type == 4 ? 2 * theta / r[0] : 2 * r[1] * sinf(theta / 2);
+        const float s = side > 0 ? radius / side : 0;
+        return make_float2(0.5f - d.y * s / r[2], 0.5f + d.z * s / r[3]);
+    }
     const float phi = atan2f(d.y, d.x);
     if (p.type == 7) return make_float2((phi - r[0]) / (r[1] - r[0]),
         (d.z / sqrtf(d.x * d.x + d.y * d.y) - r[2]) / (r[3] - r[2]));
@@ -1095,6 +1115,7 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
 #ifdef EXTENDED
     const float u = x / size.x + cameraProjection.shift[0], v = 1 - y / size.y + cameraProjection.shift[1];
     if (PANORAMIC(camera)) direction = normalize(world(camera, panorama(cameraProjection, u, v)));
+    const bool blind = PANORAMIC(camera) && !panoramaSees(cameraProjection, u, v); // Off a fisheye's circle: black
 #endif
     if (camera.lens.aperture > 0) {
         const float2 point = aperture(camera.lens, state);
@@ -1107,6 +1128,9 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     // the near plane to the far, along a panorama's rays
     origin = origin + direction * (camera.lens.near / along);
     float reach = (camera.lens.far - camera.lens.near) / along;
+#ifdef EXTENDED
+    if (blind) reach = 0;
+#endif
     const float3 start = origin;
     float at = 0;
     Hit hit = traverse(scene, origin, direction, reach, at);
@@ -1119,7 +1143,7 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     const float across = 2 * length(camera.x) / size.x;
 #ifdef EXTENDED // A panorama's by its pixel's span
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
-        camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : PANORAMIC(camera)
+        camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : blind ? -1 : PANORAMIC(camera) // A blind ray's -1
         ? spread(cameraProjection, u, v, 1.0f / size.x, 1.0f / size.y) : across / length(plane)};
 #else
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
