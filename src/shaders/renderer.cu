@@ -554,10 +554,11 @@ __device__ float spread(const Projection& p, float u, float v, float du, float d
 // An operation on a and b, each on the stack, the step's own value or read from a slot; the n on the stack replaced
 #define BINARY(name, result) CASE(name) { const unsigned c = op->code; \
     const bool own = c & IMMEDIATE, from = c & FROM, left = c & LEFT, first = c & FIRST; \
-    float3* const p = top - 2 + own + from; \
-    const float3 a = own && left ? op->value : from && first ? saved[c >> 8 & 31] : *p; \
-    const float3 b = own && !left ? op->value : from && !first ? saved[c >> 8 & 31] : top[-1]; \
-    top = p + 1, top[-1] = result; } break;
+    const int n = 2 - own - from; \
+    const float3 a = own && left ? op->value : from && first ? saved[c >> 8 & 31] : n == 2 ? top[-1] : t; \
+    const float3 b = own && !left ? op->value : from && !first ? saved[c >> 8 & 31] : t; \
+    if (n == 0) *top++ = t; else top -= n - 1; \
+    t = result; } break;
 // Surface the program resolves to at the point
 __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
@@ -569,11 +570,12 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         u = p.u, v = p.v, generated = p.generated, object = p.object, color = p.color, position = p.position;
     };
     at(point);
-    float3 stack[STACK], *top = stack, saved[SLOTS];
+    // The stack's top in t, the values under it from spilled[1] on: spilled[0] takes the empty stack's t
+    float3 spilled[STACK + 1], *top = spilled, t = make_float3(0, 0, 0), saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) { const unsigned code = op->code & CODE; switch (code) {
-        CASE(PUSH) *top++ = op->value; break;
-        CASE(STORE) saved[op->texel] = top[-1]; break;
-        CASE(LOAD) *top++ = saved[op->texel]; break;
+        CASE(PUSH) *top++ = t, t = op->value; break;
+        CASE(STORE) saved[op->texel] = t; break;
+        CASE(LOAD) *top++ = t, t = saved[op->texel]; break;
         CASE(SPECULAR) break;
         CASE(TRANSLUCENT) break;
         CASE(SHEEN) break;
@@ -582,11 +584,11 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(VELVET) break;
         CASE(TOON) break;
         CASE(DISPERSION) break;
-        CASE(HAIR) top[-1] = normalize(transform(scene, tbn.rows[0], 1, info)) * top[-1].x; break; // Its fiber
-        CASE(UV) *top++ = make_float3(u, v, 0); break;
-        CASE(GENERATED) *top++ = generated; break;
-        CASE(OBJECT) *top++ = object; break;
-        CASE(TRANSFORM) --top; top[-1] = transform(scene, top[-1], int(top->x), info); break;
+        CASE(HAIR) t = normalize(transform(scene, tbn.rows[0], 1, info)) * t.x; break; // Its fiber
+        CASE(UV) *top++ = t, t = make_float3(u, v, 0); break;
+        CASE(GENERATED) *top++ = t, t = generated; break;
+        CASE(OBJECT) *top++ = t, t = object; break;
+        CASE(TRANSFORM) --top; t = transform(scene, *top, int(t.x), info); break;
         case CAMERA_POINT: case WINDOW: { // In the camera's space, right, up and forward, or of its window, of the
             if (!used(CAMERA_POINT) && !used(WINDOW)) break;
             const Camera& c = scene.camera; // world along its direction from the camera
@@ -597,18 +599,18 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
 #ifdef EXTENDED
             if (code == WINDOW && PANORAMIC(scene.camera)) {
                 const float2 uv = unpanorama(scene.cameraProjection, local(c, d));
-                *top++ = make_float3(uv.x, uv.y, 0);
+                *top++ = t, t = make_float3(uv.x, uv.y, 0);
                 break;
             }
 #endif
-            *top++ = code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
+            *top++ = t, t = code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
                 dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
         } break;
-        CASE(VERTEX_COLOR) *top++ = make_float3(color.x, color.y, color.z); break;
-        CASE(VERTEX_ALPHA) *top++ = make_float3(1, 1, 1) * color.w; break;
+        CASE(VERTEX_COLOR) *top++ = t, t = make_float3(color.x, color.y, color.z); break;
+        CASE(VERTEX_ALPHA) *top++ = t, t = make_float3(1, 1, 1) * color.w; break;
         CASE(OBJECT_INFO) { // Its location, color, alpha, pass index, material's pass index or random number
-            const int output = int(top[-1].x);
-            top[-1] = output == 0 ? make_float3(info.location[0], info.location[1], info.location[2]) : output == 1
+            const int output = int(t.x);
+            t = output == 0 ? make_float3(info.location[0], info.location[1], info.location[2]) : output == 1
                 ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
@@ -616,39 +618,39 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
             const bool strand = STRAND(scene, point.instance); // root, or random
             const float4 root = strand ? scene.strands[3 * scene.segments[2 * point.triangle + 1]] : make_float4(0, 0, 0, 0);
-            const float output = top[-1].x;
-            top[-1] = make_float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
+            const float output = t.x;
+            t = make_float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
                 ? (point.s + scene.segments[2 * point.triangle] - __float_as_uint(root.x)) / (__float_as_uint(root.y) - 1)
                 : 0);
         } break;
 #endif
         CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
-            const int k = int(top[-1].x);
+            const int k = int(t.x);
             const float4 v = scene.attributes[info.attributes + k / 2];
-            top[-1] = k % 2 ? make_float3(1, 1, 1) * v.w : make_float3(v.x, v.y, v.z);
+            t = k % 2 ? make_float3(1, 1, 1) * v.w : make_float3(v.x, v.y, v.z);
         } break;
-        CASE(NORMAL) *top++ = normal; break;
-        CASE(POSITION) *top++ = position; break;
+        CASE(NORMAL) *top++ = t, t = normal; break;
+        CASE(POSITION) *top++ = t, t = position; break;
         CASE(SHIFT) // Pushes its own point's index before the height there
-            at(shifted(scene, point, ray, int(top[-1].x))); break;
-        CASE(SHIFTED) --top; top[-1] = *top; at(point); break;
+            at(shifted(scene, point, ray, int(t.x))); break;
+        CASE(SHIFTED) --top; at(point); break;
         CASE(BUMP) { // The normal bent by the height's gradient
             top -= 4;
-            const float3 n = top[-1], dx = shifted(scene, point, ray, 1).position - position,
+            const float3 n = top[0], dx = shifted(scene, point, ray, 1).position - position,
                 dy = shifted(scene, point, ray, 2).position - position;
             const float3 rx = cross(dy, n), ry = cross(n, dx);
             const float det = dot(dx, rx);
-            const float3 bent = n * fabsf(det) - ((top[1].x - top[0].x) * rx + (top[2].x - top[0].x) * ry)
-                * (top[3].y * sign(det));
-            top[-1] = dot(bent, bent) > 0 ? normalize(normalize(bent) * fmaxf(top[3].x, 0) + n * (1 - fmaxf(top[3].x,
+            const float3 bent = n * fabsf(det) - ((top[2].x - top[1].x) * rx + (top[3].x - top[1].x) * ry)
+                * (t.y * sign(det));
+            t = dot(bent, bent) > 0 ? normalize(normalize(bent) * fmaxf(t.x, 0) + n * (1 - fmaxf(t.x,
                 0))) : n;
         } break;
-        CASE(INCOMING) *top++ = incoming; break;
-        CASE(BACKFACING) *top++ = make_float3(1, 1, 1) * backfacing; break;
-        CASE(LIGHT_PATH) top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
+        CASE(INCOMING) *top++ = t, t = incoming; break;
+        CASE(BACKFACING) *top++ = t, t = make_float3(1, 1, 1) * backfacing; break;
+        CASE(LIGHT_PATH) t = make_float3(1, 1, 1) * lightPath(ray, int(t.x)); break;
         CASE(BAKED) { // A bake's texels, halves, read linearly at the UV, extended at its edges or repeating
             const int width = op->width, height = op->height & 0xFFFFFF;
-            const float x = top[-1].x * width - 0.5f, y = top[-1].y * height - 0.5f;
+            const float x = t.x * width - 0.5f, y = t.y * height - 0.5f;
             const int i = int(floorf(x)), j = int(floorf(y));
             const auto edged = [&](int k, int n) { return op->height >> 29 & 1 ? (k % n + n) % n
                 : min(max(k, 0), n - 1); };
@@ -659,11 +661,11 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                 c[k] = make_float3(__half2float(__ushort_as_half(h.x)), __half2float(__ushort_as_half(h.y)),
                     __half2float(__ushort_as_half(h.z)));
             }
-            top[-1] = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
+            t = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
         } break;
         CASE(GRID) { // A grid's voxels, halves, read linearly at its point in [0, 1] over its box, faces extended
             const int n[3] = {int(op->width), int(op->height & 0xFFFF), int(op->height >> 16)};
-            const float3 g = top[-1];
+            const float3 g = t;
             const float x = g.x * n[0] - 0.5f, y = g.y * n[1] - 0.5f, z = g.z * n[2] - 0.5f;
             const int i = int(floorf(x)), j = int(floorf(y)), k = int(floorf(z));
             const unsigned short* h = (const unsigned short*)(scene.texels + op->texel);
@@ -674,20 +676,20 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                 c += (m & 1 ? x - i : 1 - (x - i)) * (m & 2 ? y - j : 1 - (y - j)) * (m & 4 ? z - k : 1 - (z - k))
                     * __half2float(__ushort_as_half(h[(d * n[1] + b) * n[0] + a]));
             }
-            top[-1] = make_float3(c, c, c);
+            t = make_float3(c, c, c);
         } break;
         case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
             const bool repeat = (op->height >> 24 & 3) == 0;
             const unsigned long long image = op->height >> 31 ? scene.images[2 * op->texel] : 0; // Its texture, once
-            float x = (repeat ? wrap(top[-1].x) : top[-1].x) * (op->width & 0xFFFFF);
-            float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
+            float x = (repeat ? wrap(t.x) : t.x) * (op->width & 0xFFFFF);
+            float y = (repeat ? wrap(t.y) : t.y) * (op->height & 0xFFFFFF);
             float4 color;
             if (code == IMAGE || code == ALPHA)
                 color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
             if ((code == IMAGE_LINEAR || code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
-                color = tex2DLod<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y, ray.width > 0 // at the
+                color = tex2DLod<float4>(scene.images[2 * op->texel + 1], t.x, t.y, ray.width > 0 // at the
                     ? ray.level + log2f(float(op->width & 0xFFFFF) * (op->height & 0xFFFFFF)) / 2 // level of its cone,
                     + (int(op->width) >> 20) / 64.0f : 0); // its texels and the change of its point by the UVs
             else if (code == IMAGE_LINEAR || code == ALPHA_LINEAR) {
@@ -706,13 +708,13 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                     color = make_float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
                 }
             }
-            top[-1] = code == IMAGE || code == IMAGE_LINEAR || code == IMAGE_CUBIC
+            t = code == IMAGE || code == IMAGE_LINEAR || code == IMAGE_CUBIC
                 ? make_float3(color.x, color.y, color.z)
                 : make_float3(1, 1, 1) * color.w;
         } break;
         CASE(NORMAL_MAP) {
-            const float3 n = transform(scene, tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), 2, info);
-            top[-1] = isfinite(dot(n, n)) ? n : normal;
+            const float3 n = transform(scene, tangentToWorldNormalMap(t * 2 - make_float3(1, 1, 1), tbn), 2, info);
+            t = isfinite(dot(n, n)) ? n : normal;
         } break;
         BINARY(ADD, a + b)
         BINARY(SUBTRACT, a - b)
@@ -720,63 +722,65 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         BINARY(DOT_PRODUCT, make_float3(1, 1, 1) * dot(a, b))
         BINARY(MAXIMUM, each(a, b, [](float a, float b) { return fmaxf(a, b); }))
         BINARY(LOGARITHM, each(a, b, logarithm))
-        CASE(MULTIPLY_ADD) top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
-        CASE(SELECT) top -= 2; top[-1] = make_float3(top[-1].x != 0 ? top[0].x : top[1].x,
-            top[-1].y != 0 ? top[0].y : top[1].y, top[-1].z != 0 ? top[0].z : top[1].z); break;
+        CASE(MULTIPLY_ADD) top -= 2; t = top[0] * top[1] + t; break;
+        CASE(SELECT) top -= 2; t = make_float3(top[0].x != 0 ? top[1].x : t.x,
+            top[0].y != 0 ? top[1].y : t.y, top[0].z != 0 ? top[1].z : t.z); break;
         BINARY(DIVIDE, divide(a, b))
         CASE(SNAP) { --top;
-            const float3 q = divide(top[-1], *top);
-            top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
+            const float3 q = divide(*top, t);
+            t = make_float3(floorf(q.x) * t.x, floorf(q.y) * t.y, floorf(q.z) * t.z);
         } break;
-        CASE(BOX) --top; top[-1] = box(top[-1], top->x); break;
-        CASE(BRICK) top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
-        CASE(MAGIC) --top; top[-1] = magic(top[-1], *top); break;
-        CASE(VORONOI) top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3]); break;
-        CASE(WHITE_NOISE) --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
-        CASE(NOISE) top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
+        CASE(BOX) --top; t = box(*top, t.x); break;
+        CASE(BRICK) top -= 3; t = brick(top[0], top[1], top[2], t); break;
+        CASE(MAGIC) --top; t = magic(*top, t); break;
+        CASE(VORONOI) top -= 4; t = fractalVoronoi(top[0], top[1], top[2], top[3], t); break;
+        CASE(WHITE_NOISE) --top; t = white(*top, int(t.x), t.y != 0, t.z); break;
+        CASE(NOISE) top -= 3; t = make_float3(1, 1, 1) * fractal(top[0], top[1], top[2], t.x, t.y);
             break;
         BINARY(POWER, each(a, b, power))
-        CASE(EXPONENT) top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
+        CASE(EXPONENT) t = each(t, [](float a) { return expf(a); }); break;
         BINARY(MINIMUM, each(a, b, [](float a, float b) { return fminf(a, b); }))
         BINARY(LESS_THAN, each(a, b, [](float a, float b) { return float(a < b); }))
-        CASE(FLOOR) top[-1] = each(top[-1], [](float a) { return floorf(a); }); break;
+        CASE(FLOOR) t = each(t, [](float a) { return floorf(a); }); break;
         BINARY(MODULO, each(a, b, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; }))
         // Reduced exactly
-        CASE(SINE) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI); }); break;
-        CASE(COSINE) top[-1] = each(top[-1], [](float a) { return cospif(a * INV_PI); }); break;
-        CASE(TANGENT) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); break;
-        CASE(ARCSINE) top[-1] = each(top[-1], [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
-        CASE(ARCCOSINE) top[-1] = each(top[-1], [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
-        CASE(ARCTANGENT) top[-1] = each(top[-1], [](float a) { return atanf(a); }); break;
+        CASE(SINE) t = each(t, [](float a) { return sinpif(a * INV_PI); }); break;
+        CASE(COSINE) t = each(t, [](float a) { return cospif(a * INV_PI); }); break;
+        CASE(TANGENT) t = each(t, [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); break;
+        CASE(ARCSINE) t = each(t, [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
+        CASE(ARCCOSINE) t = each(t, [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
+        CASE(ARCTANGENT) t = each(t, [](float a) { return atanf(a); }); break;
         BINARY(ARCTAN2, each(a, b, [](float a, float b) { return atan2f(a, b); }))
-        CASE(SINH) top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
-        CASE(COSH) top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
-        CASE(TANH) top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
+        CASE(SINH) t = each(t, [](float a) { return sinhf(a); }); break;
+        CASE(COSH) t = each(t, [](float a) { return coshf(a); }); break;
+        CASE(TANH) t = each(t, [](float a) { return tanhf(a); }); break;
         BINARY(CROSS_PRODUCT, cross(a, b))
-        CASE(RGB_TO_HSV) top[-1] = toHsv(top[-1]); break;
-        CASE(HSV_TO_RGB) top[-1] = fromHsv(top[-1]); break;
-        CASE(RGB_TO_HSL) top[-1] = toHsl(top[-1]); break;
-        CASE(HSL_TO_RGB) top[-1] = fromHsl(top[-1]); break;
+        CASE(RGB_TO_HSV) t = toHsv(t); break;
+        CASE(HSV_TO_RGB) t = fromHsv(t); break;
+        CASE(RGB_TO_HSL) t = toHsl(t); break;
+        CASE(HSL_TO_RGB) t = fromHsl(t); break;
         CASE(ROTATE) { // Around the unit axis by the angle, as Rodrigues'
             top -= 2;
-            const float3 v = top[-1], k = top[0];
-            const float c = cospif(top[1].x * INV_PI), s = sinpif(top[1].x * INV_PI);
-            top[-1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
+            const float3 v = top[0], k = top[1];
+            const float c = cospif(t.x * INV_PI), s = sinpif(t.x * INV_PI);
+            t = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
         } break;
         // Image coordinates (u, v) of a direction; with rows (its texel), v a sky table's row, as equirectangular()
         CASE(EQUIRECTANGULAR) {
-            const float3 d = top[-1];
+            const float3 d = t;
             const float v = 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI;
-            top[-1] = make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI),
+            t = make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI),
                 op->texel ? (0.5f + 128 * cbrtf(fmaxf(2 * v - 1, 0))) / 129 : v, 0);
         } break;
         CASE(MIRROR_BALL) { // Image coordinates of a direction on a mirror ball
-            float3 d = top[-1] / (length(top[-1]) > 0 ? length(top[-1]) : 1) - make_float3(0, 1, 0);
+            float3 d = t / (length(t) > 0 ? length(t) : 1) - make_float3(0, 1, 0);
             d = d / (d.y < 0 ? 2 * sqrtf(-0.5f * d.y) : 1);
-            top[-1] = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
+            t = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
         } break;
-        CASE(DIELECTRIC) --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
-    } if (op->code & KEEP) saved[op->code >> 13 & 31] = top[-1]; } // A result kept in its slot
+        CASE(DIELECTRIC) --top; t = make_float3(1, 1, 1) * fresnel(fabsf(top->x), 1, t.x); break;
+    } if (op->code & KEEP) saved[op->code >> 13 & 31] = t; } // A result kept in its slot
+    *top++ = t; // The stack whole in spilled, from its bottom on at stack
+    const float3* const stack = spilled + 1;
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
         used(TRANSLUCENT) && top - stack > 13 ? stack[13] : make_float3(0, 0, 0),
