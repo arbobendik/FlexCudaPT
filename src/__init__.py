@@ -1471,6 +1471,9 @@ def surfaced(closures):  # Of a script's closure value, its weighted closures, t
             value=given[n] if isinstance(given[n], tuple) else triple(given[n]))) for n, t, d in SOCKETS_OF[kind]))
         surfaces.append(resolve(linked(node)))
     return functools.reduce(added, surfaces) if surfaces else BLACK
+# Of texture(), its interpolations and wraps as the Image Texture node's, OSL's default smart cubic and periodic
+TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cubic', 'smartcubic': 'Smart'}
+TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
 SPACES = {'common': 'WORLD', 'world': 'WORLD', 'object': 'OBJECT', 'shader': 'OBJECT', 'camera': 'CAMERA'}
 
 def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
@@ -1481,7 +1484,8 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
         raise ValueError(f"Flex: the script node '{node.name}' uses {what}, which Flex does not translate")
     # Its inputs by name; an int parameter's fixed at export an int, as OSL's int steps on constants take it
     given = {socket.identifier: int(numpy.ravel(fold(value))[0]) if socket.type == 'INT' and not isinstance(
-        fold(value), tuple) else value for socket, value in zip([s for s in node.inputs if s.enabled], inputs)}
+        fold(value), tuple) else socket.default_value if socket.type == 'STRING' else value
+        for socket, value in zip([s for s in node.inputs if s.enabled], inputs)}
     values = {}
     for name, (kind, type, v) in symbols.items():
         if kind == 'param' and name in given: values[name] = given[name]
@@ -1555,6 +1559,23 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
             elif op == 'add' and 'closure color' in kinds: values[args[0]] = operands[0] + operands[1]
             elif op == 'assign' and 'closure color' in kinds: values[args[0]] = operands[0]
             elif 'closure color' in kinds: refused(f'the step {op} on closures')
+            elif op == 'texture' and isinstance(operands[0], str):  # As an Image Texture node of the file and options
+                options = dict(zip(operands[3::2], args[5::2]))  # Each option's name and the variable holding its value
+                named = {o: values[a] for o, a in options.items() if o != 'alpha'}
+                if set(options) - {'interp', 'wrap', 'alpha'} or not all(map(isinstance, named.values(), [str] * len(
+                        named))) or named.get('interp', 'smartcubic') not in TEXTURE_INTERPOLATIONS or named.get('wrap',
+                        'periodic') not in TEXTURE_WRAPS:
+                    refused(f'texture options {options} other than a constant interp, wrap and alpha')
+                path = bpy.path.abspath(operands[0])
+                stand = types.SimpleNamespace(type='TEX_IMAGE', name=f'texture of {path}', projection='FLAT',
+                    image=on_main(lambda: bpy.data.images.load(path, check_existing=True), f"the image '{path}'"),
+                    projection_blend=0, inputs=[types.SimpleNamespace(is_linked=True)],
+                    interpolation=TEXTURE_INTERPOLATIONS[named.get('interp', 'smartcubic')],
+                    extension=TEXTURE_WRAPS[named.get('wrap', 'periodic')])
+                point = vector(operands[1], ('SUBTRACT', 1, operands[2]), 0)  # t down the image, as Cycles reads it
+                read = image(stand, [point], 0)
+                values[args[0]] = ('DOT_PRODUCT', read, numpy.eye(3)[0]) if kinds[0] == 'float' else read
+                if 'alpha' in options: values[options['alpha']] = image(stand, [point], 1)
             elif op == 'getattribute' and len(operands) == 2:  # Of the shading point, found at export: 1, else refused
                 if operands[0] not in ATTRIBUTES: refused(f"getattribute of '{operands[0]}'")
                 values[args[0]], values[args[2]] = 1, ATTRIBUTES[operands[0]]
@@ -1778,15 +1799,15 @@ def reading():  # Whether this thread is inside lattice(), whose temporary IDs m
     while frame and frame.f_code is not lattice.__code__: frame = frame.f_back
     return bool(frame)
 # f() on the main thread, where a grid's read makes IDs: at once there, else by a timer the job waits for
-def on_main(f, volume):
+def on_main(f, what):
     if threading.current_thread() is threading.main_thread(): return f()
     done, out = threading.Event(), []
     # The read, then a timer after it, which Blender runs in order and whether or not the read raised, ending the wait
     bpy.app.timers.register(lambda: (out.append(f()), None)[1])
     bpy.app.timers.register(lambda: (done.set(), None)[1])
-    if not done.wait(GRID_WAIT): raise RuntimeError(f"Flex: the grids of volume '{volume}' were not read: the main "
+    if not done.wait(GRID_WAIT): raise RuntimeError(f"Flex: reading {what} did not finish: the main "
         'thread did not answer, as while a script waits on this render')
-    if not out: raise RuntimeError(f"Flex: reading the grids of volume '{volume}' failed, as Blender's console shows")
+    if not out: raise RuntimeError(f"Flex: reading {what} failed, as Blender's console shows")
     return out[0]
 # The evaluated grid, saved and reloaded, read per active voxel or tile (value, index, extent) by Grid To Points
 def lattice(ob, name):
@@ -1846,7 +1867,8 @@ def dense(read, volume, name):  # The voxels and tiles read, dense over their ac
 # => point = (index − low + 0.5) / size
 def volume_grid(ob, name, frame, lattices):
     if lattices.get((ob.name, name), (None,))[0] != frame:  # Read anew on another frame
-        lattices[ob.name, name] = frame, dense(on_main(lambda: lattice(ob, name), ob.name), ob.name, name)
+        lattices[ob.name, name] = frame, dense(on_main(lambda: lattice(ob, name), f"the grids of volume '{ob.name}'"),
+            ob.name, name)
     values, low, size = lattices[ob.name, name][1]
     point = transform(ob.data.grids[name].matrix_object.inverted(), ('OBJECT',))
     point = 'DIVIDE', ('ADD', ('SUBTRACT', point, low), 0.5), size
