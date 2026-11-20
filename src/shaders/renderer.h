@@ -22,11 +22,12 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION };
+    TOON, SELECT, PANORAMA, DISPERSION, COAT };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera; PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen
 // of the Sheen BSDF's Ashikhmin distribution, TOON a toon lobe; SELECT, per channel, the second value where the first
-// is not 0, else the third; DISPERSION a transmission's IOR spread by wavelength
+// is not 0, else the third; DISPERSION a transmission's IOR spread by wavelength; COAT a coat's weight, roughness
+// and IOR, its tint and normal following
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 constexpr unsigned CODE = 255, IMMEDIATE = 1u << 31, LEFT = 1u << 30;
@@ -51,24 +52,25 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
     float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase, velvet; float3 toon;
-    float dispersion;
+    float dispersion; float3 coat, coat_tint, coat_normal;
 };
 // FlexLight's Material, which the shared BSDF takes of a surface; the specular tint and level factor FlexKernels' BSDF
 // will read, the color of Blender's Translucent BSDF, the color and roughness of its sheen, and its anisotropy, the
 // anisotropy's rotation and the hit's tangent, which change nothing by default; whether the sheen is velvet; its toon;
-// and its dispersion, k = Scale / Abbe, none at 0
+// its dispersion, k = Scale / Abbe, none at 0; and its coat's weight, none at 0, roughness, IOR, tint and normal, the
+// shading normal at 0
 struct BSDFMaterial {
     float3 albedo, emissive; float roughness, metallic, transmission, ior; float3 absorption, specular_tint{1, 1, 1};
     float specular_level = 1; float3 translucent{0, 0, 0}, sheen{0, 0, 0}; float sheen_roughness = 0.5f;
     float anisotropy = 0, anisotropic_rotation = 0; float3 tangent{0, 0, 0}; float velvet = 0; float3 toon{0, 0, 0};
-    float dispersion = 0;
+    float dispersion = 0, coat = 0, coat_roughness = 0.03f, coat_ior = 1.5f; float3 coat_tint{1, 1, 1},
+    coat_normal{0, 0, 0};
 };
 // Initial light power hint, refined over each triangle by the lights pass; hidden surfaces let camera rays through.
-// The programs of its layers follow each other from the top. Opaque ones block shadow rays whatever the point; bit 1
-// marks a surface they pass whole, its instance outside their mask, bit 2 a light whose shadow rays pass all. Light
-// sampling shades the program of its emission alone.
+// Opaque ones block shadow rays whatever the point; bit 1 marks a surface they pass whole, its instance outside their
+// mask, bit 2 a light whose shadow rays pass all. Light sampling shades the program of its emission alone.
 constexpr unsigned SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
-struct Material { float emitted; unsigned program, hidden, layers, opaque, emission; };
+struct Material { float emitted; unsigned program, hidden, opaque, emission; };
 // Of the object a triangle is of, as Cycles' object info node tells: its location, color, pass index and its random
 // number, then its axes, which with its location transform it into the world
 struct Info { float location[3], color[4], index, random, axes[9]; unsigned attributes; };

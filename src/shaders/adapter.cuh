@@ -62,7 +62,10 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
         used(SHEEN) ? surface.sheen : make_float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
         used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0), used(VELVET) ? surface.velvet : 0,
-        used(TOON) ? surface.toon : make_float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0}, false,
+        used(TOON) ? surface.toon : make_float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0,
+        used(COAT) ? surface.coat.x : 0, used(COAT) ? surface.coat.y : 0.03f, used(COAT) ? surface.coat.z : 1.5f,
+        used(COAT) ? surface.coat_tint : make_float3(1, 1, 1),
+        used(COAT) ? surface.coat_normal : make_float3(0, 0, 0)}, false,
         random_state, surface.coverage,
         enclosed, enclosed ? FKMedium{volume(surface).scatter, volume(surface).extinction, volume(surface).g}
         : FKMedium{},
@@ -78,7 +81,7 @@ static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 po
     const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
     FKSurface light = walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
         cross(corner[1] - corner[0], corner[2] - corner[0]), dir,
-        Ray{false, false, LOBE_NONE, float(depth + 1), length}, 0, true), point, random_state);
+        Ray{false, false, LOBE_NONE, float(depth + 1), length}, true), point, random_state);
     light.smooth_n = smoothNormal(scene, at);
     return light;
 }
@@ -88,7 +91,7 @@ static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 ori
     const Scene& scene = hookScene();
     const Hit at = nativeHit(hit);
     return walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y, smoothNormal(scene, at), dir,
-        Ray{depth == 0, false, lobe, float(depth), hit.distance, width}, layer), hitPosition(scene, scene.vertices, at),
+        Ray{depth == 0, false, lobe, float(depth), hit.distance, width}), hitPosition(scene, scene.vertices, at),
         random_state);
 }
 // Whether hair is compiled in: the renderer's own switch, false in the PTX compiled without it, which folds the walk's
@@ -111,9 +114,7 @@ static __device__ SampleBSDF fcptSampleHair(float3 hair, float3 albedo, float3 t
     fiber.hair = hair, fiber.albedo = albedo, fiber.tint = tint;
     return sampleHair(hookScene(), fiber, in_dir, random_state);
 }
-static __device__ unsigned fcptLayers(FKHit hit) {
-    return hookScene().materials[key(hookScene(), nativeHit(hit))].layers;
-}
+static __device__ unsigned fcptLayers(FKHit hit) { return 1; }  // A material's one row
 // Its size: stored negative, it marks an extinction drawn exactly
 static __device__ float fcptMajorant(unsigned filling) {
     return fabsf(hookScene().instances[owner(hookScene(), filling)].majorant);

@@ -24,12 +24,13 @@ struct Projection { uint type; float range[4], shift[2]; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION };
+    TOON, SELECT, PANORAMA, DISPERSION, COAT };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera (CUDA's alone; its place kept, so the codes after it agree with the
 // exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
-// DISPERSION a transmission's IOR spread by wavelength
+// DISPERSION a transmission's IOR spread by wavelength; COAT a coat's weight, roughness and IOR, its tint
+// and normal following
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -44,10 +45,10 @@ struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
     float level, coverage; float3 absorption; float density; float3 scatter, translucent, sheen; float sheen_roughness;
     float anisotropy, anisotropic_rotation; float3 tangent, glow, hair; float phase, velvet; float3 toon;
-    float dispersion;
+    float dispersion; float3 coat, coat_tint, coat_normal;
 };
 static const uint SHADOWS = 1; // Visibility bit of shadow rays, which instances hidden from them clear
-struct SceneMaterial { float emitted; uint program, hidden, layers, opaque, emission; };
+struct SceneMaterial { float emitted; uint program, hidden, opaque, emission; };
 struct Info { float location[3], color[4], index, random, axes[9]; uint attributes; };
 struct LightNode { float3 low, high, w; float phi, cos_theta_o; uint child, instance; uint8_t leaf; };
 // texspace: location and size of the mesh's texture space; majorant: its volume's largest extinction
@@ -110,6 +111,7 @@ float cospi(float x) { return cos(PI * (x - 2 * round(x / 2))); }
 static const uint LOBE_REFLECT = 2u;
 static const uint LOBE_NONE = 3u;
 static const uint LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
+static const uint LOBE_COAT = 5u;  // The coat's, a glossy reflection
 static const uint LOBE_TOON = 6u;  // The toon lobe, which Light Path reads as a diffuse reflection
 // Share of a ray cone's width a mip level covers, 2^-1.5
 static const float CONE_SHARE = 0.35355339;
@@ -121,9 +123,9 @@ float lightPath(Ray ray, int output) {
         case 0: return float(ray.camera);
         case 1: return float(ray.shadow);
         case 2: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET || ray.lobe == LOBE_TOON);
-        case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT);
+        case 3: return float(ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_COAT);
         case 5: return float(ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET
-            || ray.lobe == LOBE_TOON);
+            || ray.lobe == LOBE_TOON || ray.lobe == LOBE_COAT);
         case 6: return float(ray.lobe == LOBE_REFRACT);
         case 8: return ray.length;
         default: return ray.depth;
@@ -617,6 +619,7 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(VELVET) break;
         CASE(TOON) break;
         CASE(DISPERSION) break;
+        CASE(COAT) break;
         CASE(HAIR) stack[top - 1] = normalize(transform(scene, tbn[0], 1, info)) * stack[top - 1].x; break; // Its fiber
         CASE(UV) stack[top++] = float3(at.u, at.v, 0); break;
         CASE(GENERATED) stack[top++] = at.generated; break;
@@ -824,7 +827,10 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         used(ANISOTROPIC) && top > 18 ? stack[17].x : 0, used(ANISOTROPIC) && top > 18 ? stack[18] : float3(0, 0, 0),
         used(MEDIUM) && top > 19 ? stack[19] : float3(0, 0, 0), used(HAIR) && top > 20 ? stack[20] : float3(0, 0, 0),
         used(PHASE) && top > 21 ? stack[21].x : 0, used(VELVET) && top > 22 ? stack[22].x : 0,
-        used(TOON) && top > 23 ? stack[23] : float3(0, 0, 0), used(DISPERSION) && top > 24 ? stack[24].x : 0);
+        used(TOON) && top > 23 ? stack[23] : float3(0, 0, 0), used(DISPERSION) && top > 24 ? stack[24].x : 0,
+        used(COAT) && top > 27 ? stack[25] : float3(0, 0.03f, 1.5f),
+        used(COAT) && top > 27 ? stack[26] : float3(1, 1, 1),
+        used(COAT) && top > 27 ? stack[27] : float3(0, 0, 0));
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 float3x3 tangentSpace(float4* p, float3 n, float s, float t) {
@@ -909,9 +915,9 @@ Point shifted(Scene* scene, Point point, Ray ray, int axis) {
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Surface of an instance's triangle at its barycentrics, in a layer of its material
+// Surface of an instance's triangle at its barycentrics
 Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, float3 normal, float3 direction, Ray ray,
-    uint layer = 0, bool emission = false) {
+    bool emission = false) {
     if (used(CURVES) && scene.instances[instance].world == STRANDS) { // A strand's segment, its frame along its axis
         float3 n; // and normal
         const float3 o = strandPoint(scene, triangle, float2(s, t), n);
@@ -919,7 +925,6 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
         const float3 along = normalize(scene.points[p + 1].xyz - scene.points[p].xyz);
         uint program = emission ? scene.materials[key(scene, instance, triangle)].emission
             : scene.materials[key(scene, instance, triangle)].program;
-        while (layer != 0) layer -= uint(scene.ops[program++].code == END);
         float4* root = scene.strands + 3 * scene.segments[2 * triangle + 1]; // Its UV and color, and generated point
         const Instance placed = scene.instances[instance]; // by its emitter's texture space
         const float3 low = float3(placed.texspace[0], placed.texspace[1], placed.texspace[2]);
@@ -936,8 +941,6 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
     const float3 c = objectNormal(scene, vertex.instance, normals[2]);
     const SceneMaterial material = scene.materials[key(scene, instance, triangle)];
     uint program = emission ? material.emission : material.program;
-    // Each layer's program follows the end of the one above it
-    while (layer != 0) layer -= uint(scene.ops[program++].code == END);
     // Footprint of the ray cone over the UVs (Akenine-Moller et al. 2019)
     // FOOTPRINT = width^2 / |cos| * UV_AREA / AREA, |cos| = |dot(face, direction)| / |face|
     // uv_cross = (uv[1] - uv[0]) x (uv[2] - uv[0]), UV_AREA / AREA = |uv_cross| / |face|
@@ -1256,7 +1259,7 @@ Medium outside(Scene* scene, uint instance) {
         first)[0], float3(0, 0, 1), Ray(false, false, LOBE_NONE, 0.0f, 0.0f)));
 }
 
-// Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
+// Whether a shadow ray is blocked; transmitted: the light passing its occluders and media
 [ForceInline] bool occluded(Scene* scene, float3 from, float3 toward, float left, Medium medium, uint filling,
     inout uint state, Ray ray, bool onSurface, out float3 transmitted, uint skip = NONE, uint mask = SHADOWS) {
     float before = 0, at = 0, occluder;
@@ -1272,19 +1275,17 @@ Medium outside(Scene* scene, uint instance) {
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque != 0) return true;  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
-        for (uint layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
-            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
-                smoothNormal(scene, hit), toward,
-                Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder), layer);
-            transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
-                surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
-                float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation
-                : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)), surface.coverage);
-            if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
-                    hit.triangle);
-            }
+        const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
+            toward, Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder));
+        transmitted = transmitted * occluderTransmittance(toward, surface.normal, Material(surface.albedo, float3(0),
+            surface.roughness, surface.metallic, surface.transparency, surface.ior, float3(0), float3(1), 1, float3(0),
+            float3(0), 0.5f, used(ANISOTROPIC) ? surface.anisotropy : 0,
+            used(ANISOTROPIC) ? surface.anisotropic_rotation : 0, used(ANISOTROPIC) ? surface.tangent : float3(0)),
+            surface.coverage);
+        if (encloses(scene, surface, hit.instance)) {
+            const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+            medium = leaves ? outside(scene, hit.instance) : volume(surface);
+            filling = leaves ? NONE : fills(scene, hit.instance, hit.triangle);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return true;
@@ -1323,7 +1324,9 @@ FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, ui
         used(SHEEN) ? surface.sheen : float3(0, 0, 0), used(SHEEN) ? surface.sheen_roughness : 0.5f,
         used(ANISOTROPIC) ? surface.anisotropy : 0, used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
         used(ANISOTROPIC) ? surface.tangent : float3(0, 0, 0), used(VELVET) ? surface.velvet : 0,
-        used(TOON) ? surface.toon : float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0};
+        used(TOON) ? surface.toon : float3(0, 0, 0), used(DISPERSION) ? surface.dispersion : 0,
+        used(COAT) ? surface.coat.x : 0, used(COAT) ? surface.coat.y : 0.03f, used(COAT) ? surface.coat.z : 1.5f,
+        used(COAT) ? surface.coat_tint : float3(1, 1, 1), used(COAT) ? surface.coat_normal : float3(0, 0, 0)};
     const bool enclosed = encloses(scene, surface, at.instance);  // The medium it fills, only where it encloses one
     const Medium filled = enclosed ? volume(surface) : Medium(float3(0, 0, 0), float3(0, 0, 0));
     const bool hair = used(HAIR) && dot(surface.hair, surface.hair) > 0;  // Its fiber, which rays leave from the vertex
@@ -1369,7 +1372,7 @@ struct VkScene : IScene {
         const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
         FKSurface light = walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
             cross(corner[1] - corner[0], corner[2] - corner[0]), dir, Ray(false, false, LOBE_NONE, float(depth + 1),
-            length), 0, true), point, init_random_state);
+            length), true), point, init_random_state);
         light.smooth_n = smoothNormal(scene, at);
         return light;
     }
@@ -1380,10 +1383,10 @@ struct VkScene : IScene {
         uint lobe, float3 dir) {
         const Hit at = nativeHit(hit);
         return walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y, smoothNormal(scene, at),
-            dir, Ray(depth == 0, false, lobe, float(depth), hit.distance, width), layer),
+            dir, Ray(depth == 0, false, lobe, float(depth), hit.distance, width)),
             hitPosition(scene, scene.vertices, at), init_random_state);
     }
-    uint layers(FKHit hit) { return scene.materials[key(scene, nativeHit(hit))].layers; }
+    uint layers(FKHit hit) { return 1; }  // A material's one row
     // Its size: stored negative, it marks an extinction drawn exactly
     float majorant(uint filling) { return abs(scene.instances[owner(scene, filling)].majorant); }
     // Whether varying media are compiled in
@@ -1790,10 +1793,10 @@ void lights(uint3 p, Scene* scene) {
         const float side = sqrt((i + random(state)) / LIGHT_SAMPLES), along = random(state);
         const float3 n = faceNormal(scene, light.instance, light.triangle);
         float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, -n,
-            Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
+            Ray(false, false, LOBE_NONE, 0, 0), true).emissive;
         if (!(emission.x + emission.y + emission.z > 0)) // Its back's where its front emits nothing, as a portal's
             emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, n,
-                Ray(false, false, LOBE_NONE, 0, 0), 0, true).emissive;
+                Ray(false, false, LOBE_NONE, 0, 0), true).emissive;
         mean += max(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     scene.materials[triangle].emitted = max(mean, emitted * 0.001f);

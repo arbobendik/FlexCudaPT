@@ -42,6 +42,7 @@ constexpr unsigned LOBE_REFRACT = 1u;
 constexpr unsigned LOBE_REFLECT = 2u;
 constexpr unsigned LOBE_NONE = 3u;
 constexpr unsigned LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
+constexpr unsigned LOBE_COAT = 5u;  // The coat's, a glossy reflection
 constexpr unsigned LOBE_TOON = 6u;  // The toon lobe, which Light Path reads as a diffuse reflection
 constexpr float BIAS = 0.0000152587890625f;
 // Share of a ray cone's width a mip level covers, 2^-1.5
@@ -54,9 +55,9 @@ __device__ float lightPath(const Ray& ray, int output) {
         case 0: return ray.camera;
         case 1: return ray.shadow;
         case 2: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_SHEEN_VELVET || ray.lobe == LOBE_TOON;
-        case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT;
+        case 3: return ray.lobe == LOBE_REFRACT || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_COAT;
         case 5: return ray.lobe == LOBE_DIFFUSE || ray.lobe == LOBE_REFLECT || ray.lobe == LOBE_SHEEN_VELVET
-            || ray.lobe == LOBE_TOON;
+            || ray.lobe == LOBE_TOON || ray.lobe == LOBE_COAT;
         case 6: return ray.lobe == LOBE_REFRACT;
         case 8: return ray.length;
         default: return ray.depth;
@@ -582,6 +583,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         CASE(VELVET) break;
         CASE(TOON) break;
         CASE(DISPERSION) break;
+        CASE(COAT) break;
         CASE(HAIR) top[-1] = normalize(transform(scene, tbn.rows[0], 1, info)) * top[-1].x; break; // Its fiber
         CASE(UV) *top++ = make_float3(u, v, 0); break;
         CASE(GENERATED) *top++ = generated; break;
@@ -788,7 +790,10 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
         used(HAIR) && top - stack > 20 ? stack[20] : make_float3(0, 0, 0),
         used(PHASE) && top - stack > 21 ? stack[21].x : 0, used(VELVET) && top - stack > 22 ? stack[22].x : 0,
         used(TOON) && top - stack > 23 ? stack[23] : make_float3(0, 0, 0),
-        used(DISPERSION) && top - stack > 24 ? stack[24].x : 0};
+        used(DISPERSION) && top - stack > 24 ? stack[24].x : 0,
+        used(COAT) && top - stack > 27 ? stack[25] : make_float3(0, 0.03f, 1.5f),
+        used(COAT) && top - stack > 27 ? stack[26] : make_float3(1, 1, 1),
+        used(COAT) && top - stack > 27 ? stack[27] : make_float3(0, 0, 0)};
 }
 // Object-space MikkTSpace frame interpolated at the triangle's barycentrics
 __device__ SlangMatrix<float, 3, 3> tangentSpace(const float4* p, float3 n, float s, float t) {
@@ -880,13 +885,11 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Surface of an instance's triangle at its barycentrics, in a layer of its material
+// Surface of an instance's triangle at its barycentrics
 __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
-    float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
+    float3 normal, float3 direction, const Ray& ray, bool emission = false) {
     const Material& material = scene.materials[key(scene, instance, triangle)];
     unsigned program = emission ? material.emission : material.program;
-    // Each layer's program follows the end of the one above it
-    while (layer) layer -= scene.ops[program++].code == END;
 #ifdef EXTENDED
     if (STRAND(scene, instance)) { // A strand's segment, its frame along its axis and normal
         const Instance& placed = scene.instances[instance];
@@ -1224,7 +1227,7 @@ __device__ Medium outside(const Scene& scene, unsigned instance) {
         first)[0], make_float3(0, 0, 1), Ray{false, false, LOBE_NONE, 0.0f, 0.0f}));
 }
 
-// Whether a shadow ray is blocked; transmitted: the light passing its occluders' layers and media
+// Whether a shadow ray is blocked; transmitted: the light passing its occluders and media
 __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3 toward, float left, Medium medium,
     unsigned filling, unsigned& state, const Ray& ray, bool onSurface, float3& transmitted, unsigned skip = NONE,
     unsigned mask = SHADOWS) {
@@ -1241,21 +1244,18 @@ __device__ __forceinline__ bool occluded(const Scene& scene, float3 from, float3
         occluder = at - before;
         if (scene.materials[key(scene, hit)].opaque) return true;  // Shading it would pass nothing
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
-        for (unsigned layer = 0; layer < scene.materials[key(scene, hit)].layers; ++layer) {
-            const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y,
-                smoothNormal(scene, hit), toward,
-                Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder}, layer);
-            transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
-                .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
-                .transmission = surface.transparency, .ior = surface.ior,
-                .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
-                .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
-                .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
-            if (layer == 0 && encloses(scene, surface, hit.instance)) {
-                const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
-                medium = leaves ? outside(scene, hit.instance) : volume(surface), filling = leaves ? NONE : fills(scene, hit.instance,
-                    hit.triangle);
-            }
+        const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
+            toward, Ray{ray.camera, true, ray.lobe, ray.depth + 1, occluder});
+        transmitted = transmitted * occluderTransmittance(toward, surface.normal, BSDFMaterial{
+            .albedo = surface.albedo, .roughness = surface.roughness, .metallic = surface.metallic,
+            .transmission = surface.transparency, .ior = surface.ior,
+            .anisotropy = used(ANISOTROPIC) ? surface.anisotropy : 0,
+            .anisotropic_rotation = used(ANISOTROPIC) ? surface.anisotropic_rotation : 0,
+            .tangent = used(ANISOTROPIC) ? surface.tangent : make_float3(0, 0, 0)}, surface.coverage);
+        if (encloses(scene, surface, hit.instance)) {
+            const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+            medium = leaves ? outside(scene, hit.instance) : volume(surface);
+            filling = leaves ? NONE : fills(scene, hit.instance, hit.triangle);
         }
         if (rgb_to_greyscale(transmitted) <= 0)
             return true;
@@ -1498,10 +1498,10 @@ extern "C" __global__ void __raygen__lights() {
         const float side = sqrtf((i + random(state)) / LIGHT_SAMPLES), along = random(state);
         const float3 n = faceNormal(scene, light.instance, light.triangle);
         float3 emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, -n,
-            {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
+            {false, false, LOBE_NONE, 0, 0}, true).emissive;
         if (!(emission.x + emission.y + emission.z > 0)) // Its back's where its front emits nothing, as a portal's
             emission = shade(scene, light.instance, light.triangle, side * (1 - along), side * along, n, n,
-                {false, false, LOBE_NONE, 0, 0}, 0, true).emissive;
+                {false, false, LOBE_NONE, 0, 0}, true).emissive;
         mean += fmaxf(emission.x + emission.y + emission.z, 0.0f) / LIGHT_SAMPLES;
     }
     material.emitted = fmaxf(mean, material.emitted * 0.001f);

@@ -118,7 +118,7 @@ OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
     'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
-    'DISPERSION': lambda k: k}
+    'DISPERSION': lambda k: k, 'COAT': lambda coat: coat}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -443,7 +443,8 @@ def summarize(expression, table, scales):
     affine = read or (None if None in flags else any(flags) and (name in AFFINE and AFFINE[name](*flags) or None))
     points = None if name not in (*POINTS, *READS, 'NOISE', 'UNASSOCIATE') and not OPS.get(name) or read and (kind
         not in READ_COSTS or getattr(node, 'extension', '') == 'CLIP') or name in ('SPECULAR', 'TRANSLUCENT', 'SHEEN', \
-        'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET', 'TOON', 'DISPERSION') or any(part[2] is None for part in parts) \
+        'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET', 'TOON', 'DISPERSION', 'COAT') \
+        or any(part[2] is None for part in parts) \
         else READ_COSTS[kind] if read else {'NOISE': 80}.get(name, 1) + sum(part[2] for part in parts)
     inputs = ({name} & {*POINTS}).union(*(part[3] for part in parts))
     along = lambda: sum(jacobian(operands[0], input) * scales[input] for input in parts[0][3] & scales.keys())
@@ -761,7 +762,7 @@ def fold(expression, memo=None):  # The expression with its operations on consta
 def folded(expression, memo):
     name, *operands = (fold(part, memo) if isinstance(part, tuple) else part for part in expression)
     if name not in ('UNASSOCIATE', 'SPECULAR', 'TRANSLUCENT', 'SHEEN', 'ANISOTROPIC', 'HAIR', 'PHASE', 'VELVET',
-        'TOON', 'DISPERSION') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
+        'TOON', 'DISPERSION', 'COAT') and OPS[name] and not any(isinstance(x, tuple) for x in operands):
         return OPS[name](*(triple(operand) for operand in operands))
     if name in ('ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE'):
         for i, value in enumerate(operands):
@@ -1813,8 +1814,8 @@ def sealed():
     SEALING['asked'] = True
     return SEALING['closed']
 
-# The material's surface as rows, one per layer from the top: the row of its surface, filled by its volume, under that
-# of a coat emitting in its place; black without an output; passing rays straight through without a surface shader
+# The material's surface as its row: the row of its surface, filled by its volume; black without an output; passing
+# rays straight through without a surface shader
 class Default:  # An input at its value, linked to nothing, as resolve() reads it
     links, is_output, enabled, id_data = (), False, True, types.SimpleNamespace(animation_data=None)
     def __init__(self, name, type, value): self.name, self.type, self.default_value = name, type, value
@@ -1835,7 +1836,7 @@ DEFAULT_VOLUME.links = [types.SimpleNamespace(is_valid=True, is_muted=False, fro
 # filler: a volume object's: no surface, and the default volume where no Volume output is linked
 def shade(material, program, filler=False):
     output = material and material.node_tree.get_output_node('CYCLES')
-    if not output and not filler: return [program(BLACK)]
+    if not output and not filler: return program(BLACK)
     filling = output.inputs['Volume'] if output and output.inputs['Volume'].is_linked else filler and DEFAULT_VOLUME
     surface = resolve(output.inputs['Surface']) if output and not filler else BLACK
     # Its volume, or the medium its subsurface scattering fills
@@ -1851,29 +1852,26 @@ def shade(material, program, filler=False):
         surface = moved_to(surface, ('BUMP', ('NORMAL',), height, *(('SHIFTED', ('SHIFT', k), height) for k in (1, 2)),
             vector(1, 1, 0)), {}, 'NORMAL')
     if filling and (filler or not output.inputs['Surface'].is_linked): surface = [*BLACK[:9], 0, *BLACK[10:]]
-    layers = [surface[:10]] if len(surface) == 19 or not surface[19] else [[*surface[19][:4], surface[4],
-        *surface[19][5:]],
-        [*surface[:4], 0, *surface[5:10]]]
+    # A coat over it drawn by FlexKernels' coat lobe: its weight, roughness and IOR marked, then its tint and normal;
+    # two coats mixed, one lobe of their values mixed
+    coat = surface[19] if len(surface) > 19 and surface[19] else None
     # FlexLight's BSDF transmits apart from metallic reflection: its transmission is the share transmitted of the share
     # not metallic, its ior that of the share not metallic
-    base = layers[-1]
+    base = surface[:10]
     metallic, share = base[2], base[5]
     base[5] = 'DIVIDE', share, ('SUBTRACT', 1, metallic)
     base[6] = 'ADD', 1, ('DIVIDE', ('SUBTRACT', base[6], 1), ('SUBTRACT', 1, metallic))
-    # The base layer transmits the surface's translucent color diffusely and carries its sheen, anisotropy and hair, a
-    # coat over it none; each filled by its volume's emission, its phase's asymmetry and its sheen's velvet mark
-    def tail(layer):  # Its hair, phase, velvet, toon and dispersion after the glow, as far as the last there
-        marked = [surface[20] if layer is base and len(surface) > 20 else 0, phase or 0,
-            *(surface[k] if layer is base and len(surface) > k else 0 for k in (21, 22, 23))]
-        while marked and not marked[-1]: marked.pop()
-        return marked
-    attributes = [[*layer, *volume, *(surface[13:19] if layer is base else (0, 0, 0.5, 0, 0, 0)), glow, *tail(layer)]
-        for layer in layers]
-    # Each layer cut first, so the bakes the cuts make come before the rows, whose layers follow each other
-    cut = [program(attribute, emitted=False) for attribute in attributes]
-    rows = [program(surface, attribute, cut=False) for surface, attribute in zip(cut, attributes)]
-    # Light sampling reads the emission alone: the top layer's, its colors associated as in that layer's program
-    return [(*rows[0], program([*BLACK[:4], layers[0][4], *BLACK[5:]], [*layers[0], *volume])[1]), *rows[1:]]
+    # It transmits the surface's translucent color diffusely and carries its sheen, anisotropy, hair and coat; filled
+    # by its volume's emission, its phase's asymmetry and its sheen's velvet mark. Its hair, phase, velvet, toon,
+    # dispersion and coat after the glow, as far as the last there
+    marked = [surface[20] if len(surface) > 20 else 0, phase or 0, *(surface[k] if len(surface) > k else 0
+        for k in (21, 22, 23)), *((('COAT', vector(coat[9], coat[3], coat[6])), coat[1], coat[0]) if coat else ())]
+    while marked and not marked[-1]: marked.pop()
+    attribute = [*base, *volume, *surface[13:19], glow, *marked]
+    # Cut first, so the bakes the cut makes come before the row
+    row = program(program(attribute, emitted=False), attribute, cut=False)
+    # Light sampling reads the emission alone, its colors associated as in the row's program
+    return *row, program([*BLACK[:4], base[4], *BLACK[5:]], [*base, *volume])[1]
 
 class Boxed:  # The world as its box's material: its volume, behind faces passing rays straight
     def __init__(self, world):
@@ -2199,6 +2197,7 @@ class Flex(bpy.types.RenderEngine):
             surface, first = fold(unanimated(surface)), len(ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
             # them out
+            if len(surface) == 28 and not marks(surface[25], 'COAT'): surface = surface[:25]  # Its coat
             if len(surface) == 25 and not marks(surface[24], 'DISPERSION'): surface = surface[:24]  # Its dispersion
             if len(surface) == 24 and not marks(surface[23], 'TOON'): surface = surface[:23]  # Its toon
             if len(surface) == 23 and not marks(surface[22], 'VELVET'): surface = surface[:22]  # Its velvet
@@ -2241,7 +2240,7 @@ class Flex(bpy.types.RenderEngine):
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
             hints[first] = max(emitted, 1e-6 if isinstance(surface[4], tuple) else 0)
             return hints[first], first, opaque
-        rows = {None: [program(GRAY)]}  # Rows of the surface each material renders; an empty slot renders gray
+        rows = {None: program(GRAY)}  # Rows of the surface each material renders; an empty slot renders gray
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
         # An object's slots; a volume object without any, one empty slot the default volume fills
@@ -2305,9 +2304,9 @@ class Flex(bpy.types.RenderEngine):
         # per strand its first point, point count, random number, root's UV and color; per object its texture space
         # Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too
         dark = lambda ob: ob.type == 'LIGHT' and not ob.data.use_shadow
-        tabled = lambda shades, ob: numpy.array([(*row[0][:2], not ob.visible_camera, len(row), 2 | dark(ob) << 2
-            if not ob.visible_shadow or dark(ob) else any(layer[2] for layer in row), row[0][3] if len(row[0]) > 3
-            else row[0][1]) for row in shades])  # Per slot a material
+        tabled = lambda shades, ob: numpy.array([(*row[:2], not ob.visible_camera, 2 | dark(ob) << 2
+            if not ob.visible_shadow or dark(ob) else row[2], row[3] if len(row) > 3 else row[1])
+            for row in shades])  # Per slot a material
         pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
             and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
             and (m.show_render if depsgraph.mode == 'RENDER' else m.show_viewport)]  # Its hair shown as paths
@@ -2583,8 +2582,8 @@ class Flex(bpy.types.RenderEngine):
                 # pass through it straight as Cycles' lights occlude none and what lies within it is lit; an area
                 # light, which its black back occludes all the same, and a sun stay black
                 sphere = light.type in ('POINT', 'SPOT')
-                shades = [[program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
-                    else [*BLACK[:4], emission, *BLACK[5:]])], [program(BLACK)]]
+                shades = [program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
+                    else [*BLACK[:4], emission, *BLACK[5:]]), program(BLACK)]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
@@ -2664,9 +2663,9 @@ class Flex(bpy.types.RenderEngine):
         grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if world and \
             scene.world.flex_sample_light and isinstance(fold(surface)[4], tuple) else (0, 0)
         world = program(surface)
-        materials.append([(*world[:2], 0, 1, 0, world[1])])
-        shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
-            for row in layers], textures
+        materials.append([(*world[:2], 0, 0, world[1])])
+        shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for row in rows.values()], \
+            textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
             starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4  # the images they read apart, by their index,
             read = {texel for code, texel, _, height in ops if [*OPS][code & CODE] in (*READS, 'GRID')  # in 31
@@ -2761,7 +2760,7 @@ class Flex(bpy.types.RenderEngine):
         # renderer compiles from them while the rest loads; per instance its mesh's first triangle, count and whether in
         # world space, its 12 transform, 9 adjugate and 19 info floats; per triangle of the meshes 9 vertex, 9 normal, 9
         # generated, 9 object, 6 UV, 12 color and 12 tangent floats, its material's pass index, a material of its
-        # emission, program, hidden flag, layer count, opaque flag and emission program (then the world's); of strands
+        # emission, program, hidden flag, opaque flag and emission program (then the world's); of strands
         # the point and segment counts, per point its position and radius, per segment its first point and strand and
         # its bounds, per strand its first point, point count, random number, root's UV and color, and per segment its
         # strand's material; then the texels and the programs of the bakes; then each image's width and height, RGBA8
@@ -2775,8 +2774,8 @@ class Flex(bpy.types.RenderEngine):
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             struct.pack('<3I', sum(map(len, points)), sum(map(len, segments)), sum(map(len, hairs))), *points,
             *segments, *bounds, *roots, *(
-            table[segment[:, 1]] for rows in [numpy.concatenate((numpy.empty((0, 6)), *hairs), dtype='f')] for table in [
-            numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
+            table[segment[:, 1]] for rows in [numpy.concatenate((numpy.empty((0, 5)), *hairs), dtype='f')]
+            for table in [numpy.hstack((rows[:, :1].view('I'), rows[:, 1:].astype('I')))] for segment in segments),
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
