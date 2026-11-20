@@ -1418,6 +1418,13 @@ FLT_MIN = 1.1754944e-38  # OSL's logarithms clamp their argument up to it
 PROGRAMS = {}  # Of each Script node met in an export, by its pointer, its bytecode's program: compiled once an export
 LOOPS = 1024  # Iterations a loop unrolls at most
 DEPTH = 200  # Steps a script's output may lie deep, the exporter's walks of expressions recursing per step
+# The shading point's globals as the Geometry node gives them: OSL's I points in, against Incoming; time at the
+# shutter's middle, Flex having no motion blur
+GLOBALS = {'P': ('POSITION',), 'N': facing(('NORMAL',)), 'I': ('MULTIPLY', ('INCOMING',), -1), 'time': 0.5}
+# Of getattribute, the attributes Flex exports by Cycles' names: the Texture Coordinate and Object Info nodes' outputs
+ATTRIBUTES = {'geom:generated': ('GENERATED',), 'geom:uv': ('UV',), **{f'object:{name}': ('OBJECT_INFO', k)
+    for name, k in (('location', 0), ('color', 1), ('alpha', 2), ('index', 3), ('random', 5))}}
+SPACES = {'common': 'WORLD', 'world': 'WORLD', 'object': 'OBJECT', 'shader': 'OBJECT', 'camera': 'CAMERA'}
 
 def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
     # on expressions in order; what that cannot express is refused by name
@@ -1431,6 +1438,7 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
     values = {}
     for name, (kind, type, v) in symbols.items():
         if kind == 'param' and name in given: values[name] = given[name]
+        elif kind == 'global' and name in GLOBALS: values[name] = GLOBALS[name]
         elif kind != 'global' and type in ('float', 'int', 'string', *TRIPLES):
             values[name] = v if type == 'string' else (int(v[0]) if v else 0) if type == 'int' else \
                 triple(numpy.array(v or [0.0])) if type in TRIPLES else (v[0] if v else 0.0)
@@ -1484,6 +1492,14 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                     if isinstance(o, str)):  # Of 3 values or of 1, in RGB alone
                 parts = [o for o in operands if not isinstance(o, str)]
                 values[args[0]] = vector(*parts) if len(parts) == 3 else parts[0]
+            elif op == 'getattribute' and len(operands) == 2:  # Of the shading point, found at export: 1, else refused
+                if operands[0] not in ATTRIBUTES: refused(f"getattribute of '{operands[0]}'")
+                values[args[0]], values[args[2]] = 1, ATTRIBUTES[operands[0]]
+            elif op in ('transform', 'transformv', 'transformn') and all(isinstance(o, str) for o in operands[:-1]):
+                spaces = [SPACES.get(o) or refused(f"the space '{o}'") for o in ('common', *operands[:-1])[-2:]]
+                values[args[0]] = vector_transform(types.SimpleNamespace(vector_type=('POINT', 'VECTOR', 'NORMAL')[
+                    ('transform', 'transformv', 'transformn').index(op)], convert_from=spaces[0], convert_to=spaces[1]),
+                    [operands[-1]], 0)
             elif 'string' in kinds: refused(f'strings in {op}')
             elif op in INTS and operands and all(isinstance(o, int) for o in operands):
                 values[args[0]] = int(INTS[op](*operands))
