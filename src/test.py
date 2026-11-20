@@ -2047,6 +2047,24 @@ def volumed():  # Volume objects
         seen = quarters(render(made, 16).mean(2))
         assert numpy.abs(seen - quarters(due)).max() < 0.02, ('volume grid', preferences.device, seen, quarters(due))
     preferences.device = device
+    # Clipped at 1, Blender's most, the voxels below it empty: the density at the 32 voxel centres a side, zeroed under
+    # 1, bilinear between them (constant in z), which reads apart from the field unclipped
+    centre = numpy.linspace(-1, 1, 32)
+    kept = 1.5 + centre[None, :] + centre[:, None] / 2
+    kept[kept < 1] = 0
+    at = (clamped[..., :2] + 1) * 31 / 2
+    i, f = numpy.minimum(at.astype(int), 30), at - numpy.minimum(at.astype(int), 30)
+    lerp = lambda a, b, t: a + (b - a) * t
+    field = lerp(lerp(kept[i[..., 1], i[..., 0]], kept[i[..., 1], i[..., 0] + 1], f[..., 0]),
+        lerp(kept[i[..., 1] + 1, i[..., 0]], kept[i[..., 1] + 1, i[..., 0] + 1], f[..., 0]), f[..., 1])
+    clipped = numpy.exp(-2 * (field * inside).sum(-1) * 3 / 200)
+    assert numpy.abs(quarters(clipped) - quarters(due)).max() > 0.1, ('clipping apart', quarters(clipped))
+    volume.data.render.clipping = 1
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        seen = quarters(render(made, 16).mean(2))
+        assert numpy.abs(seen - quarters(clipped)).max() < 0.02, ('clipping', preferences.device, seen,
+            quarters(clipped))
+    preferences.device, volume.data.render.clipping = device, 0.001
     # A vector grid c = (0.5 + 0.4 x, 0.5 - 0.4 y, 0.3) over a 32^3 cube as the one above (of a varying density, as a
     # constant one makes tiles of one value), saved to a .vdb file and rendered from it by its path as the color of a
     # Volume Absorption of density 2: each quarter passes per channel exp(-2 (1 - c) x its depth through the box), c
