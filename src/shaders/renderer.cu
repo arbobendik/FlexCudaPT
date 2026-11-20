@@ -536,6 +536,11 @@ __device__ float3 panorama(const Projection& p, float u, float v) {
         const float theta = r[0] + (r[1] - r[0]) * u;
         return make_float3(cosf(theta), sinf(theta), r[2] + (r[3] - r[2]) * v);
     }
+    if (p.type == 3) { // Mirror ball: backward reflected off the ball whose normal at x, y of its disc is (c, -x, y),
+        // the centre seeing forward and the rim straight back
+        const float x = (u - 0.5f) * r[2], y = (v - 0.5f) * r[3], c = sqrtf(fmaxf(1 - x * x - y * y, 0.0f));
+        return make_float3(2 * c * c - 1, -2 * c * x, 2 * c * y);
+    }
     if (p.type >= 4 && p.type <= 6) { // Fisheye: off forward by the angle its radius on the frame maps to, toward it
         const float2 f = fisheyeFrame(p);
         const float x = (u - 0.5f) * f.x, y = (v - 0.5f) * f.y, radius = sqrtf(x * x + y * y);
@@ -545,10 +550,12 @@ __device__ float3 panorama(const Projection& p, float u, float v) {
     const float phi = r[0] * u + r[1], theta = r[2] * v + r[3]; // Equirectangular: longitude and polar angle
     return make_float3(sinf(theta) * cosf(phi), sinf(theta) * sinf(phi), cosf(theta));
 }
-// Whether a panorama sees anything at u, v: a fisheye only inside its circle and its field of view
+// Whether a panorama sees anything at u, v: a fisheye only inside its circle and its field of view, a mirror ball
+// inside its disc
 __device__ bool panoramaSees(const Projection& p, float u, float v) {
-    if (p.type < 4 || p.type > 6) return true;
     const float* r = p.range;
+    if (p.type == 3) return (u - 0.5f) * (u - 0.5f) * r[2] * r[2] + (v - 0.5f) * (v - 0.5f) * r[3] * r[3] <= 1;
+    if (p.type < 4 || p.type > 6) return true;
     const float2 f = fisheyeFrame(p);
     const float x = (u - 0.5f) * f.x, y = (v - 0.5f) * f.y, radius = sqrtf(x * x + y * y);
     if (p.type == 6) return fisheyeAngle(p, radius) <= r[7] / 2;
@@ -556,6 +563,13 @@ __device__ bool panoramaSees(const Projection& p, float u, float v) {
 }
 __device__ float2 unpanorama(const Projection& p, float3 d) {
     const float* r = p.range;
+    if (p.type == 3) { // Mirror ball: the disc's point whose normal halves backward and the direction; none straight
+        // back
+        const float3 n = normalize(d) + make_float3(1, 0, 0);
+        const float l = length(n);
+        if (l == 0) return make_float2(-1, -1);
+        return make_float2(0.5f - n.y / l / r[2], 0.5f + n.z / l / r[3]);
+    }
     if (p.type >= 4 && p.type <= 6) { // Fisheye: off the image past its field of view
         const float theta = acosf(fminf(fmaxf(d.x / length(d), -1.0f), 1.0f)), side = sqrtf(d.y * d.y + d.z * d.z);
         if (theta > (p.type == 6 ? r[7] : r[0]) / 2) return make_float2(-1, -1);
@@ -1135,7 +1149,8 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
 #ifdef EXTENDED
     const float u = x / size.x + cameraProjection.shift[0], v = 1 - y / size.y + cameraProjection.shift[1];
     if (PANORAMIC(camera)) direction = normalize(world(camera, panorama(cameraProjection, u, v)));
-    const bool blind = PANORAMIC(camera) && !panoramaSees(cameraProjection, u, v); // Off a fisheye's circle: black
+    const bool blind = PANORAMIC(camera) && !panoramaSees(cameraProjection, u, v); // Off a fisheye's circle or a
+    // mirror ball's disc: black
 #endif
     if (camera.lens.aperture > 0) {
         const float2 point = aperture(camera.lens, state);
