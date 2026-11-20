@@ -4412,6 +4412,69 @@ def globaled():  # OSL globals
     bpy.context.window.scene = shown
 globaled()
 
+# A Script node's closures export as the nodes drawing them do, byte for byte: weighted by a color as their Color, the
+# microfacet by refract as the Glossy, Refraction or Glass BSDF of roughness alpha's root, a sum as the Add Shader; a
+# closure Flex lacks, a closure chosen per hit and an anisotropic microfacet are refused by name
+def closured():  # OSL closures
+    shown, osl = bpy.context.window.scene, opened('osl closures')
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('closured'))
+    osl.collection.objects.link(bpy.data.objects.new('closured', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('closured'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    output = nodes['Material Output'].inputs['Surface']
+    nodes.remove(nodes['Principled BSDF'])
+    tint = (0.2, 0.4, 0.6, 1)
+    def scripted(body):  # The surface a script's BSDF, its export's bytes
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('closured.osl')
+        script.script.write('shader closured(color Tint = color(0.2, 0.4, 0.6), output closure color BSDF = 0) {\n'
+            '    ' + body + '\n}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['BSDF'], output)
+        piped = exported().requests.getvalue()
+        nodes.remove(script)
+        return piped
+    def noded(kind, **inputs):  # A node of the inputs given, its output
+        node = nodes.new(kind)
+        for name, value in inputs.items(): node.inputs[name].default_value = value
+        return node.outputs[0]
+    def drawn(socket):  # The surface the node's output, its export's bytes
+        links.new(socket, output)
+        return exported().requests.getvalue()
+    summed = nodes.new('ShaderNodeAddShader')
+    links.new(noded('ShaderNodeBsdfDiffuse', Color=tint), summed.inputs[0])
+    links.new(noded('ShaderNodeEmission'), summed.inputs[1])
+    for body, socket in (('BSDF = Tint * diffuse(N);', noded('ShaderNodeBsdfDiffuse', Color=tint)),
+            ('BSDF = Tint * microfacet("ggx", N, 0.25, 1.45, 0);', noded('ShaderNodeBsdfGlossy', Color=tint)),
+            ('BSDF = Tint * microfacet("ggx", N, 0.25, 1.45, 1);', noded('ShaderNodeBsdfRefraction', Color=tint,
+            Roughness=0.5)), ('BSDF = Tint * microfacet("ggx", N, 0.25, 1.45, 2);', noded('ShaderNodeBsdfGlass',
+            Color=tint, Roughness=0.5, IOR=1.45)), ('BSDF = Tint * emission();', noded('ShaderNodeEmission',
+            Color=tint)), ('BSDF = transparent();', noded('ShaderNodeBsdfTransparent')),
+            ('BSDF = Tint * translucent(N);', noded('ShaderNodeBsdfTranslucent', Color=tint)),
+            ('BSDF = Tint * diffuse(N) + emission();', summed.outputs[0])):
+        assert scripted(body) == drawn(socket), ('osl closure', body)
+    # What Flex lacks raises in the export, which Blender reports on stderr from a depsgraph handler and goes on from
+    for body, named in (('BSDF = phong(N, 10);', 'the closure phong'), ('if (P[0] > 0) BSDF = diffuse(N); '
+            'else BSDF = emission();', 'closures chosen per hit'), ('BSDF = microfacet("ggx", N, vector(1, 0, 0), '
+            '0.1, 0.3, 1.5, 0);', 'an anisotropic microfacet')):
+        reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
+        bpy.app.handlers.depsgraph_update_post.append(export)
+        sys.stderr = reported
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('lacking.osl')
+        script.script.write('shader lacking(output closure color BSDF = 0) {\n    ' + body + '\n}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['BSDF'], output)
+        bpy.context.view_layer.update()
+        sys.stderr = stderr
+        bpy.app.handlers.depsgraph_update_post.remove(export)
+        nodes.remove(script)
+        assert named in reported.getvalue(), ('osl closure lacking', body, reported.getvalue())
+    bpy.context.window.scene = shown
+closured()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
