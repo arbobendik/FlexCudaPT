@@ -1424,6 +1424,53 @@ GLOBALS = {'P': ('POSITION',), 'N': facing(('NORMAL',)), 'I': ('MULTIPLY', ('INC
 # Of getattribute, the attributes Flex exports by Cycles' names: the Texture Coordinate and Object Info nodes' outputs
 ATTRIBUTES = {'geom:generated': ('GENERATED',), 'geom:uv': ('UV',), **{f'object:{name}': ('OBJECT_INFO', k)
     for name, k in (('location', 0), ('color', 1), ('alpha', 2), ('index', 3), ('random', 5))}}
+# Of a closure, the node drawing it: its type, its inputs by Blender's names, defaults and order, and its arguments'
+# inputs by name; the closure's weight its Color; a normal argument of N the node's own, unlinked
+SOCKETS_OF = {'EMISSION': (('Color', 'RGBA', 1), ('Strength', 'VALUE', 1)),
+    'BACKGROUND': (('Color', 'RGBA', 0.8), ('Strength', 'VALUE', 1)),
+    'BSDF_DIFFUSE': (('Color', 'RGBA', 0.8), ('Roughness', 'VALUE', 0), ('Normal', 'VECTOR', 0)),
+    'BSDF_TRANSLUCENT': (('Color', 'RGBA', 0.8), ('Normal', 'VECTOR', 0)),
+    'BSDF_GLOSSY': (('Color', 'RGBA', 0.8), ('Roughness', 'VALUE', 0.5), ('Anisotropy', 'VALUE', 0),
+        ('Rotation', 'VALUE', 0), ('Normal', 'VECTOR', 0), ('Tangent', 'VECTOR', 0)),
+    'BSDF_REFRACTION': (('Color', 'RGBA', 1), ('Roughness', 'VALUE', 0), ('IOR', 'VALUE', 1.45),
+        ('Normal', 'VECTOR', 0)),
+    'BSDF_GLASS': (('Color', 'RGBA', 1), ('Roughness', 'VALUE', 0), ('Anisotropy', 'VALUE', 0),
+        ('Rotation', 'VALUE', 0), ('IOR', 'VALUE', 1.5), ('Normal', 'VECTOR', 0), ('Tangent', 'VECTOR', 0),
+        ('Thin Film Thickness', 'VALUE', 0), ('Thin Film IOR', 'VALUE', 1.33)),
+    'BSDF_TRANSPARENT': (('Color', 'RGBA', 1),),
+    'BSDF_SHEEN': (('Color', 'RGBA', 0.8), ('Roughness', 'VALUE', 0.5), ('Normal', 'VECTOR', 0))}
+CLOSURES = {'emission': ('EMISSION', lambda a: {}), 'background': ('BACKGROUND', lambda a: {}),
+    'diffuse': ('BSDF_DIFFUSE', lambda a: {'Normal': a[0]}),
+    'oren_nayar': ('BSDF_DIFFUSE', lambda a: {'Normal': a[0], 'Roughness': a[1]}),
+    'translucent': ('BSDF_TRANSLUCENT', lambda a: {'Normal': a[0]}),
+    'reflection': ('BSDF_GLOSSY', lambda a: {'Normal': a[0], 'Roughness': 0}),
+    'refraction': ('BSDF_REFRACTION', lambda a: {'Normal': a[0], 'IOR': a[1]}),
+    'transparent': ('BSDF_TRANSPARENT', lambda a: {}),
+    'sheen_bsdf': ('BSDF_SHEEN', lambda a: {'Normal': a[0], 'Color': a[1], 'Roughness': a[2]}),
+    # microfacet(distribution, N, U, alpha x and y, eta, refract): reflection, refraction or both by refract; Blender's
+    # roughness the root of alpha
+    'microfacet': (lambda a: ('BSDF_GLOSSY', 'BSDF_REFRACTION', 'BSDF_GLASS')[a[6]],
+        lambda a: {'Normal': a[1], 'Roughness': ('POWER', a[3], 0.5), **({'IOR': a[5]} if a[6] else {})})}
+NODES['GIVEN'] = lambda node, inputs, index: node.value  # A closure's argument, as an input linked to its value
+def linked(source):  # A stand-in input linked to the output of a stand-in node
+    taker = Default(source.outputs[0].name, source.outputs[0].type, None)
+    taker.links = [types.SimpleNamespace(is_valid=True, is_muted=False, from_socket=source.outputs[0],
+        from_node=source)]
+    return taker
+def surfaced(closures):  # Of a script's closure value, its weighted closures, the surface the nodes drawing them make
+    surfaces = []
+    for name, operands, weight in closures:
+        kind, named = CLOSURES[name]
+        kind, given = kind(operands) if callable(kind) else kind, named(operands)
+        given['Color'] = given.get('Color', 1) if weight is None else ('MULTIPLY', given['Color'], weight) if (
+            'Color' in given) else weight  # None: unweighted
+        node = types.SimpleNamespace(type=kind, mute=False, name=f'{name} closure', internal_links=[],
+            distribution='MULTI_GGX', outputs=[Default('BSDF', 'SHADER', None)], inputs=Inputs(
+            Default(n, t, d) if n not in given or n == 'Normal' and given[n] is GLOBALS['N'] else linked(
+            types.SimpleNamespace(type='GIVEN', mute=False, outputs=[Default(n, t, None)], inputs=Inputs(),
+            value=given[n] if isinstance(given[n], tuple) else triple(given[n]))) for n, t, d in SOCKETS_OF[kind]))
+        surfaces.append(resolve(linked(node)))
+    return functools.reduce(added, surfaces) if surfaces else BLACK
 SPACES = {'common': 'WORLD', 'world': 'WORLD', 'object': 'OBJECT', 'shader': 'OBJECT', 'camera': 'CAMERA'}
 
 def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
@@ -1439,6 +1486,7 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
     for name, (kind, type, v) in symbols.items():
         if kind == 'param' and name in given: values[name] = given[name]
         elif kind == 'global' and name in GLOBALS: values[name] = GLOBALS[name]
+        elif kind != 'global' and type == 'closure color': values[name] = []  # None, a sum of weighted closures
         elif kind != 'global' and type in ('float', 'int', 'string', *TRIPLES):
             values[name] = v if type == 'string' else (int(v[0]) if v else 0) if type == 'int' else \
                 triple(numpy.array(v or [0.0])) if type in TRIPLES else (v[0] if v else 0.0)
@@ -1462,6 +1510,7 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                 otherwise = run(jumps[0], jumps[1])
                 if ended or otherwise: refused('break or continue under a condition that varies per hit')
                 for name, value in taken.items():
+                    if value is not values[name] and isinstance(value, list): refused('closures chosen per hit')
                     if value is not values[name]: values[name] = 'SELECT', values[args[0]], value, values[name]
             elif op in ('for', 'while', 'dowhile'):  # Init, then condition, body and step, the body first in dowhile's
                 run(at + 1, jumps[0])
@@ -1492,6 +1541,20 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                     if isinstance(o, str)):  # Of 3 values or of 1, in RGB alone
                 parts = [o for o in operands if not isinstance(o, str)]
                 values[args[0]] = vector(*parts) if len(parts) == 3 else parts[0]
+            elif op == 'closure':  # A closure of weight 1, its arguments as given; one Flex lacks refused by name
+                name, given = operands[0], operands[1:]
+                if name not in CLOSURES: refused(f'the closure {name}')
+                if name == 'microfacet' and (not isinstance(given[6], int) or given[3] is not given[4] and (isinstance(
+                        given[3], tuple) or isinstance(given[4], tuple) or numpy.any(given[3] != given[4]))):
+                    refused('an anisotropic microfacet or one refracting per hit')
+                if name == 'reflection' and len(given) > 1 and numpy.any(fold(given[1])): refused('a reflection by eta')
+                values[args[0]] = [(name, given, None)]
+            elif op == 'mul' and 'closure color' in kinds:  # Its closures weighted by the factor
+                closures, factor = operands if isinstance(operands[0], list) else operands[::-1]
+                values[args[0]] = [(n, a, factor if w is None else ('MULTIPLY', w, factor)) for n, a, w in closures]
+            elif op == 'add' and 'closure color' in kinds: values[args[0]] = operands[0] + operands[1]
+            elif op == 'assign' and 'closure color' in kinds: values[args[0]] = operands[0]
+            elif 'closure color' in kinds: refused(f'the step {op} on closures')
             elif op == 'getattribute' and len(operands) == 2:  # Of the shading point, found at export: 1, else refused
                 if operands[0] not in ATTRIBUTES: refused(f"getattribute of '{operands[0]}'")
                 values[args[0]], values[args[2]] = 1, ATTRIBUTES[operands[0]]
@@ -1506,11 +1569,11 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
             elif op in OSL and not (op in ('lt', 'gt', 'le', 'ge', 'eq', 'neq') and set(kinds[1:]) & set(TRIPLES)):
                 values[args[0]] = OSL[op](*operands)
             else: refused(f'the step {op}')
-            if not any(isinstance(o, tuple) for o in operands):  # Constants at once, so a loop of them grows no deeper
-                values[args[0]] = fold(values[args[0]])
+            if not isinstance(values[args[0]], list) and not any(isinstance(o, tuple) for o in operands):  # Constants
+                values[args[0]] = fold(values[args[0]])  # at once, so a loop of them grows no deeper
     run(first, first + len(steps))
-    outputs = {name: values[name] if name in values else refused(f'{type} outputs') for name, (kind, type, _)
-        in symbols.items() if kind == 'oparam'}
+    outputs = {name: surfaced(values[name]) if type == 'closure color' else values[name] if name in values else
+        refused(f'{type} outputs') for name, (kind, type, _) in symbols.items() if kind == 'oparam'}
     # Each step's depth from its deepest leaf, counted without recursion
     deep, pending = {}, [value for value in outputs.values() if isinstance(value, tuple)]
     while pending:
