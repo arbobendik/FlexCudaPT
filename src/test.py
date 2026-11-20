@@ -3553,11 +3553,11 @@ for kind, d, uv in (('EQUIRECTANGULAR', (math.cos(up) * math.cos(right), -math.c
 # averaged over the directions its area maps to, within 1e-3 on the mean, black where it sees nothing, on OptiX. The
 # directions are taken from the camera settings as Blender documents them, apart from Flex, and where the manual leaves
 # a convention open, as settled for each type: the camera looks along y, left -x, up z; (x, y) is a point's offset
-# from the frame's centre, for equidistant in its radii across the whole frame on either axis (an ellipse on a
-# non-square image), for equisolid and the lens polynomial in millimetres of the sensor, its width or height along the
-# side its fit names (the larger by default), the other side by the image's aspect
+# from the frame's centre, for equidistant and a mirror ball's disc in its radii across the whole frame on either axis
+# (an ellipse on a non-square image), for equisolid and the lens polynomial in millimetres of the sensor, its width or
+# height along the side its fit names (the larger by default), the other side by the image's aspect
 def frame(lens, width, height):  # A fisheye's frame: its extent across and up, and its circle's radius there
-    if lens.panorama_type == 'FISHEYE_EQUIDISTANT': return 2, 2, 1
+    if lens.panorama_type in ('FISHEYE_EQUIDISTANT', 'MIRRORBALL'): return 2, 2, 1
     across = lens.sensor_fit == 'HORIZONTAL' or lens.sensor_fit == 'AUTO' and width >= height
     fit = lens.sensor_height if lens.sensor_fit == 'VERTICAL' else lens.sensor_width
     return (fit, fit * height / width) if across else (fit * width / height, fit)
@@ -3577,6 +3577,11 @@ def seen_directions(lens, u, v, width, height):  # Local directions, forward, le
     across, up = frame(lens, width, height)[:2]
     x, y = (u - 0.5) * across, (v - 0.5) * up
     r = numpy.hypot(x, y)
+    if lens.panorama_type == 'MIRRORBALL':  # A mirror ball's disc over the whole frame: backward reflected off the
+        c = numpy.sqrt(numpy.where(r <= 1, 1 - r * r, numpy.nan))  # ball whose normal at (x, y) is (c, -x, y), so
+        n = numpy.stack((c, -x, y), -1)  # the centre sees forward and the rim straight back
+        backward = numpy.array((-1.0, 0, 0))
+        return backward - 2 * (n @ backward)[..., None] * n
     if lens.panorama_type == 'FISHEYE_EQUIDISTANT':  # Off forward in proportion to the radius, fov / 2 at the circle
         theta = numpy.where(r <= 1, r * lens.fisheye_fov / 2, numpy.nan)
     elif lens.panorama_type == 'FISHEYE_LENS_POLYNOMIAL':  # The manual's k0 + k1 r + ... + k4 r^4, negated, so that
@@ -3590,7 +3595,7 @@ def seen_directions(lens, u, v, width, height):  # Local directions, forward, le
 def polynomial(lens, r): return sum(getattr(lens, f'fisheye_polynomial_k{i}') * r ** i for i in range(5))
 def circle(lens, width, height):  # A fisheye's frame and the radius on it past which it sees nothing
     across, up = frame(lens, width, height)[:2]
-    if lens.panorama_type == 'FISHEYE_EQUIDISTANT': return across, up, 1
+    if lens.panorama_type in ('FISHEYE_EQUIDISTANT', 'MIRRORBALL'): return across, up, 1
     if lens.panorama_type == 'FISHEYE_LENS_POLYNOMIAL':  # Where its angle reaches fov / 2, by bisection
         low, high = 0, 4 * max(across, up)
         for _ in range(100):
@@ -3605,7 +3610,7 @@ def expected_panorama(lens, width, height, fine=8):
         (numpy.arange(width * fine) + 0.5) / (width * fine), indexing='ij')
     d = seen_directions(lens, u, v, width, height)  # World: forward y, left -x, up z
     color = (0.5 + 0.5 * numpy.stack((-d[..., 1], d[..., 0], d[..., 2]), -1)).reshape(height, fine, width, fine, 3)
-    if not lens.panorama_type.startswith('FISHEYE'):
+    if not lens.panorama_type.startswith('FISHEYE') and lens.panorama_type != 'MIRRORBALL':
         return color.mean((1, 3)), numpy.ones((height, width), bool), numpy.zeros((height, width), bool)
     across, up, radius = circle(lens, width, height)
     x = (numpy.arange(width + 1) / width + lens.shift_x - 0.5) * across
@@ -3626,8 +3631,8 @@ lens = scene.camera.data
 lens.type = 'PANO'
 preferences.device = 'OPTIX'
 # Mean abs error on seeing pixels and the most any blind one holds, on a width x height image (64 x 64 by default);
-# against another type's directions
-def fisheye_row(kind, against=None, width=64, height=64, **settings):
+# against another type's directions, or mirrored left to right (flip)
+def fisheye_row(kind, against=None, flip=False, width=64, height=64, **settings):
     lens.panorama_type, lens.shift_x, lens.shift_y, lens.sensor_fit = kind, 0, 0, 'AUTO'
     scene.render.resolution_x, scene.render.resolution_y = width, height
     for name, value in settings.items(): setattr(lens, name, value)
@@ -3635,6 +3640,7 @@ def fisheye_row(kind, against=None, width=64, height=64, **settings):
     got = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(height, width, 4)[..., :3]
     if against: lens.panorama_type = against
     color, sees, blind = expected_panorama(lens, width, height)
+    if flip: color, sees, blind = color[:, ::-1], sees[:, ::-1], blind[:, ::-1]
     return abs(got - color)[sees].mean(), abs(got[blind]).max(initial=0), sees.sum(), blind.sum()
 # Positive controls, the panoramas #184 measured by a light's centroid, then the fisheyes at two settings each
 for kind, settings in (('EQUIRECTANGULAR', dict(longitude_min=-math.pi / 2, longitude_max=math.pi,
@@ -3650,7 +3656,9 @@ for kind, settings in (('EQUIRECTANGULAR', dict(longitude_min=-math.pi / 2, long
         ('FISHEYE_LENS_POLYNOMIAL', dict(sensor_width=36, fisheye_fov=math.pi)),  # Blender's default coefficients
         ('FISHEYE_LENS_POLYNOMIAL', dict(fisheye_polynomial_k0=0, fisheye_polynomial_k1=-0.12,
             fisheye_polynomial_k2=0, fisheye_polynomial_k3=-2e-5, fisheye_polynomial_k4=0, shift_y=0.05)),
-        ('FISHEYE_LENS_POLYNOMIAL', dict(fisheye_fov=2.0, width=96, height=64))):
+        ('FISHEYE_LENS_POLYNOMIAL', dict(fisheye_fov=2.0, width=96, height=64)),
+        ('MIRRORBALL', dict()), ('MIRRORBALL', dict(shift_x=0.05, shift_y=-0.04)),
+        ('MIRRORBALL', dict(width=96, height=64))):  # An ellipse across the whole frame
     error, stray, sees, blind = fisheye_row(kind, **settings)
     print('PANORAMA ROW', kind, settings, f'error {error:.2e} stray {stray:.2e} seeing {sees} blind {blind}')
     assert error < 1e-3 and stray < 1e-6 and sees > 1000, ('panorama row', kind, settings, error, stray, sees)
@@ -3659,6 +3667,10 @@ error, stray, *_ = fisheye_row('FISHEYE_EQUIDISTANT', 'FISHEYE_EQUISOLID', fishe
     sensor_width=36)
 print('PANORAMA ROW negative', f'error {error:.2e} stray {stray:.2e}')
 assert error > 1e-2 or stray > 0.1, ('panorama negative control', error, stray)
+# And a mirror ball held to its own directions mirrored left to right fails: the rows fix its handedness
+error, stray, *_ = fisheye_row('MIRRORBALL', flip=True)
+print('PANORAMA ROW negative mirrored', f'error {error:.2e} stray {stray:.2e}')
+assert error > 1e-2, ('panorama mirrored negative control', error, stray)
 preferences.device = device
 # On Vulkan a panoramic camera is refused by name: its export raises before a scene is piped, so nothing is traced
 preferences.device, traced, trace = 'VULKAN', [], flex.Flex.trace
@@ -3672,8 +3684,8 @@ assert 'Flex: panoramic cameras render on OptiX only, not on Vulkan' in reported
     ('panorama on Vulkan', reported.getvalue()[-300:], traced)
 
 # An animation's frame reusing the last one's reservoirs reprojects them through its panorama: an equirectangular
-# camera, or a fisheye equidistant, equisolid or lens polynomial one (back-projected inside its circle), turned 5
-# degrees between frames, renders the second within 1% of that frame alone, on OptiX
+# camera, or a fisheye equidistant, equisolid or lens polynomial one or a mirror ball (back-projected inside its
+# circle), turned 5 degrees between frames, renders the second within 1% of that frame alone, on OptiX
 scene = opened('turned panorama')
 scene.flex_samples, scene.flex_reuse_samples, scene.flex_reuse, scene.flex_denoise = 256, 192, True, False
 scene.frame_start, scene.frame_end = 1, 2
@@ -3689,7 +3701,7 @@ counts, trace = [], flex.Flex.trace
 flex.Flex.trace = lambda self, *args: (traced := trace(self, *args), counts.append(int(traced[1][0, 0, 3])))[0]
 preferences.device = 'OPTIX'
 for kind, height in (('EQUIRECTANGULAR', 32), ('FISHEYE_EQUIDISTANT', 64), ('FISHEYE_EQUISOLID', 64),
-        ('FISHEYE_LENS_POLYNOMIAL', 64)):
+        ('FISHEYE_LENS_POLYNOMIAL', 64), ('MIRRORBALL', 64)):
     scene.camera.data.panorama_type, scene.render.resolution_x, scene.render.resolution_y = kind, 64, height
     scene.frame_set(1)
     bpy.ops.render.render(animation=True, scene=scene.name)
