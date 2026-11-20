@@ -1,6 +1,6 @@
 # Blender render engine: exports the scene as world-space triangles and path traces it with the bundled OptiX binary.
 import addon_utils, bpy, bmesh, concurrent.futures, functools, gpu, math, mmap, numpy, os, struct, subprocess, tempfile
-import hashlib, time, types, _cycles
+import hashlib, operator, time, types, _cycles
 import sys, threading
 from gpu_extras.presets import draw_texture_2d
 from mathutils import Color, Matrix, Vector
@@ -2223,14 +2223,55 @@ class Flex(bpy.types.RenderEngine):
         # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
         for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
-        def bake(expression, memo=None):  # Each part once per outermost call, as the recursions above
-            memo = {} if memo is None else memo
-            if id(expression) not in memo: memo[id(expression)] = baking(expression, memo)
+        def bake(expression, memo=None, whole=False):  # Each part once per outermost call, as the recursions above;
+            memo = {} if memo is None else memo  # whole: baked whole or not at all
+            if id(expression) not in memo: memo[id(expression)] = baking(expression, memo, whole)
             return memo[id(expression)]
-        def baking(expression, memo):  # A unit of math, ramps, noise and linear reads on the point inputs, costing two
-            # reads, baked up to 4K and read at the UV: of generated points without reads over its object's UVs, as
-            # fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for every object
-            # where it repeats with the UV. Never affine in one image's read: it would only bake that texture again
+        # Steps of an object's own scalars (its alpha, pass indices, random number) or a vertex's alpha against
+        # constants alike in every channel: 0 or 1, equal in all three, so a chain live only for at most two of them
+        # equals, at every point, its bake with each step at 0 or 1 selected by the steps live
+        alive, leaves, found = [], {}, {}  # The variants kept while summaries holds their ids; per id, as below
+        ALIKE = {'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'MULTIPLY_ADD', 'MAXIMUM', 'MINIMUM', 'LESS_THAN', 'POWER',
+            'LOGARITHM', 'EXPONENT', 'FLOOR', 'SNAP', 'DOT_PRODUCT', 'SELECT'}  # Channels alike in, alike out
+        def leaf(x):  # Whether an expression varies only by such scalars, and by one
+            if not isinstance(x, tuple): return None if len(set(triple(x))) > 1 else False
+            if leaves.get(id(x), (None,))[0] is not x:  # Each part once, kept with it, as ids are reused
+                parts = [leaf(part) for part in x[1:]] if x[0] in ALIKE else [None]
+                leaves[id(x)] = x, x[0] == 'VERTEX_ALPHA' or x[0] == 'OBJECT_INFO' and not isinstance(x[1], tuple) and \
+                    triple(x[1])[0] >= 2 or None if x[0] in ('OBJECT_INFO', 'VERTEX_ALPHA') else None if None in \
+                    parts else any(parts)
+            return leaves[id(x)][1]
+        def stepwise(x):  # Its steps as above, outermost, by id
+            if not isinstance(x, tuple): return {}
+            if found.get(id(x), (None,))[0] is not x:
+                found[id(x)] = x, {id(x): x} if x[0] == 'LESS_THAN' and leaf(x) else {k: v for part in x[1:] for k, v
+                    in stepwise(part).items()}
+            return found[id(x)][1]
+        def substituted(x, values, memo):  # Each part once, as shared
+            if not isinstance(x, tuple): return x
+            if id(x) not in memo:  # The same where no step is in it
+                parts = [substituted(part, values, memo) for part in x[1:]]
+                memo[id(x)] = values[id(x)] if id(x) in values else x if all(map(operator.is_, parts, x[1:])) else \
+                    (x[0], *parts)
+            return memo[id(x)]
+        def stepped(expression):  # Its select between such variants, each baked whole; None where not
+            if not 0 < len(stepwise(expression)) <= 2: return None
+            stepping, variants = list(stepwise(expression).values()), []
+            for k in range(1 << len(stepping)):
+                variant = substituted(expression, {id(s): float(k >> i & 1) for i, s in enumerate(stepping)}, {})
+                alive.append(variant)
+                if (summarize(variant, summaries, current.get('scales'))[2] or 0) < 10: return None
+                variants.append(variant)
+            shared = {}  # Each baked whole, none in part, or the chain as today
+            variants = [bake(variant, shared, True) for variant in variants]
+            if any(variant[0] != 'BAKED' for variant in variants): return None
+            for s in stepping: variants = [('SELECT', s, b, a) for a, b in zip(variants[::2], variants[1::2])]
+            return variants[0]
+        def baking(expression, memo, whole):  # A unit of math, ramps, noise and linear reads on the point inputs,
+            # costing two reads, baked up to 4K and read at the UV: of generated points without reads over its object's
+            # UVs, as fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for
+            # every object where it repeats with the UV. Never affine in one image's read: it would only bake that
+            # texture again
             nonlocal ops, hints
             reads, affine, cost, inputs, need = summaries[id(expression)] if isinstance(expression, tuple) \
                 else (set(), False, None, set(), 0)
@@ -2243,13 +2284,16 @@ class Flex(bpy.types.RenderEngine):
             size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
                 if unit and 'GENERATED' in (current.get('scales') or ()) and not reads and inputs and need else None
             if size is None or (size > 4096).any():
-                if isinstance(expression, tuple) and expression[0] == 'BUMP': return bumped(*expression[1:], memo)
-                if memo.get('whole'): return expression  # Baked whole or not at all
+                if isinstance(expression, tuple) and expression[0] == 'BUMP':
+                    return bumped(*expression[1:], memo, whole)
+                if whole: return expression
+                if variant := stepped(expression): return variant  # Baked by the steps it's live for
                 if not isinstance(expression, tuple) or summaries[id(expression)][1] is None and len(
                         summaries[id(expression)][0]) == 1:  # Inexact on one image, live whole: baked parts add fetches
                     return expression  # Else as its operands are, but the alpha read an unassociation divides by
-                return (expression[0], *(bake(part, memo) for part in expression[1:])) \
-                    if expression[0] != 'UNASSOCIATE' else (expression[0], bake(expression[1], memo), expression[2])
+                return (expression[0], *(bake(part, memo, whole) for part in expression[1:])) \
+                    if expression[0] != 'UNASSOCIATE' else \
+                    (expression[0], bake(expression[1], memo, whole), expression[2])
             point = ('DIVIDE', ('SUBTRACT', ('UV',), domain[0]), domain[1]) if domain else ('UV',)
             if (key := (None if domain and domain[3] else tuple(numpy.r_[domain[0], domain[1]]) if domain else int(
                     current['triangles'][0]), expression_key(expression, keys))) in units:  # Baked over the same UVs,
@@ -2290,8 +2334,8 @@ class Flex(bpy.types.RenderEngine):
             return 'BAKED', point, units[key]
         # A Bump's heights as its height's gradient along its one point input, baked whole, at its shifted points, its
         # height at its own point no matter; where no gradient bakes, its height baked on its images' lattice, else all
-        def bumped(normal, height, first, second, factors, memo):  # live, as a bake's texels differ none between points
-            # a bump shifts by less than one
+        def bumped(normal, height, first, second, factors, memo, whole):  # live, as a bake's texels differ none
+            # between points a bump shifts by less than one
             inputs = isinstance(height, tuple) and summaries[id(height)][2] is not None and summaries[id(height)][3]
             if inputs and len(inputs) == 1 and (point := next(iter(inputs))) in (current.get('scales') or ()):
                 scales = {**current['scales'], 'BUMP': 1}  # Central differences a quarter texel apart
@@ -2300,15 +2344,15 @@ class Flex(bpy.types.RenderEngine):
                 gradient = fold(vector(*(('DIVIDE', ('SUBTRACT', shifted(e * step), shifted(-e * step)), 2 * step)
                     if k < 2 or point != 'UV' else 0 for k, e in enumerate(numpy.eye(3)))))
                 summarize(gradient, summaries, scales)
-                if (read := bake(gradient, {'whole': True}))[0] == 'BAKED':
-                    return 'BUMP', bake(normal, memo), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED', ('SHIFT',
-                        k), (point,)), (point,))) for k in (1, 2)), bake(factors, memo)
+                if (read := bake(gradient, {}, True))[0] == 'BAKED':
+                    return 'BUMP', bake(normal, memo, whole), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED',
+                        ('SHIFT', k), (point,)), (point,))) for k in (1, 2)), bake(factors, memo, whole)
             seen = {}  # Of images alone, its texels' own gradient as live has it: the height baked on their lattice
             noisy = lambda e: isinstance(e, tuple) and (seen[id(e)] if id(e) in seen else seen.setdefault(id(e), e[0] ==
                 'NOISE' or any(map(noisy, e[1:]))))
             if isinstance(height, tuple) and summaries[id(height)][0] and not noisy(height):
-                return 'BUMP', *(bake(part, memo) for part in (normal, height, first, second, factors))
-            return 'BUMP', bake(normal, memo), height, first, second, bake(factors, memo)
+                return 'BUMP', *(bake(part, memo, whole) for part in (normal, height, first, second, factors))
+            return 'BUMP', bake(normal, memo, whole), height, first, second, bake(factors, memo, whole)
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
