@@ -1741,6 +1741,7 @@ def lattice(ob, name):
         for field, kind in (('value', 'f'), ('x', 'i'), ('y', 'i'), ('z', 'i'), ('extent', 'i'))}
     for field, values in (read.items() if count else ()):
         evaluated.attributes[field].data.foreach_get(('value', 'vector')[values.ndim - 1], values.ravel())
+    if not vector: read['value'][read['value'] < ob.original.data.render.clipping] = 0  # Below its clipping, empty
     mesh, volume = holder.data, source.data
     bpy.data.objects.remove(holder), bpy.data.meshes.remove(mesh), bpy.data.node_groups.remove(tree)
     bpy.data.objects.remove(source), bpy.data.volumes.remove(volume), bpy.data.scenes.remove(scene), os.remove(path)
