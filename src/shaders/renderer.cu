@@ -536,6 +536,9 @@ __device__ float3 panorama(const Projection& p, float u, float v) {
         const float theta = r[0] + (r[1] - r[0]) * u;
         return make_float3(cosf(theta), sinf(theta), r[2] + (r[3] - r[2]) * v);
     }
+    if (p.type == 2) { // Equiangular cubemap face: the forward face, a right angle over u and over v, evenly in angle
+        return make_float3(1, -tanf((u - 0.5f) * PI / 2), tanf((v - 0.5f) * PI / 2));
+    }
     if (p.type == 3) { // Mirror ball: backward reflected off the ball whose normal at x, y of its disc is (c, -x, y),
         // the centre seeing forward and the rim straight back
         const float x = (u - 0.5f) * r[2], y = (v - 0.5f) * r[3], c = sqrtf(fmaxf(1 - x * x - y * y, 0.0f));
@@ -563,6 +566,10 @@ __device__ bool panoramaSees(const Projection& p, float u, float v) {
 }
 __device__ float2 unpanorama(const Projection& p, float3 d) {
     const float* r = p.range;
+    if (p.type == 2) { // Equiangular cubemap face: behind it none
+        if (d.x <= 0) return make_float2(-1, -1);
+        return make_float2(0.5f - atanf(d.y / d.x) * 2 / PI, 0.5f + atanf(d.z / d.x) * 2 / PI);
+    }
     if (p.type == 3) { // Mirror ball: the disc's point whose normal halves backward and the direction; none straight
         // back
         const float3 n = normalize(d) + make_float3(1, 0, 0);
