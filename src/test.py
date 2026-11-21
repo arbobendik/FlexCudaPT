@@ -3551,11 +3551,18 @@ for kind, d, uv in (('EQUIRECTANGULAR', (math.cos(up) * math.cos(right), -math.c
         ('panorama', kind, centroid, at)
 # A panorama's every pixel: under a world colored by its direction, 0.5 + 0.5 * direction, each pixel holds that color
 # averaged over the directions its area maps to, within 1e-3 on the mean, black where it sees nothing, on OptiX. The
-# directions are taken from the camera settings as Blender documents them, apart from Flex: the camera looks along y,
-# left -x, up z; (x, y) is a point's offset from the frame's centre, in the fisheye's circle's radii for equidistant
-# and in millimetres of the sensor for equisolid
-def seen_directions(lens, u, v):  # Local directions, forward, left and up, at u, v of the window; NaN where unseen
-    u, v = u + lens.shift_x, v + lens.shift_y
+# directions are taken from the camera settings as Blender documents them, apart from Flex, and where the manual leaves
+# a convention open, as settled for each type: the camera looks along y, left -x, up z; (x, y) is a point's offset
+# from the frame's centre, for equidistant in its radii across the whole frame on either axis (an ellipse on a
+# non-square image), for equisolid in millimetres of the sensor, its width or height along the side its fit names (the
+# larger by default), the other side by the image's aspect
+def frame(lens, width, height):  # A fisheye's frame: its extent across and up, and its circle's radius there
+    if lens.panorama_type == 'FISHEYE_EQUIDISTANT': return 2, 2, 1
+    across = lens.sensor_fit == 'HORIZONTAL' or lens.sensor_fit == 'AUTO' and width >= height
+    fit = lens.sensor_height if lens.sensor_fit == 'VERTICAL' else lens.sensor_width
+    return (fit, fit * height / width) if across else (fit * width / height, fit)
+def seen_directions(lens, u, v, width, height):  # Local directions, forward, left and up, at u, v of the window; NaN
+    u, v = u + lens.shift_x, v + lens.shift_y  # where unseen
     if lens.panorama_type == 'EQUIRECTANGULAR':  # Longitude to the right, latitude up, over their ranges
         right = lens.longitude_min + u * (lens.longitude_max - lens.longitude_min)
         up = lens.latitude_min + v * (lens.latitude_max - lens.latitude_min)
@@ -3567,37 +3574,37 @@ def seen_directions(lens, u, v):  # Local directions, forward, left and up, at u
             - lens.central_cylindrical_range_v_min)
         d = numpy.stack((numpy.cos(right), -numpy.sin(right), height / lens.central_cylindrical_radius), -1)
         return d / numpy.linalg.norm(d, axis=-1, keepdims=True)
-    side = lens.sensor_width  # Square images: the sensor's width spans the frame
+    across, up = frame(lens, width, height)[:2]
+    x, y = (u - 0.5) * across, (v - 0.5) * up
+    r = numpy.hypot(x, y)
     if lens.panorama_type == 'FISHEYE_EQUIDISTANT':  # Off forward in proportion to the radius, fov / 2 at the circle
-        x, y = (u - 0.5) * 2, (v - 0.5) * 2
-        r = numpy.hypot(x, y)
         theta = numpy.where(r <= 1, r * lens.fisheye_fov / 2, numpy.nan)
     else:  # Equisolid: a radius of 2 f sin(theta / 2), cut at fov / 2
-        x, y = (u - 0.5) * side, (v - 0.5) * side
-        r = numpy.hypot(x, y)
         theta = 2 * numpy.arcsin(numpy.minimum(r / (2 * lens.fisheye_lens), 1))
         theta = numpy.where((r <= 2 * lens.fisheye_lens) & (theta <= lens.fisheye_fov / 2), theta, numpy.nan)
     s = numpy.where(r > 0, numpy.sin(theta) / numpy.maximum(r, 1e-30), 0)
     return numpy.stack((numpy.cos(theta), -x * s, y * s), -1)
+def circle(lens, width, height):  # A fisheye's frame and the radius on it past which it sees nothing
+    across, up = frame(lens, width, height)[:2]
+    if lens.panorama_type == 'FISHEYE_EQUIDISTANT': return across, up, 1
+    return across, up, 2 * lens.fisheye_lens * math.sin(lens.fisheye_fov / 4)
 # Per pixel, bottom row first: its mean color, whether all its area sees and whether none of it does, by the fisheye's
-# circle against the pixel's square: its farthest point inside, or its nearest outside
-def expected_panorama(lens, size, fine=8):
-    sub = (numpy.arange(size * fine) + 0.5) / (size * fine)
-    v, u = numpy.meshgrid(sub, sub, indexing='ij')
-    d = seen_directions(lens, u, v)  # World: forward y, left -x, up z
-    color = (0.5 + 0.5 * numpy.stack((-d[..., 1], d[..., 0], d[..., 2]), -1)).reshape(size, fine, size, fine, 3)
+# circle against the pixel's rectangle on the frame: its farthest point inside, or its nearest outside
+def expected_panorama(lens, width, height, fine=8):
+    v, u = numpy.meshgrid((numpy.arange(height * fine) + 0.5) / (height * fine),
+        (numpy.arange(width * fine) + 0.5) / (width * fine), indexing='ij')
+    d = seen_directions(lens, u, v, width, height)  # World: forward y, left -x, up z
+    color = (0.5 + 0.5 * numpy.stack((-d[..., 1], d[..., 0], d[..., 2]), -1)).reshape(height, fine, width, fine, 3)
     if not lens.panorama_type.startswith('FISHEYE'):
-        return color.mean((1, 3)), numpy.ones((size, size), bool), numpy.zeros((size, size), bool)
-    scale, radius = (2, 1) if lens.panorama_type == 'FISHEYE_EQUIDISTANT' else \
-        (lens.sensor_width, 2 * lens.fisheye_lens * math.sin(lens.fisheye_fov / 4))
-    edges = numpy.arange(size + 1) / size
-    x, y = (edges + lens.shift_x - 0.5) * scale, (edges + lens.shift_y - 0.5) * scale
+        return color.mean((1, 3)), numpy.ones((height, width), bool), numpy.zeros((height, width), bool)
+    across, up, radius = circle(lens, width, height)
+    x = (numpy.arange(width + 1) / width + lens.shift_x - 0.5) * across
+    y = (numpy.arange(height + 1) / height + lens.shift_y - 0.5) * up
     near = lambda e: numpy.where(e[:-1] * e[1:] <= 0, 0, numpy.minimum(abs(e[:-1]), abs(e[1:])))
     far = lambda e: numpy.maximum(abs(e[:-1]), abs(e[1:]))
     nearest, farthest = numpy.hypot(*numpy.meshgrid(near(x), near(y))), numpy.hypot(*numpy.meshgrid(far(x), far(y)))
     return numpy.nan_to_num(color).mean((1, 3)), farthest < radius, nearest > radius
 scene = opened('fisheye')
-scene.render.resolution_x = scene.render.resolution_y = 64
 scene.flex_samples, scene.flex_denoise = 1024, False
 nodes, links = scene.world.node_tree.nodes, scene.world.node_tree.links
 coded = nodes.new('ShaderNodeVectorMath')
@@ -3608,13 +3615,16 @@ scene.camera = add(bpy.data.cameras.new('fisheye'), (0, 0, 0), (math.pi / 2, 0, 
 lens = scene.camera.data
 lens.type = 'PANO'
 preferences.device = 'OPTIX'
-def fisheye_row(kind, against=None, **settings):  # Mean abs error on seeing pixels and the most any blind one holds
-    lens.panorama_type, lens.shift_x, lens.shift_y = kind, 0, 0
+# Mean abs error on seeing pixels and the most any blind one holds, on a width x height image (64 x 64 by default);
+# against another type's directions
+def fisheye_row(kind, against=None, width=64, height=64, **settings):
+    lens.panorama_type, lens.shift_x, lens.shift_y, lens.sensor_fit = kind, 0, 0, 'AUTO'
+    scene.render.resolution_x, scene.render.resolution_y = width, height
     for name, value in settings.items(): setattr(lens, name, value)
     bpy.ops.render.render(scene=scene.name, write_still=True)
-    got = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(64, 64, 4)[..., :3]
+    got = numpy.array(bpy.data.images.load(scene.render.filepath).pixels).reshape(height, width, 4)[..., :3]
     if against: lens.panorama_type = against
-    color, sees, blind = expected_panorama(lens, 64)
+    color, sees, blind = expected_panorama(lens, width, height)
     return abs(got - color)[sees].mean(), abs(got[blind]).max(initial=0), sees.sum(), blind.sum()
 # Positive controls, the panoramas #184 measured by a light's centroid, then the fisheyes at two settings each
 for kind, settings in (('EQUIRECTANGULAR', dict(longitude_min=-math.pi / 2, longitude_max=math.pi,
@@ -3624,7 +3634,9 @@ for kind, settings in (('EQUIRECTANGULAR', dict(longitude_min=-math.pi / 2, long
         ('FISHEYE_EQUIDISTANT', dict(fisheye_fov=math.pi)),
         ('FISHEYE_EQUIDISTANT', dict(fisheye_fov=3.6, shift_x=0.05, shift_y=-0.03)),
         ('FISHEYE_EQUISOLID', dict(fisheye_lens=10.5, fisheye_fov=math.pi, sensor_width=36)),
-        ('FISHEYE_EQUISOLID', dict(fisheye_lens=8, fisheye_fov=2.8, sensor_width=30, shift_x=0.04))):
+        ('FISHEYE_EQUISOLID', dict(fisheye_lens=8, fisheye_fov=2.8, sensor_width=30, shift_x=0.04)),
+        ('FISHEYE_EQUIDISTANT', dict(fisheye_fov=math.pi, width=96, height=64)),  # An ellipse across the whole frame
+        ('FISHEYE_EQUISOLID', dict(fisheye_lens=10.5, fisheye_fov=math.pi, sensor_width=36, width=96, height=64))):
     error, stray, sees, blind = fisheye_row(kind, **settings)
     print('PANORAMA ROW', kind, settings, f'error {error:.2e} stray {stray:.2e} seeing {sees} blind {blind}')
     assert error < 1e-3 and stray < 1e-6 and sees > 1000, ('panorama row', kind, settings, error, stray, sees)

@@ -2035,8 +2035,9 @@ def panorama(camera, width, height):
         data.latitude_min - data.latitude_max, math.pi / 2 - data.latitude_min), 'CENTRAL_CYLINDRICAL': (
         -data.central_cylindrical_range_u_min, -data.central_cylindrical_range_u_max,
         data.central_cylindrical_range_v_min / radius, data.central_cylindrical_range_v_max / radius),
-        # Equidistant: its field of view across the circle the fitted side spans, the frame in that circle's radii
-        'FISHEYE_EQUIDISTANT': (data.fisheye_fov, 0, *(2 * side / fit for side in frame)),
+        # Equidistant: its field of view across its circle stretched over the whole frame, two radii each way (an
+        # ellipse on a non-square image)
+        'FISHEYE_EQUIDISTANT': (data.fisheye_fov, 0, 2, 2),
         'FISHEYE_EQUISOLID': (data.fisheye_fov, data.fisheye_lens, *frame)}  # Its field of view and focal length
     if data.panorama_type not in ranges:
         raise ValueError(f"Flex: the {data.bl_rna.properties['panorama_type'].enum_items[data.panorama_type].name} "
