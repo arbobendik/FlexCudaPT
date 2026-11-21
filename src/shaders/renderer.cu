@@ -617,225 +617,298 @@ __device__ float spread(const Projection& p, float u, float v, float du, float d
     return fmaxf(length(normalize(panorama(p, u + du, v)) - d), length(normalize(panorama(p, u, v + dv)) - d));
 }
 #endif
+// What a program reads at its point: the scene, its normal, frame, point, incoming direction, side, ray, instance and
+// material's pass index; the point's UV, generated and object coordinates, color and position, which at() moves to
+// another point
+struct Shading {
+    const Scene& scene; unsigned program; float3 normal; SlangMatrix<float, 3, 3> tbn; const Point& point;
+    float3 incoming; bool backfacing; const Ray& ray; const Info& info; float material;
+    float u, v; float3 generated, object; float4 color; float3 position;
+    __device__ void at(const Point& p) {
+        u = p.u, v = p.v, generated = p.generated, object = p.object, color = p.color, position = p.position;
+    }
+};
+// A program's steps, each a function of its operands, the point it reads and its own fields, which the interpreter
+// below and a material's native code both call
+#define OP __device__ __forceinline__ float3
+OP op_HAIR(const Shading& x, float3 a) { return normalize(transform(x.scene, x.tbn.rows[0], 1, x.info)) * a.x; } // Its
+// fiber
+OP op_UV(const Shading& x) { return make_float3(x.u, x.v, 0); }
+OP op_GENERATED(const Shading& x) { return x.generated; }
+OP op_OBJECT(const Shading& x) { return x.object; }
+OP op_TRANSFORM(const Shading& x, float3 a, float3 mode) { return transform(x.scene, a, int(mode.x), x.info); }
+// In the camera's space, right, up and forward, or of its window, of the world along its direction from the camera
+OP op_CAMERA_POINT(const Shading& x, unsigned code) {
+    const Camera& c = x.scene.camera;
+    const float3 d = x.program == x.scene.materials[x.scene.count].program ? x.position : x.position - c.origin;
+    const float3 forward = normalize(cross(c.y, c.x));
+    const float3 q = c.lens.ortho ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its image plane
+#ifdef EXTENDED
+    if (code == WINDOW && PANORAMIC(x.scene.camera)) {
+        const float2 uv = unpanorama(x.scene.cameraProjection, local(c, d));
+        return make_float3(uv.x, uv.y, 0);
+    }
+#endif
+    return code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)), dot(d, forward))
+        : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
+}
+OP op_VERTEX_COLOR(const Shading& x) { return make_float3(x.color.x, x.color.y, x.color.z); }
+OP op_VERTEX_ALPHA(const Shading& x) { return make_float3(1, 1, 1) * x.color.w; }
+OP op_OBJECT_INFO(const Shading& x, float3 a) { // Its location, color, alpha, pass index, material's pass index or
+    const int output = int(a.x); // random number
+    return output == 0 ? make_float3(x.info.location[0], x.info.location[1], x.info.location[2]) : output == 1
+        ? make_float3(x.info.color[0], x.info.color[1], x.info.color[2]) : make_float3(1, 1, 1)
+        * (output == 2 ? x.info.color[3] : output == 3 ? x.info.index : output == 4 ? x.material : x.info.random);
+}
+#ifdef EXTENDED
+OP op_TRIANGLE(const Shading& x, float3 a) { return triangled(x.scene, x.point, x.backfacing, int(a.x)); }
+OP op_HAIR_INFO(const Shading& x, float3 a) { // Of the strand at the point, else none: whether one, its intercept, by
+    const Scene& scene = x.scene; // its points from the root, or random
+    const bool strand = STRAND(scene, x.point.instance);
+    const float4 root = strand ? scene.strands[3 * scene.segments[2 * x.point.triangle + 1]] : make_float4(0, 0, 0, 0);
+    const float output = a.x;
+    return make_float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
+        ? (x.point.s + scene.segments[2 * x.point.triangle] - __float_as_uint(root.x)) / (__float_as_uint(root.y) - 1)
+        : 0);
+}
+#endif
+OP op_INSTANCER(const Shading& x, float3 a) { // An instancer attribute of its instance, its color or, odd, its alpha
+    const int k = int(a.x);
+    const float4 v = x.scene.attributes[x.info.attributes + k / 2];
+    return k % 2 ? make_float3(1, 1, 1) * v.w : make_float3(v.x, v.y, v.z);
+}
+OP op_NORMAL(const Shading& x) { return x.normal; }
+OP op_POSITION(const Shading& x) { return x.position; }
+__device__ __forceinline__ void op_SHIFT(Shading& x, float3 a) { // To its own point, by its index
+    x.at(shifted(x.scene, x.point, x.ray, int(a.x)));
+}
+__device__ __forceinline__ void op_SHIFTED(Shading& x) { x.at(x.point); } // Back to the point
+OP op_BUMP(const Shading& x, float3 n, float3 h, float3 hx, float3 hy, float3 strength) { // The normal bent by the
+    const float3 dx = shifted(x.scene, x.point, x.ray, 1).position - x.position, // height's gradient
+        dy = shifted(x.scene, x.point, x.ray, 2).position - x.position;
+    const float3 rx = cross(dy, n), ry = cross(n, dx);
+    const float det = dot(dx, rx);
+    const float3 bent = n * fabsf(det) - ((hx.x - h.x) * rx + (hy.x - h.x) * ry) * (strength.y * sign(det));
+    return dot(bent, bent) > 0 ? normalize(normalize(bent) * fmaxf(strength.x, 0) + n * (1 - fmaxf(strength.x, 0))) : n;
+}
+OP op_INCOMING(const Shading& x) { return x.incoming; }
+OP op_BACKFACING(const Shading& x) { return make_float3(1, 1, 1) * x.backfacing; }
+OP op_LIGHT_PATH(const Shading& x, float3 a) { return make_float3(1, 1, 1) * lightPath(x.ray, int(a.x)); }
+OP op_BAKED(const Shading& x, const Op& op, float3 a) { // A bake's texels, halves, read linearly at the UV, extended at
+    const int width = op.width, height = op.height & 0xFFFFFF; // its edges or repeating
+    const float px = a.x * width - 0.5f, py = a.y * height - 0.5f;
+    const int i = int(floorf(px)), j = int(floorf(py));
+    const auto edged = [&](int k, int n) { return op.height >> 29 & 1 ? (k % n + n) % n : min(max(k, 0), n - 1); };
+    float3 c[4];
+    for (int k = 0; k < 4; ++k) {
+        const ushort4 h = ((const ushort4*)(x.scene.texels + op.texel))[edged(j + k / 2, height) * width
+            + edged(i + k % 2, width)];
+        c[k] = make_float3(__half2float(__ushort_as_half(h.x)), __half2float(__ushort_as_half(h.y)),
+            __half2float(__ushort_as_half(h.z)));
+    }
+    return mix(mix(c[0], c[1], px - i), mix(c[2], c[3], px - i), py - j);
+}
+OP op_GRID(const Shading& x, const Op& op, float3 g) { // A grid's voxels, halves, read linearly at its point in [0, 1]
+    const int n[3] = {int(op.width), int(op.height & 0xFFFF), int(op.height >> 16)}; // over its box, faces extended
+    const float px = g.x * n[0] - 0.5f, py = g.y * n[1] - 0.5f, pz = g.z * n[2] - 0.5f;
+    const int i = int(floorf(px)), j = int(floorf(py)), k = int(floorf(pz));
+    const unsigned short* h = (const unsigned short*)(x.scene.texels + op.texel);
+    float c = 0;
+    for (int m = 0; m < 8; ++m) {
+        const int a = min(max(i + (m & 1), 0), n[0] - 1), b = min(max(j + (m >> 1 & 1), 0), n[1] - 1);
+        const int d = min(max(k + (m >> 2), 0), n[2] - 1);
+        c += (m & 1 ? px - i : 1 - (px - i)) * (m & 2 ? py - j : 1 - (py - j)) * (m & 4 ? pz - k : 1 - (pz - k))
+            * __half2float(__ushort_as_half(h[(d * n[1] + b) * n[0] + a]));
+    }
+    return make_float3(c, c, c);
+}
+OP op_IMAGE(const Shading& x, unsigned code, const Op& op, float3 a) { // An image's color or alpha, nearest, linear or
+    const Scene& scene = x.scene; // cubic; repeating
+    const bool repeat = (op.height >> 24 & 3) == 0;
+    const unsigned long long image = op.height >> 31 ? scene.images[2 * op.texel] : 0; // Its texture, once
+    float px = (repeat ? wrap(a.x) : a.x) * (op.width & 0xFFFFF);
+    float py = (repeat ? wrap(a.y) : a.y) * (op.height & 0xFFFFFF);
+    float4 color;
+    if (code == IMAGE || code == ALPHA)
+        color = texel(scene, op, image, int(floorf(px)), int(floorf(py)));
+    if ((code == IMAGE_LINEAR || code == ALPHA_LINEAR) && op.height >> 31) // In hardware, by its texture at the level
+        color = tex2DLod<float4>(scene.images[2 * op.texel + 1], a.x, a.y, x.ray.width > 0 // of its cone, its texels
+            ? x.ray.level + log2f(float(op.width & 0xFFFFF) * (op.height & 0xFFFFFF)) / 2 // and the change of its
+            + (int(op.width) >> 20) / 64.0f : 0); // point by the UVs
+    else if (code == IMAGE_LINEAR || code == ALPHA_LINEAR) {
+        px -= 0.5f; py -= 0.5f;
+        const int i = int(floorf(px)), j = int(floorf(py));
+        color = mix(mix(texel(scene, op, image, i, j), texel(scene, op, image, i + 1, j), px - i),
+            mix(texel(scene, op, image, i, j + 1), texel(scene, op, image, i + 1, j + 1), px - i), py - j);
+    }
+    if (code == IMAGE_CUBIC || code == ALPHA_CUBIC) {
+        px -= 0.5f; py -= 0.5f;
+        const int i = int(floorf(px)), j = int(floorf(py));
+        color = make_float4(0, 0, 0, 0);
+        for (int k = 0; k < 16; ++k) {
+            const float4 t = texel(scene, op, image, i + k % 4 - 1, j + k / 4 - 1);
+            const float w = spline(px - i, k % 4) * spline(py - j, k / 4);
+            color = make_float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
+        }
+    }
+    return code == IMAGE || code == IMAGE_LINEAR || code == IMAGE_CUBIC ? make_float3(color.x, color.y, color.z)
+        : make_float3(1, 1, 1) * color.w;
+}
+OP op_NORMAL_MAP(const Shading& x, float3 a) {
+    const float3 n = transform(x.scene, tangentToWorldNormalMap(a * 2 - make_float3(1, 1, 1), x.tbn), 2, x.info);
+    return isfinite(dot(n, n)) ? n : x.normal;
+}
+OP op_ADD(float3 a, float3 b) { return a + b; }
+OP op_SUBTRACT(float3 a, float3 b) { return a - b; }
+OP op_MULTIPLY(float3 a, float3 b) { return a * b; }
+OP op_DOT_PRODUCT(float3 a, float3 b) { return make_float3(1, 1, 1) * dot(a, b); }
+OP op_MAXIMUM(float3 a, float3 b) { return each(a, b, [](float a, float b) { return fmaxf(a, b); }); }
+OP op_LOGARITHM(float3 a, float3 b) { return each(a, b, logarithm); }
+OP op_MULTIPLY_ADD(float3 a, float3 b, float3 c) { return a * b + c; }
+OP op_SELECT(float3 c, float3 a, float3 b) {
+    return make_float3(c.x != 0 ? a.x : b.x, c.y != 0 ? a.y : b.y, c.z != 0 ? a.z : b.z);
+}
+OP op_DIVIDE(float3 a, float3 b) { return divide(a, b); }
+OP op_SNAP(float3 a, float3 b) {
+    const float3 q = divide(a, b);
+    return make_float3(floorf(q.x) * b.x, floorf(q.y) * b.y, floorf(q.z) * b.z);
+}
+OP op_BOX(float3 a, float3 b) { return box(a, b.x); }
+OP op_BRICK(float3 a, float3 b, float3 c, float3 d) { return brick(a, b, c, d); }
+OP op_MAGIC(float3 a, float3 b) { return magic(a, b); }
+OP op_VORONOI(float3 a, float3 b, float3 c, float3 d, float3 e) { return fractalVoronoi(a, b, c, d, e); }
+OP op_WHITE_NOISE(float3 a, float3 b) { return white(a, int(b.x), b.y != 0, b.z); }
+OP op_NOISE(float3 a, float3 b, float3 c, float3 d) { return make_float3(1, 1, 1) * fractal(a, b, c, d.x, d.y); }
+OP op_POWER(float3 a, float3 b) { return each(a, b, power); }
+OP op_EXPONENT(float3 a) { return each(a, [](float a) { return expf(a); }); }
+OP op_MINIMUM(float3 a, float3 b) { return each(a, b, [](float a, float b) { return fminf(a, b); }); }
+OP op_LESS_THAN(float3 a, float3 b) { return each(a, b, [](float a, float b) { return float(a < b); }); }
+OP op_FLOOR(float3 a) { return each(a, [](float a) { return floorf(a); }); }
+OP op_MODULO(float3 a, float3 b) { return each(a, b, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; }); }
+// Reduced exactly
+OP op_SINE(float3 a) { return each(a, [](float a) { return sinpif(a * INV_PI); }); }
+OP op_COSINE(float3 a) { return each(a, [](float a) { return cospif(a * INV_PI); }); }
+OP op_TANGENT(float3 a) { return each(a, [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); }
+OP op_ARCSINE(float3 a) { return each(a, [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); }
+OP op_ARCCOSINE(float3 a) { return each(a, [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); }
+OP op_ARCTANGENT(float3 a) { return each(a, [](float a) { return atanf(a); }); }
+OP op_ARCTAN2(float3 a, float3 b) { return each(a, b, [](float a, float b) { return atan2f(a, b); }); }
+OP op_SINH(float3 a) { return each(a, [](float a) { return sinhf(a); }); }
+OP op_COSH(float3 a) { return each(a, [](float a) { return coshf(a); }); }
+OP op_TANH(float3 a) { return each(a, [](float a) { return tanhf(a); }); }
+OP op_CROSS_PRODUCT(float3 a, float3 b) { return cross(a, b); }
+OP op_RGB_TO_HSV(float3 a) { return toHsv(a); }
+OP op_HSV_TO_RGB(float3 a) { return fromHsv(a); }
+OP op_RGB_TO_HSL(float3 a) { return toHsl(a); }
+OP op_HSL_TO_RGB(float3 a) { return fromHsl(a); }
+OP op_ROTATE(float3 v, float3 k, float3 angle) { // Around the unit axis by the angle, as Rodrigues'
+    const float c = cospif(angle.x * INV_PI), s = sinpif(angle.x * INV_PI);
+    return v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
+}
+// Image coordinates (u, v) of a direction; with rows (its texel), v a sky table's row, as equirectangular()
+OP op_EQUIRECTANGULAR(const Op& op, float3 d) {
+    const float v = 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI;
+    return make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI), op.texel ? (0.5f + 128 * cbrtf(fmaxf(2 * v - 1, 0))) / 129
+        : v, 0);
+}
+OP op_MIRROR_BALL(float3 a) { // Image coordinates of a direction on a mirror ball
+    float3 d = a / (length(a) > 0 ? length(a) : 1) - make_float3(0, 1, 0);
+    d = d / (d.y < 0 ? 2 * sqrtf(-0.5f * d.y) : 1);
+    return make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
+}
+OP op_DIELECTRIC(float3 a, float3 b) { return make_float3(1, 1, 1) * fresnel(fabsf(a.x), 1, b.x); }
+#undef OP
 #define CASE(code) case code: if (!used(code)) break;
 // An operation on a and b, each on the stack, the step's own value or read from a slot; the n on the stack replaced
-#define BINARY(name, result) CASE(name) { const unsigned c = op->code; \
+#define BINARY(name) CASE(name) { const unsigned c = op->code; \
     const bool own = c & IMMEDIATE, from = c & FROM, left = c & LEFT, first = c & FIRST; \
     float3* const p = top - 2 + own + from; \
     const float3 a = own && left ? op->value : from && first ? saved[c >> 8 & 31] : *p; \
     const float3 b = own && !left ? op->value : from && !first ? saved[c >> 8 & 31] : top[-1]; \
-    top = p + 1, top[-1] = result; } break;
+    top = p + 1, top[-1] = op_##name(a, b); } break;
 // Surface the program resolves to at the point
 __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
     const Info& info, float material = 0) {
-    float u, v;
-    float3 generated, object, position;
-    float4 color;
-    const auto at = [&](const Point& p) {
-        u = p.u, v = p.v, generated = p.generated, object = p.object, color = p.color, position = p.position;
-    };
-    at(point);
+    Shading x{scene, program, normal, tbn, point, incoming, backfacing, ray, info, material};
+    x.at(point);
     float3 stack[STACK], *top = stack, saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) { const unsigned code = op->code & CODE; switch (code) {
         CASE(PUSH) *top++ = op->value; break;
         CASE(STORE) saved[op->texel] = top[-1]; break;
         CASE(LOAD) *top++ = saved[op->texel]; break;
-        CASE(HAIR) top[-1] = normalize(transform(scene, tbn.rows[0], 1, info)) * top[-1].x; break; // Its fiber
-        CASE(UV) *top++ = make_float3(u, v, 0); break;
-        CASE(GENERATED) *top++ = generated; break;
-        CASE(OBJECT) *top++ = object; break;
-        CASE(TRANSFORM) --top; top[-1] = transform(scene, top[-1], int(top->x), info); break;
-        case CAMERA_POINT: case WINDOW: { // In the camera's space, right, up and forward, or of its window, of the
+        CASE(HAIR) top[-1] = op_HAIR(x, top[-1]); break;
+        CASE(UV) *top++ = op_UV(x); break;
+        CASE(GENERATED) *top++ = op_GENERATED(x); break;
+        CASE(OBJECT) *top++ = op_OBJECT(x); break;
+        CASE(TRANSFORM) --top; top[-1] = op_TRANSFORM(x, top[-1], *top); break;
+        case CAMERA_POINT: case WINDOW:
             if (!used(CAMERA_POINT) && !used(WINDOW)) break;
-            const Camera& c = scene.camera; // world along its direction from the camera
-            const float3 d = program == scene.materials[scene.count].program ? position : position - c.origin;
-            const float3 forward = normalize(cross(c.y, c.x));
-            const float3 q = c.lens.ortho ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its
-            // image plane
+            *top++ = op_CAMERA_POINT(x, code); break;
+        CASE(VERTEX_COLOR) *top++ = op_VERTEX_COLOR(x); break;
+        CASE(VERTEX_ALPHA) *top++ = op_VERTEX_ALPHA(x); break;
+        CASE(OBJECT_INFO) top[-1] = op_OBJECT_INFO(x, top[-1]); break;
 #ifdef EXTENDED
-            if (code == WINDOW && PANORAMIC(scene.camera)) {
-                const float2 uv = unpanorama(scene.cameraProjection, local(c, d));
-                *top++ = make_float3(uv.x, uv.y, 0);
-                break;
-            }
+        CASE(TRIANGLE) top[-1] = op_TRIANGLE(x, top[-1]); break;
+        CASE(HAIR_INFO) top[-1] = op_HAIR_INFO(x, top[-1]); break;
 #endif
-            *top++ = code == CAMERA_POINT ? make_float3(dot(d, normalize(c.x)), dot(d, normalize(c.y)),
-                dot(d, forward)) : make_float3(dot(q, c.x) / dot(c.x, c.x) + 1, dot(q, c.y) / dot(c.y, c.y) + 1, 0) / 2;
-        } break;
-        CASE(VERTEX_COLOR) *top++ = make_float3(color.x, color.y, color.z); break;
-        CASE(VERTEX_ALPHA) *top++ = make_float3(1, 1, 1) * color.w; break;
-        CASE(OBJECT_INFO) { // Its location, color, alpha, pass index, material's pass index or random number
-            const int output = int(top[-1].x);
-            top[-1] = output == 0 ? make_float3(info.location[0], info.location[1], info.location[2]) : output == 1
-                ? make_float3(info.color[0], info.color[1], info.color[2]) : make_float3(1, 1, 1)
-                * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
-        } break;
-#ifdef EXTENDED
-        CASE(TRIANGLE) top[-1] = triangled(scene, point, backfacing, int(top[-1].x)); break;
-        CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
-            const bool strand = STRAND(scene, point.instance); // root, or random
-            const float4 root = strand ? scene.strands[3 * scene.segments[2 * point.triangle + 1]] : make_float4(0, 0, 0, 0);
-            const float output = top[-1].x;
-            top[-1] = make_float3(1, 1, 1) * (output == 5 ? root.z : !strand ? 0 : output == 0 ? 1 : output == 1
-                ? (point.s + scene.segments[2 * point.triangle] - __float_as_uint(root.x)) / (__float_as_uint(root.y) - 1)
-                : 0);
-        } break;
-#endif
-        CASE(INSTANCER) { // An instancer attribute of its instance, its color or, odd, its alpha
-            const int k = int(top[-1].x);
-            const float4 v = scene.attributes[info.attributes + k / 2];
-            top[-1] = k % 2 ? make_float3(1, 1, 1) * v.w : make_float3(v.x, v.y, v.z);
-        } break;
-        CASE(NORMAL) *top++ = normal; break;
-        CASE(POSITION) *top++ = position; break;
-        CASE(SHIFT) // Pushes its own point's index before the height there
-            at(shifted(scene, point, ray, int(top[-1].x))); break;
-        CASE(SHIFTED) --top; top[-1] = *top; at(point); break;
-        CASE(BUMP) { // The normal bent by the height's gradient
-            top -= 4;
-            const float3 n = top[-1], dx = shifted(scene, point, ray, 1).position - position,
-                dy = shifted(scene, point, ray, 2).position - position;
-            const float3 rx = cross(dy, n), ry = cross(n, dx);
-            const float det = dot(dx, rx);
-            const float3 bent = n * fabsf(det) - ((top[1].x - top[0].x) * rx + (top[2].x - top[0].x) * ry)
-                * (top[3].y * sign(det));
-            top[-1] = dot(bent, bent) > 0 ? normalize(normalize(bent) * fmaxf(top[3].x, 0) + n * (1 - fmaxf(top[3].x,
-                0))) : n;
-        } break;
-        CASE(INCOMING) *top++ = incoming; break;
-        CASE(BACKFACING) *top++ = make_float3(1, 1, 1) * backfacing; break;
-        CASE(LIGHT_PATH) top[-1] = make_float3(1, 1, 1) * lightPath(ray, int(top[-1].x)); break;
-        CASE(BAKED) { // A bake's texels, halves, read linearly at the UV, extended at its edges or repeating
-            const int width = op->width, height = op->height & 0xFFFFFF;
-            const float x = top[-1].x * width - 0.5f, y = top[-1].y * height - 0.5f;
-            const int i = int(floorf(x)), j = int(floorf(y));
-            const auto edged = [&](int k, int n) { return op->height >> 29 & 1 ? (k % n + n) % n
-                : min(max(k, 0), n - 1); };
-            float3 c[4];
-            for (int k = 0; k < 4; ++k) {
-                const ushort4 h = ((const ushort4*)(scene.texels + op->texel))[edged(j + k / 2, height) * width
-                    + edged(i + k % 2, width)];
-                c[k] = make_float3(__half2float(__ushort_as_half(h.x)), __half2float(__ushort_as_half(h.y)),
-                    __half2float(__ushort_as_half(h.z)));
-            }
-            top[-1] = mix(mix(c[0], c[1], x - i), mix(c[2], c[3], x - i), y - j);
-        } break;
-        CASE(GRID) { // A grid's voxels, halves, read linearly at its point in [0, 1] over its box, faces extended
-            const int n[3] = {int(op->width), int(op->height & 0xFFFF), int(op->height >> 16)};
-            const float3 g = top[-1];
-            const float x = g.x * n[0] - 0.5f, y = g.y * n[1] - 0.5f, z = g.z * n[2] - 0.5f;
-            const int i = int(floorf(x)), j = int(floorf(y)), k = int(floorf(z));
-            const unsigned short* h = (const unsigned short*)(scene.texels + op->texel);
-            float c = 0;
-            for (int m = 0; m < 8; ++m) {
-                const int a = min(max(i + (m & 1), 0), n[0] - 1), b = min(max(j + (m >> 1 & 1), 0), n[1] - 1);
-                const int d = min(max(k + (m >> 2), 0), n[2] - 1);
-                c += (m & 1 ? x - i : 1 - (x - i)) * (m & 2 ? y - j : 1 - (y - j)) * (m & 4 ? z - k : 1 - (z - k))
-                    * __half2float(__ushort_as_half(h[(d * n[1] + b) * n[0] + a]));
-            }
-            top[-1] = make_float3(c, c, c);
-        } break;
-        case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC: { // Repeating
+        CASE(INSTANCER) top[-1] = op_INSTANCER(x, top[-1]); break;
+        CASE(NORMAL) *top++ = op_NORMAL(x); break;
+        CASE(POSITION) *top++ = op_POSITION(x); break;
+        CASE(SHIFT) op_SHIFT(x, top[-1]); break; // Pushes its own point's index before the height there
+        CASE(SHIFTED) --top; top[-1] = *top; op_SHIFTED(x); break;
+        CASE(BUMP) top -= 4; top[-1] = op_BUMP(x, top[-1], top[0], top[1], top[2], top[3]); break;
+        CASE(INCOMING) *top++ = op_INCOMING(x); break;
+        CASE(BACKFACING) *top++ = op_BACKFACING(x); break;
+        CASE(LIGHT_PATH) top[-1] = op_LIGHT_PATH(x, top[-1]); break;
+        CASE(BAKED) top[-1] = op_BAKED(x, *op, top[-1]); break;
+        CASE(GRID) top[-1] = op_GRID(x, *op, top[-1]); break;
+        case IMAGE: case ALPHA: case IMAGE_LINEAR: case ALPHA_LINEAR: case IMAGE_CUBIC: case ALPHA_CUBIC:
             if (!used(IMAGE) && !used(ALPHA) && !used(IMAGE_LINEAR) && !used(ALPHA_LINEAR) && !used(IMAGE_CUBIC)
                 && !used(ALPHA_CUBIC)) break;
-            const bool repeat = (op->height >> 24 & 3) == 0;
-            const unsigned long long image = op->height >> 31 ? scene.images[2 * op->texel] : 0; // Its texture, once
-            float x = (repeat ? wrap(top[-1].x) : top[-1].x) * (op->width & 0xFFFFF);
-            float y = (repeat ? wrap(top[-1].y) : top[-1].y) * (op->height & 0xFFFFFF);
-            float4 color;
-            if (code == IMAGE || code == ALPHA)
-                color = texel(scene, *op, image, int(floorf(x)), int(floorf(y)));
-            if ((code == IMAGE_LINEAR || code == ALPHA_LINEAR) && op->height >> 31) // In hardware, by its
-                color = tex2DLod<float4>(scene.images[2 * op->texel + 1], top[-1].x, top[-1].y, ray.width > 0 // at the
-                    ? ray.level + log2f(float(op->width & 0xFFFFF) * (op->height & 0xFFFFFF)) / 2 // level of its cone,
-                    + (int(op->width) >> 20) / 64.0f : 0); // its texels and the change of its point by the UVs
-            else if (code == IMAGE_LINEAR || code == ALPHA_LINEAR) {
-                x -= 0.5f; y -= 0.5f;
-                const int i = int(floorf(x)), j = int(floorf(y));
-                color = mix(mix(texel(scene, *op, image, i, j), texel(scene, *op, image, i + 1, j), x - i),
-                    mix(texel(scene, *op, image, i, j + 1), texel(scene, *op, image, i + 1, j + 1), x - i), y - j);
-            }
-            if (code == IMAGE_CUBIC || code == ALPHA_CUBIC) {
-                x -= 0.5f; y -= 0.5f;
-                const int i = int(floorf(x)), j = int(floorf(y));
-                color = make_float4(0, 0, 0, 0);
-                for (int k = 0; k < 16; ++k) {
-                    const float4 t = texel(scene, *op, image, i + k % 4 - 1, j + k / 4 - 1);
-                    const float w = spline(x - i, k % 4) * spline(y - j, k / 4);
-                    color = make_float4(color.x + t.x * w, color.y + t.y * w, color.z + t.z * w, color.w + t.w * w);
-                }
-            }
-            top[-1] = code == IMAGE || code == IMAGE_LINEAR || code == IMAGE_CUBIC
-                ? make_float3(color.x, color.y, color.z)
-                : make_float3(1, 1, 1) * color.w;
-        } break;
-        CASE(NORMAL_MAP) {
-            const float3 n = transform(scene, tangentToWorldNormalMap(top[-1] * 2 - make_float3(1, 1, 1), tbn), 2, info);
-            top[-1] = isfinite(dot(n, n)) ? n : normal;
-        } break;
-        BINARY(ADD, a + b)
-        BINARY(SUBTRACT, a - b)
-        BINARY(MULTIPLY, a * b)
-        BINARY(DOT_PRODUCT, make_float3(1, 1, 1) * dot(a, b))
-        BINARY(MAXIMUM, each(a, b, [](float a, float b) { return fmaxf(a, b); }))
-        BINARY(LOGARITHM, each(a, b, logarithm))
-        CASE(MULTIPLY_ADD) top -= 2; top[-1] = top[-1] * top[0] + top[1]; break;
-        CASE(SELECT) top -= 2; top[-1] = make_float3(top[-1].x != 0 ? top[0].x : top[1].x,
-            top[-1].y != 0 ? top[0].y : top[1].y, top[-1].z != 0 ? top[0].z : top[1].z); break;
-        BINARY(DIVIDE, divide(a, b))
-        CASE(SNAP) { --top;
-            const float3 q = divide(top[-1], *top);
-            top[-1] = make_float3(floorf(q.x) * top->x, floorf(q.y) * top->y, floorf(q.z) * top->z);
-        } break;
-        CASE(BOX) --top; top[-1] = box(top[-1], top->x); break;
-        CASE(BRICK) top -= 3; top[-1] = brick(top[-1], top[0], top[1], top[2]); break;
-        CASE(MAGIC) --top; top[-1] = magic(top[-1], *top); break;
-        CASE(VORONOI) top -= 4; top[-1] = fractalVoronoi(top[-1], top[0], top[1], top[2], top[3]); break;
-        CASE(WHITE_NOISE) --top; top[-1] = white(top[-1], int(top->x), top->y != 0, top->z); break;
-        CASE(NOISE) top -= 3; top[-1] = make_float3(1, 1, 1) * fractal(top[-1], top[0], top[1], top[2].x, top[2].y);
-            break;
-        BINARY(POWER, each(a, b, power))
-        CASE(EXPONENT) top[-1] = each(top[-1], [](float a) { return expf(a); }); break;
-        BINARY(MINIMUM, each(a, b, [](float a, float b) { return fminf(a, b); }))
-        BINARY(LESS_THAN, each(a, b, [](float a, float b) { return float(a < b); }))
-        CASE(FLOOR) top[-1] = each(top[-1], [](float a) { return floorf(a); }); break;
-        BINARY(MODULO, each(a, b, [](float a, float b) { return b != 0 ? fmodf(a, b) : 0; }))
-        // Reduced exactly
-        CASE(SINE) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI); }); break;
-        CASE(COSINE) top[-1] = each(top[-1], [](float a) { return cospif(a * INV_PI); }); break;
-        CASE(TANGENT) top[-1] = each(top[-1], [](float a) { return sinpif(a * INV_PI) / cospif(a * INV_PI); }); break;
-        CASE(ARCSINE) top[-1] = each(top[-1], [](float a) { return asinf(fminf(fmaxf(a, -1), 1)); }); break;
-        CASE(ARCCOSINE) top[-1] = each(top[-1], [](float a) { return acosf(fminf(fmaxf(a, -1), 1)); }); break;
-        CASE(ARCTANGENT) top[-1] = each(top[-1], [](float a) { return atanf(a); }); break;
-        BINARY(ARCTAN2, each(a, b, [](float a, float b) { return atan2f(a, b); }))
-        CASE(SINH) top[-1] = each(top[-1], [](float a) { return sinhf(a); }); break;
-        CASE(COSH) top[-1] = each(top[-1], [](float a) { return coshf(a); }); break;
-        CASE(TANH) top[-1] = each(top[-1], [](float a) { return tanhf(a); }); break;
-        BINARY(CROSS_PRODUCT, cross(a, b))
-        CASE(RGB_TO_HSV) top[-1] = toHsv(top[-1]); break;
-        CASE(HSV_TO_RGB) top[-1] = fromHsv(top[-1]); break;
-        CASE(RGB_TO_HSL) top[-1] = toHsl(top[-1]); break;
-        CASE(HSL_TO_RGB) top[-1] = fromHsl(top[-1]); break;
-        CASE(ROTATE) { // Around the unit axis by the angle, as Rodrigues'
-            top -= 2;
-            const float3 v = top[-1], k = top[0];
-            const float c = cospif(top[1].x * INV_PI), s = sinpif(top[1].x * INV_PI);
-            top[-1] = v * c + cross(k, v) * s + k * (dot(k, v) * (1 - c));
-        } break;
-        // Image coordinates (u, v) of a direction; with rows (its texel), v a sky table's row, as equirectangular()
-        CASE(EQUIRECTANGULAR) {
-            const float3 d = top[-1];
-            const float v = 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI;
-            top[-1] = make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI),
-                op->texel ? (0.5f + 128 * cbrtf(fmaxf(2 * v - 1, 0))) / 129 : v, 0);
-        } break;
-        CASE(MIRROR_BALL) { // Image coordinates of a direction on a mirror ball
-            float3 d = top[-1] / (length(top[-1]) > 0 ? length(top[-1]) : 1) - make_float3(0, 1, 0);
-            d = d / (d.y < 0 ? 2 * sqrtf(-0.5f * d.y) : 1);
-            top[-1] = make_float3(0.5f * (d.x + 1), 0.5f * (d.z + 1), 0);
-        } break;
-        CASE(DIELECTRIC) --top; top[-1] = make_float3(1, 1, 1) * fresnel(fabsf(top[-1].x), 1, top->x); break;
+            top[-1] = op_IMAGE(x, code, *op, top[-1]); break;
+        CASE(NORMAL_MAP) top[-1] = op_NORMAL_MAP(x, top[-1]); break;
+        BINARY(ADD)
+        BINARY(SUBTRACT)
+        BINARY(MULTIPLY)
+        BINARY(DOT_PRODUCT)
+        BINARY(MAXIMUM)
+        BINARY(LOGARITHM)
+        CASE(MULTIPLY_ADD) top -= 2; top[-1] = op_MULTIPLY_ADD(top[-1], top[0], top[1]); break;
+        CASE(SELECT) top -= 2; top[-1] = op_SELECT(top[-1], top[0], top[1]); break;
+        BINARY(DIVIDE)
+        CASE(SNAP) --top; top[-1] = op_SNAP(top[-1], *top); break;
+        CASE(BOX) --top; top[-1] = op_BOX(top[-1], *top); break;
+        CASE(BRICK) top -= 3; top[-1] = op_BRICK(top[-1], top[0], top[1], top[2]); break;
+        CASE(MAGIC) --top; top[-1] = op_MAGIC(top[-1], *top); break;
+        CASE(VORONOI) top -= 4; top[-1] = op_VORONOI(top[-1], top[0], top[1], top[2], top[3]); break;
+        CASE(WHITE_NOISE) --top; top[-1] = op_WHITE_NOISE(top[-1], *top); break;
+        CASE(NOISE) top -= 3; top[-1] = op_NOISE(top[-1], top[0], top[1], top[2]); break;
+        BINARY(POWER)
+        CASE(EXPONENT) top[-1] = op_EXPONENT(top[-1]); break;
+        BINARY(MINIMUM)
+        BINARY(LESS_THAN)
+        CASE(FLOOR) top[-1] = op_FLOOR(top[-1]); break;
+        BINARY(MODULO)
+        CASE(SINE) top[-1] = op_SINE(top[-1]); break;
+        CASE(COSINE) top[-1] = op_COSINE(top[-1]); break;
+        CASE(TANGENT) top[-1] = op_TANGENT(top[-1]); break;
+        CASE(ARCSINE) top[-1] = op_ARCSINE(top[-1]); break;
+        CASE(ARCCOSINE) top[-1] = op_ARCCOSINE(top[-1]); break;
+        CASE(ARCTANGENT) top[-1] = op_ARCTANGENT(top[-1]); break;
+        BINARY(ARCTAN2)
+        CASE(SINH) top[-1] = op_SINH(top[-1]); break;
+        CASE(COSH) top[-1] = op_COSH(top[-1]); break;
+        CASE(TANH) top[-1] = op_TANH(top[-1]); break;
+        BINARY(CROSS_PRODUCT)
+        CASE(RGB_TO_HSV) top[-1] = op_RGB_TO_HSV(top[-1]); break;
+        CASE(HSV_TO_RGB) top[-1] = op_HSV_TO_RGB(top[-1]); break;
+        CASE(RGB_TO_HSL) top[-1] = op_RGB_TO_HSL(top[-1]); break;
+        CASE(HSL_TO_RGB) top[-1] = op_HSL_TO_RGB(top[-1]); break;
+        CASE(ROTATE) top -= 2; top[-1] = op_ROTATE(top[-1], top[0], top[1]); break;
+        CASE(EQUIRECTANGULAR) top[-1] = op_EQUIRECTANGULAR(*op, top[-1]); break;
+        CASE(MIRROR_BALL) top[-1] = op_MIRROR_BALL(top[-1]); break;
+        CASE(DIELECTRIC) --top; top[-1] = op_DIELECTRIC(top[-1], *top); break;
     } if (op->code & KEEP) saved[op->code >> 13 & 31] = top[-1]; } // A result kept in its slot
     return {normalize(stack[0]), stack[1], stack[2].x, stack[3].x, stack[4], stack[5].x, stack[6].x, stack[7],
         stack[8].x, stack[9].x, stack[10], stack[11].x, stack[12],
