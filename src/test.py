@@ -4703,7 +4703,8 @@ triangled()
 
 # A Script node's noise() renders as Flex's own Noise or White Noise texture of the same point does: "perlin" (snoise)
 # as the Noise texture of no detail unnormalized, "uperlin" (noise) normalized, in 1 to 4 dimensions, "hash" as
-# the White Noise texture; on a plane seen straight down, at the same samples, on both backends
+# the White Noise texture, "cell" as it of the point's floor, a periodic one of the point wrapped by the period, a color
+# as the texture's color; on a plane seen straight down, at the same samples, on both backends
 def noised():  # OSL noise()
     shown, lit, was = bpy.context.window.scene, opened('osl noise', sky=(0, 0, 0)), preferences.device
     lit.flex_restir, lit.flex_samples = False, 16
@@ -4721,24 +4722,48 @@ def noised():  # OSL noise()
     links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
     position, x = nodes.new('ShaderNodeNewGeometry').outputs['Position'], nodes.new('ShaderNodeSeparateXYZ')
     links.new(position, x.inputs[0])
-    def textured(kind, dimensions, normalize=False, w=0):  # A noise texture of the position, scaled by 4
+    def textured(kind, dimensions, normalize=False, w=0, output=0, at=None):  # A noise texture of the position by 4
         node = nodes.new(kind)
         if kind == 'ShaderNodeTexNoise':
             node.noise_dimensions, node.normalize, node.inputs['Detail'].default_value = dimensions, normalize, 0
             node.inputs['Scale'].default_value = 4
             if dimensions == '4D': node.inputs['W'].default_value = w
-        links.new(x.outputs['X'] if dimensions == '1D' else position, node.inputs['W' if dimensions == '1D'
+        else: node.noise_dimensions = dimensions
+        links.new(at or (x.outputs['X'] if dimensions == '1D' else position), node.inputs['W' if dimensions == '1D'
             else 'Vector'])
+        return node.outputs[output]
+    def calculated(kind, operation, *operands):  # A math node's result of sockets or constants, None left at default
+        node = nodes.new(kind)
+        node.operation = operation
+        for socket, operand in zip(node.inputs, operands):
+            if isinstance(operand, bpy.types.NodeSocket): links.new(operand, socket)
+            elif operand is not None: socket.default_value = operand
         return node.outputs[0]
+    scaled = calculated('ShaderNodeVectorMath', 'SCALE', position, None, None, 4)
+    floored = calculated('ShaderNodeVectorMath', 'FLOOR', scaled)
+    xy = [calculated('ShaderNodeMath', 'MULTIPLY', x.outputs[axis], 4) for axis in ('X', 'Y')]
+    wrapped = nodes.new('ShaderNodeCombineXYZ')
+    for axis, period, socket in zip(xy, (3, 2), wrapped.inputs): links.new(calculated('ShaderNodeMath', 'WRAP', axis,
+        period, 0), socket)
     for body, socket in (('noise("perlin", P * 4)', textured('ShaderNodeTexNoise', '3D')),
             ('noise(P * 4)', textured('ShaderNodeTexNoise', '3D', True)),
             ('snoise(P[0] * 4)', textured('ShaderNodeTexNoise', '1D')),
             ('noise("perlin", P[0] * 4, P[1] * 4)', textured('ShaderNodeTexNoise', '2D')),
             ('noise("uperlin", P * 4, 0.3 * 4)', textured('ShaderNodeTexNoise', '4D', True, 0.3)),
-            ('hashnoise(P)', textured('ShaderNodeTexWhiteNoise', '3D'))):
+            ('hashnoise(P)', textured('ShaderNodeTexWhiteNoise', '3D')),
+            ('cellnoise(P * 4)', textured('ShaderNodeTexWhiteNoise', '3D', at=floored)),
+            ('(color) noise("cell", P[0] * 4)', textured('ShaderNodeTexWhiteNoise', '1D', output=1, at=calculated(
+                'ShaderNodeMath', 'FLOOR', xy[0]))),
+            ('(color) noise(P * 4)', textured('ShaderNodeTexNoise', '3D', True, output=1)),
+            ('(vector) snoise(P * 4, 0.3 * 4)', textured('ShaderNodeTexNoise', '4D', False, 0.3, output=1)),
+            ('pnoise("cell", P * 4, point(3, 2, 5))', textured('ShaderNodeTexWhiteNoise', '3D', at=calculated(
+                'ShaderNodeVectorMath', 'WRAP', floored, (3, 2, 5), (0, 0, 0)))),
+            ('(color) pnoise("hash", P[0] * 4, P[1] * 4, 3, 2)', textured('ShaderNodeTexWhiteNoise', '2D', output=1,
+                at=wrapped.outputs[0]))):
         script = nodes.new('ShaderNodeScript')
         script.script = bpy.data.texts.new('noised.osl')
-        script.script.write('shader noised(output color Color = 0) {\n    float f = ' + body + ';\n    Color = f;\n}\n')
+        kind, body = body[1:].split(') ', 1) if body[0] == '(' else ('float', body)
+        script.script.write(f'shader noised(output color Color = 0) {{\n    {kind} f = {body};\n    Color = f;\n}}\n')
         Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
         for preferences.device in ('OPTIX', 'VULKAN'):
             links.new(script.outputs['Color'], light.inputs['Color'])
@@ -4748,6 +4773,24 @@ def noised():  # OSL noise()
             assert numpy.ptp(due) > 0.01 and numpy.abs(seen - due).max() < 1e-5, ('osl noise', body, preferences.device,
                 numpy.abs(seen - due).max())
         nodes.remove(script)
+    # A period not a constant whole number of at least 1 and a kind Flex lacks raise in the export, which Blender
+    # reports on stderr from a depsgraph handler and goes on from
+    for body, named in (('pnoise("cell", P, 2.5)', 'a period not'), ('pnoise("hash", P, point(1, 0, 1))',
+            'a period not'), ('pnoise("cell", P, P[0])', 'a period not'), ('pnoise("perlin", P, 4)',
+            'the noise "perlin" periodic'), ('noise("simplex", P)', 'the noise "simplex"')):
+        reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
+        bpy.app.handlers.depsgraph_update_post.append(export)
+        sys.stderr = reported
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('lacking.osl')
+        script.script.write(f'shader lacking(output color Color = 0) {{\n    float f = {body};\n    Color = f;\n}}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['Color'], light.inputs['Color'])
+        bpy.context.view_layer.update()
+        sys.stderr = stderr
+        bpy.app.handlers.depsgraph_update_post.remove(export)
+        nodes.remove(script)
+        assert named in reported.getvalue(), ('osl noise lacking', body, reported.getvalue())
     preferences.device = was
     bpy.context.window.scene = shown
 noised()
