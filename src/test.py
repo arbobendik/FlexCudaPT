@@ -4701,6 +4701,57 @@ def triangled():  # OSL triangle globals
     bpy.context.window.scene = shown
 triangled()
 
+# A Script node's noise() renders as Flex's own Noise or White Noise texture of the same point does: "perlin" (snoise)
+# as the Noise texture of no detail unnormalized, "uperlin" (noise) normalized, in 1 to 4 dimensions, "hash" as
+# the White Noise texture; on a plane seen straight down, at the same samples, on both backends
+def noised():  # OSL noise()
+    shown, lit, was = bpy.context.window.scene, opened('osl noise', sky=(0, 0, 0)), preferences.device
+    lit.flex_restir, lit.flex_samples = False, 16
+    lit.render.resolution_x = lit.render.resolution_y = 32
+    lit.camera = bpy.data.objects.new('osl noise camera', bpy.data.cameras.new('osl noise camera'))
+    lit.collection.objects.link(lit.camera)
+    lit.camera.data.type, lit.camera.data.ortho_scale, lit.camera.location = 'ORTHO', 2, (0, 0, 1)
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('osl noise'))
+    lit.collection.objects.link(bpy.data.objects.new('osl noise', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('osl noise'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    light = nodes.new('ShaderNodeEmission')
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    position, x = nodes.new('ShaderNodeNewGeometry').outputs['Position'], nodes.new('ShaderNodeSeparateXYZ')
+    links.new(position, x.inputs[0])
+    def textured(kind, dimensions, normalize=False, w=0):  # A noise texture of the position, scaled by 4
+        node = nodes.new(kind)
+        if kind == 'ShaderNodeTexNoise':
+            node.noise_dimensions, node.normalize, node.inputs['Detail'].default_value = dimensions, normalize, 0
+            node.inputs['Scale'].default_value = 4
+            if dimensions == '4D': node.inputs['W'].default_value = w
+        links.new(x.outputs['X'] if dimensions == '1D' else position, node.inputs['W' if dimensions == '1D'
+            else 'Vector'])
+        return node.outputs[0]
+    for body, socket in (('noise("perlin", P * 4)', textured('ShaderNodeTexNoise', '3D')),
+            ('noise(P * 4)', textured('ShaderNodeTexNoise', '3D', True)),
+            ('snoise(P[0] * 4)', textured('ShaderNodeTexNoise', '1D')),
+            ('noise("perlin", P[0] * 4, P[1] * 4)', textured('ShaderNodeTexNoise', '2D')),
+            ('noise("uperlin", P * 4, 0.3 * 4)', textured('ShaderNodeTexNoise', '4D', True, 0.3)),
+            ('hashnoise(P)', textured('ShaderNodeTexWhiteNoise', '3D'))):
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('noised.osl')
+        script.script.write('shader noised(output color Color = 0) {\n    float f = ' + body + ';\n    Color = f;\n}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            links.new(script.outputs['Color'], light.inputs['Color'])
+            seen = render(lit, 32)
+            links.new(socket, light.inputs['Color'])
+            due = render(lit, 32)
+            assert numpy.ptp(due) > 0.01 and numpy.abs(seen - due).max() < 1e-5, ('osl noise', body, preferences.device,
+                numpy.abs(seen - due).max())
+        nodes.remove(script)
+    preferences.device = was
+    bpy.context.window.scene = shown
+noised()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
