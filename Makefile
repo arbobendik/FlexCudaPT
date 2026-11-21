@@ -10,10 +10,20 @@ CPPFLAGS += -I$(CUDA_PATH)/include -I$(OPTIX_PATH)/include
 LDLIBS += -L$(CUDA_PATH)/lib64 -lcuda -ldl
 
 build/flex.zip: src/__init__.py src/blender_manifest.toml src/hosek_wilkie.npy src/hosek_wilkie.LICENSE build/renderer \
-	build/renderer-vulkan
+	build/renderer-vulkan build/native
 	python3 -m zipfile -c $@ $^
 
-build/renderer: src/main.cpp src/loader.h src/shaders/renderer.h build/shaders.h
+# What the native programs' helper compiles with NVRTC, which it ships: the renderer's source and the headers it reads
+build/native: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter.h src/shaders/adapter.cuh \
+	src/shaders/flexkernels/pathtracer.cuh
+	rm -rf $@ && mkdir -p $@/flexkernels
+	cp $(filter-out %pathtracer.cuh,$^) $(SLANG_PATH)/include/slang-cuda-prelude.h $(CUDA_PATH)/include/cuda_fp16.h \
+		$(CUDA_PATH)/include/cuda_fp16.hpp $@
+	cp -r $(OPTIX_PATH)/include/* $@
+	cp src/shaders/flexkernels/pathtracer.cuh $@/flexkernels
+	cp -L $(CUDA_PATH)/lib64/libnvrtc.so.13 $(CUDA_PATH)/lib64/libnvrtc-builtins.so.13.? $@
+
+build/renderer: src/main.cpp src/loader.h src/native.h src/shaders/renderer.h build/shaders.h
 	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -ffp-contract=off $< -o $@ $(LDLIBS)
 
 # The walk's CUDA reads Slang's prelude from the Slang it pins
