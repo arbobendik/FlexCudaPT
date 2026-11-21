@@ -500,6 +500,9 @@ struct Point {
     float u, v; float3 generated, object; float4 color; float3 position; float s, t; unsigned triangle, instance;
 };
 __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray, int axis);
+#ifdef EXTENDED
+__device__ __noinline__ float3 triangled(const Scene& scene, const Point& point, bool backfacing, int output);
+#endif
 // Whether the scene's programs take the step
 __device__ bool used(unsigned code) {
     return params.ops[code >> 6] >> (code & 63) & 1;
@@ -509,9 +512,9 @@ __device__ bool used(unsigned code) {
 #define VIEW(camera) camera, camera##Projection
 #define VIEWING(camera) const Camera& camera, const Projection& camera##Projection
 #define PANORAMIC(camera) (used(PANORAMA) && camera##Projection.type != 0)
-#else // Nor varying media, strands and panoramas
+#else // Nor varying media, strands, panoramas and a hit's triangle
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
-    && code != PANORAMA && used(code))
+    && code != PANORAMA && code != TRIANGLE && used(code))
 #define STRAND(scene, i) false
 #define VIEW(camera) camera
 #define VIEWING(camera) const Camera& camera
@@ -674,6 +677,7 @@ __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, floa
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
 #ifdef EXTENDED
+        CASE(TRIANGLE) top[-1] = triangled(scene, point, backfacing, int(top[-1].x)); break;
         CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
             const bool strand = STRAND(scene, point.instance); // root, or random
             const float4 root = strand ? scene.strands[3 * scene.segments[2 * point.triangle + 1]] : make_float4(0, 0, 0, 0);
@@ -887,6 +891,16 @@ __device__ Corners corners(const float3* vertices, const Instance& instance, uns
 __device__ Corners cornerNormals(const float3* normals, const Instance& instance, unsigned triangle) {
     return {normals + 3 * triangle, instance, true};
 }
+#ifdef EXTENDED
+// Of the hit's triangle in the world, none off one: its face normal toward the ray, the hit's parameters u and v along
+// its edges from vertex 0, P = v0 + u (v1 - v0) + v (v2 - v0) => dP/du = v1 - v0, dP/dv = v2 - v0
+__device__ __noinline__ float3 triangled(const Scene& scene, const Point& point, bool backfacing, int output) {
+    if (point.triangle == NONE || STRAND(scene, point.instance)) return make_float3(0, 0, 0);
+    const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
+    return output == 0 ? vertex.face() * (backfacing ? -1.0f : 1.0f) : output == 1 ? make_float3(point.s, point.t, 0)
+        : vertex[output - 1] - vertex[0];
+}
+#endif
 // Instance of a triangle by its number in the scene's order: the last one numbered no higher, by bisection
 __device__ unsigned owner(const Scene& scene, unsigned number) {
     unsigned low = 0, high = scene.instanceCount;
