@@ -1,5 +1,7 @@
 #pragma once
+#ifndef __CUDACC_RTC__ // NVRTC has its own
 #include <vector_types.h>
+#endif
 // renderer.slang declares these layouts again for Vulkan
 
 // Thin lens: aperture radius, depth of its focus plane, polygon sides (0 for a disk), rotation and anamorphic ratio.
@@ -147,4 +149,5 @@ struct Scene {
     const Scene* anchor; // The anchor's scene, in its record
     unsigned width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
+    unsigned* calls; // Per program, shade()'s calls at the hot call sites, which choose the native ones
 };

@@ -3,13 +3,13 @@
 #pragma once
 #include "cuda.h"
 #include "../shaders/renderer.h"
+#include "../host.h"
 #include <optix_types.h>
 #include <cstdio>
 #include <cstdint>
 #include <string>
 #include <thread>
 #include <vector>
-#include <pwd.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -33,8 +33,7 @@ extern unsigned int build_queue_ptx_len, build_extended_queue_ptx_len, build_tem
 // Pipeline cache file beside OptiX's: FNV-1a of the SPIR-V, then the cache's data (the driver checks its header);
 // another release's or driver's loads as none
 inline std::string cacheFile() {
-    const char* cache = std::getenv("OPTIX_CACHE_PATH");
-    const std::string directory = cache ? cache : "/var/tmp/OptixCache_" + std::string(getpwuid(getuid())->pw_name);
+    const std::string directory = cacheDirectory();
     mkdir(directory.c_str(), 0700);
     return directory + "/flex-vulkan.bin";
 }
@@ -44,7 +43,7 @@ inline std::vector<char> readCache(const std::string& path, const uint64_t* key 
     if (FILE* file = std::fopen(path.c_str(), "rb")) {
         uint64_t found = 0;
         std::fseek(file, 0, SEEK_END);
-        data.resize(std::ftell(file) - sizeof(found));
+        data.resize(std::max(std::ftell(file) - long(sizeof(found)), 0l));
         std::fseek(file, 0, SEEK_SET);
         if (!std::fread(&found, sizeof(found), 1, file) || (key && found != *key)) data.clear();
         data.resize(std::fread(data.data(), 1, data.size(), file));
