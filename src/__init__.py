@@ -1474,6 +1474,10 @@ def surfaced(closures):  # Of a script's closure value, its weighted closures, t
             value=given[n] if isinstance(given[n], tuple) else triple(given[n]))) for n, t, d in SOCKETS_OF[kind]))
         surfaces.append(resolve(linked(node)))
     return functools.reduce(added, surfaces) if surfaces else BLACK
+# Of noise(), each op's own kind and the kinds Flex draws: Perlin's by the Noise texture at no detail, unnormalized
+# (signed) or normalized (in [0, 1]); "hash" by the White Noise texture of the coordinates' bits
+NOISES = {'noise': 'uperlin', 'snoise': 'perlin', 'cellnoise': 'cell', 'hashnoise': 'hash'}
+NOISE_KINDS = {'perlin': 1, 'snoise': 1, 'uperlin': 0, 'noise': 0, 'hash': None}
 # Of texture(), its interpolations and wraps as the Image Texture node's, OSL's default smart cubic and periodic
 TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cubic', 'smartcubic': 'Smart'}
 TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
@@ -1562,6 +1566,17 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
             elif op == 'add' and 'closure color' in kinds: values[args[0]] = operands[0] + operands[1]
             elif op == 'assign' and 'closure color' in kinds: values[args[0]] = operands[0]
             elif 'closure color' in kinds: refused(f'the step {op} on closures')
+            elif op in NOISES:  # Of a named or the op's own kind, as Flex's Noise or White Noise texture of 1 to 4D
+                named = isinstance(operands[0], str)
+                kind, given = (operands[0], operands[1:]) if named else (NOISES[op], operands)
+                dims = {('float',): 1, ('float', 'float'): 2, ('triple',): 3, ('triple', 'float'): 4}.get(tuple(
+                    'triple' if k in TRIPLES else k for k in kinds[1 + named:]))
+                if kinds[0] != 'float' or dims is None: refused(f'{op} of a {kinds[0]} or of {kinds[1 + named:]}')
+                if kind not in NOISE_KINDS: refused(f'the noise "{kind}"')
+                point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)
+                w = given[1] if dims == 4 else 0
+                values[args[0]] = ('WHITE_NOISE', point, vector(dims, 0, w)) if NOISE_KINDS[kind] is None else ('NOISE',
+                    point, numpy.array((0, 0.5, 2.0)), numpy.array((0, 0, NOISE_KINDS[kind])), vector(w, dims, 0))
             elif op == 'texture' and isinstance(operands[0], str):  # As an Image Texture node of the file and options
                 options = dict(zip(operands[3::2], args[5::2]))  # Each option's name and the variable holding its value
                 named = {o: values[a] for o, a in options.items() if o != 'alpha'}
