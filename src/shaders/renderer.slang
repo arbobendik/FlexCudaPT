@@ -94,6 +94,7 @@ struct Scene {
     Scene* anchor; // The anchor's scene, in its record
     uint width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
+    uint* calls; // OptiX's alone: shade()'s calls per program at the hot call sites
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];

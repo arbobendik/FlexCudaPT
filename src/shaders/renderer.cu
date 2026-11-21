@@ -1,6 +1,8 @@
 #include "renderer.h"
 #include <optix.h>
+#ifndef __CUDACC_RTC__ // NVRTC has its own
 #include <cuda_runtime.h>
+#endif
 #include "adapter.h"
 
 constexpr int STACK = 64;
@@ -826,12 +828,20 @@ OP op_DIELECTRIC(float3 a, float3 b) { return make_float3(1, 1, 1) * fresnel(fab
     const float3 a = own && left ? op->value : from && first ? saved[c >> 8 & 31] : *p; \
     const float3 b = own && !left ? op->value : from && !first ? saved[c >> 8 & 31] : top[-1]; \
     top = p + 1, top[-1] = op_##name(a, b); } break;
-// Surface the program resolves to at the point
-__device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
+#ifdef NATIVE // The scene's native programs, compiled with it (native.h)
+#include "native.cuh"
+#endif
+// Surface the program resolves to at the point; at a hot call site, counted, and a native program's own code if any
+template <bool HOT = false> __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
     const Info& info, float material = 0) {
     Shading x{scene, program, normal, tbn, point, incoming, backfacing, ray, info, material};
     x.at(point);
+#ifdef NATIVE // Counted no more once native
+    if (HOT) switch (program) { NATIVE_CASES }
+#else
+    if (HOT) atomicAdd(scene.calls + program, 1u);
+#endif
     float3 stack[STACK], *top = stack, saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) { const unsigned code = op->code & CODE; switch (code) {
         CASE(PUSH) *top++ = op->value; break;
@@ -1022,9 +1032,10 @@ __device__ Point shifted(const Scene& scene, const Point& point, const Ray& ray,
         axis == 1 ? point.s + step / length(vertex[1] - vertex[0]) : point.s,
         axis == 2 ? point.t + step / length(vertex[2] - vertex[0]) : point.t);
 }
-// Surface of an instance's triangle at its barycentrics, in a layer of its material
-__device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, unsigned triangle, float s, float t,
-    float3 normal, float3 direction, const Ray& ray, unsigned layer = 0, bool emission = false) {
+// Surface of an instance's triangle at its barycentrics, in a layer of its material; at a hot call site, as there
+template <bool HOT = false> __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance,
+    unsigned triangle, float s, float t, float3 normal, float3 direction, const Ray& ray, unsigned layer = 0,
+    bool emission = false) {
     const Material& material = scene.materials[key(scene, instance, triangle)];
     unsigned program = emission ? material.emission : material.program;
     // Each layer's program follows the end of the one above it
@@ -1036,7 +1047,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
         const float3 o = strandPoint(scene, triangle, make_float2(s, t), n, along);
         const float4* root = scene.strands + 3 * scene.segments[2 * triangle + 1]; // Its UV and color, and generated
         const float* space = placed.texspace; // point by its emitter's texture space
-        return shade(scene, program, normal, makeMatrix<float, 3, 3>(along, cross(n, along), n), Point{root[1].x,
+        return shade<HOT>(scene, program, normal, makeMatrix<float, 3, 3>(along, cross(n, along), n), Point{root[1].x,
             root[1].y, make_float3((o.x - space[0]) / (2 * space[3]) + 0.5f, (o.y - space[1]) / (2 * space[4]) + 0.5f,
             (o.z - space[2]) / (2 * space[5]) + 0.5f), o, root[2], place(placed, o), s, t, triangle, instance},
             -direction, false, ray, placed.info);
@@ -1057,7 +1068,7 @@ __device__ __forceinline__ Surface shade(const Scene& scene, unsigned instance, 
     Ray cone = ray;
     cone.level = log2f(ray.width * CONE_SHARE * sqrtf(fabsf(((uv[1].x - uv[0].x) * (uv[2].y - uv[0].y)
         - (uv[2].x - uv[0].x) * (uv[1].y - uv[0].y)) / dot(face, direction))));
-    return shade(scene, program, normal,
+    return shade<HOT>(scene, program, normal,
         tangentSpace(scene.tangents + 3 * triangle, normalize(a + (b - a) * s + (c - a) * t), s, t),
         at(scene, instance, triangle, s, t), -direction,
         dot(vertex.face(), direction) > 0, cone, object, scene.passes[triangle]);
@@ -1278,8 +1289,8 @@ __device__ float3 environment(const Scene& scene, float3 direction, const Ray& r
     const Point point = {0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, make_float4(0, 0, 0, 0), direction, 0, 0, NONE};
-    return shade(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{}, point, -direction,
-        false, ray, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
+    return shade<true>(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{}, point,
+        -direction, false, ray, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
 }
 
 __device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y), expf(a.z)); }
