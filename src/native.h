@@ -155,6 +155,26 @@ inline std::string nativeDirectory() {
     return std::string(self, slash ? slash - self : 0) + "/native";
 }
 
+// What a native PTX is compiled from besides its programs, which its place in the cache is keyed by too: the shipped
+// sources and headers, and NVRTC by its size
+inline std::string nativeBuild() {
+    std::vector<std::filesystem::path> paths; // In order, so that the key is the same whatever the directory's
+    std::error_code ignored;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(nativeDirectory(), ignored))
+        if (entry.is_regular_file()) paths.push_back(entry.path());
+    std::sort(paths.begin(), paths.end());
+    std::string build;
+    for (const auto& path : paths) {
+        build += std::to_string(std::filesystem::file_size(path, ignored)) + "\n";
+        if (path.filename().string().find(".so") != std::string::npos) continue;
+        FILE* file = std::fopen(path.c_str(), "rb");
+        char buffer[1 << 16];
+        for (size_t n; file && (n = std::fread(buffer, 1, sizeof(buffer), file));) build.append(buffer, n);
+        if (file) std::fclose(file);
+    }
+    return build;
+}
+
 // The helper process: renderer.cu shipped beside the binary, with dir/native.cuh, through NVRTC into dir/native.ptx;
 // extended as the scene's module is. Without NVRTC (libnvrtc beside it), none: the scene keeps the interpreter.
 inline int compileNative(const char* dir, bool extended) {
