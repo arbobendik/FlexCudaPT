@@ -21,6 +21,13 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <pwd.h>
+#include <spawn.h>
+#include <filesystem>
+#include <signal.h>
+#include <sys/wait.h>
+#ifndef VK_VERSION_1_0
+#include "native.h"
+#endif
 
 // Whether a scene's module, while it compiles, has the generic one stand in: OptiX's compile runs as tasks beside
 // frames; Vulkan compiles a pipeline whole, at once, so there each scene takes its own as before
@@ -30,11 +37,15 @@ constexpr bool TIERED = false, QUEUED_TEMPORAL = true;
 #else
 constexpr bool TIERED = true, QUEUED_TEMPORAL = false;
 #endif
+constexpr unsigned NATIVE_AFTER = 8; // Launches of the scene's steps whose calls choose its native programs
 
 // Kinds of what the extension pipes in
 enum { SCENE, REQUEST, UPDATE, STEPS };
 
 int main(int, char** argv) { // Usage: renderer file parent < scenes, requests > an answer per request, sums in the file
+#ifndef VK_VERSION_1_0
+    if (argv[1] && !std::strcmp(argv[1], "native")) return compileNative(argv[2], argv[3][0] == '1'); // The helper
+#endif
     // CUDA + OptiX contexts
     CUcontext cuda;
     OptixDeviceContext context;
@@ -100,8 +111,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // A module compiled for an op set, bound in its params, with its programs and pipeline once linked
     // quick: from the stand-in PTX, its shading not inlined, quicker to compile, to stand in while the module of its
     // op set compiles
+    // ptx: a native tier's, compiled from source with the scene's programs, else the embedded PTX
     struct Tier {
         Params params; OptixModule module; OptixProgramGroup groups[PASSES + 4]; OptixPipeline pipeline; bool quick;
+        std::string ptx;
     };
     // SBT records carrying scene: first the anchor's, scene in the BVH, triangles and lights its reservoirs were last
     // traced in, which a view's first temporal pass reprojects into, then one per pass
@@ -151,20 +164,23 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             workers.changed.notify_all();
         }
     }).detach();
+    const auto extended = [](const Params& params) { // Varying media, strands or hair, the steps after MEDIUM, a
+        return params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 15 // panoramic camera or a script reading its hit's
+            || params.ops[PANORAMA >> 6] >> (PANORAMA & 63) & 1 // triangle: the extended PTX alone
+            || params.ops[TRIANGLE >> 6] >> (TRIANGLE & 63) & 1;
+    };
     const auto begin = [&](Tier& tier) { // Its module created: its compile's first task
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
         const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
-        const bool rare = tier.params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 15 // Varying media, strands or hair, the
-            || tier.params.ops[PANORAMA >> 6] >> (PANORAMA & 63) & 1 // steps after MEDIUM, a panoramic camera or a
-            || tier.params.ops[TRIANGLE >> 6] >> (TRIANGLE & 63) & 1; // script reading its hit's triangle: the
-        // extended PTX alone
+        const bool rare = extended(tier.params);
         const unsigned char* ptx[2][2] = {{build_shaders_ptx, build_standin_ptx}, {build_extended_ptx,
             build_extended_standin_ptx}};
         const unsigned lengths[2][2] = {{build_shaders_ptx_len, build_standin_ptx_len}, {build_extended_ptx_len,
             build_extended_standin_ptx_len}};
-        CHECK(optixModuleCreateWithTasks(context, &options, &compile, (const char*)ptx[rare][tier.quick],
-            lengths[rare][tier.quick], nullptr, nullptr, &tier.module, &first));
+        CHECK(optixModuleCreateWithTasks(context, &options, &compile, tier.ptx.empty()
+            ? (const char*)ptx[rare][tier.quick] : tier.ptx.data(), tier.ptx.empty() ? lengths[rare][tier.quick]
+            : tier.ptx.size(), nullptr, nullptr, &tier.module, &first));
         return first;
     };
     const auto compiled = [&](const Tier& tier) { // OptiX's disk cache holding it, it is so at once
@@ -259,6 +275,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     }
     Tier* special = nullptr; // The module of the scene's op set, launches taking it once compiled
     Tier* interim = nullptr; // Its stand-in's, standing in without a generic until it is
+    // The scene's native programs: once its steps ran so many launches, those chosen by their calls are compiled by a
+    // helper process, into a tier of the special's params that launches take once compiled, until the steps change
+    Tier* native = nullptr;
+    pid_t helper = 0;
+    std::string helping; // Its directory, of the programs' source and the PTX
+    unsigned counted = 0; // Launches since the steps changed
+    bool chosen = false; // Whether their programs were chosen since, none or some
     std::vector<Tier*> retiring; // Those of earlier op sets, compiling still or awaiting their end
     // Each request accumulates up to launches more samples of its view, samples at most, and is answered with the
     // number launched, memory used and peak in MiB, the sums left in the shared file if any were. A new view starts
@@ -294,15 +317,66 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         // At a frame's start, every launch before it ended: the scene's module swapped in once compiled, its renders
         // a stand-in's to rounding; those of earlier op sets dropped once compiled
-        if (special && pipeline != special->pipeline && compiled(*special)) {
+        if (special && pipeline != special->pipeline && (!native || pipeline != native->pipeline)
+            && compiled(*special)) {
             linked(*special), use(*special), flock(busy, LOCK_UN);
             if (interim) drop(interim), interim = nullptr;
         }
+#ifndef VK_VERSION_1_0
+        const auto adopt = [&] { // The PTX, compiled as the special's module
+            if (FILE* file = std::fopen((helping + "/native.ptx").c_str(), "rb")) {
+                native = new Tier{.params = special->params};
+                char buffer[1 << 16];
+                for (size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file));) native->ptx.append(buffer, n);
+                std::fclose(file), give(begin(*native));
+            }
+        };
+        int status;
+        if (helper && waitpid(helper, &status, WNOHANG) == helper) {
+            helper = 0;
+            if (WIFEXITED(status) && !WEXITSTATUS(status)) adopt();
+            std::filesystem::remove_all(helping);
+        }
+        if (native && pipeline == special->pipeline && compiled(*native)) linked(*native), use(*native);
+        if (!chosen && counted >= NATIVE_AFTER && special && pipeline == special->pipeline) {
+            chosen = true;
+            std::vector<unsigned> calls(loaded.rows); // Chosen by their calls so far
+            CHECK(cuMemcpyDtoH(calls.data(), (CUdeviceptr)scene.calls, calls.size() * sizeof(unsigned)));
+            const std::vector<unsigned> programs = chooseNative(loaded.ops, calls);
+            const bool exact = std::getenv("FLEX_NATIVE_EXACT"), rare = extended(special->params);
+            const std::string text = generateNative(loaded.ops, programs, exact);
+            char dir[] = "/tmp/flex-native-XXXXXX";
+            if (!programs.empty() && mkdtemp(dir)) {
+                helping = dir;
+                FILE* file = std::fopen((helping + "/native.cuh").c_str(), "wb");
+                std::fwrite(text.data(), 1, text.size(), file), std::fclose(file);
+                char self[] = "/proc/self/exe", mode[] = "native", options[] = {char('0' + rare), 0};
+                char* args[] = {self, mode, dir, options, nullptr};
+                if (posix_spawn(&helper, self, nullptr, nullptr, args, environ)) helper = 0;
+            }
+        }
+#endif
         std::erase_if(retiring, [&](Tier* tier) { return compiled(*tier) && (drop(tier), true); });
         if (kind != REQUEST) {
+#ifndef VK_VERSION_1_0
+            if (kind != UPDATE) { // New steps: native programs dropped, their helper ended, calls counted anew
+                if (helper) kill(helper, SIGKILL), waitpid(helper, nullptr, 0), helper = 0,
+                    std::filesystem::remove_all(helping);
+                if (native && pipeline == native->pipeline) use(*special);
+                if (native) retiring.push_back(std::exchange(native, nullptr));
+                counted = 0, chosen = false;
+            }
+#endif
             const unsigned count = scene.count;
             kind == SCENE ? loadSteps(scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
                 : updateSteps(scene, loaded);
+#ifndef VK_VERSION_1_0
+            if (kind != UPDATE) { // Its programs' calls, counted from none
+                if (scene.calls) release((CUdeviceptr)scene.calls);
+                scene.calls = (unsigned*)allocate(loaded.rows * sizeof(unsigned));
+                CHECK(cuMemsetD32((CUdeviceptr)scene.calls, 0, loaded.rows));
+            }
+#endif
             Params next{};
             for (const Op& op : loaded.ops) next.ops[(op.code & CODE) >> 6] |= 1ull << (op.code & 63);
             const bool another = !special || std::memcmp(&next, &special->params, sizeof(next));
@@ -311,7 +385,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (another) { // Another op set: its own module, one still compiling taken back, the generic standing in
                 if (special) retiring.push_back(special); // as it compiles, or without one awaited
                 const auto again = std::find_if(retiring.begin(), retiring.end(),
-                    [&](const Tier* tier) { return !tier->quick && !std::memcmp(&tier->params, &next, sizeof(next)); });
+                    [&](const Tier* tier) { return !tier->quick && tier->ptx.empty()
+                        && !std::memcmp(&tier->params, &next, sizeof(next)); });
                 if (again != retiring.end()) special = *again, retiring.erase(again);
                 else special = new Tier{.params = next}, give(begin(*special)); // Its compile, to the workers
                 last = std::exchange(interim, nullptr);
@@ -507,6 +582,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 OPTIX_BUILD_OPERATION_BUILD, anchorTop, loaded);
         }
         std::fwrite(&launched, sizeof(launched), 1, stdout);
+        counted += launched;
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
         std::fwrite(memory, sizeof(memory), 1, stdout);
         if (!launched) continue;
