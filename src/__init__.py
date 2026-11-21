@@ -119,7 +119,7 @@ OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
     'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
-    'DISPERSION': lambda k: k, 'WORLD_PATH': None}
+    'DISPERSION': lambda k: k, 'WORLD_PATH': None, 'TRIANGLE': None}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1419,9 +1419,11 @@ FLT_MIN = 1.1754944e-38  # OSL's logarithms clamp their argument up to it
 PROGRAMS = {}  # Of each Script node met in an export, by its pointer, its bytecode's program: compiled once an export
 LOOPS = 1024  # Iterations a loop unrolls at most
 DEPTH = 200  # Steps a script's output may lie deep, the exporter's walks of expressions recursing per step
-# The shading point's globals as the Geometry node gives them: OSL's I points in, against Incoming; time at the
-# shutter's middle, Flex having no motion blur
-GLOBALS = {'P': ('POSITION',), 'N': facing(('NORMAL',)), 'I': ('MULTIPLY', ('INCOMING',), -1), 'time': 0.5}
+# The shading point's globals: P, N and I as the Geometry node gives them, OSL's I pointing in, against Incoming; time
+# at the shutter's middle, Flex having no motion blur; Ng, u, v, dPdu and dPdv of the hit's triangle
+GLOBALS = {'P': ('POSITION',), 'N': facing(('NORMAL',)), 'I': ('MULTIPLY', ('INCOMING',), -1), 'time': 0.5,
+    'Ng': ('TRIANGLE', 0), 'u': ('DOT_PRODUCT', ('TRIANGLE', 1), numpy.eye(3)[0]), 'v': ('DOT_PRODUCT', ('TRIANGLE', 1),
+    numpy.eye(3)[1]), 'dPdu': ('TRIANGLE', 2), 'dPdv': ('TRIANGLE', 3)}
 # Of getattribute, the attributes Flex exports by Cycles' names: the Texture Coordinate and Object Info nodes' outputs
 ATTRIBUTES = {'geom:generated': ('GENERATED',), 'geom:uv': ('UV',), **{f'object:{name}': ('OBJECT_INFO', k)
     for name, k in (('location', 0), ('color', 1), ('alpha', 2), ('index', 3), ('random', 5))}}

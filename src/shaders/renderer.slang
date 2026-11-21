@@ -25,13 +25,13 @@ struct Projection { uint type; float range[8], shift[2]; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH };
+    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH, TRIANGLE };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera (CUDA's alone; its place kept, so the codes after it agree with the
 // exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
 // DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes, a world that reads
-// Light Path
+// Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -586,8 +586,9 @@ struct Point {
 [vk::constant_id(0)] const uint64_t OPS0 = 0xFFFFFFFFFFFFFFFFull;
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
-#ifndef EXTENDED // Nor varying media and strands
-#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID && used(code))
+#ifndef EXTENDED // Nor varying media, strands and a hit's triangle
+#define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
+    && code != TRIANGLE && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // An operation on a and b, each on the stack, the step's own value or read from a slot; the n on the stack replaced
@@ -639,6 +640,18 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
                 ? float3(info.color[0], info.color[1], info.color[2]) : float3(1, 1, 1)
                 * (output == 2 ? info.color[3] : output == 3 ? info.index : output == 4 ? material : info.random);
         } break;
+#ifdef EXTENDED
+        CASE(TRIANGLE) { // Of the hit's triangle in the world, none off one: its face normal toward the ray, the
+            // hit's parameters u and v along its edges from vertex 0, P = v0 + u (v1 - v0) + v (v2 - v0)
+            // => dP/du = v1 - v0, dP/dv = v2 - v0
+            const int output = int(stack[top - 1].x);
+            if (point.triangle == NONE || used(CURVES) && scene.instances[point.instance].world == STRANDS) {
+                stack[top - 1] = float3(0, 0, 0); break; }
+            const Corners vertex = corners(scene.vertices, scene.instances[point.instance], point.triangle);
+            stack[top - 1] = output == 0 ? normalize(vertex.face()) * (backfacing ? -1.0f : 1.0f) : output == 1
+                ? float3(point.s, point.t, 0) : output == 2 ? vertex[1] - vertex[0] : vertex[2] - vertex[0];
+        } break;
+#endif
         CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
             const bool strand = scene.instances[point.instance].world == STRANDS; // root, or random
             const float4 root = strand ? scene.strands[3 * scene.segments[2 * point.triangle + 1]] : float4(0, 0, 0, 0);

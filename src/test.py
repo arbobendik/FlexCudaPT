@@ -4469,7 +4469,7 @@ def globaled():  # OSL globals
     light.inputs['Color'].default_value = (0.5, 0.5, 0.5, 1)
     assert scripted('    Color = time;\n') == exported().requests.getvalue(), 'osl time'
     # What Flex lacks raises in the export, which Blender reports on stderr from a depsgraph handler and goes on from
-    for body, named in (('Color = Ng;', 'the global Ng'), ('getattribute("geom:name", Color);',
+    for body, named in (('Color = Ps;', 'the global Ps'), ('getattribute("geom:name", Color);',
             "getattribute of 'geom:name'"), ('Color = transform("raster", P);', "the space 'raster'")):
         reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
         bpy.app.handlers.depsgraph_update_post.append(export)
@@ -4649,6 +4649,57 @@ def stepped():
     preferences.device, bpy.context.window.scene = device, shown
 
 stepped()
+
+# A Script node's Ng, u, v, dPdu and dPdv are of the hit's triangle: on one triangle, turned and tilted, smooth with its
+# normals bent away from its face, seen straight down by an orthographic camera, its light the script's Color reads
+# Ng the face's normal toward the camera (not the bent N), u and v the pixel's place along its edges from vertex 0,
+# P = v0 + u (v1 - v0) + v (v2 - v0), and dPdu, dPdv those edges, all in the world
+def triangled():  # OSL triangle globals
+    shown, lit, was = bpy.context.window.scene, opened('osl triangle', sky=(0, 0, 0)), preferences.device
+    lit.flex_restir = False
+    lit.camera = bpy.data.objects.new('osl triangle camera', bpy.data.cameras.new('osl triangle camera'))
+    lit.collection.objects.link(lit.camera)
+    lit.camera.data.type, lit.camera.data.ortho_scale, lit.camera.location = 'ORTHO', 2, (0, 0, 5)
+    corners = numpy.array(((-0.9, -0.7, 0), (0.8, -0.6, 0), (-0.2, 0.9, 0)))
+    mesh = bpy.data.meshes.new('osl triangle')
+    mesh.from_pydata(corners.tolist(), [], [(0, 1, 2)])
+    mesh.shade_smooth()
+    mesh.normals_split_custom_set([(0.6, 0, 0.8), (0, 0.6, 0.8), (-0.6, 0, 0.8)])
+    lit.collection.objects.link(ob := bpy.data.objects.new('osl triangle', mesh))
+    ob.rotation_euler, ob.scale = (0.4, 0, 0.3), (1.1, 0.9, 1)
+    mesh.materials.append(material := bpy.data.materials.new('osl triangle'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    light = nodes.new('ShaderNodeEmission')
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    bpy.context.view_layer.update()
+    world = numpy.array([ob.matrix_world @ Vector(c) for c in corners])
+    face = numpy.cross(world[1] - world[0], world[2] - world[0])
+    face *= numpy.sign(face[2]) / numpy.linalg.norm(face)  # Toward the camera above
+    f = (numpy.arange(SIZE) + 0.5) / SIZE * 2 - 1
+    x, y = numpy.meshgrid(f, f)  # Rows from the bottom, as render() gives them
+    # (x, y) = v0 + u (v1 - v0) + v (v2 - v0) in the view's plane, the orthographic view keeping barycentrics
+    edges = numpy.stack((world[1, :2] - world[0, :2], world[2, :2] - world[0, :2]), 1)
+    u, v = numpy.moveaxis(numpy.linalg.solve(edges, numpy.stack((x - world[0, 0], y - world[0, 1]), 0).reshape(2, -1))
+        .reshape(2, SIZE, SIZE), 0, 0)
+    inside = (u > 0.05) & (v > 0.05) & (u + v < 0.95)  # Off the edges by a pixel and more
+    assert inside.sum() > 400, inside.sum()
+    for body, due in (('Color = Ng * 0.5 + 0.5;', numpy.broadcast_to(face * 0.5 + 0.5, (SIZE, SIZE, 3))),
+            ('Color = color(u, v, 0);', numpy.stack((u, v, 0 * u), -1)),
+            ('Color = dPdu * 0.25 + 0.5;', numpy.broadcast_to((world[1] - world[0]) * 0.25 + 0.5, (SIZE, SIZE, 3))),
+            ('Color = dPdv * 0.25 + 0.5;', numpy.broadcast_to((world[2] - world[0]) * 0.25 + 0.5, (SIZE, SIZE, 3)))):
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('triangled.osl')
+        script.script.write('shader triangled(output color Color = 0) {\n    ' + body + '\n}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['Color'], light.inputs['Color'])
+        for preferences.device in ('OPTIX', 'VULKAN'):
+            seen = render(lit)
+            assert numpy.abs(seen[inside] - due[inside]).max() < 0.005, ('osl triangle', body, preferences.device,
+                numpy.abs(seen[inside] - due[inside]).max())
+        nodes.remove(script)
+    preferences.device = was
+    bpy.context.window.scene = shown
+triangled()
 
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
