@@ -44,7 +44,8 @@ enum { SCENE, REQUEST, UPDATE, STEPS };
 
 int main(int, char** argv) { // Usage: renderer file parent < scenes, requests > an answer per request, sums in the file
 #ifndef VK_VERSION_1_0
-    if (argv[1] && !std::strcmp(argv[1], "native")) return compileNative(argv[2], argv[3][0] == '1'); // The helper
+    if (argv[1] && !std::strcmp(argv[1], "native")) // The helper
+        return compileNative(argv[2], argv[3][0] == '1', argv[4]);
 #endif
     // CUDA + OptiX contexts
     CUcontext cuda;
@@ -279,7 +280,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // helper process, into a tier of the special's params that launches take once compiled, until the steps change
     Tier* native = nullptr;
     pid_t helper = 0;
-    std::string helping; // Its directory, of the programs' source and the PTX
+    std::string helping, cached; // Its directory, of the programs' source and the PTX; the PTX's in OptiX's cache
     unsigned counted = 0; // Launches since the steps changed
     bool chosen = false; // Whether their programs were chosen since, none or some
     std::vector<Tier*> retiring; // Those of earlier op sets, compiling still or awaiting their end
@@ -323,8 +324,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (interim) drop(interim), interim = nullptr;
         }
 #ifndef VK_VERSION_1_0
-        const auto adopt = [&] { // The PTX, compiled as the special's module
-            if (FILE* file = std::fopen((helping + "/native.ptx").c_str(), "rb")) {
+        const auto adopt = [&] { // The PTX cached, compiled as the special's module
+            if (FILE* file = std::fopen(cached.c_str(), "rb")) {
                 native = new Tier{.params = special->params};
                 char buffer[1 << 16];
                 for (size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file));) native->ptx.append(buffer, n);
@@ -333,9 +334,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         };
         int status;
         if (helper && waitpid(helper, &status, WNOHANG) == helper) {
-            helper = 0;
+            helper = 0; // Its PTX in the cache
             if (WIFEXITED(status) && !WEXITSTATUS(status)) adopt();
-            std::filesystem::remove_all(helping);
         }
         if (native && pipeline == special->pipeline && compiled(*native)) linked(*native), use(*native);
         if (!chosen && counted >= NATIVE_AFTER && special && pipeline == special->pipeline) {
@@ -345,13 +345,18 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             const std::vector<unsigned> programs = chooseNative(loaded.ops, calls);
             const bool exact = std::getenv("FLEX_NATIVE_EXACT"), rare = extended(special->params);
             const std::string text = generateNative(loaded.ops, programs, exact);
+            char key[17]; // Its source's, of this build and its options
+            std::snprintf(key, sizeof(key), "%016zx", std::hash<std::string>{}(text + char('0' + 2 * exact + rare)
+                + nativeBuild()));
+            cached = cache + "/flex-native-" + key + ".ptx";
             char dir[] = "/tmp/flex-native-XXXXXX";
-            if (!programs.empty() && mkdtemp(dir)) {
+            if (!programs.empty() && std::filesystem::exists(cached)) adopt();
+            else if (!programs.empty() && mkdtemp(dir)) { // Else compiled by the helper
                 helping = dir;
                 FILE* file = std::fopen((helping + "/native.cuh").c_str(), "wb");
                 std::fwrite(text.data(), 1, text.size(), file), std::fclose(file);
                 char self[] = "/proc/self/exe", mode[] = "native", options[] = {char('0' + rare), 0};
-                char* args[] = {self, mode, dir, options, nullptr};
+                char* args[] = {self, mode, dir, options, cached.data(), nullptr};
                 if (posix_spawn(&helper, self, nullptr, nullptr, args, environ)) helper = 0;
             }
         }

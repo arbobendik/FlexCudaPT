@@ -11,8 +11,6 @@
 #include <string>
 #include <vector>
 #include <dlfcn.h>
-#include <csignal>
-#include <sys/prctl.h>
 #include <unistd.h>
 
 // The programs worth native code: by shade()'s calls at the hot call sites times their length, the fewest covering 90 %
@@ -155,10 +153,31 @@ inline std::string nativeDirectory() {
     return std::string(self, slash ? slash - self : 0) + "/native";
 }
 
-// The helper process: renderer.cu shipped beside the binary, with dir/native.cuh, through NVRTC into dir/native.ptx;
-// extended as the scene's module is. Without NVRTC (libnvrtc beside it), none: the scene keeps the interpreter.
-inline int compileNative(const char* dir, bool extended) {
-    prctl(PR_SET_PDEATHSIG, SIGKILL); // Ended with its renderer
+// What a native PTX is compiled from besides its programs, which its place in the cache is keyed by too: the shipped
+// sources and headers, and NVRTC by its size
+inline std::string nativeBuild() {
+    std::vector<std::filesystem::path> paths; // In order, so that the key is the same whatever the directory's
+    std::error_code ignored;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(nativeDirectory(), ignored))
+        if (entry.is_regular_file()) paths.push_back(entry.path());
+    std::sort(paths.begin(), paths.end());
+    std::string build;
+    for (const auto& path : paths) {
+        build += std::to_string(std::filesystem::file_size(path, ignored)) + "\n";
+        if (path.filename().string().find(".so") != std::string::npos) continue;
+        FILE* file = std::fopen(path.c_str(), "rb");
+        char buffer[1 << 16];
+        for (size_t n; file && (n = std::fread(buffer, 1, sizeof(buffer), file));) build.append(buffer, n);
+        if (file) std::fclose(file);
+    }
+    return build;
+}
+
+// The helper process: renderer.cu shipped beside the binary, with dir/native.cuh, which it removes once read, through
+// NVRTC into the cache's file, written whole under a name of its own first, so another renderer may read it at once.
+// It outlives its renderer, so a scene ended before its compile finds it cached next time, and exits once written.
+// Extended as the scene's module is. Without NVRTC (libnvrtc beside it), none: the scene keeps the interpreter.
+inline int compileNative(const char* dir, bool extended, const char* cached) {
     const std::string here = nativeDirectory();
     for (const auto& entry : std::filesystem::directory_iterator(here)) // Its builtins first, which it opens by name
         if (entry.path().filename().string().starts_with("libnvrtc-builtins.so"))
@@ -183,6 +202,7 @@ inline int compileNative(const char* dir, bool extended) {
         return text;
     };
     const std::string source = read(here + "/renderer.cu"), cases = read(std::string(dir) + "/native.cuh");
+    std::filesystem::remove_all(dir); // Read, so removed on any outcome
     const char* header = cases.c_str();
     const char* name = "native.cuh";
     void* program;
@@ -197,8 +217,10 @@ inline int compileNative(const char* dir, bool extended) {
     size(program, &bytes);
     std::string ptx(bytes, 0);
     get(program, ptx.data());
-    FILE* file = std::fopen((std::string(dir) + "/native.ptx").c_str(), "wb");
-    if (!file) return 1;
-    std::fwrite(ptx.data(), 1, bytes - 1, file);
-    return std::fclose(file) != 0;
+    const std::string partial = std::string(cached) + "." + std::to_string(getpid());
+    FILE* file = std::fopen(partial.c_str(), "wb");
+    const bool whole = file && std::fwrite(ptx.data(), 1, bytes - 1, file) == bytes - 1;
+    if (!file || std::fclose(file) || !whole || std::rename(partial.c_str(), cached))
+        return std::remove(partial.c_str()), 1;
+    return 0;
 }
