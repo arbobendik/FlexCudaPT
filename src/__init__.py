@@ -1474,10 +1474,12 @@ def surfaced(closures):  # Of a script's closure value, its weighted closures, t
             value=given[n] if isinstance(given[n], tuple) else triple(given[n]))) for n, t, d in SOCKETS_OF[kind]))
         surfaces.append(resolve(linked(node)))
     return functools.reduce(added, surfaces) if surfaces else BLACK
-# Of noise(), each op's own kind and the kinds Flex draws: Perlin's by the Noise texture at no detail, unnormalized
-# (signed) or normalized (in [0, 1]); "hash" by the White Noise texture of the coordinates' bits
-NOISES = {'noise': 'uperlin', 'snoise': 'perlin', 'cellnoise': 'cell', 'hashnoise': 'hash'}
-NOISE_KINDS = {'perlin': 1, 'snoise': 1, 'uperlin': 0, 'noise': 0, 'hash': None}
+# Of noise(), each op's own kind, periodic ones by a p, and the kinds Flex draws: Perlin's by the Noise texture at no
+# detail, unnormalized (signed) or normalized (in [0, 1]); "hash" by the White Noise texture of the coordinates' bits,
+# "cell" of their floors; a color or vector of either texture's color
+NOISES = {'noise': 'uperlin', 'snoise': 'perlin', 'cellnoise': 'cell', 'hashnoise': 'hash', 'pnoise': 'uperlin',
+    'psnoise': 'perlin'}
+NOISE_KINDS = {'perlin': 1, 'snoise': 1, 'uperlin': 0, 'noise': 0, 'hash': None, 'cell': None}
 # Of texture(), its interpolations and wraps as the Image Texture node's, OSL's default smart cubic and periodic
 TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cubic', 'smartcubic': 'Smart'}
 TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
@@ -1567,16 +1569,28 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
             elif op == 'assign' and 'closure color' in kinds: values[args[0]] = operands[0]
             elif 'closure color' in kinds: refused(f'the step {op} on closures')
             elif op in NOISES:  # Of a named or the op's own kind, as Flex's Noise or White Noise texture of 1 to 4D
-                named = isinstance(operands[0], str)
+                named, periodic, color = isinstance(operands[0], str), op[0] == 'p', kinds[0] in TRIPLES
                 kind, given = (operands[0], operands[1:]) if named else (NOISES[op], operands)
-                dims = {('float',): 1, ('float', 'float'): 2, ('triple',): 3, ('triple', 'float'): 4}.get(tuple(
-                    'triple' if k in TRIPLES else k for k in kinds[1 + named:]))
-                if kinds[0] != 'float' or dims is None: refused(f'{op} of a {kinds[0]} or of {kinds[1 + named:]}')
-                if kind not in NOISE_KINDS: refused(f'the noise "{kind}"')
+                shape = tuple('triple' if k in TRIPLES else k for k in kinds[1 + named:])
+                half = len(shape) // 2 if periodic else len(shape)  # The coordinates, then any periods alike
+                dims = {('float',): 1, ('float', 'float'): 2, ('triple',): 3, ('triple', 'float'): 4}.get(
+                    shape[:half]) if not periodic or shape[:half] == shape[half:] else None
+                if kinds[0] not in ('float', *TRIPLES) or dims is None: refused(f'{op} of a {kinds[0]} or of {shape}')
+                if kind not in NOISE_KINDS or periodic and NOISE_KINDS[kind] is not None:
+                    refused(f'the noise "{kind}"{" periodic" * periodic}')
+                periods = [fold(t) for t in given[half:]]  # Constant whole numbers of at least 1, as the rows test
+                if any(isinstance(t, tuple) or numpy.any(numpy.asarray(t) < 1) or numpy.any(numpy.asarray(t) % 1)
+                        for t in periods): refused('a period not a constant whole number of at least 1')
+                if kind == 'cell': given = [('FLOOR', g) for g in given[:half]] + given[half:]
+                # Of a periodic noise, its coordinates wrapped into [0, period), as by the Wrap math node
+                if periodic: given = [COMPOSITES['WRAP'](g, t, 0) for g, t in zip(given, given[half:])]
                 point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)
                 w = given[1] if dims == 4 else 0
-                values[args[0]] = ('WHITE_NOISE', point, vector(dims, 0, w)) if NOISE_KINDS[kind] is None else ('NOISE',
-                    point, numpy.array((0, 0.5, 2.0)), numpy.array((0, 0, NOISE_KINDS[kind])), vector(w, dims, 0))
+                fractal = lambda p, w: ('NOISE', p, numpy.array((0, 0.5, 2.0)), numpy.array((0, 0, NOISE_KINDS[kind])),
+                    vector(w, dims, 0))
+                at = lambda seed: fractal(('ADD', point, offset(seed, dims)[0]), ('ADD', w, offset(seed, dims)[1]))
+                values[args[0]] = ('WHITE_NOISE', point, vector(dims, int(color), w)) if NOISE_KINDS[kind] is None \
+                    else vector(fractal(point, w), at(dims), at(dims + 1)) if color else fractal(point, w)
             elif op == 'texture' and isinstance(operands[0], str):  # As an Image Texture node of the file and options
                 options = dict(zip(operands[3::2], args[5::2]))  # Each option's name and the variable holding its value
                 named = {o: values[a] for o, a in options.items() if o != 'alpha'}
