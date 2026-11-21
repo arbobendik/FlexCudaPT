@@ -44,7 +44,9 @@ enum { SCENE, REQUEST, UPDATE, STEPS };
 
 int main(int, char** argv) { // Usage: renderer file parent < scenes, requests > an answer per request, sums in the file
 #ifndef VK_VERSION_1_0
-    if (argv[1] && !std::strcmp(argv[1], "native")) return compileNative(argv[2], argv[3][0] == '1'); // The helper
+    const bool nativeHelper = argv[1] && !std::strcmp(argv[1], "native"); // NVRTC first, without a context
+    if (nativeHelper)
+        if (const int failed = compileNative(argv[2], argv[3][0] == '1', argv[3][1] == '1', argv[4])) return failed;
 #endif
     // CUDA + OptiX contexts
     CUcontext cuda;
@@ -57,6 +59,22 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     unsigned rtcore;
     CHECK(optixDeviceContextGetProperty(context, OPTIX_DEVICE_PROPERTY_RTCORE_VERSION, &rtcore, sizeof(rtcore)));
     CHECK(!rtcore); // RT cores required: built-in triangles then use hardware traversal and intersection.
+    OptixPipelineCompileOptions compile{ // Rays traverse instances of BVHs of triangles
+        .traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
+        .numPayloadValues = 7, // The triangle a ray skips, a layer and its gathering
+        .pipelineLaunchParamsVariableName = "params"};
+#ifndef VK_VERSION_1_0
+    if (nativeHelper) { // Its module of the PTX cached, as the renderer compiles it for the op set's words given, so
+        // OptiX's disk cache holds it once the helper ends
+        const std::string ptx = readFile(argv[4]);
+        const Params words{{std::strtoull(argv[5], nullptr, 10), std::strtoull(argv[6], nullptr, 10)}};
+        const OptixModuleCompileBoundValueEntry bound{0, sizeof(words.ops), &words};
+        const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
+        OptixModule module;
+        CHECK(optixModuleCreate(context, &options, &compile, ptx.data(), ptx.size(), nullptr, nullptr, &module));
+        return 0;
+    }
+#endif
     if (!argv[1]) return 0; // Probe: whether this machine's device runs it
 #ifdef VK_VERSION_1_0
     if (!std::strcmp(argv[1], "compile")) { // A helper renderer: of the op mask and SPIR-V given, the temporal round's
@@ -94,10 +112,6 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
 
     // Embedded PTX for the scene's steps, bound in params
-    OptixPipelineCompileOptions compile{ // Rays traverse instances of BVHs of triangles
-        .traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
-        .numPayloadValues = 7, // The triangle a ray skips, a layer and its gathering
-        .pipelineLaunchParamsVariableName = "params"};
     Params params{}; // Those of the module launches take
     const CUdeviceptr launch = allocate(sizeof(params));
     // Raygen programs per pass, then the triangle-skipping any-hit (rays only traversed: no miss, no closest hit)
@@ -270,7 +284,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     // helper process, into a tier of the special's params that launches take once compiled, until the steps change
     Tier* native = nullptr;
     pid_t helper = 0;
-    std::string helping; // Its directory, of the programs' source and the PTX
+    std::string helping, cached; // Its directory, of the programs' source and the PTX; the PTX's in OptiX's cache
     unsigned counted = 0; // Launches since the steps changed
     bool chosen = false; // Whether their programs were chosen since, none or some
     std::vector<Tier*> retiring; // Those of earlier op sets, compiling still or awaiting their end
@@ -310,19 +324,14 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (interim) drop(interim), interim = nullptr;
         }
 #ifndef VK_VERSION_1_0
-        const auto adopt = [&] { // The PTX, compiled as the special's module
-            if (FILE* file = std::fopen((helping + "/native.ptx").c_str(), "rb")) {
-                native = new Tier{.params = special->params};
-                char buffer[1 << 16];
-                for (size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file));) native->ptx.append(buffer, n);
-                std::fclose(file), give(begin(*native));
-            }
+        const auto adopt = [&] { // The PTX cached, compiled as the special's module
+            if (std::filesystem::exists(cached))
+                native = new Tier{.params = special->params, .ptx = readFile(cached)}, give(begin(*native));
         };
         int status;
         if (helper && waitpid(helper, &status, WNOHANG) == helper) {
-            helper = 0;
+            helper = 0; // Its PTX in the cache
             if (WIFEXITED(status) && !WEXITSTATUS(status)) adopt();
-            std::filesystem::remove_all(helping);
         }
         if (native && pipeline == special->pipeline && compiled(*native)) linked(*native), use(*native);
         if (!chosen && counted >= NATIVE_AFTER && special && pipeline == special->pipeline) {
@@ -330,16 +339,26 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             std::vector<unsigned> calls(loaded.rows); // Chosen by their calls so far
             CHECK(cuMemcpyDtoH(calls.data(), (CUdeviceptr)scene.calls, calls.size() * sizeof(unsigned)));
             const std::vector<unsigned> programs = chooseNative(loaded.ops, calls);
-            const bool exact = std::getenv("FLEX_NATIVE_EXACT"), rare = extended(special->params);
-            const std::string text = generateNative(loaded.ops, programs, exact);
-            char dir[] = "/tmp/flex-native-XXXXXX";
-            if (!programs.empty() && mkdtemp(dir)) {
-                helping = dir;
-                FILE* file = std::fopen((helping + "/native.cuh").c_str(), "wb");
-                std::fwrite(text.data(), 1, text.size(), file), std::fclose(file);
-                char self[] = "/proc/self/exe", mode[] = "native", options[] = {char('0' + rare), 0};
-                char* args[] = {self, mode, dir, options, nullptr};
-                if (posix_spawn(&helper, self, nullptr, nullptr, args, environ)) helper = 0;
+            if (!programs.empty()) { // Only with programs to compile
+                const bool exact = std::getenv("FLEX_NATIVE_EXACT"), rare = extended(special->params);
+                const std::string text = generateNative(loaded.ops, programs, exact);
+                char key[17]; // Its source's, of this build and its options
+                std::snprintf(key, sizeof(key), "%016zx", std::hash<std::string>{}(text + char('0' + 2 * exact + rare)
+                    + nativeBuild()));
+                cached = cache + "/flex-native-" + key + ".ptx";
+                char dir[] = "/tmp/flex-native-XXXXXX";
+                if (std::filesystem::exists(cached)) adopt();
+                else if (mkdtemp(dir)) { // Else compiled by the helper
+                    helping = dir;
+                    FILE* file = std::fopen((helping + "/native.cuh").c_str(), "wb");
+                    std::fwrite(text.data(), 1, text.size(), file), std::fclose(file);
+                    char self[] = "/proc/self/exe", mode[] = "native";
+                    char options[] = {char('0' + rare), char('0' + exact), 0};
+                    std::string words[2] = {std::to_string(special->params.ops[0]),
+                        std::to_string(special->params.ops[1])}; // Of its op set, which its module binds
+                    char* args[] = {self, mode, dir, options, cached.data(), words[0].data(), words[1].data(), nullptr};
+                    if (posix_spawn(&helper, self, nullptr, nullptr, args, environ)) helper = 0;
+                }
             }
         }
 #endif

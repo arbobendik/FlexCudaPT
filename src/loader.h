@@ -30,6 +30,17 @@ inline bool receive(void* data, size_t size, size_t count) {
 
 constexpr unsigned WORLD_SPACE = 1; // An instance's world flag of its points in world space, beside STRANDS
 
+// A whole file's bytes, none of a file not there
+inline std::string readFile(const std::string& path) {
+    std::string bytes;
+    if (FILE* file = std::fopen(path.c_str(), "rb")) {
+        char buffer[1 << 16];
+        for (size_t n; (n = std::fread(buffer, 1, sizeof(buffer), file));) bytes.append(buffer, n);
+        std::fclose(file);
+    }
+    return bytes;
+}
+
 inline size_t memory_used = 0, memory_peak = 0;
 inline void account(size_t bytes) { memory_peak = std::max(memory_peak, memory_used += bytes); }
 
