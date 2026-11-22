@@ -4773,11 +4773,12 @@ def noised():  # OSL noise()
             assert numpy.ptp(due) > 0.01 and numpy.abs(seen - due).max() < 1e-5, ('osl noise', body, preferences.device,
                 numpy.abs(seen - due).max())
         nodes.remove(script)
-    # A period not a constant whole number of at least 1 and a kind Flex lacks raise in the export, which Blender
-    # reports on stderr from a depsgraph handler and goes on from
+    # A period not a constant whole number of at least 1, a kind Flex lacks and a periodic simplex raise in the
+    # export, which Blender reports on stderr from a depsgraph handler and goes on from
     for body, named in (('pnoise("cell", P, 2.5)', 'a period not'), ('pnoise("hash", P, point(1, 0, 1))',
-            'a period not'), ('pnoise("cell", P, P[0])', 'a period not'), ('pnoise("perlin", P, 4)',
-            'the noise "perlin" periodic'), ('noise("simplex", P)', 'the noise "simplex"')):
+            'a period not'), ('pnoise("cell", P, P[0])', 'a period not'), ('pnoise("perlin", P, 2.5)', 'a period not'),
+            ('noise("lattice", P)', 'the noise "lattice"'), ('pnoise("simplex", P, 4)',
+            'the noise "simplex" periodic')):
         reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
         bpy.app.handlers.depsgraph_update_post.append(export)
         sys.stderr = reported
@@ -4794,6 +4795,45 @@ def noised():  # OSL noise()
     preferences.device = was
     bpy.context.window.scene = shown
 noised()
+
+# A Script node's periodic noises render as the renderer defines them: periodic "perlin" and "uperlin" as noise()
+# where the period exceeds the plane, repeating by the period
+def noisier():  # OSL pnoise()
+    shown, lit, was = bpy.context.window.scene, opened('osl noisier', sky=(0, 0, 0)), preferences.device
+    lit.flex_restir, lit.flex_samples = False, 16
+    lit.render.resolution_x = lit.render.resolution_y = 32
+    lit.camera = bpy.data.objects.new('osl noisier camera', bpy.data.cameras.new('osl noisier camera'))
+    lit.collection.objects.link(lit.camera)
+    lit.camera.data.type, lit.camera.data.ortho_scale, lit.camera.location = 'ORTHO', 2, (0, 0, 1)
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('osl noisier'))
+    lit.collection.objects.link(bpy.data.objects.new('osl noisier', mesh))
+    mesh.materials.append(material := bpy.data.materials.new('osl noisier'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    light = nodes.new('ShaderNodeEmission')
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    def drawn(body, kind='float'):  # The plane lit by a script's value of the kind
+        script = nodes.new('ShaderNodeScript')
+        script.script = bpy.data.texts.new('noisier.osl')
+        script.script.write(f'shader noisier(output color Color = 0) {{\n    {kind} f = {body};\n    Color = f;\n}}\n')
+        Viewport.engine.update_script_node(types.SimpleNamespace(report=print), script)
+        links.new(script.outputs['Color'], light.inputs['Color'])
+        seen = render(lit, 32)
+        nodes.remove(script)
+        return seen
+    for preferences.device in ('OPTIX', 'VULKAN'):
+        for body, due in (('pnoise("perlin", P * 4 + 8, 1000)', 'noise("perlin", P * 4 + 8)'),
+                ('pnoise(P * 4 + 8, point(1000, 1000, 1000))', 'noise(P * 4 + 8)'),
+                ('pnoise(P[0] * 4 + 8, 1000)', 'noise(P[0] * 4 + 8)'),
+                ('psnoise(P * 4 + 8, 0.6, point(1000, 1000, 1000), 1000)', 'snoise(P * 4 + 8, 0.6)'),
+                ('pnoise("perlin", P * 4, 2)', 'pnoise("perlin", P * 4 + 2, 2)')):
+            seen, wanted = drawn(f'0.5 + 0.5 * {body}', 'float'), drawn(f'0.5 + 0.5 * {due}', 'float')
+            assert numpy.ptp(wanted) > 0.01 and numpy.abs(seen - wanted).max() < 1e-5, ('osl pnoise', body,
+                preferences.device, numpy.abs(seen - wanted).max())
+    preferences.device = was
+    bpy.context.window.scene = shown
+noisier()
 
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
