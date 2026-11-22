@@ -25,13 +25,14 @@ struct Projection { uint type; float range[8], shift[2]; };
     LIGHT_PATH, WHITE_NOISE, VORONOI, MAGIC, BRICK, OBJECT, VERTEX_COLOR, VERTEX_ALPHA,
     OBJECT_INFO, CAMERA_POINT, WINDOW, TRANSFORM, BOX, SHIFT, SHIFTED, BUMP, STORE, LOAD, ANIMATED, BAKED, SPECULAR,
     TRANSLUCENT, SHEEN, INSTANCER, ANISOTROPIC, MEDIUM, CURVES, HAIR_INFO, HAIR, PHASE, WORLD, GRID, VELVET, SKY,
-    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH, TRIANGLE };
+    TOON, SELECT, PANORAMA, DISPERSION, WORLD_PATH, TRIANGLE, NOISE_EXTRA };
 // MEDIUM, CURVES, WORLD, SKY and PANORAMA no program takes: a scene's varying media, strands, world volume, world
 // sampled by its luminance and panoramic camera (CUDA's alone; its place kept, so the codes after it agree with the
 // exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
 // DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes, a world that reads
-// Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges
+// Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges; NOISE_EXTRA periodic gradient
+// noise
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -532,6 +533,35 @@ float noise(float3 p, float w, int dims) {
             return value;
     }
 }
+#ifdef EXTENDED
+// The lattice coordinate x wrapped into [0, n), n = floor(period) where n >= 1: x - n floor(x / n) = (x % n + n) % n
+int tiled(int x, float period) { const int n = int(floor(period)); return n >= 1 ? (x % n + n) % n : x; }
+// Signed gradient noise as noise()'s general loop, equal to it where no period applies, of corners tiled by the periods
+float periodic(float3 p, float w, int dims, float3 period, float wPeriod) {
+    const float q[4] = {wrapped(p.x), wrapped(p.y), wrapped(p.z), wrapped(w)};
+    const float t[4] = {period.x, period.y, period.z, wPeriod}, scales[4] = {0.25f, 0.6616f, 0.9820f, 0.8344f};
+    float sum = 0;
+    for (int corner = 0; corner < 1 << dims; ++corner) {
+        float weight = 1, f[4] = {0, 0, 0, 0};
+        int x[4] = {0, 0, 0, 0};
+        for (int k = 0; k < dims; ++k) {
+            const int b = corner >> k & 1;
+            x[k] = tiled(int(floor(q[k])) + b, t[k]);
+            f[k] = q[k] - floor(q[k]) - b;
+            weight *= b != 0 ? fade(f[k] + 1) : 1 - fade(f[k]);
+        }
+        sum += weight * gradient(jenkins(dims, uint(x[0]), uint(x[1]), uint(x[2]), uint(x[3])), f, dims);
+    }
+    return scales[dims - 1] * sum;
+}
+// Of kind 0 and 1 periodic gradient noise, signed and in [0, 1]: a's w, dims and kind, b the periods, c w's
+// period
+[noinline] float noiseExtra(float3 p, float3 a, float3 b, float3 c) {
+    const int dims = int(a.y), kind = int(a.z);
+    const float v = periodic(p, a.x, dims, b, c.x);
+    return kind == 1 ? 0.5f * v + 0.5f : v;
+}
+#endif
 // Cubic B-spline weights of the four texels around t
 float spline(float t, int k) {
     return k == 0 ? (1 - t) * (1 - t) * (1 - t) / 6 : k == 1 ? (t * t * (3 * t - 6) + 4) / 6
@@ -590,9 +620,9 @@ struct Point {
 [vk::constant_id(0)] const uint64_t OPS0 = 0xFFFFFFFFFFFFFFFFull;
 [vk::constant_id(1)] const uint64_t OPS1 = 0xFFFFFFFFFFFFFFFFull;
 bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1) != 0; }
-#ifndef EXTENDED // Nor varying media, strands and a hit's triangle
+#ifndef EXTENDED // Nor varying media, strands, a hit's triangle and the rarer noises
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
-    && code != TRIANGLE && used(code))
+    && code != TRIANGLE && code != NOISE_EXTRA && used(code))
 #endif
 #define CASE(code) case code: if (!used(code)) break;
 // An operation on a and b, each on the stack, the step's own value or read from a slot; the n on the stack replaced
@@ -655,6 +685,9 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
             stack[top - 1] = output == 0 ? normalize(vertex.face()) * (backfacing ? -1.0f : 1.0f) : output == 1
                 ? float3(point.s, point.t, 0) : output == 2 ? vertex[1] - vertex[0] : vertex[2] - vertex[0];
         } break;
+        CASE(NOISE_EXTRA) top -= 3;
+            stack[top - 1] = float3(1, 1, 1) * noiseExtra(stack[top - 1], stack[top], stack[top + 1], stack[top + 2]);
+            break;
 #endif
         CASE(HAIR_INFO) { // Of the strand at the point, else none: whether one, its intercept, by its points from the
             const bool strand = scene.instances[point.instance].world == STRANDS; // root, or random
