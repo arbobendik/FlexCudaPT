@@ -59,7 +59,7 @@ struct Instance { uint first, count, world; float matrix[12], adjugate[9]; Info 
     uint key; };
 static const uint NONE = ~0u;
 struct Hit { uint triangle, instance; float2 uv; };
-struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
+struct Settings { uint restir, decorrelation, neighbors, bounces, paths, denoise, noise, medium; };
 static const int PAIRING_SIZES[] = {254, 230, 210};
 static const uint QUEUE_HEADER = 3 + 2 * 40; // The shift queue's dispatch size, jobs per bin and jobs written per bin
 // The passes by their indices in renderer.h's PROGRAMS

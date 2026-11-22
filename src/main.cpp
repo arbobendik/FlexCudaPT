@@ -339,8 +339,16 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
 #ifndef VK_VERSION_1_0
     CUarray noiseArray = nullptr; // The blue-noise tensor's layers, once built or read
 #endif
+#ifndef VK_VERSION_1_0
+    CUmodule noiseModule; // FlexKernels' generation of the tensor, its own kernels
+    CUfunction noiseStart, noiseSweep;
+    CHECK(cuModuleLoadData(&noiseModule, build_noise_ptx));
+    CHECK(cuModuleGetFunction(&noiseStart, noiseModule, "noiseStart"));
+    CHECK(cuModuleGetFunction(&noiseSweep, noiseModule, "noiseSweep"));
+#endif
     const std::string addon = std::filesystem::canonical("/proc/self/exe").parent_path(); // Its shipped tensor
-    // The blue-noise tensor of a side as the add-on ships it, white without; on OptiX read as a layered texture
+    // The blue-noise tensor of a side: stored by the user, else shipped with the add-on, else generated once by
+    // FlexKernels' own kernels, before any frame, and stored; on OptiX then read as a layered texture
     const auto noised = [&](unsigned size) {
         const size_t texels = size_t(size) * size * 32, bytes = texels * sizeof(unsigned);
 #ifndef VK_VERSION_1_0
@@ -349,13 +357,39 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         if (scene.noise) release((CUdeviceptr)scene.noise);
         std::vector<unsigned> ranks(texels);
         const std::string name = "/bluenoise-" + std::to_string(size) + "x" + std::to_string(size) + "x32.bin";
-        FILE* stored = std::fopen((addon + name).c_str(), "rb");
-        const bool read = stored && std::fread(ranks.data(), 1, bytes, stored) == bytes && std::fgetc(stored) == EOF;
-        if (stored) std::fclose(stored);
+        const char* directory = std::getenv("FLEX_NOISE");
+        bool read = false;
+        for (const std::string& file : {directory ? directory + name : std::string(), addon + name})
+            if (FILE* stored = !read && !file.empty() ? std::fopen(file.c_str(), "rb") : nullptr) {
+                read = std::fread(ranks.data(), 1, bytes, stored) == bytes && std::fgetc(stored) == EOF;
+                std::fclose(stored);
+            }
         scene.noise = (unsigned*)allocate(bytes, read ? ranks.data() : nullptr), scene.noiseSize = size;
         scene.noiseTexture = 0, params.noise = size;
         CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
-        if (!read) { release((CUdeviceptr)scene.noise), scene.noise = nullptr; return; } // None shipped: white
+        if (!read) { // White, then 64 sweeps of 8 colours' blocks, by FlexKernels' own kernels or pipelines
+#ifdef VK_VERSION_1_0
+            CHECK(noiseGenerate((CUdeviceptr)scene.noise, size, 64));
+#else
+            struct { unsigned* data; size_t count; } tensor{scene.noise, texels}; // A RWStructuredBuffer<uint>
+            const unsigned blocks = size / 16 * (size / 16) * 2;
+            void* start[] = {&tensor, &size};
+            CHECK(cuLaunchKernel(noiseStart, unsigned((texels + 63) / 64), 1, 1, 64, 1, 1, 0, nullptr, start, nullptr));
+            for (unsigned sweep = 0; sweep < 64; ++sweep) for (unsigned colour = 0; colour < 8; ++colour) {
+                void* step[] = {&tensor, &size, &sweep, &colour};
+                CHECK(cuLaunchKernel(noiseSweep, (blocks + 63) / 64, 1, 1, 64, 1, 1, 0, nullptr, step, nullptr));
+            }
+#endif
+            if (directory) { // Whole or not at all, a renderer storing it at once with another
+                CHECK(cuMemcpyDtoH(ranks.data(), (CUdeviceptr)scene.noise, bytes));
+                const std::string file = directory + name, part = file + "." + std::to_string(getpid());
+                if (FILE* storing = std::fopen(part.c_str(), "wb")) {
+                    const bool whole = std::fwrite(ranks.data(), 1, bytes, storing) == bytes;
+                    if (!std::fclose(storing) && whole) std::rename(part.c_str(), file.c_str());
+                    else std::remove(part.c_str());
+                }
+            }
+        }
 #ifndef VK_VERSION_1_0
         // Read from here on as a layered texture: a warp's tile of pixels reads one tile of it per draw
         const CUDA_ARRAY3D_DESCRIPTOR layers{size, size, 32, CU_AD_FORMAT_UNSIGNED_INT16, 2, CUDA_ARRAY3D_LAYERED};
@@ -477,7 +511,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (last) drop(last);
                 flock(busy, compiled(*special) ? LOCK_UN : LOCK_SH); // Awaiting its own: the warm-up yields
             }
-            if (!scene.noiseSize) noised(512); // Its prepass, the first scene's: the shipped side
+            if (!scene.noiseSize) noised(512); // Its prepass, the first scene's: the default side, or a request's later
             for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
                 const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
                 CHECK(cuMemsetD32((CUdeviceptr)(scene.texels + texture.texel), 0, 2 * texture.width * texture.height));
@@ -539,6 +573,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             continue;
         }
         receive(&request, sizeof(request), 1);
+        if (request.view.settings.noise != scene.noiseSize) noised(request.view.settings.noise); // A size changed
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
             reused = !stale && length(next.origin - last.origin) <= request.distance

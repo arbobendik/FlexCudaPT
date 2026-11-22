@@ -2075,6 +2075,9 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
 
 BACKENDS = (('OPTIX', ''), ('VULKAN', '-vulkan'))  # The renderer of each, by the suffix of its binary
 runnable = ()  # The backends whose renderer starts on this machine, which register finds
+def noises():  # The directory the blue-noise tensors are stored in, the add-on's user data
+    try: return bpy.utils.extension_path_user(__package__, create=True)
+    except ValueError: return bpy.utils.user_resource('DATAFILES', path='flex', create=True)
 def device(): return bpy.context.preferences.addons[__package__].preferences.device
 
 # Whether the point lies in the closed mesh of the BVH: a ray up from it crosses it an odd number of times, stepping a
@@ -2088,7 +2091,7 @@ def inside(tree, point):
 # The scene's settings of the renderer, in its order, which denoises on OptiX alone; the viewport denoises every result
 def settings(scene, viewport, device):
     return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors, scene.flex_bounces, scene.flex_paths, \
-        scene.flex_denoise * (1 + viewport) * (device == 'OPTIX')
+        scene.flex_denoise * (1 + viewport) * (device == 'OPTIX'), 1 << scene.flex_noise_size.bit_length() - 1
 
 # The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
 # angle its camera moves and turns at most from the last one's to reuse them and continue its denoised sequence; a view
@@ -2240,7 +2243,8 @@ class Flex(bpy.types.RenderEngine):
         self.device = device()  # That of the renderer, which the preference may change since
         process = subprocess.Popen((BINARY + '-vulkan' * (self.device == 'VULKAN'), str(self.shared.fileno()),
             str(os.getpid())) + ('headless',) * bpy.app.background,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),))
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, pass_fds=(self.shared.fileno(),),
+            env={**os.environ, 'FLEX_NOISE': noises()})
         self.requests = process.stdin
         self.answers = process.stdout
         process.stdin = process.stdout = None
@@ -3203,7 +3207,8 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
 
     def draw(self, context):
         self.layout.use_property_split = True
-        for name in ('flex_samples', 'flex_bounces', 'flex_paths'): self.layout.prop(context.scene, name)
+        for name in ('flex_samples', 'flex_bounces', 'flex_paths', 'flex_noise_size'):
+            self.layout.prop(context.scene, name)
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, 'flex_denoise')
@@ -3295,6 +3300,8 @@ PROPERTIES = {
         description='Bounces of a path after the surface the camera sees', default=16, min=0, max=16),
     'flex_paths': bpy.props.IntProperty(name='Paths per Sample',
         description='Paths traced per pixel and sample, the initial candidates of ReSTIR', default=1, min=1, max=32),
+    'flex_noise_size': bpy.props.IntProperty(name='Noise Size', description='Side of the blue-noise tensor every '
+        'random number is drawn from, a power of two: built once per size and stored', default=512, min=256, max=2048),
     'flex_denoise': bpy.props.BoolProperty(name='Denoise',
         description='Denoise the result with the OptiX denoiser'),
     'flex_restir': bpy.props.BoolProperty(name='ReSTIR',
