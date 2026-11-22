@@ -20,12 +20,10 @@
 #define CHECK(call) do { int error = (call); if (error) { \
     std::fprintf(stderr, "%s failed (%d)\n", #call, error); std::_Exit(1); } } while (0)
 
-// Count items of size piped in by the extension into data. Its pipe ends only once the extension is gone, closed,
-// crashed or killed, when the renderer ends too, whatever it was reading, rather than go on with what never came: true
-// as it returns only with them all. Ended without exit handlers: those of OptiX unload its compiler under its threads
-inline bool receive(void* data, size_t size, size_t count) {
+// count items of size piped in into data, all of them; a pipe ended (the extension gone) ends the renderer, without
+// exit handlers (OptiX's unload its compiler under its threads)
+inline void receive(void* data, size_t size, size_t count) {
     if (std::fread(data, size, count, stdin) != count) std::_Exit(0);
-    return true;
 }
 
 constexpr unsigned WORLD_SPACE = 1; // An instance's world flag of its points in world space, beside STRANDS
@@ -682,12 +680,12 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
     update(scene.ops, 0, loaded.rows, loaded.ops.data());
     receive(loaded.ops.data() + loaded.rows, sizeof(Op), count - loaded.rows);
     std::vector<float4> only; // Texels only bakes read, sent again for bakes to run again: first flagged in bit 31
-    for (unsigned table[2]; receive(table, sizeof(table), 1) && table[1];)
+    for (unsigned table[2]; receive(table, sizeof(table), 1), table[1];)
         if (table[0] >> 31) only.resize(std::max<size_t>(only.size(), (table[0] & ~(1u << 31)) + table[1])),
             receive(only.data() + (table[0] & ~(1u << 31)), sizeof(float4), table[1]);
         else update(scene.texels, table[0], table[1], std::vector<float4>(table[1]).data());
     std::unordered_map<unsigned, float> hints;
-    for (std::pair<unsigned, float> hint; receive(&hint, sizeof(hint), 1) && hint.first != ~0u;)
+    for (std::pair<unsigned, float> hint; receive(&hint, sizeof(hint), 1), hint.first != ~0u;)
         hints[hint.first] = hint.second;
     for (Material& material : loaded.materials) material.emitted = hints.at(material.program);
     receive(&count, sizeof(count), 1);
