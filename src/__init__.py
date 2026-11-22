@@ -1480,8 +1480,12 @@ def surfaced(closures):  # Of a script's closure value, its weighted closures, t
 NOISES = {'noise': 'uperlin', 'snoise': 'perlin', 'cellnoise': 'cell', 'hashnoise': 'hash', 'pnoise': 'uperlin',
     'psnoise': 'perlin'}
 NOISE_KINDS = {'perlin': 1, 'snoise': 1, 'uperlin': 0, 'noise': 0, 'hash': None, 'cell': None}
-# The kinds the renderer's rarer noises draw, by its kind number: the periodic gradient noises and simplex
-PERIODIC_KINDS, EXTRA_KINDS = {'perlin': 0, 'snoise': 0, 'uperlin': 1, 'noise': 1}, {'simplex': 2, 'usimplex': 3}
+# The kinds the renderer's rarer noises draw, by its kind number: the periodic gradient noises, simplex and the sparse
+# convolution, "gabor", and the latter's options with their defaults
+PERIODIC_KINDS, EXTRA_KINDS = {'perlin': 0, 'snoise': 0, 'uperlin': 1, 'noise': 1}, {'simplex': 2, 'usimplex': 3,
+    'gabor': 4}
+GABOR_OPTIONS = {'anisotropic': 0, 'direction': numpy.array((1.0, 0, 0)), 'bandwidth': 1.0, 'impulses': 16,
+    'do_filter': 1}
 # Of texture(), its interpolations and wraps as the Image Texture node's, OSL's default smart cubic and periodic
 TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cubic', 'smartcubic': 'Smart'}
 TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
@@ -1574,6 +1578,8 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                 named, periodic, color = isinstance(operands[0], str), op[0] == 'p', kinds[0] in TRIPLES
                 kind, given = (operands[0], operands[1:]) if named else (NOISES[op], operands)
                 shape = tuple('triple' if k in TRIPLES else k for k in kinds[1 + named:])
+                start = shape.index('string') if 'string' in shape else len(shape)  # Of any options, the first name
+                options, given, shape = dict(zip(given[start::2], given[start + 1::2])), given[:start], shape[:start]
                 half = len(shape) // 2 if periodic else len(shape)  # The coordinates, then any periods alike
                 dims = {('float',): 1, ('float', 'float'): 2, ('triple',): 3, ('triple', 'float'): 4}.get(
                     shape[:half]) if not periodic or shape[:half] == shape[half:] else None
@@ -1581,16 +1587,22 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                 extra = PERIODIC_KINDS.get(kind) if periodic else EXTRA_KINDS.get(kind)  # The renderer's rarer noise's
                 if kind not in NOISE_KINDS and kind not in EXTRA_KINDS or periodic and NOISE_KINDS.get(kind, 0) is not \
                         None and extra is None: refused(f'the noise "{kind}"{" periodic" * periodic}')
+                options = {**GABOR_OPTIONS, **{o: fold(v) for o, v in options.items()}} if kind == 'gabor' else options
+                if options and kind != 'gabor' or set(options) - set(GABOR_OPTIONS) or kind == 'gabor' and (dims > 3 or
+                        options['anisotropic'] not in (0, 1) or options['do_filter'] != 0):
+                    refused(f'the noise "{kind}" of options {options}, other than an unfiltered, not hybrid gabor')
                 if color and extra is not None: refused(f'a color or vector of the noise "{kind}"')
                 periods = [fold(t) for t in given[half:]]  # Constant whole numbers of at least 1, as the rows test
                 if any(isinstance(t, tuple) or numpy.any(numpy.asarray(t) < 1) or numpy.any(numpy.asarray(t) % 1)
                         for t in periods): refused('a period not a constant whole number of at least 1')
-                if extra is not None:  # With the periods of a periodic
-                    point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)
-                    periods = [*given[half:], 0, 0][:2] if periodic and dims < 3 else []
+                if extra is not None:  # With the periods of a periodic, or a gabor's direction, bandwidth, impulses
+                    point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)  # and whether
+                    periods = [*given[half:], 0, 0][:2] if periodic and dims < 3 else []  # anisotropic
                     values[args[0]] = ('NOISE_EXTRA', point, vector(given[1] if dims == 4 else 0, dims, extra),
-                        (given[half] if dims > 2 else vector(*periods, 0)) if periodic else numpy.zeros(3),
-                        vector(given[half + 1] if dims == 4 else 0, 0, 0) if periodic else numpy.zeros(3))
+                        (given[half] if dims > 2 else vector(*periods, 0)) if periodic else options['direction']
+                        if kind == 'gabor' else numpy.zeros(3), vector(given[half + 1] if dims == 4 else 0, 0, 0)
+                        if periodic else vector(options['bandwidth'], options['impulses'], options['anisotropic'])
+                        if kind == 'gabor' else numpy.zeros(3))
                 else:
                     if kind == 'cell': given = [('FLOOR', g) for g in given[:half]] + given[half:]
                     # Of a periodic noise, its coordinates wrapped into [0, period), as by the Wrap math node
