@@ -1491,8 +1491,10 @@ TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cu
 TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
 SPACES = {'common': 'WORLD', 'world': 'WORLD', 'object': 'OBJECT', 'shader': 'OBJECT', 'camera': 'CAMERA'}
 
-def translated(node, inputs):  # Of a Script node, its outputs by name as expressions of its inputs: its main code run
-    # on expressions in order; what that cannot express is refused by name
+def translated(node, inputs, scope=None):  # Of a Script node, its outputs by name as expressions of its inputs: its
+    # main code run on expressions in order, its globals and attributes those of the scope (else a shading point's);
+    # what that cannot express is refused by name
+    globals_, attributes = scope or (GLOBALS, ATTRIBUTES)
     if node.as_pointer() not in PROGRAMS: PROGRAMS[node.as_pointer()] = program(oso(node))
     symbols, steps, first = PROGRAMS[node.as_pointer()]
     def refused(what):
@@ -1504,7 +1506,7 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
     values = {}
     for name, (kind, type, v) in symbols.items():
         if kind == 'param' and name in given: values[name] = given[name]
-        elif kind == 'global' and name in GLOBALS: values[name] = GLOBALS[name]
+        elif kind == 'global' and name in globals_: values[name] = globals_[name]
         elif kind != 'global' and type == 'closure color': values[name] = []  # None, a sum of weighted closures
         elif kind != 'global' and type in ('float', 'int', 'string', *TRIPLES):
             values[name] = v if type == 'string' else (int(v[0]) if v else 0) if type == 'int' else \
@@ -1632,8 +1634,8 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                 values[args[0]] = ('DOT_PRODUCT', read, numpy.eye(3)[0]) if kinds[0] == 'float' else read
                 if 'alpha' in options: values[options['alpha']] = image(stand, [point], 1)
             elif op == 'getattribute' and len(operands) == 2:  # Of the shading point, found at export: 1, else refused
-                if operands[0] not in ATTRIBUTES: refused(f"getattribute of '{operands[0]}'")
-                values[args[0]], values[args[2]] = 1, ATTRIBUTES[operands[0]]
+                if operands[0] not in attributes: refused(f"getattribute of '{operands[0]}'")
+                values[args[0]], values[args[2]] = 1, attributes[operands[0]]
             elif op in ('transform', 'transformv', 'transformn') and all(isinstance(o, str) for o in operands[:-1]):
                 spaces = [SPACES.get(o) or refused(f"the space '{o}'") for o in ('common', *operands[:-1])[-2:]]
                 values[args[0]] = vector_transform(types.SimpleNamespace(vector_type=('POINT', 'VECTOR', 'NORMAL')[
@@ -2074,10 +2076,12 @@ PANORAMAS = ('EQUIRECTANGULAR', 'EQUIANGULAR_CUBEMAP_FACE', 'MIRRORBALL', 'FISHE
     'FISHEYE_LENS_POLYNOMIAL', 'CENTRAL_CYLINDRICAL')  # Blender's panoramas, numbered from 1 in the renderer
 
 # A camera's panorama on a width x height image: its number, 0 for none, its eight parameters (a range of directions
-# over u and v, or a fisheye's field of view, focal length or polynomial and frame, zeros past them) and shift
-def panorama(camera, width, height):
+# over u and v, or a fisheye's field of view, focal length or polynomial and frame, zeros past them) and shift; a
+# custom camera's the number after them, its program's first step (lensing) and no shift
+CUSTOM = len(PANORAMAS) + 1
+def panorama(camera, width, height, lensing=0):
     data = camera and camera.type == 'CAMERA' and camera.data
-    if data and data.type == 'CUSTOM': raise ValueError('Flex: custom cameras need OSL, which Flex does not run')
+    if data and data.type == 'CUSTOM': return CUSTOM, lensing, *[0.0] * 9
     if not data or data.type != 'PANO': return 0, *[0.0] * 10
     radius = data.central_cylindrical_radius
     # A fisheye's frame in millimetres: the sensor's width or height along the side its fit names, the larger by
@@ -2124,6 +2128,41 @@ def lens(camera):  # Cycles' thin lens: radius in scene units, focus depth, blad
         max(distance, 1e-5), \
         dof.aperture_blades if dof.aperture_blades >= 3 else 0, dof.aperture_rotation, dof.aperture_ratio
 
+# Of a custom camera on a width x height image, its script's outputs as a program's surface: the rays' direction in
+# the normal's place, their origin in the albedo's and throughput in the emission's, all in the camera's space (x
+# right, y up, z forward), of the raster point (P) in [0, 1]^2 and three uniforms (N) its sample draws; its cam:
+# attributes the camera's: the frame in millimetres as a fisheye's, focus and aperture as its thin lens, and a point
+# on the aperture of N's first two, at radius sqrt(N.x) and angle 2 pi N.y
+def script(data):  # What a custom camera runs: its bytecode, else its text or file
+    return data.custom_bytecode_hash or data.custom_shader and data.custom_shader.as_string(), data.custom_filepath
+
+def lensed(camera, width, height):
+    data = camera.data
+    across = data.sensor_fit == 'HORIZONTAL' or data.sensor_fit == 'AUTO' and width >= height
+    fit = data.sensor_height if data.sensor_fit == 'VERTICAL' else data.sensor_width
+    frame = (fit, fit * height / width) if across else (fit * width / height, fit)
+    radius, focus, _, _, ratio = lens(types.SimpleNamespace(type='CAMERA', data=types.SimpleNamespace(type='PERSP',
+        dof=data.dof, lens=data.lens), matrix_world=camera.matrix_world))
+    focus = focus if data.dof.use_dof else data.dof.focus_distance
+    sample = ('INCOMING',)
+    r, angle = ('POWER', ('DOT_PRODUCT', sample, numpy.eye(3)[0]), 0.5), ('MULTIPLY', ('DOT_PRODUCT', sample,
+        numpy.eye(3)[1]), 2 * math.pi)
+    attributes = {'cam:sensor_size': numpy.array((*frame, 0.0)), 'cam:image_resolution': numpy.array((width, height,
+        0.0)), 'cam:focal_distance': focus, 'cam:aperture_size': radius, 'cam:aperture_aspect_ratio': ratio,
+        'cam:aperture_position': ('MULTIPLY', vector(('MULTIPLY', r, ('COSINE', angle)), ('MULTIPLY', r, ('SINE',
+        angle)), 0), radius)}
+    values = dict(data.cycles_custom)
+    inputs = [types.SimpleNamespace(identifier=name, enabled=True, type='STRING' if isinstance(value, str) else 'INT'
+        if isinstance(value, int) else 'FLOAT', default_value=value) for name, value in values.items()]
+    stand = types.SimpleNamespace(name=f'camera {data.name}', bytecode=data.custom_bytecode if data.custom_mode ==
+        'INTERNAL' else '', mode=data.custom_mode, filepath=data.custom_filepath, script=data.custom_shader,
+        id_data=data, inputs=inputs, as_pointer=lambda: hash(script(data)))
+    outputs = translated(stand, [numpy.array(v, 'd') if isinstance(v, tuple) or hasattr(v, '__len__') and not
+        isinstance(v, str) else v for v in values.values()], ({'P': ('POSITION',), 'N': sample}, attributes))
+    surface = list(BLACK)
+    surface[0], surface[1], surface[4] = outputs['direction'], outputs['position'], outputs['throughput']
+    return surface
+
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
@@ -2158,6 +2197,7 @@ class Flex(bpy.types.RenderEngine):
         # its first triangle of a material filling it
         self.box = 2 ** 32 - 1  # The instance of the world's box, none without a world volume
         self.panoramic = False  # Whether the scene's camera is panoramic, which a step tells the renderer
+        self.custom, self.lensing = False, 0  # Of its custom camera: what its program holds; the program's first step
         self.shape = None  # Of the scene last piped: its steps' codes, rows' programs, opacity and emission, textures
         self.kept = {}  # Of the scene last piped, the rows a later export may take again, by their keys
         self.cuts, self.placed, self.piped = {}, [], 0  # Of the scene last piped: what each row was cut over, each
@@ -2202,10 +2242,19 @@ class Flex(bpy.types.RenderEngine):
         if any(update.is_updated_geometry and (isinstance(update.id, bpy.types.Volume) or getattr(update.id, 'type', '')
                 == 'VOLUME') for update in depsgraph.updates): lattices.clear()
         viewer = depsgraph.scene_eval.camera
-        panoramic = bool(viewer and viewer.type == 'CAMERA' and viewer.data.type == 'PANO')
+        panoramic = bool(viewer and viewer.type == 'CAMERA' and viewer.data.type in ('PANO', 'CUSTOM'))
         if panoramic and device() == 'VULKAN':  # Its descent on Vulkan hangs NVIDIA's driver 620.70.06
-            raise ValueError('Flex: panoramic cameras render on OptiX only, not on Vulkan')
-        same = visible == self.visible and not references & changed and panoramic == self.panoramic
+            raise ValueError('Flex: panoramic and custom cameras render on OptiX only, not on Vulkan')
+        # A custom camera's script, settings and image, which its program holds
+        render = depsgraph.scene_eval.render
+        size = [render.resolution_x * render.resolution_percentage // 100, render.resolution_y
+            * render.resolution_percentage // 100]
+        custom = panoramic and viewer.data.type == 'CUSTOM' and (*script(viewer.data), viewer.data.custom_mode,
+            repr(dict(viewer.data.cycles_custom)), *size,
+            viewer.data.lens, viewer.data.sensor_width, viewer.data.sensor_height, viewer.data.sensor_fit,
+            *(getattr(viewer.data.dof, k) for k in ('use_dof', 'focus_distance', 'aperture_fstop', 'aperture_ratio')))
+        same = visible == self.visible and not references & changed and panoramic == self.panoramic \
+            and custom == self.custom
         if same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera))
                 or getattr(update.id, 'type', '') == 'CAMERA' for update in depsgraph.updates): return
         moved = same and all(isinstance(update.id, (bpy.types.Scene, bpy.types.Camera, bpy.types.Object,
@@ -2222,7 +2271,7 @@ class Flex(bpy.types.RenderEngine):
             or update.is_updated_transform and not camera(update) or isinstance(update.id, bpy.types.Image))
             for update in depsgraph.updates)
         self.visible = None  # Until piped: an export that raises exports anew next
-        self.panoramic = panoramic
+        self.panoramic, self.custom = panoramic, custom
         scene = depsgraph.scene_eval
         # Per object, after none for a scene without triangles, in the renderer's order: vertices, normals, texture
         # coordinates (the points in the mesh's texture space), object coordinates (the points in the object's space),
@@ -2885,6 +2934,7 @@ class Flex(bpy.types.RenderEngine):
         world_path = grid[0] and any(marks(x, 'LIGHT_PATH') for x in surface)  # Its sky samples asked per lobe
         world = program(surface)
         materials.append([(*world[:2], 0, 1, 0, world[1])])
+        self.lensing = program(lensed(viewer, *size))[1] if custom else 0  # The custom camera's, run per sample
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for layers in rows.values()
             for row in layers], textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
@@ -3031,7 +3081,7 @@ class Flex(bpy.types.RenderEngine):
         # offsets), then the thin lens and whether orthographic, the near and far planes' depths, and its panorama.
         self.requests.write(struct.pack(f'<3I2f{5 + len(settings)}I20fI10f', REQUEST, *sampling, launches, width,
             height, *settings, medium, self.box, *matrix.translation, *x, *y, *center, *lens(camera), ortho, near, far,
-            *panorama(camera, width, height)))
+            *panorama(camera, width, height, self.lensing)))
         self.requests.flush()
         # Launches, memory and the view's sums; none if the renderer stopped, which fails the render
         answer = self.answers.read(12)
