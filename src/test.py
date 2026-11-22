@@ -4853,6 +4853,63 @@ def noisier():  # OSL pnoise() and the noises "simplex" and "gabor"
     bpy.context.window.scene = shown
 noisier()
 
+# A custom camera's script renders as the renderer's own camera does where it describes one: Blender's basic camera
+# template at the camera's focal length as the perspective camera, on an emitting plane filling the view whose color is
+# its point, at the same jittered pixel points; its throughput weighs each sample, none leaving a pixel black; its
+# aperture point and focus distance focus as the thin lens does, the image's mean alike
+def lensed():  # OSL camera scripts
+    shown, lit, was = bpy.context.window.scene, opened('osl camera', sky=(0, 0, 0)), preferences.device
+    lit.flex_restir, lit.flex_samples, preferences.device = False, 16, 'OPTIX'
+    lit.render.resolution_x = lit.render.resolution_y = 32
+    lit.camera = bpy.data.objects.new('osl camera', bpy.data.cameras.new('osl camera'))
+    lit.collection.objects.link(lit.camera)
+    lit.camera.location = 0, 0, 1
+    bm = bmesh.new()
+    bmesh.ops.create_grid(bm, size=1, calc_uvs=True)
+    bm.to_mesh(mesh := bpy.data.meshes.new('osl camera plane'))
+    plane = bpy.data.objects.new('osl camera plane', mesh)
+    lit.collection.objects.link(plane)
+    mesh.materials.append(material := bpy.data.materials.new('osl camera plane'))
+    nodes, links = material.node_tree.nodes, material.node_tree.links
+    light, shifted = nodes.new('ShaderNodeEmission'), nodes.new('ShaderNodeVectorMath')
+    shifted.operation, shifted.inputs[1].default_value, shifted.inputs[2].default_value = 'MULTIPLY_ADD', (1, 1, 1), \
+        (1, 1, 1)
+    links.new(nodes.new('ShaderNodeNewGeometry').outputs['Position'], shifted.inputs[0])
+    links.new(shifted.outputs[0], light.inputs['Color'])
+    links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
+    data = lit.camera.data
+    perspective = render(lit, 32)
+    template = open(os.path.join(bpy.utils.system_resource('SCRIPTS'), 'templates_osl', 'basic_camera.osl')).read()
+    def through(body, **parameters):  # The image through a custom camera of the script and its parameters
+        data.type, data.custom_mode = 'CUSTOM', 'INTERNAL'
+        data.custom_shader = bpy.data.texts.new('osl camera.osl')
+        data.custom_shader.write(body)
+        for name, value in parameters.items(): data.cycles_custom[name] = value
+        seen = render(lit, 32)
+        data.type = 'PERSP'
+        return seen
+    seen = through(template, focal_length=data.lens)
+    assert numpy.ptp(perspective) > 0.1 and numpy.abs(seen - perspective).max() < 1e-4, ('osl camera',
+        numpy.abs(seen - perspective).max())
+    weighed = through(template.replace('direction = normalize', 'throughput = P[0] < 0.5 ? 0 : 0.5;\n  direction = '
+        'normalize'), focal_length=data.lens)
+    assert not weighed[:, :16].any() and numpy.abs(weighed[:, 16:] - perspective[:, 16:] / 2).max() < 1e-4, (
+        'osl camera throughput', numpy.abs(weighed[:, 16:] - perspective[:, 16:] / 2).max())
+    data.dof.use_dof, data.dof.focus_distance, data.dof.aperture_fstop, plane.location.z = True, 0.5, 0.5, 0.2
+    lit.flex_samples = 64
+    thin = render(lit, 32)
+    focused = through(template.replace('  direction = normalize(vector(Pcam.x, Pcam.y, 1.0));', '''  direction =
+        normalize(vector(Pcam.x, Pcam.y, 1.0));
+  float focus;
+  getattribute("cam:focal_distance", focus);
+  getattribute("cam:aperture_position", position);
+  direction = normalize(direction * focus / direction[2] - position);'''), focal_length=data.lens)
+    assert abs(focused.mean() / thin.mean() - 1) < 0.02 and numpy.abs(focused - thin).mean() < 0.02, (
+        'osl camera focus', focused.mean() / thin.mean(), numpy.abs(focused - thin).mean())
+    preferences.device = was
+    bpy.context.window.scene = shown
+lensed()
+
 # A Principled coat of IOR 1.5, smooth, over a black base reflecting nothing of its own, on a sphere seen as the sheen
 # row sees its own under the white sky: at each view cosine it reflects the dielectric Fresnel there, each pixel over
 # its area, the sky 1 past the rim. Over a white diffuse base instead, at 16 bounces, Max Bounces' most, it gives back
