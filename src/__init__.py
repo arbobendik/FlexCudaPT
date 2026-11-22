@@ -1480,8 +1480,8 @@ def surfaced(closures):  # Of a script's closure value, its weighted closures, t
 NOISES = {'noise': 'uperlin', 'snoise': 'perlin', 'cellnoise': 'cell', 'hashnoise': 'hash', 'pnoise': 'uperlin',
     'psnoise': 'perlin'}
 NOISE_KINDS = {'perlin': 1, 'snoise': 1, 'uperlin': 0, 'noise': 0, 'hash': None, 'cell': None}
-# The kinds the renderer's rarer noises draw, by its kind number: the periodic gradient noises
-PERIODIC_KINDS = {'perlin': 0, 'snoise': 0, 'uperlin': 1, 'noise': 1}
+# The kinds the renderer's rarer noises draw, by its kind number: the periodic gradient noises and simplex
+PERIODIC_KINDS, EXTRA_KINDS = {'perlin': 0, 'snoise': 0, 'uperlin': 1, 'noise': 1}, {'simplex': 2, 'usimplex': 3}
 # Of texture(), its interpolations and wraps as the Image Texture node's, OSL's default smart cubic and periodic
 TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cubic', 'smartcubic': 'Smart'}
 TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
@@ -1578,18 +1578,19 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                 dims = {('float',): 1, ('float', 'float'): 2, ('triple',): 3, ('triple', 'float'): 4}.get(
                     shape[:half]) if not periodic or shape[:half] == shape[half:] else None
                 if kinds[0] not in ('float', *TRIPLES) or dims is None: refused(f'{op} of a {kinds[0]} or of {shape}')
-                extra = PERIODIC_KINDS.get(kind) if periodic else None  # The renderer's rarer noise's
-                if kind not in NOISE_KINDS or periodic and NOISE_KINDS[kind] is not None and extra is None:
-                    refused(f'the noise "{kind}"{" periodic" * periodic}')
+                extra = PERIODIC_KINDS.get(kind) if periodic else EXTRA_KINDS.get(kind)  # The renderer's rarer noise's
+                if kind not in NOISE_KINDS and kind not in EXTRA_KINDS or periodic and NOISE_KINDS.get(kind, 0) is not \
+                        None and extra is None: refused(f'the noise "{kind}"{" periodic" * periodic}')
                 if color and extra is not None: refused(f'a color or vector of the noise "{kind}"')
                 periods = [fold(t) for t in given[half:]]  # Constant whole numbers of at least 1, as the rows test
                 if any(isinstance(t, tuple) or numpy.any(numpy.asarray(t) < 1) or numpy.any(numpy.asarray(t) % 1)
                         for t in periods): refused('a period not a constant whole number of at least 1')
-                if extra is not None:  # With its periods
-                    periods = [*given[half:], 0, 0][:2] if dims < 3 else []
-                    values[args[0]] = ('NOISE_EXTRA', given[0] if dims > 2 else vector(given[0], given[1] if dims == 2
-                        else 0, 0), vector(given[1] if dims == 4 else 0, dims, extra), given[half] if dims > 2 else
-                        vector(*periods, 0), vector(given[half + 1] if dims == 4 else 0, 0, 0))
+                if extra is not None:  # With the periods of a periodic
+                    point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)
+                    periods = [*given[half:], 0, 0][:2] if periodic and dims < 3 else []
+                    values[args[0]] = ('NOISE_EXTRA', point, vector(given[1] if dims == 4 else 0, dims, extra),
+                        (given[half] if dims > 2 else vector(*periods, 0)) if periodic else numpy.zeros(3),
+                        vector(given[half + 1] if dims == 4 else 0, 0, 0) if periodic else numpy.zeros(3))
                 else:
                     if kind == 'cell': given = [('FLOOR', g) for g in given[:half]] + given[half:]
                     # Of a periodic noise, its coordinates wrapped into [0, period), as by the Wrap math node
