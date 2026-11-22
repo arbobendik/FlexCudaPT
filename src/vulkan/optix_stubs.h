@@ -274,6 +274,77 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     }) ? OPTIX_ERROR_LAUNCH_FAILURE : OPTIX_SUCCESS;
 }
 
+// The blue-noise tensor of a side generated in place by FlexKernels' noiseStart and noiseSweep, pipelines of their own:
+// the white start, then sweeps of 8 colours, each pass after the last; the tensor a storage buffer at set 0, binding 0,
+// the side, sweep and colour pushed
+extern unsigned char build_noise_start_spv[], build_noise_sweep_spv[]; // FlexKernels' SPIR-V, shaders.h's
+extern unsigned int build_noise_start_spv_len, build_noise_sweep_spv_len;
+inline CUresult noiseGenerate(CUdeviceptr tensor, unsigned size, unsigned sweeps) {
+    const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT};
+    const VkDescriptorSetLayoutCreateInfo set{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1, .pBindings = &binding};
+    VkDescriptorSetLayout setLayout;
+    if (vkCreateDescriptorSetLayout(vulkan.device, &set, nullptr, &setLayout)) return 1;
+    const VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 3 * sizeof(unsigned)};
+    const VkPipelineLayoutCreateInfo info{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
+        .pSetLayouts = &setLayout, .pushConstantRangeCount = 1, .pPushConstantRanges = &range};
+    VkPipelineLayout layout;
+    if (vkCreatePipelineLayout(vulkan.device, &info, nullptr, &layout)) return 1;
+    const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    const VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1,
+        .poolSizeCount = 1, .pPoolSizes = &poolSize};
+    VkDescriptorPool pool;
+    if (vkCreateDescriptorPool(vulkan.device, &poolInfo, nullptr, &pool)) return 1;
+    const VkDescriptorSetAllocateInfo allocate{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &setLayout};
+    VkDescriptorSet descriptors;
+    if (vkAllocateDescriptorSets(vulkan.device, &allocate, &descriptors)) return 1;
+    const VkDescriptorBufferInfo buffer{vulkan.allocations.at(tensor).buffer, 0, VK_WHOLE_SIZE};
+    const VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = descriptors,
+        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &buffer};
+    vkUpdateDescriptorSets(vulkan.device, 1, &write, 0, nullptr);
+    VkPipeline pipelines[2];
+    const unsigned char* code[] = {build_noise_start_spv, build_noise_sweep_spv};
+    const unsigned lengths[] = {build_noise_start_spv_len, build_noise_sweep_spv_len};
+    for (unsigned k = 0; k < 2; ++k) {
+        std::vector<uint32_t> words(lengths[k] / 4); // Aligned as SPIR-V's words
+        std::memcpy(words.data(), code[k], lengths[k]);
+        const VkShaderModuleCreateInfo module{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = lengths[k], .pCode = words.data()};
+        VkShaderModule shader;
+        if (vkCreateShaderModule(vulkan.device, &module, nullptr, &shader)) return 1;
+        const VkComputePipelineCreateInfo create{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader, .pName = "main"}, .layout = layout};
+        const VkResult made = vkCreateComputePipelines(vulkan.device, nullptr, 1, &create, nullptr, &pipelines[k]);
+        vkDestroyShaderModule(vulkan.device, shader, nullptr);
+        if (made) return 1;
+    }
+    const unsigned texels = size * size * 32, blocks = size / 16 * (size / 16) * 2;
+    const CUresult result = run([&](VkCommandBuffer commands) {
+        const VkMemoryBarrier after{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+            | VK_ACCESS_SHADER_WRITE_BIT};
+        vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &descriptors, 0, nullptr);
+        vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[0]);
+        vkCmdPushConstants(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(size), &size);
+        vkCmdDispatch(commands, (texels + 63) / 64, 1, 1);
+        vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[1]);
+        for (unsigned sweep = 0; sweep < sweeps; ++sweep) for (unsigned colour = 0; colour < 8; ++colour) {
+            vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 1, &after, 0, nullptr, 0, nullptr);
+            const unsigned pushed[] = {size, sweep, colour};
+            vkCmdPushConstants(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushed), pushed);
+            vkCmdDispatch(commands, (blocks + 63) / 64, 1, 1);
+        }
+    });
+    for (VkPipeline pipeline : pipelines) vkDestroyPipeline(vulkan.device, pipeline, nullptr);
+    vkDestroyDescriptorPool(vulkan.device, pool, nullptr);
+    vkDestroyPipelineLayout(vulkan.device, layout, nullptr);
+    vkDestroyDescriptorSetLayout(vulkan.device, setLayout, nullptr);
+    return result;
+}
+
 // A build input as its level takes it: triangles or bounds at the bottom, instances of bottom levels on top
 struct Geometry {
     VkAccelerationStructureGeometryKHR geometry;
