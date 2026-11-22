@@ -5301,3 +5301,39 @@ def denoised():  # The OptiX denoiser
     assert all(numpy.isfinite(frame).all() and frame.max() > 0 for frame in nudged), 'denoised viewport'
     preferences.device = device
 denoised()
+
+# The blue-noise tensor of a size, every random number's: built once and stored, so a render building it and one
+# loading it are the same; each of its layers a permutation of the ranks; an image's mean, whole and over disjoint
+# cells, that of many more samples within its noise, at 1, 4 and 16 samples
+def blued():  # A sphere under the sky, through a lens out of focus: every draw, the camera's and lens's too
+    shown, device, preferences.device = bpy.context.window.scene, preferences.device, 'OPTIX'
+    scene = opened('blue noise')
+    scene.camera = bpy.data.objects.new('blue noise camera', bpy.data.cameras.new('blue noise camera'))
+    scene.collection.objects.link(scene.camera)
+    scene.camera.location, scene.camera.data.dof.use_dof = (0, -4, 0), True
+    scene.camera.rotation_euler = (math.pi / 2, 0, 0)
+    scene.camera.data.dof.focus_distance, scene.camera.data.dof.aperture_fstop = 2, 0.5
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=1)
+    bm.to_mesh(data := bpy.data.meshes.new('blue noise'))
+    scene.collection.objects.link(bpy.data.objects.new('blue noise', data))
+    render = lambda: globals()['render'](scene)
+    stored = os.path.join(flex.noises(), 'bluenoise-256x256x32.bin')
+    if os.path.exists(stored): os.remove(stored)
+    scene.flex_noise_size, scene.flex_samples = 256, 4
+    built, made = render(), os.path.getmtime(stored)
+    assert (render() == built).all() and os.path.getmtime(stored) == made, 'blue noise stored'
+    ranks = numpy.fromfile(stored, numpy.uint16).reshape(32, -1, 2)  # Per layer and texel, its pair
+    assert (numpy.sort(ranks, 1) == numpy.arange(1 << 16)[:, None]).all(), 'blue noise ranks'
+    scene.flex_samples = 1024
+    reference = render()
+    for scene.flex_samples in (1, 4, 16):
+        seen = render()
+        for cells in (1, 4):  # The image's mean, and its 4 x 4 cells'
+            shape = (cells, SIZE // cells, cells, SIZE // cells, 3)
+            means, references = seen.reshape(shape).mean((1, 3)), reference.reshape(shape).mean((1, 3))
+            spread = seen.reshape(shape).std((1, 3)) / (SIZE // cells)
+            assert (abs(means - references) <= 6 * spread + 1e-4).all(), ('blue noise mean', scene.flex_samples,
+                cells, abs(means - references).max())
+    bpy.context.window.scene, preferences.device = shown, device
+blued()
