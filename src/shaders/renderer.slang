@@ -93,6 +93,9 @@ struct Scene {
     uint width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
     uint* calls; // OptiX's alone: shade()'s calls per program at the hot call sites
+    float3* lensed; // OptiX's alone: of a custom camera, per pixel its sample's throughput
+    uint* noise; uint noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
+    uint64_t noiseTexture; // while built; then as a layered texture of 32 layers
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];
@@ -1065,7 +1068,6 @@ Surface shade(Scene* scene, uint instance, uint triangle, float s, float t, floa
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026), paths in primary sample space
 
 // Random streams besides the per vertex ones
-static const uint STREAM_JITTER = 192u;
 static const uint STREAM_SELECT = 193u;
 
 // Camera and primary hit of a pixel
@@ -1217,8 +1219,9 @@ float3 smoothNormal(Scene* scene, Hit hit) {
 // Polygon: a blade's triangle of height aperture * cos(half), its width 2 * x * tan(half) growing with x
 // CDF(x) = x^2 / (aperture * cos(half))^2 = u => x = radius * cos(half), y uniform across the width
 // => y = radius * (2 * (sector - floor(sector)) - 1) * sin(half)
-float2 aperture(Lens lens, uint state) {
-    float angle = 2 * PI * random(state), radius = lens.aperture * sqrt(random(state)), x = radius, y = 0;
+float2 aperture(Lens lens, uint seed) {
+    float angle = 2 * PI * draw(seed, NOISE_LENS_X).value;
+    float radius = lens.aperture * sqrt(draw(seed, NOISE_LENS_Y).value), x = radius, y = 0;
     if (lens.blades >= 3) {
         const float sector = angle * lens.blades / (2 * PI), half = PI / lens.blades;
         x = radius * cos(half);
@@ -1230,14 +1233,13 @@ float2 aperture(Lens lens, uint state) {
 
 // Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray
 Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed) {
-    uint state = stream(seed, STREAM_JITTER);
-    const float x = pixel % size.x + random(state);
-    const float y = pixel / size.x + random(state);
+    const float x = pixel % size.x + draw(seed, NOISE_CAMERA_X).value;
+    const float y = pixel / size.x + draw(seed, NOISE_CAMERA_Y).value;
     const float3 plane = camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z;
     float3 direction = camera.lens.ortho != 0 ? normalize(cross(camera.y, camera.x)) : normalize(plane);
     float3 origin = camera.lens.ortho != 0 ? camera.origin + plane : camera.origin;
     if (camera.lens.aperture > 0) {
-        const float2 point = aperture(camera.lens, state);
+        const float2 point = aperture(camera.lens, seed);
         const float3 offset = normalize(camera.x) * point.x + normalize(camera.y) * point.y;
         const float3 forward = normalize(cross(camera.y, camera.x));
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
@@ -1972,6 +1974,17 @@ void run(uint3 thread, uint3 group, uint index) {
         default: denoise(p, size, scene); break;
     }
 }
+}
+
+// FlexKernels' blue-noise hooks: the tensor's rank pair at texel (x, y) of layer t, white without one, and its side
+export public uint fkBlueNoise(uint x, uint y, uint t) {
+    fcpt.Scene* scene = &fcpt.launch.record.scene;
+    return scene.noise != nullptr ? scene.noise[(uint64_t(t) * scene.noiseSize + y) * scene.noiseSize + x]
+        : 0xFFFFFFFFu;
+}
+export public uint fkBlueNoiseSize() {
+    const uint size = fcpt.launch.record.scene.noiseSize;
+    return size != 0 ? size : 512;
 }
 
 // The walk through the scene hooks, of the walk's domain
