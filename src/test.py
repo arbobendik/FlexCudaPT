@@ -4895,6 +4895,10 @@ def lensed():  # OSL camera scripts
         'normalize'), focal_length=data.lens)
     assert not weighed[:, :16].any() and numpy.abs(weighed[:, 16:] - perspective[:, 16:] / 2).max() < 1e-4, (
         'osl camera throughput', numpy.abs(weighed[:, 16:] - perspective[:, 16:] / 2).max())
+    # Leaving early where the raster point is on the left, the script weighs those samples the same
+    returned = through(template.replace('  direction = normalize', '  throughput = 0.5;\n  if (P[0] < 0.5) {\n    '
+        'throughput = 0;\n    return;\n  }\n  direction = normalize'), focal_length=data.lens)
+    assert numpy.abs(returned - weighed).max() < 1e-6, ('osl camera return', numpy.abs(returned - weighed).max())
     data.dof.use_dof, data.dof.focus_distance, data.dof.aperture_fstop, plane.location.z = True, 0.5, 0.5, 0.2
     lit.flex_samples = 64
     thin = render(lit, 32)

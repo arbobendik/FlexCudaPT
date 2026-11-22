@@ -1514,23 +1514,40 @@ def translated(node, inputs, scope=None):  # Of a Script node, its outputs by na
     def known(name):  # Whether a value fixed at export is not 0, None for one that varies per hit
         value = fold(values[name])
         return None if isinstance(value, tuple) else bool(numpy.any(value))
-    def run(start, stop):  # Steps start to stop as OSL runs them: an if by its condition, loops unrolled; 'break' or
-        k = start  # 'continue' where one ends them early
+    # Of each function entered and the shader, the returns and exits taken per hit: each its kind, where it was taken
+    # (none taken before it) and the values then, which the scope's end chooses there
+    scopes = [[]]
+    alive = lambda: functools.reduce(lambda a, e: ('MULTIPLY', a, ('SUBTRACT', 1, e[1])), sum(scopes, []), 1)
+    def left(kind, where, then):  # A return or exit taken per hit
+        scopes[-1].append((kind, ('MULTIPLY', alive(), where), then))
+    def ended(entries):  # The scope's end: its values chosen where each was taken
+        for kind, where, then in entries:
+            for name, value in then.items():
+                if value is not values[name] and (isinstance(value, list) or isinstance(values[name], list)):
+                    refused('closures chosen per hit')
+                if value is not values[name]: values[name] = 'SELECT', where, value, values[name]
+    def run(start, stop):  # Steps start to stop as OSL runs them: an if by its condition, loops unrolled; 'break',
+        k = start  # 'continue', 'return' or 'exit' where one ends them early
         while k < stop:
             at, (op, args, jumps) = k, steps[k - first]
-            k = jumps[-1] if op in ('if', 'for', 'while', 'dowhile') else k + 1
-            if op in ('break', 'continue'): return op
+            k = jumps[-1] if op in ('if', 'for', 'while', 'dowhile', 'functioncall') else k + 1
+            if op in ('break', 'continue', 'return', 'exit'): return op
             if op == 'if' and known(args[0]) is not None:
-                ended = run(at + 1, jumps[0]) if known(args[0]) else run(jumps[0], jumps[1])
-                if ended: return ended
-            elif op == 'if':  # Both branches, what either changes chosen per hit by its condition
-                before = dict(values)
-                ended = run(at + 1, jumps[0])
+                end = run(at + 1, jumps[0]) if known(args[0]) else run(jumps[0], jumps[1])
+                if end: return end
+            elif op == 'if':  # Both branches, what either changes chosen per hit by its condition; one that returns or
+                before = dict(values)  # exits left there, the other going on
+                end = run(at + 1, jumps[0])
                 taken = dict(values)
                 values.update(before)
                 otherwise = run(jumps[0], jumps[1])
-                if ended or otherwise: refused('break or continue under a condition that varies per hit')
-                for name, value in taken.items():
+                if {end, otherwise} & {'break', 'continue'}:
+                    refused('break or continue under a condition that varies per hit')
+                if end: left(end, values[args[0]], taken)
+                if otherwise: left(otherwise, ('SUBTRACT', 1, values[args[0]]), dict(values))
+                if end and otherwise: return 'exit' if 'exit' in (end, otherwise) else 'return'
+                if otherwise: values.update(taken)
+                for name, value in (() if end or otherwise else taken.items()):
                     if value is not values[name] and isinstance(value, list): refused('closures chosen per hit')
                     if value is not values[name]: values[name] = 'SELECT', values[args[0]], value, values[name]
             elif op in ('for', 'while', 'dowhile'):  # Init, then condition, body and step, the body first in dowhile's
@@ -1541,14 +1558,22 @@ def translated(node, inputs, scope=None):  # Of a Script node, its outputs by na
                         if known(args[0]) is None: refused('loops whose count varies per hit')
                         if not known(args[0]): break
                         if count == LOOPS: refused(f'loops of more than {LOOPS} iterations')
-                    if run(jumps[1], jumps[2]) == 'break': break
+                    end = run(jumps[1], jumps[2])
+                    if end == 'break': break
+                    if end in ('return', 'exit'): return end
                     run(jumps[2], jumps[3])
+            elif op == 'functioncall':  # Its body, where it returns per hit chosen at its end; an exit kept on
+                scopes.append([])
+                end = run(at + 1, jumps[0])
+                entries = scopes.pop()
+                ended([e for e in entries if e[0] == 'return'])
+                scopes[-1] += [e for e in entries if e[0] == 'exit']
+                if end == 'exit': return end
             if op in ('if', 'for', 'while', 'dowhile', 'functioncall', 'useparam', 'end'): continue
             for name in args:
                 if name not in values: refused(f"{symbols[name][1]} {name}" if symbols[name][0] != 'global' else
                     f"the global {name}")
             kinds, operands = [symbols[name][1] for name in args], [values[name] for name in args[1:]]
-            if op in ('return', 'exit'): refused('return or exit')
             # Per-hit values made ints truncate and int arithmetic is C's, refused; a comparison's int, 0 or 1, a value
             per_hit = [k == 'int' and not isinstance(o, int) for k, o in zip(kinds[1:], operands)]
             if op == 'assign' and kinds[0] == 'int' and not isinstance(operands[0], int) or any(per_hit) and op not in (
@@ -1650,6 +1675,7 @@ def translated(node, inputs, scope=None):  # Of a Script node, its outputs by na
             if not isinstance(values[args[0]], list) and not any(isinstance(o, tuple) for o in operands):  # Constants
                 values[args[0]] = fold(values[args[0]])  # at once, so a loop of them grows no deeper
     run(first, first + len(steps))
+    ended(scopes[0])
     outputs = {name: surfaced(values[name]) if type == 'closure color' else values[name] if name in values else
         refused(f'{type} outputs') for name, (kind, type, _) in symbols.items() if kind == 'oparam'}
     # Each step's depth from its deepest leaf, counted without recursion
