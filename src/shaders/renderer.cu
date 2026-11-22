@@ -453,6 +453,34 @@ __device__ __noinline__ float fractal(float3 p, float3 params, float3 extra, flo
             return value;
     }
 }
+#ifdef EXTENDED
+// The lattice coordinate x wrapped into [0, n), n = floor(period) where n >= 1: x - n floor(x / n) = (x % n + n) % n
+__device__ int tiled(int x, float period) { const int n = int(floorf(period)); return n >= 1 ? (x % n + n) % n : x; }
+// Signed gradient noise as noise()'s general loop, equal to it where no period applies, of corners tiled by the periods
+__device__ float periodic(float3 p, float w, int dims, float3 period, float wPeriod) {
+    const float q[4] = {wrapped(p.x), wrapped(p.y), wrapped(p.z), wrapped(w)}, t[4] = {period.x, period.y, period.z,
+        wPeriod}, scales[4] = {0.25f, 0.6616f, 0.9820f, 0.8344f};
+    float sum = 0;
+    for (int corner = 0; corner < 1 << dims; ++corner) {
+        float weight = 1, f[4];
+        int x[4] = {};
+        for (int k = 0; k < dims; ++k) {
+            const int b = corner >> k & 1;
+            x[k] = tiled(int(floorf(q[k])) + b, t[k]), f[k] = q[k] - floorf(q[k]) - b;
+            weight *= b ? fade(f[k] + 1) : 1 - fade(f[k]);
+        }
+        sum += weight * gradient(jenkins(dims, x[0], x[1], x[2], x[3]), f, dims);
+    }
+    return scales[dims - 1] * sum;
+}
+// Of kind 0 and 1 periodic gradient noise, signed and in [0, 1]: a's w, dims and kind, b the periods, c w's
+// period
+__device__ __noinline__ float noiseExtra(float3 p, float3 a, float3 b, float3 c) {
+    const int dims = int(a.y), kind = int(a.z);
+    const float v = periodic(p, a.x, dims, b, c.x);
+    return kind == 1 ? 0.5f * v + 0.5f : v;
+}
+#endif
 // Cubic B-spline weights of the four texels around t
 __device__ float spline(float t, int k) {
     return k == 0 ? (1 - t) * (1 - t) * (1 - t) / 6 : k == 1 ? (t * t * (3 * t - 6) + 4) / 6
@@ -517,9 +545,9 @@ __device__ bool used(unsigned code) {
 #define VIEW(camera) camera, camera##Projection
 #define VIEWING(camera) const Camera& camera, const Projection& camera##Projection
 #define PANORAMIC(camera) (used(PANORAMA) && camera##Projection.type != 0)
-#else // Nor varying media, strands, panoramas and a hit's triangle
+#else // Nor varying media, strands, panoramas, a hit's triangle and the rarer noises
 #define used(code) (code != MEDIUM && code != CURVES && code != HAIR_INFO && code != HAIR && code != GRID \
-    && code != PANORAMA && code != TRIANGLE && used(code))
+    && code != PANORAMA && code != TRIANGLE && code != NOISE_EXTRA && used(code))
 #define STRAND(scene, i) false
 #define VIEW(camera) camera
 #define VIEWING(camera) const Camera& camera
@@ -664,6 +692,7 @@ OP op_OBJECT_INFO(const Shading& x, float3 a) { // Its location, color, alpha, p
 }
 #ifdef EXTENDED
 OP op_TRIANGLE(const Shading& x, float3 a) { return triangled(x.scene, x.point, x.backfacing, int(a.x)); }
+OP op_NOISE_EXTRA(float3 a, float3 b, float3 c, float3 d) { return make_float3(1, 1, 1) * noiseExtra(a, b, c, d); }
 OP op_HAIR_INFO(const Shading& x, float3 a) { // Of the strand at the point, else none: whether one, its intercept, by
     const Scene& scene = x.scene; // its points from the root, or random
     const bool strand = STRAND(scene, x.point.instance);
@@ -868,6 +897,7 @@ template <bool HOT = false> __device__ SHADE_INLINE Surface shade(const Scene& s
         CASE(OBJECT_INFO) top[-1] = op_OBJECT_INFO(x, top[-1]); break;
 #ifdef EXTENDED
         CASE(TRIANGLE) top[-1] = op_TRIANGLE(x, top[-1]); break;
+        CASE(NOISE_EXTRA) top -= 3; top[-1] = op_NOISE_EXTRA(top[-1], top[0], top[1], top[2]); break;
         CASE(HAIR_INFO) top[-1] = op_HAIR_INFO(x, top[-1]); break;
 #endif
         CASE(INSTANCER) top[-1] = op_INSTANCER(x, top[-1]); break;
