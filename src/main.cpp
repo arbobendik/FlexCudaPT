@@ -535,6 +535,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 scene.previousCamera = anchorCamera, scene.previousCameraProjection = anchorProjection;
             }
             view = request.view;
+            if (scene.lensed) release((CUdeviceptr)scene.lensed); // A custom camera's throughput per pixel, none for
+            // other cameras
+            scene.lensed = view.projection.type == CUSTOM_CAMERA ? zeros<float3>(pixels) : nullptr;
             history = history && reused;
             done = scene.frame = 0; // Random numbers repeat per view
             scene.camera = view.camera, scene.cameraProjection = view.projection;

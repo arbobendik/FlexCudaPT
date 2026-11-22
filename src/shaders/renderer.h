@@ -12,6 +12,8 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
 // A panorama: its number, 0 for none, its parameters (the range of directions over u and v, or a fisheye's) and the
 // shift of its window
 struct Projection { unsigned type; float range[8], shift[2]; };
+// A custom camera's type: its program's first step in range[0], run per sample
+constexpr unsigned CUSTOM_CAMERA = 8;
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
 // combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there, or a
@@ -150,4 +152,5 @@ struct Scene {
     unsigned width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
     unsigned* calls; // Per program, shade()'s calls at the hot call sites, which choose the native ones
+    float3* lensed; // Of a custom camera, per pixel its sample's throughput; none for other cameras
 };

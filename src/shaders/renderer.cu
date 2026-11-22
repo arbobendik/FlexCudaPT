@@ -732,7 +732,7 @@ OP op_CAMERA_POINT(const Shading& x, unsigned code) {
     const float3 forward = normalize(cross(c.y, c.x));
     const float3 q = c.lens.ortho ? d - c.z : d * (dot(c.z, forward) / dot(d, forward)) - c.z; // On its image plane
 #ifdef EXTENDED
-    if (code == WINDOW && PANORAMIC(x.scene.camera)) {
+    if (code == WINDOW && PANORAMIC(x.scene.camera) && x.scene.cameraProjection.type != CUSTOM_CAMERA) {
         const float2 uv = unpanorama(x.scene.cameraProjection, local(c, d));
         return make_float3(uv.x, uv.y, 0);
     }
@@ -1183,6 +1183,9 @@ struct Domain {
     float3 x1;
     Hit hit;
     float width, spread;
+#ifdef EXTENDED
+    float3 throughput; // A custom camera's sample's, else one
+#endif
 };
 
 // Nearest hit of a ray within far and its distance, NONE on a miss
@@ -1344,9 +1347,23 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     float3 origin = camera.lens.ortho ? camera.origin + plane : camera.origin;
 #ifdef EXTENDED
     const float u = x / size.x + cameraProjection.shift[0], v = 1 - y / size.y + cameraProjection.shift[1];
-    if (PANORAMIC(camera)) direction = normalize(world(camera, panorama(cameraProjection, u, v)));
-    const bool blind = PANORAMIC(camera) && !panoramaSees(cameraProjection, u, v); // Off a fisheye's circle or a
+    const bool custom = PANORAMIC(camera) && cameraProjection.type == CUSTOM_CAMERA;
+    if (PANORAMIC(camera) && !custom) direction = normalize(world(camera, panorama(cameraProjection, u, v)));
+    bool blind = PANORAMIC(camera) && !custom && !panoramaSees(cameraProjection, u, v); // Off a fisheye's circle or a
     // mirror ball's disc: black
+    float3 through = make_float3(1, 1, 1);
+    if (custom) { // Its program's ray at the raster point u, v up from the bottom left and three uniforms, from its
+        // space (x right, y up, z forward) into the world's by the panorama frame's (x forward, y left, z up)
+        const Point raster = {u, v, {}, {}, {}, make_float3(u, v, 0), 0, 0, NONE, 0};
+        const float3 sample = make_float3(random(state), random(state), random(state));
+        const Surface lens = shade(scene, unsigned(cameraProjection.range[0]), sample, SlangMatrix<float, 3, 3>{},
+            raster, sample, false, Ray{true, false, LOBE_NONE, 0, 0}, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}});
+        origin = camera.origin + world(camera, make_float3(lens.albedo.z, -lens.albedo.x, lens.albedo.y));
+        direction = normalize(world(camera, make_float3(lens.normal.z, -lens.normal.x, lens.normal.y)));
+        blind = lens.emissive.x == 0 && lens.emissive.y == 0 && lens.emissive.z == 0 || !isfinite(dot(direction,
+            direction));
+        through = lens.emissive;
+    }
 #endif
     if (camera.lens.aperture > 0) {
         const float2 point = aperture(camera.lens, state);
@@ -1372,10 +1389,11 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     }
     // A pixel's cone: from the lens a point spreading by the angle the pixel spans, orthographic a pixel wide
     const float across = 2 * length(camera.x) / size.x;
-#ifdef EXTENDED // A panorama's by its pixel's span
+#ifdef EXTENDED // A panorama's by its pixel's span, a custom camera's a radian's share of a pixel
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
-        camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : blind ? -1 : PANORAMIC(camera) // A blind ray's -1
-        ? spread(cameraProjection, u, v, 1.0f / size.x, 1.0f / size.y) : across / length(plane)};
+        camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : blind ? -1 : custom ? 1.0f / size.x // Blind: -1
+        : PANORAMIC(camera) ? spread(cameraProjection, u, v, 1.0f / size.x, 1.0f / size.y) : across / length(plane),
+        through};
 #else
     return {start, hit.triangle == NONE ? start + direction : hitPosition(scene, scene.vertices, hit), hit,
         camera.lens.ortho ? across : 0, camera.lens.ortho ? 0 : across / length(plane)};
@@ -1652,6 +1670,7 @@ WALK_CALLABLE(__direct_callable__walk, true)
 __device__ float2 project(VIEWING(camera), float3 position, uint3 size) {
     const float3 d = position - camera.origin;
 #ifdef EXTENDED
+    if (PANORAMIC(camera) && cameraProjection.type == CUSTOM_CAMERA) return make_float2(-1, -1); // None to reproject
     if (PANORAMIC(camera)) {
         const float2 uv = unpanorama(cameraProjection, local(camera, d));
         return make_float2((uv.x - cameraProjection.shift[0]) * size.x,
