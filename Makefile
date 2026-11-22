@@ -13,6 +13,12 @@ build/flex.zip: src/__init__.py src/blender_manifest.toml src/hosek_wilkie.npy s
 	build/renderer-vulkan build/native $(wildcard build/bluenoise-512x512x32.bin)  # The tensor CI's packaging fetches
 	python3 -m zipfile -c $@ $^
 
+# The same tensor of any side on the CPU, by FlexKernels' noise.cpp: test.py's reference for the generation
+build/bluenoise: tools/bluenoise.cpp src/shaders/flexkernels/noise.cpp
+	mkdir -p build
+	$(CXX) -std=c++20 -O2 -fopenmp -ffunction-sections -Wl,--gc-sections -Isrc/shaders/flexkernels \
+		-I$(SLANG_PATH)/include $< -o $@
+
 # What the native programs' helper compiles with NVRTC, which it ships: the renderer's source and the headers it reads
 build/native: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter.h src/shaders/adapter.cuh \
 	src/shaders/flexkernels/pathtracer.cuh
@@ -90,7 +96,7 @@ install: build/flex.zip  # A running Blender loads the new build within a second
 	blender -b --command extension install-file -r user_default -e $<
 
 test: export BLENDER_USER_RESOURCES = $(CURDIR)/build/blender
-test: install  # Into the exported resources instead of the user's
+test: install build/bluenoise  # Into the exported resources instead of the user's
 	blender -b --python-exit-code 1 -P src/test.py
 
 clean:
