@@ -100,6 +100,9 @@ static __device__ unsigned fcptQueueCursorAdd(unsigned bin, unsigned jobs);
 static __device__ void fcptQueueJobStore(unsigned index, unsigned job);
 static __device__ void fcptQueueDispatchStore(unsigned x, unsigned y, unsigned z);
 static __device__ unsigned fcptQueuedShifts(unsigned index);
+// The blue-noise tensor's rank at texel (x, y) of layer t, white (0xFFFFFFFF) without one, and its side
+static __device__ unsigned fkBlueNoise(unsigned x, unsigned y, unsigned t);
+static __device__ unsigned fkBlueNoiseSize();
 #include "flexkernels/pathtracer.cuh"
 // The walk's camera domain beside the renderer's own, which its pixels keep
 typedef Domain FKDomain;
