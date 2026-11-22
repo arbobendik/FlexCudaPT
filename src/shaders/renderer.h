@@ -31,7 +31,7 @@ enum { END, PUSH, UV, NORMAL, IMAGE, ALPHA, NORMAL_MAP, ADD, SUBTRACT, MULTIPLY,
 // of the Sheen BSDF's Ashikhmin distribution, TOON a toon lobe; SELECT, per channel, the second value where the first
 // is not 0, else the third; DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes,
 // a world that reads Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges; NOISE_EXTRA
-// periodic gradient noise
+// periodic gradient or simplex noise
 struct Op { unsigned code; union { float3 value; struct { unsigned texel, width, height; }; }; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 constexpr unsigned CODE = 255, IMMEDIATE = 1u << 31, LEFT = 1u << 30;
