@@ -268,7 +268,7 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 struct HairTable;
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
     std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
-    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps, bounds; unsigned rows;
+    std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps, bounds;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
     std::vector<HairTable> tables; std::vector<float4> hairs; std::future<void> baking; // Hair tables, as they bake
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
@@ -570,7 +570,7 @@ inline void loadSteps(Scene& scene, Loaded& loaded) {
     loaded.textures.clear();
     auto& header = loaded.header;
     receive(&header, sizeof(header), 1);
-    loaded.ops.resize(header.ops), loaded.rows = header.rows, scene.count = header.count;
+    loaded.ops.resize(header.ops), scene.count = header.count;
     receive(loaded.ops.data(), sizeof(Op), header.ops); // The materials' programs, then the bakes', apart
     scene.ops = (Op*)allocate(header.rows * sizeof(Op), loaded.ops.data());
     loaded.bakeOps = allocate((header.ops - header.rows) * sizeof(Op), loaded.ops.data() + header.rows);
@@ -668,8 +668,8 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
 inline void updateSteps(Scene& scene, Loaded& loaded) {
     unsigned count;
     receive(&count, sizeof(count), 1);
-    update(scene.ops, 0, loaded.rows, loaded.ops.data());
-    receive(loaded.ops.data() + loaded.rows, sizeof(Op), count - loaded.rows);
+    update(scene.ops, 0, loaded.header.rows, loaded.ops.data());
+    receive(loaded.ops.data() + loaded.header.rows, sizeof(Op), count - loaded.header.rows);
     std::vector<float4> only; // Texels only bakes read, sent again for bakes to run again: first flagged in bit 31
     for (unsigned table[2]; receive(table, sizeof(table), 1), table[1];)
         if (table[0] >> 31) only.resize(std::max<size_t>(only.size(), (table[0] & ~(1u << 31)) + table[1])),
@@ -683,7 +683,8 @@ inline void updateSteps(Scene& scene, Loaded& loaded) {
     loaded.rebakes = read<unsigned>(count);
     receive(&scene.environmentWidth, sizeof(unsigned), 2);
     if (count) // Those bakes' programs and texels for their pass alone, as a scene's
-        loaded.bakeOps = allocate((loaded.ops.size() - loaded.rows) * sizeof(Op), loaded.ops.data() + loaded.rows),
+        loaded.bakeOps = allocate((loaded.ops.size() - loaded.header.rows) * sizeof(Op),
+            loaded.ops.data() + loaded.header.rows),
         scene.bakeTexels = (float4*)allocate(only.size() * sizeof(float4), only.data());
 }
 

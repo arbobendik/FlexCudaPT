@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -136,7 +137,7 @@ inline OptixResult optixProgramGroupCreate(OptixDeviceContext, const OptixProgra
     const OptixProgramGroupOptions*, char*, size_t*, OptixProgramGroup* groups) {
     for (unsigned i = 0; i < count; ++i) {
         if (desc[i].kind != OPTIX_PROGRAM_GROUP_KIND_RAYGEN) {
-            groups[i] = new OptixProgramGroup_t{.program = ~0u};
+            groups[i] = new OptixProgramGroup_t{};
             continue;
         }
         const auto program = std::find_if(std::begin(PROGRAMS), std::end(PROGRAMS),
@@ -165,9 +166,8 @@ inline OptixResult optixPipelineCreate(OptixDeviceContext, const OptixPipelineCo
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
         .module = shaders[k], .pName = "main", .pSpecializationInfo = &specialization}, // Each module's own entry
         .layout = (*pipeline)->layout};
-    // The main pipeline compiled alone in this process while a helper renderer compiles the temporal round's two at
-    // once: compiled beside another in one process, the driver can leave the main pipeline a binary blind to its
-    // parameters. Their binaries come back through the cache's data, so here they are found at once
+    // Main pipeline here, the temporal two in a helper (in one process the driver can leave the main one blind to its
+    // parameters); theirs return through the cache's data
     VkPipeline made[3];
     VkResult results[3];
     const auto create = [&](int k) {
@@ -253,10 +253,12 @@ inline OptixResult optixLaunch(OptixPipeline pipeline, CUstream, CUdeviceptr, si
     const OptixShaderBindingTable* sbt, unsigned width, unsigned height, unsigned depth) {
     const Launch launch{sbt->raygenRecord, width, height, depth};
     const bool row = height == 1 && depth == 1;
-    // The pass by its record's place: main.cpp's passes precede the walk's callables, one record each; the temporal
-    // round's count and queue run in the second pipeline, its shifts and reuse in the third
-    const unsigned program = sbt->callablesRecordBase ? unsigned(std::size(PROGRAMS)
-        - (sbt->callablesRecordBase - sbt->raygenRecord) / sbt->callablesRecordStrideInBytes) : ~0u;
+    // The pass its record's header names, read once a record; temporal count and queue: second pipeline, shifts and
+    // reuse: third
+    static std::unordered_map<CUdeviceptr, unsigned> passes;
+    const auto [named, unread] = passes.try_emplace(sbt->raygenRecord, 0);
+    if (unread) cuMemcpyDtoH(&named->second, sbt->raygenRecord, sizeof(unsigned));
+    const unsigned program = named->second;
     const VkPipeline bound = program == PASS_TEMPORAL_COUNT || program == PASS_TEMPORAL_PREPASS ? pipeline->queue
         : program == PASS_TEMPORAL_SHIFT || program == PASS_TEMPORAL ? pipeline->temporal : pipeline->pipeline;
     const unsigned groups = (width + WORKGROUP * WORKGROUP - 1) / (WORKGROUP * WORKGROUP); // Of a row

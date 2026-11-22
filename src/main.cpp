@@ -23,6 +23,7 @@
 #include <sys/resource.h>
 #include <spawn.h>
 #include <filesystem>
+#include <span>
 #include <signal.h>
 #include <sys/wait.h>
 #ifndef VK_VERSION_1_0
@@ -283,6 +284,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     Tier* interim = nullptr; // Its stand-in's, standing in without a generic until it is
     // The scene's native programs: once its steps ran so many launches, those chosen by their calls are compiled by a
     // helper process, into a tier of the special's params that launches take once compiled, until the steps change
+    std::vector<std::pair<CUarray, CUtexObject>> bakes; // The bakes' textures, which their readers filter through
     Tier* native = nullptr;
     pid_t helper = 0;
     std::string helping, cached; // Its directory, of the programs' source and the PTX; the PTX's in OptiX's cache
@@ -380,6 +382,11 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         release((CUdeviceptr)scene.noise), scene.noise = nullptr;
 #endif
     };
+    const auto launchRecord = [&](unsigned pass, unsigned width, unsigned height, unsigned depth) { // Its record's
+        CHECK(cuMemcpyHtoD(table + (pass + 1) * sizeof(Record), &records[pass + 1], sizeof(Record))); // data uploaded
+        sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
+        CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, width, height, depth));
+    };
     for (unsigned done = 0, launched, kind;; std::fflush(stdout)) {
         receive(&kind, sizeof(kind), 1);
         // Frame start (launches ended): the scene's module swapped in once compiled (= stand-in's to rounding);
@@ -402,7 +409,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         if (native && pipeline == special->pipeline && compiled(*native)) linked(*native), use(*native);
         if (!chosen && counted >= NATIVE_AFTER && special && pipeline == special->pipeline) {
             chosen = true;
-            std::vector<unsigned> calls(loaded.rows); // Chosen by their calls so far
+            std::vector<unsigned> calls(loaded.header.rows); // Chosen by their calls so far
             CHECK(cuMemcpyDtoH(calls.data(), (CUdeviceptr)scene.calls, calls.size() * sizeof(unsigned)));
             const std::vector<unsigned> programs = chooseNative(loaded.ops, calls);
             if (!programs.empty()) { // Only with programs to compile
@@ -445,8 +452,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
 #ifndef VK_VERSION_1_0
             if (kind != UPDATE) { // Its programs' calls, counted from none
                 if (scene.calls) release((CUdeviceptr)scene.calls);
-                scene.calls = (unsigned*)allocate(loaded.rows * sizeof(unsigned));
-                CHECK(cuMemsetD32((CUdeviceptr)scene.calls, 0, loaded.rows));
+                scene.calls = (unsigned*)allocate(loaded.header.rows * sizeof(unsigned));
+                CHECK(cuMemsetD32((CUdeviceptr)scene.calls, 0, loaded.header.rows));
             }
 #endif
             Params next{};
@@ -492,26 +499,62 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
                 CHECK(cuMemsetD32((CUdeviceptr)(scene.texels + texture.texel), 0, 2 * texture.width * texture.height));
                 for (unsigned pass = 0, tiles = loaded.ops[bake - 2].width; pass < (tiles ? 2 : 1); ++pass) {
-                    records[PASSES - 2].data = scene; // before the lights pass: 16 x 16 texels per tile, inside their
-                    records[PASSES - 2].data.frame = bake | pass << 31; // triangles, then off their edges, as halves;
-                    records[PASSES - 2].data.ops = (Op*)loaded.bakeOps - loaded.rows; // the bakes' steps, numbered on
-                    CHECK(cuMemcpyHtoD(table + (PASSES - 2) * sizeof(Record), &records[PASSES - 2], sizeof(Record)));
-                    const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 2) * sizeof(Record)};
-                    CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, tiles ? 16 * tiles // or,
-                        : texture.width, tiles ? 16 : texture.height, 1)); // without tiles, every texel at once
+                    records[PASS_BAKE + 1].data = scene; // before the lights pass: 16 x 16 texels per tile, inside
+                    records[PASS_BAKE + 1].data.frame = bake | pass << 31; // their triangles, then off their edges, as
+                    records[PASS_BAKE + 1].data.ops = (Op*)loaded.bakeOps // halves; the bakes' steps, numbered on
+                        - loaded.header.rows;
+                    launchRecord(PASS_BAKE, tiles ? 16 * tiles : texture.width, tiles ? 16 : texture.height, 1); // or,
+                    // without tiles, every texel at once
                 }
             }
             if (loaded.bakeOps) // Freed once baked, as nothing else reads them: those the next steps need come again
                 release(loaded.bakeOps), release((CUdeviceptr)scene.bakeTexels), loaded.bakeOps = 0,
                     scene.bakeTexels = {};
+#ifndef VK_VERSION_1_0
+            if (kind != UPDATE) { // The bakes' texels copied into textures, their readers' ops marked to read those
+                for (const auto& [array, object] : bakes) {
+                    CHECK(cuTexObjectDestroy(object));
+                    CHECK(cuArrayDestroy(array));
+                }
+                bakes.clear();
+                std::map<unsigned long long, unsigned> index; // Each bake's texture by its texels' place and wrapping
+                for (Op& op : std::span(loaded.ops.data(), loaded.header.rows)) {
+                    if ((op.code & CODE) != BAKED) continue;
+                    const unsigned width = op.width, height = op.height & 0xFFFFFF;
+                    const auto [at, fresh] = index.try_emplace(op.texel * 2ull | (op.height >> 29 & 1),
+                        unsigned(bakes.size()));
+                    if (fresh) {
+                        const CUDA_ARRAY_DESCRIPTOR array{width, height, CU_AD_FORMAT_HALF, 4};
+                        auto& [texels, object] = bakes.emplace_back();
+                        CHECK(cuArrayCreate(&texels, &array));
+                        const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_DEVICE,
+                            .srcDevice = (CUdeviceptr)(scene.texels + op.texel), .srcPitch = width * 8,
+                            .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = texels, .WidthInBytes = width * 8,
+                            .Height = height};
+                        CHECK(cuMemcpy2D(&copy));
+                        const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY,
+                            .res = {.array = {texels}}};
+                        const auto mode = op.height >> 29 & 1 ? CU_TR_ADDRESS_MODE_WRAP : CU_TR_ADDRESS_MODE_CLAMP;
+                        const CUDA_TEXTURE_DESC filtering{.addressMode = {mode, mode},
+                            .filterMode = CU_TR_FILTER_MODE_LINEAR, .flags = CU_TRSF_NORMALIZED_COORDINATES};
+                        CHECK(cuTexObjectCreate(&object, &resource, &filtering, nullptr));
+                    }
+                    op.width = at->second, op.height |= 1u << 27;
+                }
+                std::vector<CUtexObject> objects;
+                for (const auto& bake : bakes) objects.push_back(bake.second);
+                if (scene.bakeTextures) release((CUdeviceptr)scene.bakeTextures);
+                scene.bakeTextures = (unsigned long long*)allocate(objects.size() * sizeof(CUtexObject),
+                    objects.data());
+                CHECK(cuMemcpyHtoD((CUdeviceptr)scene.ops, loaded.ops.data(), loaded.header.rows * sizeof(Op)));
+            }
+#endif
             std::vector<Material> materials = loaded.materials;
             if (scene.count) {
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(),
                     materials.size() * sizeof(Material)));
-                records[PASSES - 1].data = scene;
-                CHECK(cuMemcpyHtoD(table + (PASSES - 1) * sizeof(Record), &records[PASSES - 1], sizeof(Record)));
-                const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
-                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count, 1, 1));
+                records[PASS_LIGHTS + 1].data = scene;
+                launchRecord(PASS_LIGHTS, scene.count, 1, 1);
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials,
                     materials.size() * sizeof(Material)));
             }
@@ -525,11 +568,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 const CUdeviceptr band = allocate(texels.size() * sizeof(float4));
                 for (unsigned row = 0; row < height; row += 64) {
                     const unsigned span = std::min(64u, height - row);
-                    records[PASSES - 1].data = scene, records[PASSES - 1].data.bakeTexels = (float4*)band;
-                    records[PASSES - 1].data.frame = 1u << 30 | row;
-                    CHECK(cuMemcpyHtoD(table + (PASSES - 1) * sizeof(Record), &records[PASSES - 1], sizeof(Record)));
-                    const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
-                    CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, width, span, 1));
+                    records[PASS_LIGHTS + 1].data = scene, records[PASS_LIGHTS + 1].data.bakeTexels = (float4*)band;
+                    records[PASS_LIGHTS + 1].data.frame = 1u << 30 | row;
+                    launchRecord(PASS_LIGHTS, width, span, 1);
                     CHECK(cuMemcpyDtoH(texels.data(), band, span * size_t(width) * sizeof(float4)));
                     luminance.add(texels.data(), row, span);
                 }
