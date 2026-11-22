@@ -111,9 +111,9 @@ struct Reservoir {
 // Integrand of a sample shifted into another pixel times the Jacobian determinant of the shift, and the latter
 struct Shift { float3 f; float jac; };
 // Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, the
-// spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample, and
-// a triangle of the volume the camera is in, or none
-struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, medium; };
+// spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample,
+// the side of its blue-noise tensor, and a triangle of the volume the camera is in, or none
+struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, noise, medium; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle of the meshes, in their own space: three vertices, normals, generated points, points in their object,
@@ -155,5 +155,5 @@ struct Scene {
     unsigned* calls; // Per program, shade()'s calls at the hot call sites, which choose the native ones
     float3* lensed; // Of a custom camera, per pixel its sample's throughput; none for other cameras
     unsigned* noise; unsigned noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
-    unsigned long long noiseTexture; // as read; on OptiX then as a layered texture of 32 layers
+    unsigned long long noiseTexture; // while built; then as a layered texture of 32 layers
 };
