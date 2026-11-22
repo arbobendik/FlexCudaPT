@@ -1,6 +1,15 @@
 // FlexKernels' scene hooks (walk.slang's HookScene) by the renderer's own functions, in the order walk.slang lists
 // them: thin calls, its types converted to and from the renderer's. The scene is the one the raygens read
 static __device__ const Scene& hookScene() { return *(const Scene*)optixGetSbtDataPointer(); }
+static __device__ unsigned fkBlueNoise(unsigned x, unsigned y, unsigned t) {
+    const Scene& scene = hookScene();
+    if (scene.noiseTexture) {
+        const ushort2 pair = tex2DLayered<ushort2>(scene.noiseTexture, x + 0.5f, y + 0.5f, t);
+        return pair.x | unsigned(pair.y) << 16;
+    }
+    return scene.noise ? scene.noise[(size_t(t) * scene.noiseSize + y) * scene.noiseSize + x] : 0xFFFFFFFFu;
+}
+static __device__ unsigned fkBlueNoiseSize() { return params.noise ? params.noise : 512; }
 static __device__ Hit nativeHit(FKHit hit) { return {hit.triangle_index, hit.instance_index, hit.uv}; }
 // A miss has no instance, as the walk tests it; no point lights exist to consider. Off a surface, past its margin, as
 // traverse starts by default, skipping the face a straight pass leaves by, if it was reached past that margin; from no
