@@ -1174,8 +1174,11 @@ template <bool HOT = false> __device__ __forceinline__ Surface shade(const Scene
 // ReSTIR PT Enhanced (Lin, Kettunen and Wyman 2026), paths in primary sample space
 
 // Random streams besides the per vertex ones
-constexpr unsigned STREAM_JITTER = 192u;
+constexpr unsigned STREAM_JITTER = 192u; // A custom camera's uniforms, white
 constexpr unsigned STREAM_SELECT = 193u;
+// A path's own variables, drawn at its origin as noise.slang's NOISE_ ones
+constexpr unsigned NOISE_SECOND = 0x80000000u, NOISE_CAMERA_X = 14u, NOISE_CAMERA_Y = NOISE_CAMERA_X | NOISE_SECOND,
+    NOISE_LENS_X = 15u, NOISE_LENS_Y = NOISE_LENS_X | NOISE_SECOND;
 
 // Camera and primary hit of a pixel
 struct Domain {
@@ -1327,8 +1330,9 @@ __device__ float3 smoothNormal(const Scene& scene, Hit hit) {
 // Polygon: a blade's triangle of height aperture * cos(half), its width 2 * x * tan(half) growing with x
 // CDF(x) = x^2 / (aperture * cos(half))^2 = u => x = radius * cos(half), y uniform across the width
 // => y = radius * (2 * (sector - floor(sector)) - 1) * sin(half)
-__device__ float2 aperture(const Lens& lens, unsigned state) {
-    float angle = 2 * PI * random(state), radius = lens.aperture * sqrtf(random(state)), x = radius, y = 0;
+__device__ float2 aperture(const Lens& lens, unsigned seed) {
+    float angle = 2 * PI * draw(seed, NOISE_LENS_X).value;
+    float radius = lens.aperture * sqrtf(draw(seed, NOISE_LENS_Y).value), x = radius, y = 0;
     if (lens.blades >= 3) {
         const float sector = angle * lens.blades / (2 * PI), half = PI / lens.blades;
         x = radius * cosf(half), y = radius * (2 * (sector - floorf(sector)) - 1) * sinf(half);
@@ -1340,8 +1344,8 @@ __device__ float2 aperture(const Lens& lens, unsigned state) {
 // Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray
 __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, uint3 size, unsigned seed) {
     unsigned state = stream(seed, STREAM_JITTER);
-    const float x = pixel % size.x + random(state);
-    const float y = pixel / size.x + random(state);
+    const float x = pixel % size.x + draw(seed, NOISE_CAMERA_X).value;
+    const float y = pixel / size.x + draw(seed, NOISE_CAMERA_Y).value;
     const float3 plane = camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z;
     float3 direction = camera.lens.ortho ? normalize(cross(camera.y, camera.x)) : normalize(plane);
     float3 origin = camera.lens.ortho ? camera.origin + plane : camera.origin;
@@ -1366,7 +1370,7 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
     }
 #endif
     if (camera.lens.aperture > 0) {
-        const float2 point = aperture(camera.lens, state);
+        const float2 point = aperture(camera.lens, seed);
         const float3 offset = normalize(camera.x) * point.x + normalize(camera.y) * point.y;
         const float3 forward = normalize(cross(camera.y, camera.x));
         direction = normalize(direction * (camera.lens.focus / dot(direction, forward)) - offset);
