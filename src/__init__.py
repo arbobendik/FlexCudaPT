@@ -119,7 +119,7 @@ OPS = {'END': lambda *surface: numpy.sum(triple(surface[4])), **dict.fromkeys(('
     'ANISOTROPIC': lambda anisotropy: anisotropy, 'MEDIUM': None, 'CURVES': None, 'HAIR_INFO': None,
     'HAIR': lambda level: level, 'PHASE': lambda g: g, 'WORLD': None, 'GRID': None, 'VELVET': lambda v: v,
     'SKY': None, 'TOON': lambda toon: toon, 'SELECT': lambda c, a, b: numpy.where(c != 0, a, b), 'PANORAMA': None,
-    'DISPERSION': lambda k: k, 'WORLD_PATH': None, 'TRIANGLE': None}
+    'DISPERSION': lambda k: k, 'WORLD_PATH': None, 'TRIANGLE': None, 'NOISE_EXTRA': None}
 # Surface: expressions of its normal, albedo, metallic, roughness, emissive, transparency, ior, specular tint, specular
 # level, coverage, absorption, density, scattering color, translucent color, sheen color and roughness, and anisotropy,
 # its rotation and tangent, the last six of which a program carries only marked
@@ -1480,6 +1480,8 @@ def surfaced(closures):  # Of a script's closure value, its weighted closures, t
 NOISES = {'noise': 'uperlin', 'snoise': 'perlin', 'cellnoise': 'cell', 'hashnoise': 'hash', 'pnoise': 'uperlin',
     'psnoise': 'perlin'}
 NOISE_KINDS = {'perlin': 1, 'snoise': 1, 'uperlin': 0, 'noise': 0, 'hash': None, 'cell': None}
+# The kinds the renderer's rarer noises draw, by its kind number: the periodic gradient noises
+PERIODIC_KINDS = {'perlin': 0, 'snoise': 0, 'uperlin': 1, 'noise': 1}
 # Of texture(), its interpolations and wraps as the Image Texture node's, OSL's default smart cubic and periodic
 TEXTURE_INTERPOLATIONS = {'linear': 'Linear', 'closest': 'Closest', 'cubic': 'Cubic', 'smartcubic': 'Smart'}
 TEXTURE_WRAPS = {'periodic': 'REPEAT', 'default': 'REPEAT', 'clamp': 'EXTEND', 'black': 'CLIP', 'mirror': 'MIRROR'}
@@ -1576,21 +1578,29 @@ def translated(node, inputs):  # Of a Script node, its outputs by name as expres
                 dims = {('float',): 1, ('float', 'float'): 2, ('triple',): 3, ('triple', 'float'): 4}.get(
                     shape[:half]) if not periodic or shape[:half] == shape[half:] else None
                 if kinds[0] not in ('float', *TRIPLES) or dims is None: refused(f'{op} of a {kinds[0]} or of {shape}')
-                if kind not in NOISE_KINDS or periodic and NOISE_KINDS[kind] is not None:
+                extra = PERIODIC_KINDS.get(kind) if periodic else None  # The renderer's rarer noise's
+                if kind not in NOISE_KINDS or periodic and NOISE_KINDS[kind] is not None and extra is None:
                     refused(f'the noise "{kind}"{" periodic" * periodic}')
+                if color and extra is not None: refused(f'a color or vector of the noise "{kind}"')
                 periods = [fold(t) for t in given[half:]]  # Constant whole numbers of at least 1, as the rows test
                 if any(isinstance(t, tuple) or numpy.any(numpy.asarray(t) < 1) or numpy.any(numpy.asarray(t) % 1)
                         for t in periods): refused('a period not a constant whole number of at least 1')
-                if kind == 'cell': given = [('FLOOR', g) for g in given[:half]] + given[half:]
-                # Of a periodic noise, its coordinates wrapped into [0, period), as by the Wrap math node
-                if periodic: given = [COMPOSITES['WRAP'](g, t, 0) for g, t in zip(given, given[half:])]
-                point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)
-                w = given[1] if dims == 4 else 0
-                fractal = lambda p, w: ('NOISE', p, numpy.array((0, 0.5, 2.0)), numpy.array((0, 0, NOISE_KINDS[kind])),
-                    vector(w, dims, 0))
-                at = lambda seed: fractal(('ADD', point, offset(seed, dims)[0]), ('ADD', w, offset(seed, dims)[1]))
-                values[args[0]] = ('WHITE_NOISE', point, vector(dims, int(color), w)) if NOISE_KINDS[kind] is None \
-                    else vector(fractal(point, w), at(dims), at(dims + 1)) if color else fractal(point, w)
+                if extra is not None:  # With its periods
+                    periods = [*given[half:], 0, 0][:2] if dims < 3 else []
+                    values[args[0]] = ('NOISE_EXTRA', given[0] if dims > 2 else vector(given[0], given[1] if dims == 2
+                        else 0, 0), vector(given[1] if dims == 4 else 0, dims, extra), given[half] if dims > 2 else
+                        vector(*periods, 0), vector(given[half + 1] if dims == 4 else 0, 0, 0))
+                else:
+                    if kind == 'cell': given = [('FLOOR', g) for g in given[:half]] + given[half:]
+                    # Of a periodic noise, its coordinates wrapped into [0, period), as by the Wrap math node
+                    if periodic: given = [COMPOSITES['WRAP'](g, t, 0) for g, t in zip(given, given[half:])]
+                    point = given[0] if dims > 2 else vector(given[0], given[1] if dims == 2 else 0, 0)
+                    w = given[1] if dims == 4 else 0
+                    fractal = lambda p, w: ('NOISE', p, numpy.array((0, 0.5, 2.0)), numpy.array((0, 0,
+                        NOISE_KINDS[kind])), vector(w, dims, 0))
+                    at = lambda seed: fractal(('ADD', point, offset(seed, dims)[0]), ('ADD', w, offset(seed, dims)[1]))
+                    values[args[0]] = ('WHITE_NOISE', point, vector(dims, int(color), w)) if NOISE_KINDS[kind] is None \
+                        else vector(fractal(point, w), at(dims), at(dims + 1)) if color else fractal(point, w)
             elif op == 'texture' and isinstance(operands[0], str):  # As an Image Texture node of the file and options
                 options = dict(zip(operands[3::2], args[5::2]))  # Each option's name and the variable holding its value
                 named = {o: values[a] for o, a in options.items() if o != 'alpha'}
