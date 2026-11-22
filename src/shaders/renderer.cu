@@ -784,6 +784,10 @@ OP op_INCOMING(const Shading& x) { return x.incoming; }
 OP op_BACKFACING(const Shading& x) { return make_float3(1, 1, 1) * x.backfacing; }
 OP op_LIGHT_PATH(const Shading& x, float3 a) { return make_float3(1, 1, 1) * lightPath(x.ray, int(a.x)); }
 OP op_BAKED(const Shading& x, const Op& op, float3 a) { // A bake's texels, halves, read linearly at the UV, extended at
+    if (op.height >> 27 & 1) { // Read through its texture, its index in place of its width (OptiX)
+        const float4 c = tex2DLod<float4>(x.scene.bakeTextures[op.width], a.x, a.y, 0);
+        return make_float3(c.x, c.y, c.z);
+    }
     const int width = op.width, height = op.height & 0xFFFFFF; // its edges or repeating
     const float px = a.x * width - 0.5f, py = a.y * height - 0.5f;
     const int i = int(floorf(px)), j = int(floorf(py));
