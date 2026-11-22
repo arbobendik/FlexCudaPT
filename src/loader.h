@@ -1,6 +1,7 @@
 #pragma once
 #include "shaders/renderer.h"
 #include <algorithm>
+#include <filesystem>
 #include <vector>
 #include <map>
 #include <tuple>
@@ -27,6 +28,9 @@ inline void receive(void* data, size_t size, size_t count) {
 }
 
 constexpr unsigned WORLD_SPACE = 1; // An instance's world flag of its points in world space, beside STRANDS
+
+// The directory of the renderer's binary, where the add-on ships its files
+inline std::string selfDirectory() { return std::filesystem::canonical("/proc/self/exe").parent_path(); }
 
 // A whole file's bytes, none of a file not there
 inline std::string readFile(const std::string& path) {
