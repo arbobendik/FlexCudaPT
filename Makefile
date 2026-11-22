@@ -30,44 +30,34 @@ build/renderer: src/main.cpp src/loader.h src/native.h src/environment.h src/hos
 # The walk's CUDA reads Slang's prelude from the Slang it pins
 PTXFLAGS = -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -I$(OPTIX_PATH)/include -I$(SLANG_PATH)/include
 build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter.h src/shaders/adapter.cuh \
-	src/shaders/flexkernels/pathtracer.cuh $(SLANGC) \
+	src/shaders/flexkernels/pathtracer.cuh src/shaders/noise.cu src/shaders/flexkernels/noise.cuh $(SLANGC) \
 	$(OPTIX_PATH)/include/optix.h
 	mkdir -p build
-	$(NVCC) $(PTXFLAGS) $< -o build/shaders.ptx
-	$(NVCC) $(PTXFLAGS) -DSTANDIN $< -o build/standin.ptx
-	$(NVCC) $(PTXFLAGS) -DEXTENDED $< -o build/extended.ptx
-	$(NVCC) $(PTXFLAGS) -DEXTENDED -DSTANDIN $< -o build/extended_standin.ptx
-	xxd -i build/shaders.ptx > $@
-	xxd -i build/standin.ptx >> $@
-	xxd -i build/extended.ptx >> $@
-	xxd -i build/extended_standin.ptx >> $@
+	for v in shaders: standin:-DSTANDIN extended:-DEXTENDED "extended_standin:-DEXTENDED -DSTANDIN"; do \
+		$(NVCC) $(PTXFLAGS) $${v#*:} $< -o build/$${v%%:*}.ptx || exit 1; done
+	$(NVCC) $(PTXFLAGS) src/shaders/noise.cu -o build/noise.ptx
+	for n in shaders noise standin extended extended_standin; do xxd -i build/$$n.ptx; done > $@
 
 # The same host on Vulkan, which src/vulkan stands in for CUDA and OptiX on
 build/renderer-vulkan: src/main.cpp src/loader.h src/environment.h src/host.h src/shaders/renderer.h \
-	src/vulkan/cuda.h src/vulkan/optix_stubs.h src/vulkan/vector_types.h build/vulkan/shaders.h $(OPTIX_PATH)/include/optix.h
+	src/vulkan/cuda.h src/vulkan/optix_stubs.h src/vulkan/vector_types.h build/vulkan/shaders.h \
+	$(OPTIX_PATH)/include/optix.h
 	$(CXX) -Isrc/vulkan -I$(OPTIX_PATH)/include -Ibuild/vulkan $(CXXFLAGS) -ffp-contract=off $< -o $@ -lvulkan
 
 # Under the name of the PTX, which the host loads; shading fills its program's stack before reading it
 build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/shaders/flexkernels/pathtracer.slang-module \
+	src/shaders/flexkernels/noise-start.spv src/shaders/flexkernels/noise-sweep.spv \
 	$(SLANGC)
 	mkdir -p build/vulkan
-	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/shaders.spv
-	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/extended.spv
-	# The temporal round's count and queue alone, the second pipeline's, and its queued shifts and reuse alone, the
-	# third's: what each entry reaches
-	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -entry queue -target spirv -o build/vulkan/queue.spv
-	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -entry queue -target spirv \
-		-o build/vulkan/extended_queue.spv
-	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -entry temporal -target spirv \
-		-o build/vulkan/temporal.spv
-	$(SLANGC) -warnings-disable 41035 -O2 -DEXTENDED -Isrc/shaders/flexkernels $< -entry temporal -target spirv \
-		-o build/vulkan/extended_temporal.spv
-	xxd -i -n build_shaders_ptx build/vulkan/shaders.spv > $@
-	xxd -i -n build_extended_ptx build/vulkan/extended.spv >> $@
-	xxd -i -n build_queue_ptx build/vulkan/queue.spv >> $@
-	xxd -i -n build_extended_queue_ptx build/vulkan/extended_queue.spv >> $@
-	xxd -i -n build_temporal_ptx build/vulkan/temporal.spv >> $@
-	xxd -i -n build_extended_temporal_ptx build/vulkan/extended_temporal.spv >> $@
+	# Each program plain and extended (name:defines:entry): the whole, then the temporal round's count and queue alone,
+	# the second pipeline's, and its queued shifts and reuse alone, the third's: what each entry reaches
+	for v in shaders:: extended:-DEXTENDED: queue::queue extended_queue:-DEXTENDED:queue temporal::temporal \
+		extended_temporal:-DEXTENDED:temporal; do n=$${v%%:*}; r=$${v#*:}; e=$${r#*:}; \
+		$(SLANGC) -warnings-disable 41035 -O2 $${r%%:*} -Isrc/shaders/flexkernels $< $${e:+-entry $$e} -target spirv \
+		-o build/vulkan/$$n.spv || exit 1; done
+	for n in shaders extended queue extended_queue temporal extended_temporal; do \
+		xxd -i -n build_$${n}_ptx build/vulkan/$$n.spv; done > $@
+	for n in start sweep; do xxd -i -n build_noise_$${n}_spv src/shaders/flexkernels/noise-$$n.spv; done >> $@
 	printf '#define build_standin_ptx build_shaders_ptx\n' >> $@ # Its own stand-in: Vulkan has no inlining to undo
 	printf '#define build_standin_ptx_len build_shaders_ptx_len\n' >> $@
 	printf '#define build_extended_standin_ptx build_extended_ptx\n' >> $@

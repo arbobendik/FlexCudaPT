@@ -146,13 +146,7 @@ inline std::string generateNative(const std::vector<Op>& ops, const std::vector<
 }
 
 // Where the add-on ships what the helper compiles with: beside the renderer's binary
-inline std::string nativeDirectory() {
-    char self[4096];
-    const ssize_t length = readlink("/proc/self/exe", self, sizeof(self) - 1);
-    self[std::max<ssize_t>(length, 0)] = 0;
-    const char* slash = std::strrchr(self, '/');
-    return std::string(self, slash ? slash - self : 0) + "/native";
-}
+inline std::string nativeDirectory() { return selfDirectory() + "/native"; }
 
 // A native PTX's inputs besides its programs, part of its cache key: shipped sources and headers, NVRTC by size
 inline std::string nativeBuild() {
