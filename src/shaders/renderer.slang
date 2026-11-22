@@ -32,7 +32,7 @@ struct Projection { uint type; float range[8], shift[2]; };
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
 // DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes, a world that reads
 // Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges; NOISE_EXTRA periodic gradient
-// noise
+// or simplex noise
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -554,12 +554,41 @@ float periodic(float3 p, float w, int dims, float3 period, float wPeriod) {
     }
     return scales[dims - 1] * sum;
 }
-// Of kind 0 and 1 periodic gradient noise, signed and in [0, 1]: a's w, dims and kind, b the periods, c w's
-// period
+// Signed simplex noise: of n = dims, the lattice skewed by (sqrt(n + 1) - 1) / n so that its unit cubes split into
+// simplices, p's cell i = floor(q + skew sum q) and its offset f0 = q - (i - unskew sum i), unskew = (1 - 1 /
+// sqrt(n + 1)) / n; corner c steps by 1 along the c largest components of f0, its offset f = f0 - step + c unskew,
+// weighted by (r2 - |f|^2)^4 where positive, r2 1, 0.5 or 0.6 => sum of the corners' weights times their gradients,
+// scaled so that it spans [-1, 1]
+float simplex(float3 p, float w, int dims) {
+    const float q[4] = {p.x, p.y, p.z, w}, n = float(dims), skew = dims > 1 ? (sqrt(n + 1) - 1) / n : 0;
+    const float unskew = dims > 1 ? (1 - 1 / sqrt(n + 1)) / n : 0, scales[4] = {0.4204f, 45.23f, 32.76f, 27.60f};
+    float s = 0, t = 0, f0[4] = {0, 0, 0, 0}, sum = 0;
+    int i[4] = {0, 0, 0, 0}, rank[4] = {0, 0, 0, 0};
+    for (int k = 0; k < dims; ++k) s += q[k] * skew;
+    for (int k = 0; k < dims; ++k) { i[k] = int(floor(q[k] + s)); t += i[k] * unskew; }
+    for (int k = 0; k < dims; ++k) f0[k] = q[k] - (i[k] - t);
+    for (int k = 0; k < dims; ++k)
+        for (int j = 0; j < dims; ++j) rank[k] += int(f0[j] > f0[k] || f0[j] == f0[k] && j < k);
+    for (int c = 0; c <= dims; ++c) {
+        float f[4] = {0, 0, 0, 0}, d = dims == 1 ? 1.0f : dims == 2 ? 0.5f : 0.6f;
+        int x[4] = {0, 0, 0, 0};
+        for (int k = 0; k < dims; ++k) {
+            const int step = int(rank[k] < c);
+            x[k] = i[k] + step;
+            f[k] = f0[k] - step + c * unskew;
+            d -= f[k] * f[k];
+        }
+        if (d > 0) sum += d * d * d * d * gradient(jenkins(dims, uint(x[0]), uint(x[1]), uint(x[2]), uint(x[3])), f,
+            dims);
+    }
+    return scales[dims - 1] * sum;
+}
+// Of kind 0 and 1 periodic gradient noise, signed and in [0, 1], 2 and 3 simplex alike: a's w, dims and kind, b
+// the periods, c w's period
 [noinline] float noiseExtra(float3 p, float3 a, float3 b, float3 c) {
     const int dims = int(a.y), kind = int(a.z);
-    const float v = periodic(p, a.x, dims, b, c.x);
-    return kind == 1 ? 0.5f * v + 0.5f : v;
+    const float v = kind < 2 ? periodic(p, a.x, dims, b, c.x) : simplex(p, a.x, dims);
+    return kind == 1 || kind == 3 ? 0.5f * v + 0.5f : v;
 }
 #endif
 // Cubic B-spline weights of the four texels around t
