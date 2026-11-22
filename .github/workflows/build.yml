@@ -30,6 +30,13 @@ jobs:
         run: |
           sed -i "s/^\(version = \"[0-9]*\.[0-9]*\)\.[0-9]*\"/\1.$(git rev-list --count HEAD)\"/" src/blender_manifest.toml
           echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' src/blender_manifest.toml)" >> "$GITHUB_ENV"
+      - name: The blue-noise tensor the add-on ships, the noise-512 release's, generated once on a GPU
+        run: |
+          mkdir -p build
+          curl -fsSL -o build/bluenoise-512x512x32.bin \
+            https://github.com/arbobendik/FlexCudaPT/releases/download/noise-512/bluenoise-512x512x32.bin
+          echo "de6572dcca1e6fca0b3b8dbaa552bd355f6bd69f61fb653718426bd86871c321  build/bluenoise-512x512x32.bin" \
+            | sha256sum -c
       - run: make
       - uses: actions/upload-artifact@v7
         with:

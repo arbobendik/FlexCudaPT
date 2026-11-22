@@ -10,7 +10,7 @@ CPPFLAGS += -I$(CUDA_PATH)/include -I$(OPTIX_PATH)/include
 LDLIBS += -L$(CUDA_PATH)/lib64 -lcuda -ldl
 
 build/flex.zip: src/__init__.py src/blender_manifest.toml src/hosek_wilkie.npy src/hosek_wilkie.LICENSE build/renderer \
-	build/renderer-vulkan build/native
+	build/renderer-vulkan build/native $(wildcard build/bluenoise-512x512x32.bin)  # The tensor CI's packaging fetches
 	python3 -m zipfile -c $@ $^
 
 # What the native programs' helper compiles with NVRTC, which it ships: the renderer's source and the headers it reads

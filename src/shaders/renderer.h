@@ -52,7 +52,8 @@ static_assert(sizeof(PROGRAMS) / sizeof(*PROGRAMS) == PASS_DENOISE + 1, "a pass 
 // The shift queue: dispatch size, jobs per bin and jobs written per bin of 40 bins, then the jobs
 constexpr unsigned QUEUE_HEADER = 3 + 2 * 40;
 // Launch parameters, bound at compile time: per step code whether the scene's programs take it
-struct Params { unsigned long long ops[2]; };
+// noise: the blue-noise tensor's side, launched, not bound
+struct Params { unsigned long long ops[2]; unsigned noise; };
 // What a material's program leaves on the stack, from the bottom
 struct Surface {
     float3 normal, albedo; float metallic, roughness; float3 emissive; float transparency, ior; float3 tint;
@@ -153,4 +154,6 @@ struct Scene {
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
     unsigned* calls; // Per program, shade()'s calls at the hot call sites, which choose the native ones
     float3* lensed; // Of a custom camera, per pixel its sample's throughput; none for other cameras
+    unsigned* noise; unsigned noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
+    unsigned long long noiseTexture; // as read; on OptiX then as a layered texture of 32 layers
 };
