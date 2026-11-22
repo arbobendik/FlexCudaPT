@@ -92,6 +92,7 @@ struct Scene {
     Scene* anchor; // The anchor's scene, in its record
     uint width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
+    uint64_t* bakeTextures; // OptiX's alone: each bake's texture
     uint* calls; // OptiX's alone: shade()'s calls per program at the hot call sites
     float3* lensed; // OptiX's alone: of a custom camera, per pixel its sample's throughput
     uint* noise; uint noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
