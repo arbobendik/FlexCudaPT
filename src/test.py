@@ -4773,12 +4773,13 @@ def noised():  # OSL noise()
             assert numpy.ptp(due) > 0.01 and numpy.abs(seen - due).max() < 1e-5, ('osl noise', body, preferences.device,
                 numpy.abs(seen - due).max())
         nodes.remove(script)
-    # A period not a constant whole number of at least 1, a kind Flex lacks and a periodic simplex raise in the
-    # export, which Blender reports on stderr from a depsgraph handler and goes on from
+    # A period not a constant whole number of at least 1, a kind Flex lacks, a periodic simplex and a filtered or
+    # hybrid "gabor" noise raise in the export, which Blender reports on stderr from a depsgraph handler and goes on
+    # from
     for body, named in (('pnoise("cell", P, 2.5)', 'a period not'), ('pnoise("hash", P, point(1, 0, 1))',
             'a period not'), ('pnoise("cell", P, P[0])', 'a period not'), ('pnoise("perlin", P, 2.5)', 'a period not'),
-            ('noise("lattice", P)', 'the noise "lattice"'), ('pnoise("simplex", P, 4)',
-            'the noise "simplex" periodic')):
+            ('noise("lattice", P)', 'the noise "lattice"'), ('pnoise("simplex", P, 4)', 'the noise "simplex" periodic'),
+            ('noise("gabor", P)', 'unfiltered'), ('noise("gabor", P, "anisotropic", 2, "do_filter", 0)', 'unfiltered')):
         reported, stderr, export = io.StringIO(), sys.stderr, lambda _, graph: exported(graph)
         bpy.app.handlers.depsgraph_update_post.append(export)
         sys.stderr = reported
@@ -4797,9 +4798,9 @@ def noised():  # OSL noise()
 noised()
 
 # A Script node's rarer noises render as the renderer defines them: periodic "perlin" and "uperlin" as noise() where
-# the period exceeds the plane, repeating by the period, "simplex" and "usimplex" at constant points as a CPU
-# evaluation of the same definition gives them, the renders' pixels checked to read a constant color exactly
-def noisier():  # OSL pnoise() and the noise "simplex"
+# the period exceeds the plane, repeating by the period, "simplex", "usimplex" and "gabor" at constant points as a
+# CPU evaluation of the same definition gives them, the renders' pixels checked to read a constant color exactly
+def noisier():  # OSL pnoise() and the noises "simplex" and "gabor"
     shown, lit, was = bpy.context.window.scene, opened('osl noisier', sky=(0, 0, 0)), preferences.device
     lit.flex_restir, lit.flex_samples = False, 16
     lit.render.resolution_x = lit.render.resolution_y = 32
@@ -4823,7 +4824,7 @@ def noisier():  # OSL pnoise() and the noise "simplex"
         seen = render(lit, 32)
         nodes.remove(script)
         return seen
-    at = 'point(0.3, 1.7, 2.2)'
+    at, filtered = 'point(0.3, 1.7, 2.2)', '"do_filter", 0'
     for preferences.device in ('OPTIX', 'VULKAN'):
         for body, due in (('pnoise("perlin", P * 4 + 8, 1000)', 'noise("perlin", P * 4 + 8)'),
                 ('pnoise(P * 4 + 8, point(1000, 1000, 1000))', 'noise(P * 4 + 8)'),
@@ -4837,9 +4838,16 @@ def noisier():  # OSL pnoise() and the noise "simplex"
                 (f'color(noise("usimplex", 1.37), noise("usimplex", 1.37, 2.11), noise("usimplex", {at}))',
                     (0.68331861, 0.59214019, 0.59611388)),
                 (f'color(noise("usimplex", {at}, 0.8), 0.5 + 0.5 * noise("simplex", {at}), 0)', (0.42154728,
-                    0.59611388, 0))):
+                    0.59611388, 0)),
+                (f'0.5 + 0.5 * color(noise("gabor", 1.37, {filtered}), noise("gabor", 1.37, 2.11, {filtered}), '
+                    f'noise("gabor", {at}, {filtered}))', 0.5 + 0.5 * numpy.array((0.09515784, 0.0555797,
+                    -0.17930477))),
+                (f'0.5 + 0.5 * noise("gabor", {at}, "anisotropic", 1, "direction", vector(0, 2, 0), "bandwidth", 2.0, '
+                    f'"impulses", 8, {filtered})', 0.5 + 0.5 * -0.2799331),
+                (f'0.5 + 0.5 * noise("gabor", {at}, "anisotropic", 1, "direction", vector(0), {filtered})',
+                    0.5 + 0.5 * -0.0824334)):
             seen = drawn(body, 'color' if 'color(' in body else 'float')
-            assert numpy.abs(seen - due).max() < 1e-4, ('osl simplex', body, preferences.device,
+            assert numpy.abs(seen - due).max() < 1e-4, ('osl simplex or gabor', body, preferences.device,
                 numpy.abs(seen - due).max())
     preferences.device = was
     bpy.context.window.scene = shown
