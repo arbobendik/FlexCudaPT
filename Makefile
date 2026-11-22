@@ -29,14 +29,16 @@ build/renderer: src/main.cpp src/loader.h src/native.h src/shaders/renderer.h bu
 # The walk's CUDA reads Slang's prelude from the Slang it pins
 PTXFLAGS = -std=c++20 -ptx -arch=compute_75 --use_fast_math -rdc=true -I$(OPTIX_PATH)/include -I$(SLANG_PATH)/include
 build/shaders.h: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter.h src/shaders/adapter.cuh \
-	src/shaders/flexkernels/pathtracer.cuh $(SLANGC) \
+	src/shaders/flexkernels/pathtracer.cuh src/shaders/noise.cu src/shaders/flexkernels/noise.cuh $(SLANGC) \
 	$(OPTIX_PATH)/include/optix.h
 	mkdir -p build
 	$(NVCC) $(PTXFLAGS) $< -o build/shaders.ptx
 	$(NVCC) $(PTXFLAGS) -DSTANDIN $< -o build/standin.ptx
 	$(NVCC) $(PTXFLAGS) -DEXTENDED $< -o build/extended.ptx
 	$(NVCC) $(PTXFLAGS) -DEXTENDED -DSTANDIN $< -o build/extended_standin.ptx
+	$(NVCC) $(PTXFLAGS) src/shaders/noise.cu -o build/noise.ptx
 	xxd -i build/shaders.ptx > $@
+	xxd -i build/noise.ptx >> $@
 	xxd -i build/standin.ptx >> $@
 	xxd -i build/extended.ptx >> $@
 	xxd -i build/extended_standin.ptx >> $@
@@ -48,6 +50,7 @@ build/renderer-vulkan: src/main.cpp src/loader.h src/shaders/renderer.h src/vulk
 
 # Under the name of the PTX, which the host loads; shading fills its program's stack before reading it
 build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/shaders/flexkernels/pathtracer.slang-module \
+	src/shaders/flexkernels/noise-start.spv src/shaders/flexkernels/noise-sweep.spv \
 	$(SLANGC)
 	mkdir -p build/vulkan
 	$(SLANGC) -warnings-disable 41035 -O2 -Isrc/shaders/flexkernels $< -target spirv -o build/vulkan/shaders.spv
@@ -65,6 +68,8 @@ build/vulkan/shaders.h: src/shaders/renderer.slang src/shaders/renderer.h src/sh
 	xxd -i -n build_extended_ptx build/vulkan/extended.spv >> $@
 	xxd -i -n build_queue_ptx build/vulkan/queue.spv >> $@
 	xxd -i -n build_extended_queue_ptx build/vulkan/extended_queue.spv >> $@
+	xxd -i -n build_noise_start_spv src/shaders/flexkernels/noise-start.spv >> $@
+	xxd -i -n build_noise_sweep_spv src/shaders/flexkernels/noise-sweep.spv >> $@
 	xxd -i -n build_temporal_ptx build/vulkan/temporal.spv >> $@
 	xxd -i -n build_extended_temporal_ptx build/vulkan/extended_temporal.spv >> $@
 	printf '#define build_standin_ptx build_shaders_ptx\n' >> $@ # Its own stand-in: Vulkan has no inlining to undo
