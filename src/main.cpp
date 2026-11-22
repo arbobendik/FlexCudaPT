@@ -166,9 +166,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         }
     }).detach();
     const auto extended = [](const Params& params) { // Varying media, strands or hair, the steps after MEDIUM, a
-        return params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 15 // panoramic camera or a script reading its hit's
-            || params.ops[PANORAMA >> 6] >> (PANORAMA & 63) & 1 // triangle: the extended PTX alone
-            || params.ops[TRIANGLE >> 6] >> (TRIANGLE & 63) & 1;
+        return params.ops[MEDIUM >> 6] >> (MEDIUM & 63) & 15 // panoramic camera, a script reading its hit's
+            || params.ops[PANORAMA >> 6] >> (PANORAMA & 63) & 1 // triangle or a rarer noise: the extended PTX alone
+            || params.ops[TRIANGLE >> 6] >> (TRIANGLE & 63) & 1
+            || params.ops[NOISE_EXTRA >> 6] >> (NOISE_EXTRA & 63) & 1;
     };
     const auto begin = [&](Tier& tier) { // Its module created: its compile's first task
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
