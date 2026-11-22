@@ -215,7 +215,13 @@ static __device__ bool fcptCurrentDomain(int2 p, FKDomain* dom) {
 }
 static __device__ bool fcptStoredDomainInitial(int2 p, unsigned seed, FKDomain* dom) {
     if (!onImage(p)) return false;
-    *dom = fkDomain(pixelDomain(hookScene(), VIEW(hookScene().camera), pixelIndex(p), imageSize(), seed));
+    const Domain own = pixelDomain(hookScene(), VIEW(hookScene().camera), pixelIndex(p), imageSize(), seed);
+#ifdef EXTENDED // A custom camera's throughput of the pixel's own sample, in a launch over the image its own thread's
+    const uint3 at = optixGetLaunchIndex();
+    if (hookScene().lensed && optixGetLaunchDimensions().y > 1 && int(at.x) == p.x && int(at.y) == p.y)
+        hookScene().lensed[pixelIndex(p)] = own.throughput;
+#endif
+    *dom = fkDomain(own);
     return dom->hit.instance_index != NONE;
 }
 static __device__ bool fcptStoredDomainTemporal(int2 p, unsigned seed, FKDomain* dom) {
@@ -318,8 +324,13 @@ static __device__ float3 fcptMissed(int2 p, FKDomain dom, float scale) {
     return environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
         / hookScene().settings.paths;
 }
-// Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
+// Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without; through a custom
+// camera times the throughput of the pixel's own sample, which its own thread stored as the initial pass drew it
 static __device__ void fcptAddColor(int2 p, float4 color) {
+#ifdef EXTENDED
+    const float3 through = hookScene().lensed ? hookScene().lensed[pixelIndex(p)] : make_float3(1, 1, 1);
+    color = make_float4(color.x * through.x, color.y * through.y, color.z * through.z, color.w);
+#endif
     float4& sum = hookScene().accumulation[pixelIndex(p)];
     sum = make_float4(sum.x + color.x, sum.y + color.y, sum.z + color.z, sum.w + color.w);
 }
