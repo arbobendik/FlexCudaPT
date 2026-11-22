@@ -5325,6 +5325,9 @@ def blued():  # A sphere under the sky, through a lens out of focus: every draw,
     assert (render() == built).all() and os.path.getmtime(stored) == made, 'blue noise stored'
     ranks = numpy.fromfile(stored, numpy.uint16).reshape(32, -1, 2)  # Per layer and texel, its pair
     assert (numpy.sort(ranks, 1) == numpy.arange(1 << 16)[:, None]).all(), 'blue noise ranks'
+    cpu = os.path.join(bpy.app.tempdir, 'bluenoise-256.bin')  # FlexKernels' CPU generation, bit for bit the GPU's
+    subprocess.run((os.path.join(os.path.dirname(__file__), '..', 'build', 'bluenoise'), '256', cpu), check=True)
+    assert open(cpu, 'rb').read() == open(stored, 'rb').read(), 'blue noise CPU'
     scene.flex_samples = 1024
     reference = render()
     for scene.flex_samples in (1, 4, 16):
