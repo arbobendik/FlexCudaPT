@@ -172,7 +172,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             || params.ops[NOISE_EXTRA >> 6] >> (NOISE_EXTRA & 63) & 1;
     };
     const auto begin = [&](Tier& tier) { // Its module created: its compile's first task
-        const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params), &tier.params};
+        const OptixModuleCompileBoundValueEntry bound{0, sizeof(tier.params.ops), &tier.params}; // Not the noise side
         const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixTask first;
         const bool rare = extended(tier.params);
@@ -235,7 +235,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         CHECK(optixPipelineSetStackSize(tier.pipeline, traversal, state, continuation, 2));
     };
     const auto use = [&](const Tier& tier) { // Launches take it from here on: its params and its programs' headers
-        params = tier.params, pipeline = tier.pipeline;
+        params = tier.params, params.noise = scene.noiseSize, pipeline = tier.pipeline;
         CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
         for (unsigned pass = 0; pass < PASSES; ++pass)
             CHECK(optixSbtRecordPackHeader(tier.groups[pass], &records[pass + 1]));
@@ -316,6 +316,40 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     OptixDenoiserSizes sizes;
     CUdeviceptr state, scratch, denoised, guides[2];
     bool history = false;
+#ifndef VK_VERSION_1_0
+    CUarray noiseArray = nullptr; // The blue-noise tensor's layers, once built or read
+#endif
+    const std::string addon = std::filesystem::canonical("/proc/self/exe").parent_path(); // Its shipped tensor
+    // The blue-noise tensor of a side as the add-on ships it, white without; on OptiX read as a layered texture
+    const auto noised = [&](unsigned size) {
+        const size_t texels = size_t(size) * size * 32, bytes = texels * sizeof(unsigned);
+#ifndef VK_VERSION_1_0
+        if (scene.noiseTexture) { CHECK(cuTexObjectDestroy(scene.noiseTexture)); CHECK(cuArrayDestroy(noiseArray)); }
+#endif
+        if (scene.noise) release((CUdeviceptr)scene.noise);
+        std::vector<unsigned> ranks(texels);
+        const std::string name = "/bluenoise-" + std::to_string(size) + "x" + std::to_string(size) + "x32.bin";
+        FILE* stored = std::fopen((addon + name).c_str(), "rb");
+        const bool read = stored && std::fread(ranks.data(), 1, bytes, stored) == bytes && std::fgetc(stored) == EOF;
+        if (stored) std::fclose(stored);
+        scene.noise = (unsigned*)allocate(bytes, read ? ranks.data() : nullptr), scene.noiseSize = size;
+        scene.noiseTexture = 0, params.noise = size;
+        CHECK(cuMemcpyHtoD(launch, &params, sizeof(params)));
+        if (!read) { release((CUdeviceptr)scene.noise), scene.noise = nullptr; return; } // None shipped: white
+#ifndef VK_VERSION_1_0
+        // Read from here on as a layered texture: a warp's tile of pixels reads one tile of it per draw
+        const CUDA_ARRAY3D_DESCRIPTOR layers{size, size, 32, CU_AD_FORMAT_UNSIGNED_INT16, 2, CUDA_ARRAY3D_LAYERED};
+        CHECK(cuArray3DCreate(&noiseArray, &layers));
+        CUDA_MEMCPY3D copy{.srcMemoryType = CU_MEMORYTYPE_DEVICE, .srcDevice = (CUdeviceptr)scene.noise,
+            .srcPitch = size * sizeof(unsigned), .srcHeight = size, .dstMemoryType = CU_MEMORYTYPE_ARRAY,
+            .dstArray = noiseArray, .WidthInBytes = size * sizeof(unsigned), .Height = size, .Depth = 32};
+        CHECK(cuMemcpy3D(&copy));
+        const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY, .res = {.array = {noiseArray}}};
+        const CUDA_TEXTURE_DESC texture{.filterMode = CU_TR_FILTER_MODE_POINT, .flags = CU_TRSF_READ_AS_INTEGER};
+        CHECK(cuTexObjectCreate(&scene.noiseTexture, &resource, &texture, nullptr));
+        release((CUdeviceptr)scene.noise), scene.noise = nullptr;
+#endif
+    };
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         // At a frame's start, every launch before it ended: the scene's module swapped in once compiled, its renders
         // a stand-in's to rounding; those of earlier op sets dropped once compiled
@@ -421,6 +455,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (last) drop(last);
                 flock(busy, compiled(*special) ? LOCK_UN : LOCK_SH); // Awaiting its own: the warm-up yields
             }
+            if (!scene.noiseSize) noised(512); // Its prepass, the first scene's: the shipped side
             for (unsigned bake : std::exchange(kind == SCENE ? loaded.bakes : loaded.rebakes, {})) { // A scene's, or
                 const Op& texture = loaded.ops[bake - 1]; // those new steps run again, once: numbered by its frame,
                 CHECK(cuMemsetD32((CUdeviceptr)(scene.texels + texture.texel), 0, 2 * texture.width * texture.height));
