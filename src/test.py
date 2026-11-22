@@ -4796,9 +4796,10 @@ def noised():  # OSL noise()
     bpy.context.window.scene = shown
 noised()
 
-# A Script node's periodic noises render as the renderer defines them: periodic "perlin" and "uperlin" as noise()
-# where the period exceeds the plane, repeating by the period
-def noisier():  # OSL pnoise()
+# A Script node's rarer noises render as the renderer defines them: periodic "perlin" and "uperlin" as noise() where
+# the period exceeds the plane, repeating by the period, "simplex" and "usimplex" at constant points as a CPU
+# evaluation of the same definition gives them, the renders' pixels checked to read a constant color exactly
+def noisier():  # OSL pnoise() and the noise "simplex"
     shown, lit, was = bpy.context.window.scene, opened('osl noisier', sky=(0, 0, 0)), preferences.device
     lit.flex_restir, lit.flex_samples = False, 16
     lit.render.resolution_x = lit.render.resolution_y = 32
@@ -4813,7 +4814,7 @@ def noisier():  # OSL pnoise()
     nodes, links = material.node_tree.nodes, material.node_tree.links
     light = nodes.new('ShaderNodeEmission')
     links.new(light.outputs[0], nodes['Material Output'].inputs['Surface'])
-    def drawn(body, kind='float'):  # The plane lit by a script's value of the kind
+    def drawn(body, kind='color'):  # The plane lit by a script's value of the kind
         script = nodes.new('ShaderNodeScript')
         script.script = bpy.data.texts.new('noisier.osl')
         script.script.write(f'shader noisier(output color Color = 0) {{\n    {kind} f = {body};\n    Color = f;\n}}\n')
@@ -4822,6 +4823,7 @@ def noisier():  # OSL pnoise()
         seen = render(lit, 32)
         nodes.remove(script)
         return seen
+    at = 'point(0.3, 1.7, 2.2)'
     for preferences.device in ('OPTIX', 'VULKAN'):
         for body, due in (('pnoise("perlin", P * 4 + 8, 1000)', 'noise("perlin", P * 4 + 8)'),
                 ('pnoise(P * 4 + 8, point(1000, 1000, 1000))', 'noise(P * 4 + 8)'),
@@ -4831,6 +4833,14 @@ def noisier():  # OSL pnoise()
             seen, wanted = drawn(f'0.5 + 0.5 * {body}', 'float'), drawn(f'0.5 + 0.5 * {due}', 'float')
             assert numpy.ptp(wanted) > 0.01 and numpy.abs(seen - wanted).max() < 1e-5, ('osl pnoise', body,
                 preferences.device, numpy.abs(seen - wanted).max())
+        for body, due in (('color(0.25, 0.5, 0.75)', (0.25, 0.5, 0.75)),
+                (f'color(noise("usimplex", 1.37), noise("usimplex", 1.37, 2.11), noise("usimplex", {at}))',
+                    (0.68331861, 0.59214019, 0.59611388)),
+                (f'color(noise("usimplex", {at}, 0.8), 0.5 + 0.5 * noise("simplex", {at}), 0)', (0.42154728,
+                    0.59611388, 0))):
+            seen = drawn(body, 'color' if 'color(' in body else 'float')
+            assert numpy.abs(seen - due).max() < 1e-4, ('osl simplex', body, preferences.device,
+                numpy.abs(seen - due).max())
     preferences.device = was
     bpy.context.window.scene = shown
 noisier()
