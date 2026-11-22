@@ -31,8 +31,8 @@ struct Projection { uint type; float range[8], shift[2]; };
 // exporter's); PHASE marks a volume's Henyey-Greenstein asymmetry, VELVET a sheen of the Sheen BSDF's Ashikhmin
 // distribution, TOON a toon lobe; SELECT, per channel, the second value where the first is not 0, else the third;
 // DISPERSION a transmission's IOR spread by wavelength; WORLD_PATH, which no program takes, a world that reads
-// Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges; NOISE_EXTRA periodic gradient
-// or simplex noise
+// Light Path; TRIANGLE of the hit's triangle its face normal, parameters or edges; NOISE_EXTRA periodic gradient,
+// simplex or sparse convolution noise
 struct Op { Code code; float3 value; };
 // A step's code in its low byte; with IMMEDIATE an operation's second operand is its value, with LEFT its first
 static const uint CODE = 255;
@@ -583,11 +583,42 @@ float simplex(float3 p, float w, int dims) {
     }
     return scales[dims - 1] * sum;
 }
-// Of kind 0 and 1 periodic gradient noise, signed and in [0, 1], 2 and 3 simplex alike: a's w, dims and kind, b
-// the periods, c w's period
+// The next uniform in [0, 1) of a cell's state, a linear congruential step: state = 1664525 state + 1013904223, its
+// top 24 bits over 2^24
+float drawn(inout uint state) { state = state * 1664525u + 1013904223u; return (state >> 8) / 16777216.0f; }
+// Sparse convolution noise of a Gaussian times a cosine, 1 to 3D: a bandwidth of b octaves gives the Gaussian's width a
+// = sqrt(pi) (2^b - 1) / (2^b + 1) at frequency 1, cut where it falls to 5%, exp(-pi a^2 r^2) = 0.05 => r = sqrt(-ln
+// 0.05 / pi) / a, the lattice's cell; per cell around p's, impulses at hashed places and signs, each that Gaussian
+// times cos(2 pi x . omega), omega a hashed direction (isotropic) or the given one; of n impulses per cell
+// r^dims, the sum's variance n / r^dims * 1/2 * (2 a^2)^(-dims / 2) => the sum over 3 standard deviations
+float convolved(float3 p, int dims, float3 direction, float bandwidth, int impulses, bool anisotropic) {
+    const float two = exp2(bandwidth), a = sqrt(PI) * (two - 1) / (two + 1), radius = sqrt(-log(0.05f) / PI) / a;
+    const float3 q = p / radius, low = floor(q);
+    // The given direction over its length, zero kept zero
+    const float3 along = direction * rsqrt(dot(direction, direction) + 1e-30f);
+    float sum = 0;
+    for (int cell = 0; cell < (dims == 1 ? 3 : dims == 2 ? 9 : 27); ++cell) {
+        const int c[3] = {int(low.x) + cell % 3 - 1, dims > 1 ? int(low.y) + cell / 3 % 3 - 1 : 0,
+            dims > 2 ? int(low.z) + cell / 9 - 1 : 0};
+        uint state = jenkins(dims, uint(c[0]), uint(c[1]), uint(c[2]));
+        for (int i = 0; i < impulses; ++i) {
+            const float ax = c[0] + drawn(state), ay = dims > 1 ? c[1] + drawn(state) : 0;
+            const float3 at = float3(ax, ay, dims > 2 ? c[2] + drawn(state) : 0), x = (q - at) * radius;
+            const float sign = drawn(state) < 0.5f ? -1 : 1, phi = 2 * PI * drawn(state), z = 2 * drawn(state) - 1;
+            const float3 omega = anisotropic ? along : dims == 1 ? float3(1, 0, 0) : dims == 2
+                ? float3(cos(phi), sin(phi), 0) : float3(sqrt(1 - z * z) * cos(phi), sqrt(1 - z * z) * sin(phi), z);
+            if (dot(x, x) < radius * radius) sum += sign * exp(-PI * a * a * dot(x, x)) * cos(2 * PI * dot(x, omega));
+        }
+    }
+    const float variance = impulses / pow(radius, float(dims)) * 0.5f * pow(2 * a * a, -0.5f * dims);
+    return sum / (3 * sqrt(variance));
+}
+// Of kind 0 and 1 periodic gradient noise, signed and in [0, 1], 2 and 3 simplex alike, 4 sparse convolution: a's w,
+// dims and kind, b the periods or direction, c w's period or the bandwidth, impulses and whether anisotropic
 [noinline] float noiseExtra(float3 p, float3 a, float3 b, float3 c) {
     const int dims = int(a.y), kind = int(a.z);
-    const float v = kind < 2 ? periodic(p, a.x, dims, b, c.x) : simplex(p, a.x, dims);
+    const float v = kind < 2 ? periodic(p, a.x, dims, b, c.x) : kind < 4 ? simplex(p, a.x, dims)
+        : convolved(p, dims, b, c.x, int(c.y), c.z != 0);
     return kind == 1 || kind == 3 ? 0.5f * v + 0.5f : v;
 }
 #endif
