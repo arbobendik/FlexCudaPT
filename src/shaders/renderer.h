@@ -152,6 +152,7 @@ struct Scene {
     const Scene* anchor; // The anchor's scene, in its record
     unsigned width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
+    unsigned long long* bakeTextures; // Each bake's texture, filtered by the hardware, which its readers take
     unsigned* calls; // Per program, shade()'s calls at the hot call sites, which choose the native ones
     float3* lensed; // Of a custom camera, per pixel its sample's throughput; none for other cameras
     unsigned* noise; unsigned noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
