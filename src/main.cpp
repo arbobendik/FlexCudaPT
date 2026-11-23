@@ -279,7 +279,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     Tier* interim = nullptr; // Its stand-in's, standing in without a generic until it is
     // The scene's native programs: once its steps ran so many launches, those chosen by their calls are compiled by a
     // helper process, into a tier of the special's params that launches take once compiled, until the steps change
-    std::vector<std::pair<CUarray, CUtexObject>> bakes; // The bakes' textures, which their readers filter through
+    std::vector<std::pair<CUmipmappedArray, CUtexObject>> bakes; // The bakes' textures, their readers filter through
     Tier* native = nullptr;
     pid_t helper = 0;
     std::string helping, cached; // Its directory, of the programs' source and the PTX; the PTX's in OptiX's cache
@@ -511,11 +511,10 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (loaded.bakeOps) // Freed once baked, as nothing else reads them: those the next steps need come again
                 release(loaded.bakeOps), release((CUdeviceptr)scene.bakeTexels), loaded.bakeOps = 0,
                     scene.bakeTexels = {};
-#ifndef VK_VERSION_1_0
             if (kind != UPDATE) { // The bakes' texels copied into textures, their readers' ops marked to read those
-                for (const auto& [array, object] : bakes) {
+                for (const auto& [chain, object] : bakes) {
                     CHECK(cuTexObjectDestroy(object));
-                    CHECK(cuArrayDestroy(array));
+                    CHECK(cuMipmappedArrayDestroy(chain));
                 }
                 bakes.clear();
                 std::map<unsigned long long, unsigned> index; // Each bake's texture by its texels' place and wrapping
@@ -525,16 +524,18 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     const auto [at, fresh] = index.try_emplace(op.texel * 2ull | (op.height >> 29 & 1),
                         unsigned(bakes.size()));
                     if (fresh) {
-                        const CUDA_ARRAY_DESCRIPTOR array{width, height, CU_AD_FORMAT_HALF, 4};
-                        auto& [texels, object] = bakes.emplace_back();
-                        CHECK(cuArrayCreate(&texels, &array));
+                        const CUDA_ARRAY3D_DESCRIPTOR array{width, height, 0, CU_AD_FORMAT_HALF, 4, 0};
+                        auto& [chain, object] = bakes.emplace_back();
+                        CHECK(cuMipmappedArrayCreate(&chain, &array, 1));
+                        CUarray level;
+                        CHECK(cuMipmappedArrayGetLevel(&level, chain, 0));
                         const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_DEVICE,
                             .srcDevice = (CUdeviceptr)(scene.texels + op.texel), .srcPitch = width * 8,
-                            .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = texels, .WidthInBytes = width * 8,
+                            .dstMemoryType = CU_MEMORYTYPE_ARRAY, .dstArray = level, .WidthInBytes = width * 8,
                             .Height = height};
                         CHECK(cuMemcpy2D(&copy));
                         const CUDA_RESOURCE_DESC resource{.resType = CU_RESOURCE_TYPE_ARRAY,
-                            .res = {.array = {texels}}};
+                            .res = {.array = {level}}};
                         const auto mode = op.height >> 29 & 1 ? CU_TR_ADDRESS_MODE_WRAP : CU_TR_ADDRESS_MODE_CLAMP;
                         const CUDA_TEXTURE_DESC filtering{.addressMode = {mode, mode},
                             .filterMode = CU_TR_FILTER_MODE_LINEAR, .flags = CU_TRSF_NORMALIZED_COORDINATES};
@@ -549,7 +550,6 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     objects.data());
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.ops, loaded.ops.data(), loaded.rows * sizeof(Op)));
             }
-#endif
             std::vector<Material> materials = loaded.materials;
             if (scene.count) {
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));

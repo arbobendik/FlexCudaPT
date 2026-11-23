@@ -92,7 +92,7 @@ struct Scene {
     Scene* anchor; // The anchor's scene, in its record
     uint width, height; // The image's size, which shift passes launched over their queue need
     Projection cameraProjection, previousCameraProjection, denoisedCameraProjection;
-    uint64_t* bakeTextures; // OptiX's alone: each bake's texture
+    uint64_t* bakeTextures; // Each bake's texture, filtered by the hardware
     uint* calls; // OptiX's alone: shade()'s calls per program at the hot call sites
     float3* lensed; // OptiX's alone: of a custom camera, per pixel its sample's throughput
     uint* noise; uint noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
@@ -785,8 +785,13 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(BACKFACING) stack[top++] = float3(1, 1, 1) * float(backfacing); break;
         CASE(LIGHT_PATH) stack[top - 1] = float3(1, 1, 1) * lightPath(ray, int(stack[top - 1].x)); break;
         CASE(BAKED) { // A bake's texels, halves two to a texel, read linearly at the UV, extended at its edges or
-            const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF); // repeating
-            const float x = stack[top - 1].x * width - 0.5f, y = stack[top - 1].y * height - 0.5f;
+            if ((asuint(op.value.z) >> 27 & 1) != 0) { // repeating: through its texture, its index in place of its
+                stack[top - 1] = filtered[NonUniformResourceIndex(uint(scene.bakeTextures[asuint(op.value.y)]))]
+                    .SampleLevel(samplers[(asuint(op.value.z) >> 29 & 1) != 0 ? 0 : 1], stack[top - 1].xy, 0).xyz;
+                break;
+            }
+            const int width = int(asuint(op.value.y)), height = int(asuint(op.value.z) & 0xFFFFFF); // width; else
+            const float x = stack[top - 1].x * width - 0.5f, y = stack[top - 1].y * height - 0.5f; // its texels
             const int i = int(floor(x)), j = int(floor(y));
             const bool repeating = (asuint(op.value.z) >> 29 & 1) != 0;
             float3 c[4];

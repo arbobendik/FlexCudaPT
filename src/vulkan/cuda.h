@@ -21,14 +21,14 @@ typedef struct CUarray_st { VkImage image; VkDeviceMemory memory; VkImageView vi
 // first level, and of floats of all, of RGBA8 once its filtering texture reads it; a level of a chain shares its image
 typedef CUarray CUmipmappedArray;
 enum { CU_AD_FORMAT_UNSIGNED_INT8 = 0x01, CU_AD_FORMAT_UNSIGNED_INT16 = 0x02, CU_AD_FORMAT_HALF = 0x10,
-    CU_AD_FORMAT_FLOAT = 0x20, CU_MEMORYTYPE_HOST = 1, CU_MEMORYTYPE_ARRAY = 3,
+    CU_AD_FORMAT_FLOAT = 0x20, CU_MEMORYTYPE_HOST = 1, CU_MEMORYTYPE_DEVICE = 2, CU_MEMORYTYPE_ARRAY = 3,
     CU_RESOURCE_TYPE_ARRAY = 0, CU_RESOURCE_TYPE_MIPMAPPED_ARRAY = 1, CU_TR_ADDRESS_MODE_WRAP = 0,
     CU_TR_ADDRESS_MODE_CLAMP = 1, CU_TR_ADDRESS_MODE_MIRROR = 2, CU_TR_ADDRESS_MODE_BORDER = 3,
     CU_TR_FILTER_MODE_POINT = 0, CU_TR_FILTER_MODE_LINEAR = 1, CU_TRSF_READ_AS_INTEGER = 1,
     CU_TRSF_NORMALIZED_COORDINATES = 2, CU_TRSF_SRGB = 0x10 };
 struct CUDA_ARRAY3D_DESCRIPTOR { size_t Width, Height, Depth; int Format; unsigned NumChannels, Flags; };
-struct CUDA_MEMCPY2D { int srcMemoryType; const void* srcHost; size_t srcPitch; int dstMemoryType; CUarray dstArray;
-    size_t WidthInBytes, Height; };
+struct CUDA_MEMCPY2D { int srcMemoryType; const void* srcHost; CUdeviceptr srcDevice; size_t srcPitch;
+    int dstMemoryType; CUarray dstArray; size_t WidthInBytes, Height; };
 struct CUDA_RESOURCE_DESC { int resType; union { struct { CUarray hArray; } array;
     struct { CUmipmappedArray hMipmappedArray; } mipmap; } res; };
 struct CUDA_TEXTURE_DESC { int addressMode[3], filterMode; unsigned flags, maxAnisotropy; int mipmapFilterMode;
@@ -363,9 +363,24 @@ inline void layout(VkCommandBuffer commands, VkImage image, VkImageLayout from, 
 }
 
 // Of host rows into an array's image, as loader.h pipes them, of no gaps: through the staging buffer a run of rows at a
-// time, for the shaders to read
+// time, for the shaders to read; or of a device array's rows, as bakes are, at once
 inline CUresult cuMemcpy2D(const CUDA_MEMCPY2D* copy) {
     const CUarray array = copy->dstArray;
+    if (copy->srcMemoryType == CU_MEMORYTYPE_DEVICE) {
+        const auto [from, offset] = find(copy->srcDevice);
+        return run([&](VkCommandBuffer commands) {
+            layout(commands, array->image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                array->level);
+            const VkBufferImageCopy region{.bufferOffset = offset,
+                .bufferRowLength = uint32_t(copy->srcPitch / (copy->WidthInBytes / array->extent.width)),
+                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, array->level, 0, 1},
+                .imageExtent = {array->extent.width, uint32_t(copy->Height), 1}};
+            vkCmdCopyBufferToImage(commands, from.buffer, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                &region);
+            layout(commands, array->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, array->level);
+        });
+    }
     const size_t rows = STAGING / copy->WidthInBytes;
     for (size_t row = 0; row < copy->Height; row += rows) {
         const uint32_t count = uint32_t(std::min(rows, copy->Height - row));
