@@ -2311,12 +2311,13 @@ def tabled(shades, ob):  # Per slot a material
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     # shaded: whether the last export's rows are taken again; kept: those rows; textures and places: the last export's
-    def __init__(self, shaded, keeping, moved, kept, textures, places, instances, attributes):
+    def __init__(self, shaded, keeping, moved, kept, textures, places):
         self.ops, self.hints = [], {}  # Steps of all programs; the light power hint of each by its first
         self.aside, self.tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once
         # baked; tiles
         self.textures = textures  # First texel, width, height and mean per image and ramp
         self.texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
+        self.attributes = [numpy.zeros(4 * len(INSTANCER), 'f')]  # Instancer attributes, as start() notes
         self.derived = set()  # Images a Bump differentiates, kept floats
         self.baked, self.bakes, self.units, self.summaries, self.placed, self.again = [0], [], {}, {}, [], []  # Texels
         # baked after those piped, each bake's program, each unit's texture, what each expression of the surface the
@@ -2333,7 +2334,12 @@ class Export:
         for place in places: interned(place[1][1], self.keys)  # So a unit kept compares its key in its arity
         self.moved, self.shaded, self.keeping, self.kept, self.spans = moved, shaded, keeping, kept, []  # Kept rows;
         # this export's spans
-        self.instances, self.attributes, self.placements = instances, attributes, []  # What record() appends to
+        self.instances, self.placements = [], []  # Per instance its mesh, transform and adjugate and its object's
+        # location, color, pass index, random number and axes, as Cycles' object info node tells; what record() places
+        self.points, self.segments, self.hairs, self.bounds, self.roots, self.spaces = [numpy.empty((0, 4), 'f')], [], \
+            [], [], [], {}  # Strands: their points in their object's space and radius; per segment its first point
+        # and strand, material and bounds; per strand its first point, point count, random number, root's UV and
+        # color; per object its texture space
         self.subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open
         # objects apart
         self.alive, self.leaves, self.found = [], {}, {}  # The variants kept while summaries holds their ids; per id,
@@ -2565,8 +2571,7 @@ class Export:
     def variant(self, material):  # Apart for open objects where its subsurface scattering asked
         return (material, None) if material in self.subsurface and not SEALING['closed'] else material
     # An object's strands, of its particle hair rendered as paths and its curves, its rows' and entries' among those
-    def hair(self, rows, entries, strands, mode, i, instance, ob):
-        points, segments, hairs, bounds, roots, spaces = strands
+    def hair(self, rows, entries, mode, i, instance, ob):
         SEALING['closed'] = False
         shades = [rows[variant] if (variant := self.variant(material)) in rows else self.current.update(scales=None,
             made=[]) or rows.setdefault(variant, self.shaded_row(material)) for material in [slot.material
@@ -2579,24 +2584,26 @@ class Export:
             count = numpy.hstack([[], *counts]).astype('I')  # Per strand its points
             strand = numpy.repeat(numpy.arange(len(count), dtype='I'), count)
             p = numpy.concatenate([numpy.empty((0, 4)), *paths], dtype='f')
-            segment = numpy.flatnonzero(strand[:-1] == strand[1:]).astype('I')  # Of each two points of a strand, by its
+            segment = numpy.flatnonzero(strand[:-1] == strand[1:]).astype('I')  # Of each two points of a strand, by
+            # its
             box = [f(p[:-1, :3] + sign * p[:-1, 3:], p[1:, :3] + sign * p[1:, 3:])[segment] for sign, f in ((-1,
                 numpy.minimum), (1, numpy.maximum))]  # first; its spheres' bounds
-            entries[key] = sum(map(len, segments)), len(segment), STRANDS
-            segments.append(numpy.column_stack((segment + sum(map(len, points)), strand[segment]
-                + sum(map(len, hairs)))))
-            bounds.append(numpy.hstack(box))
-            roots.append(numpy.column_stack(((numpy.cumsum(count) - count + sum(map(len, points))).astype('I').view(
-                'f'), count.view('f'), numpy.random.default_rng(0).random(len(count), 'f'), numpy.zeros(len(count)),
-                numpy.vstack([numpy.empty((0, 2)), *uvs]), numpy.zeros((len(count), 2)), numpy.vstack([
-                numpy.empty((0, 4)), *colors]))).astype('f'))
+            entries[key] = sum(map(len, self.segments)), len(segment), STRANDS
+            self.segments.append(numpy.column_stack((segment + sum(map(len, self.points)), strand[segment]
+                + sum(map(len, self.hairs)))))
+            self.bounds.append(numpy.hstack(box))
+            self.roots.append(numpy.column_stack(((numpy.cumsum(count) - count + sum(map(len, self.points))).astype(
+                'I').view('f'), count.view('f'), numpy.random.default_rng(0).random(len(count), 'f'),
+                numpy.zeros(len(count)), numpy.vstack([numpy.empty((0, 2)), *uvs]), numpy.zeros((len(count), 2)),
+                numpy.vstack([numpy.empty((0, 4)), *colors]))).astype('f'))
             low, high = (p[:, :3].min(0), p[:, :3].max(0)) if ob.type == 'CURVES' and len(p) else (numpy.array(
                 ob.data.texspace_location) - ob.data.texspace_size, numpy.array(ob.data.texspace_location)
                 + ob.data.texspace_size) if ob.type == 'MESH' else (numpy.zeros(3), numpy.ones(3))
-            spaces[key] = ((*(low + high) / 2, *(high - low) / 2), 0)  # Its generated points' texture space
-            points.append(p)
-            hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
-        self.record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
+            self.spaces[key] = ((*(low + high) / 2, *(high - low) / 2), 0)  # Its generated points' texture space
+            self.points.append(p)
+            self.hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'),
+                len(shades) - 1)])
+        self.record(~i, instance, ob, entries[key], media=self.spaces[key])  # Apart from its emitter's mesh
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -2717,9 +2724,8 @@ class Flex(bpy.types.RenderEngine):
         # their handedness in object space, and per triangle its material's pass index: once per object's mesh and
         # materials of all its instances, its vertices and normals in object space but of a light's or under an update
         columns = [[numpy.empty((0, *shape), 'f')] for shape in (*[(3, 3)] * 4, (3, 2), (3, 4), (3, 4), ())]
-        materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
-        # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
-        # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
+        materials, entries = [], {}  # A row per triangle of each mesh, as each object's mesh by its key
+        # (its first triangle, count and whether in world space)
         HAIRS.clear()
         PROGRAMS.clear()
         if not shaded:  # An update keeps each folded chain's table, its key
@@ -2730,23 +2736,18 @@ class Flex(bpy.types.RenderEngine):
         IDS.clear()
         INSTANCER.clear(), INSTANCER.update((name, k) for k, name in enumerate(sorted({node.attribute_name for tree in
             trees if tree for node in tree.nodes if node.type == 'ATTRIBUTE' and node.attribute_type == 'INSTANCER'})))
-        attributes = [numpy.zeros(4 * len(INSTANCER), 'f')]
         ex = Export(shaded, keeping, moved, self.kept if shaded else {}, dict(self.shape[2]) if shaded else {},
-            self.placed if shaded else [], instances, attributes)
+            self.placed if shaded else [])
         empty = ex.program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
         # An object's slots; a volume object without any, one empty slot the default volume fills
         slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
-        slots, volumes = ex.placements, {}  # Index, triangle count and key of each instance exported; BVHs of those
-        # filling volumes
+        volumes = {}  # Index, triangle count and key of each instance exported; BVHs of those filling
+        # volumes
         varying = set()  # Those whose volume varies, bounded inside where they are: moved, exported anew
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
-        strands = [numpy.empty((0, 4), 'f')], [], [], [], [], {}  # Strands:
-        # their points in their object's space and radius; per segment its first point and strand, material and bounds;
-        # per strand its first point, point count, random number, root's UV and color; per object its texture space
-        points, segments, hairs, bounds, roots, spaces = strands
         output = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         SIDE['volume'] = True  # The world's volume, boxed where it has any extinction, (s + 1 - a) d
         filled = output and output.inputs['Volume'].is_linked and resolve(output.inputs['Volume'])
@@ -2765,7 +2766,7 @@ class Flex(bpy.types.RenderEngine):
                     ex.record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance):
-                    ex.hair(rows, entries, strands, depsgraph.mode, i, instance, ob)
+                    ex.hair(rows, entries, depsgraph.mode, i, instance, ob)
                 if ob.type == 'CURVES':
                     if box and not (ob.hide_render and not instance.is_instance): hold(corners, instance, ob)
                     continue
@@ -2876,7 +2877,8 @@ class Flex(bpy.types.RenderEngine):
                     t = uv[mask]
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
                         * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
-                    ex.current.update(triangles=sum(slot[1] for slot in slots) + numpy.nonzero(mask)[0], uv=t, made=[],
+                    ex.current.update(triangles=sum(slot[1] for slot in ex.placements) + numpy.nonzero(mask)[0], uv=t,
+                        made=[],
                         scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(ex.current)
@@ -3008,13 +3010,13 @@ class Flex(bpy.types.RenderEngine):
         # its object's info and its transform's rows and adjugate
         if moved:
             if varying or self.box != 2 ** 32 - 1 or not all(self.slots.get(i, ())[1:] == (count, key)
-                    for i, count, key in slots):  # Or the world's box, which what moved may leave
+                    for i, count, key in ex.placements):  # Or the world's box, which what moved may leave
                 return True
             self.volumes.update(volumes)
-            self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
-                enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
-                *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:40].astype('f'),
-                instances[k][3][:21].astype('f')))))
+            self.requests.writelines((struct.pack('<2I', UPDATE, len(ex.placements)), *(array for k, (i, count, _) in
+                enumerate(ex.placements) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
+                *(column[k + 1].astype('f') for column in columns[:8]), ex.instances[k][3][21:40].astype('f'),
+                ex.instances[k][3][:21].astype('f')))))
             self.visible = visible
             return
         outlet = scene.world and scene.world.node_tree.get_output_node('CYCLES')
@@ -3073,7 +3075,7 @@ class Flex(bpy.types.RenderEngine):
             and height >> 28 & 1 else (code, texel, width, height)
             for code, texel, width, height in ex.ops + ex.aside[0]]
         ex.ops += [(OP[name], 0, 0, 0) for name, any in (('MEDIUM', varying),
-            ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic),
+            ('CURVES', sum(map(len, ex.hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic),
             ('WORLD_PATH', world_path)) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
             if self.varying or shape[:2] != self.shape[:2] or len(ex.textures) != len(self.shape[2]) or [*HAIRS] != \
@@ -3113,9 +3115,9 @@ class Flex(bpy.types.RenderEngine):
             self.visible, self.kept = visible, recorded(ex.spans, None, ex.ops, ex.aside, ex.bakes, ex.placed, ex.again)
             return
         self.shape, self.hairs = shape, [*HAIRS]
-        firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
-        self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
-        self.volumes, self.varying, self.box = volumes, varying, len(slots) - 1 if box else 2 ** 32 - 1
+        firsts = numpy.cumsum([0] + [count for _, count, _ in ex.placements])
+        self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(ex.placements, firsts)}
+        self.volumes, self.varying, self.box = volumes, varying, len(ex.placements) - 1 if box else 2 ** 32 - 1
         self.cuts, self.placed, self.piped = cuts, ex.placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
@@ -3130,21 +3132,22 @@ class Flex(bpy.types.RenderEngine):
         # in its bit 26, and its texels; the hair tables' count and entries after the steps, baked as the rest loads;
         # last the instancer attributes and the world's grid
         self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ex.ops), piped, ex.baked[0],
-            len(ex.bakes), ahead, counts[1], sum(map(len, columns[0])), len(instances), counts[2]),
+            len(ex.bakes), ahead, counts[1], sum(map(len, columns[0])), len(ex.instances), counts[2]),
             numpy.array(ex.ops, 'I'),
             struct.pack('<I', len(HAIRS)), numpy.array([*HAIRS], 'f'),
-            *(part for first, count, in_world, values in instances
+            *(part for first, count, in_world, values in ex.instances
             for part in (numpy.array((first, count, in_world), 'I'), values)),
             *(numpy.concatenate(column, dtype='f') for column in columns),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
-            struct.pack('<3I', sum(map(len, points)), sum(map(len, segments)), sum(map(len, hairs))), *points,
-            *segments, *bounds, *roots, *(
-            table[segment[:, 1]] for hair_rows in [numpy.concatenate((numpy.empty((0, 5)), *hairs), dtype='f')]
+            struct.pack('<3I', sum(map(len, ex.points)), sum(map(len, ex.segments)), sum(map(len, ex.hairs))),
+            *ex.points,
+            *ex.segments, *ex.bounds, *ex.roots, *(
+            table[segment[:, 1]] for hair_rows in [numpy.concatenate((numpy.empty((0, 5)), *ex.hairs), dtype='f')]
             for table in [numpy.hstack((hair_rows[:, :1].view('I'), hair_rows[:, 1:].astype('I')))]
-            for segment in segments),
+            for segment in ex.segments),
             *ex.texels, numpy.array(ex.bakes, 'I'),
             numpy.array([shape for _, shape in ex.images], 'I'), *(entry for entry, _ in ex.images),
-            struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
+            struct.pack('<I', len(ex.attributes) * len(INSTANCER)), *ex.attributes, struct.pack('<2I', *grid)))
         self.visible, self.kept = visible, recorded(ex.spans, at, ex.ops, ex.aside, ex.bakes, ex.placed, ex.again) \
             if keeping else {}
 
