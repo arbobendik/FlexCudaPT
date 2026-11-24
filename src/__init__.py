@@ -2762,7 +2762,7 @@ class Flex(bpy.types.RenderEngine):
             bm = bmesh.new()
             if ob.type == 'CURVES' or pathed(ob, depsgraph.mode):  # Its strands: anew when it moved
                 if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
-                    if ~i not in self.slots: return self.start(depsgraph, keeping)
+                    if ~i not in self.slots: return True
                     ex.record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance):
@@ -3010,7 +3010,7 @@ class Flex(bpy.types.RenderEngine):
         if moved:
             if varying or self.box != 2 ** 32 - 1 or not all(self.slots.get(i, ())[1:] == (count, key)
                     for i, count, key in slots):  # Or the world's box, which what moved may leave
-                return self.start(depsgraph, keeping)
+                return True
             self.volumes.update(volumes)
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
@@ -3076,7 +3076,7 @@ class Flex(bpy.types.RenderEngine):
                     textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
                     or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
                     if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
-                return self.start(depsgraph, keeping)
+                return True
             read = {texel for code, texel, *_ in ops if NAMES[code & CODE][:5] in ('IMAGE', 'ALPHA')}  # The tables
             tables = {key: [] for key, entry in textures.items()
                 if not isinstance(key, (tuple, Bake)) and entry[0] in read}
@@ -3085,7 +3085,7 @@ class Flex(bpy.types.RenderEngine):
             if any((means[key] != textures[key][3]).any() for key in tables):
                 self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
                 self.visible = visible  # The same scene: start() pipes its steps again
-                return self.start(depsgraph, keeping)
+                return True
             # Then per table its first texel, texel count and texels, until a count of 0, those only bakes read flagged
             # in bit 31, and with bakes to run again their images, as piped, and tiles; per program its first step and
             # light power hint, until a first of 2^32 - 1; then the count and programs of the bakes to run again; then
@@ -3185,7 +3185,7 @@ class Flex(bpy.types.RenderEngine):
         self.update_progress(0)
         self.update_stats('', f'{scene.name} | Syncing scene')
         self.restart()
-        self.start(depsgraph, render.use_persistent_data or self.is_animation)  # Kept for a later render
+        while self.start(depsgraph, render.use_persistent_data or self.is_animation): pass  # Kept for a later render
         evaluated = scene.camera.evaluated_get(depsgraph)
         camera = (evaluated.matrix_world.normalized(),
             evaluated.calc_matrix_camera(depsgraph, x=render.resolution_x, y=render.resolution_y), evaluated)
@@ -3216,7 +3216,7 @@ class Flex(bpy.types.RenderEngine):
     def view_update(self, context, depsgraph):
         if reading(): return  # Of the IDs a grid's read makes, within the export reading it
         self.restart()
-        self.start(depsgraph, True)  # A viewport's engine is kept
+        while self.start(depsgraph, True): pass  # A viewport's engine is kept
 
     def view_draw(self, context, depsgraph):  # Draws the viewport's view, after a few more samples while it lacks any
         if self.visible is None: return  # No scene piped to trace
