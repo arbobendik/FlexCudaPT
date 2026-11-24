@@ -2206,11 +2206,11 @@ def substituted(x, values, memo):  # Each part once, as shared
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places):
+            again, images, keys, failed, current, places, moved):
         self.ops, self.hints, self.aside, self.tilings, self.textures = ops, hints, aside, tilings, textures
         self.texels, self.derived, self.baked, self.bakes, self.units = texels, derived, baked, bakes, units
         self.summaries, self.placed, self.again, self.images, self.keys = summaries, placed, again, images, keys
-        self.failed, self.current, self.places = failed, current, places
+        self.failed, self.current, self.places, self.moved = failed, current, places, moved
         self.alive, self.leaves, self.found = [], {}, {}  # The variants kept while summaries holds their ids; per id,
         # as below
     # Steps of an object's own scalars (its alpha, pass indices, random number) or a vertex's alpha against
@@ -2315,6 +2315,84 @@ class Export:
         self.baked[0] += -(-size.prod() // 2)
         self.ops, self.hints = outer
         return 'BAKED', point, self.units[key]
+    # A Bump's heights as its height's gradient along its one point input, baked whole, at its shifted points, its
+    # height at its own point no matter; where no gradient bakes, its height baked on its images' lattice, else all
+    def bumped(self, normal, height, first, second, factors, memo, whole):  # live, as a bake's texels differ none
+        # between points a bump shifts by less than one
+        summary = isinstance(height, tuple) and self.summaries[id(height)]
+        inputs = summary and summary.cost is not None and summary.inputs
+        if inputs and len(inputs) == 1 and (point := next(iter(inputs))) in (self.current.get('scales') or ()):
+            scales = {**self.current['scales'], 'BUMP': 1}  # Central differences a quarter texel apart
+            step = scales[point] / 4 / max(64, summarize(height, {}, scales).need)
+            shifted = lambda d: moved_to(height, ('ADD', (point,), d), {}, point)
+            gradient = fold(vector(*(('DIVIDE', ('SUBTRACT', shifted(e * step), shifted(-e * step)), 2 * step)
+                if k < 2 or point != 'UV' else 0 for k, e in enumerate(numpy.eye(3)))))
+            summarize(gradient, self.summaries, scales)
+            if (read := self.bake(gradient, {}, True))[0] == 'BAKED':
+                return 'BUMP', self.bake(normal, memo, whole), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED',
+                    ('SHIFT', k), (point,)), (point,))) for k in (1, 2)), self.bake(factors, memo, whole)
+        seen = {}  # Of images alone, its texels' own gradient as live has it: the height baked on their lattice
+        noisy = lambda e: isinstance(e, tuple) and (seen[id(e)] if id(e) in seen else seen.setdefault(id(e), e[0] ==
+            'NOISE' or any(map(noisy, e[1:]))))
+        if isinstance(height, tuple) and self.summaries[id(height)].reads and not noisy(height):
+            return 'BUMP', *(self.bake(part, memo, whole) for part in (normal, height, first, second, factors))
+        return 'BUMP', self.bake(normal, memo, whole), height, first, second, self.bake(factors, memo, whole)
+    # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
+    def program(self, surface, reads=None, cut=True, emitted=True):  # baked, but in an update of moves: its bakes
+        # the last's; with emitted false only cut
+        surface = [skied(attribute, memo) for memo in [{}] for attribute in surface]  # Skies' chains read once
+        surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
+        self.derived.update(differentiated(surface))
+        seen, table = set(), {}  # Reads of attributes shading isn't linear in, or that aren't affine in their reads
+        for k, attribute in enumerate(surface):
+            if k % len(GRAY) in UNFILTERED or summarize(attribute, table, None).affine is None:
+                unfiltered(attribute, seen)
+        if cut and not self.moved:  # Its expressions as units, all, then its units cut
+            self.summaries.clear()
+            for attribute in surface: summarize(attribute, self.summaries, self.current.get('scales'))
+            surface = [attribute if k in LIVE else self.bake(attribute) for k, attribute in enumerate(surface)]
+        if not emitted: return surface
+        surface, first = fold(unanimated(surface)), len(self.ops)
+        # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
+        # them out
+        for length, slot, mark in ((28, 25, 'COAT'), (25, 24, 'DISPERSION'), (24, 23, 'TOON'), (23, 22, 'VELVET'),
+                (22, 21, 'PHASE'), (21, 20, 'HAIR'), (20, 19, None), (19, 16, 'ANISOTROPIC'), (16, 14, 'SHEEN'),
+                (14, 13, 'TRANSLUCENT')):  # Cut from the slot of a mark absent; 19: the volume's emission, 0
+            if len(surface) == length and not (marks(surface[slot], mark) if mark else nonzero(surface[slot])):
+                surface = surface[:slot]
+        emit(surface, [], self.textures, self.texels, alpha, uses, keys=keyed)
+        load = OP['LOAD']
+        # The slots a step reads, by a LOAD or as its operand, and keeps its result in, numbered once per value
+        slots_read = lambda op: [op[1]] if op[0] == load else [op[4]] if len(op) > 4 and op[4] is not None else []
+        keeps = lambda op: [op[5]] if len(op) > 4 and op[5] is not None else []
+        # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
+        # straight through, so a program needs only as many slots as it keeps values at once; while that is more
+        # than SLOTS, the value kept longest of those live at the most crowded step is computed again where read
+        while True:
+            del self.ops[first:]
+            slots.clear()
+            radiant = emit(surface, self.ops, self.textures, self.texels, alpha, uses, slots, keys=keyed)
+            last = {slot: k for k, op in enumerate(self.ops[first:], first) for slot in slots_read(op)}
+            taken, renamed, stored, crowded = set(), {}, {}, set()
+            for k in range(first, len(self.ops)):
+                for slot in keeps(self.ops[k]):
+                    renamed[slot] = min(set(range(len(taken) + 1)) - taken)
+                    taken.add(renamed[slot]), stored.update({slot: k})
+                if len(taken) > len(crowded): crowded = {s for s in stored if last[s] >= k}
+                for slot in slots_read(self.ops[k]):
+                    if last[slot] == k: taken.discard(renamed[slot])
+            if len(crowded) <= SLOTS:
+                self.ops[first:] = [(code, renamed[op[0]], 0, 0) if code == load else (code | (op[3] is not None and
+                    renamed[op[3]] << 8) | (op[4] is not None and KEEP | renamed[op[4]] << 13), *op[:3])
+                    if len(op) > 3 else (code, *op) for code, *op in self.ops[first:]]
+                break
+            spilled = max(crowded, key=lambda s: last[s] - stored[s])
+            uses[next(key for key, slot in slots.items() if slot == spilled)][0] = 1
+        # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
+        scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(triple(surface[k])[0])
+        opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
+        self.hints[first] = max(radiant, 1e-6 if isinstance(surface[4], tuple) else 0)
+        return self.hints[first], first, opaque
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -2483,87 +2561,8 @@ class Flex(bpy.types.RenderEngine):
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
         for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
         ex = Export(ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places)
-        # A Bump's heights as its height's gradient along its one point input, baked whole, at its shifted points, its
-        # height at its own point no matter; where no gradient bakes, its height baked on its images' lattice, else all
-        def bumped(normal, height, first, second, factors, memo, whole):  # live, as a bake's texels differ none
-            # between points a bump shifts by less than one
-            summary = isinstance(height, tuple) and ex.summaries[id(height)]
-            inputs = summary and summary.cost is not None and summary.inputs
-            if inputs and len(inputs) == 1 and (point := next(iter(inputs))) in (ex.current.get('scales') or ()):
-                scales = {**ex.current['scales'], 'BUMP': 1}  # Central differences a quarter texel apart
-                step = scales[point] / 4 / max(64, summarize(height, {}, scales).need)
-                shifted = lambda d: moved_to(height, ('ADD', (point,), d), {}, point)
-                gradient = fold(vector(*(('DIVIDE', ('SUBTRACT', shifted(e * step), shifted(-e * step)), 2 * step)
-                    if k < 2 or point != 'UV' else 0 for k, e in enumerate(numpy.eye(3)))))
-                summarize(gradient, ex.summaries, scales)
-                if (read := ex.bake(gradient, {}, True))[0] == 'BAKED':
-                    return 'BUMP', ex.bake(normal, memo, whole), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED',
-                        ('SHIFT', k), (point,)), (point,))) for k in (1, 2)), ex.bake(factors, memo, whole)
-            seen = {}  # Of images alone, its texels' own gradient as live has it: the height baked on their lattice
-            noisy = lambda e: isinstance(e, tuple) and (seen[id(e)] if id(e) in seen else seen.setdefault(id(e), e[0] ==
-                'NOISE' or any(map(noisy, e[1:]))))
-            if isinstance(height, tuple) and ex.summaries[id(height)].reads and not noisy(height):
-                return 'BUMP', *(ex.bake(part, memo, whole) for part in (normal, height, first, second, factors))
-            return 'BUMP', ex.bake(normal, memo, whole), height, first, second, ex.bake(factors, memo, whole)
-        # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
-        def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
-            # the last's; with emitted false only cut
-            surface = [skied(attribute, memo) for memo in [{}] for attribute in surface]  # Skies' chains read once
-            surface, alpha, uses, slots, keyed = fold(surface), set(alpha_reads(reads or surface)), {}, {}, {}
-            ex.derived.update(differentiated(surface))
-            seen, table = set(), {}  # Reads of attributes shading isn't linear in, or that aren't affine in their reads
-            for k, attribute in enumerate(surface):
-                if k % len(GRAY) in UNFILTERED or summarize(attribute, table, None).affine is None:
-                    unfiltered(attribute, seen)
-            if cut:  # Its expressions as units, all, then its units cut
-                ex.summaries.clear()
-                for attribute in surface: summarize(attribute, ex.summaries, ex.current.get('scales'))
-                surface = [attribute if k in LIVE else ex.bake(attribute) for k, attribute in enumerate(surface)]
-            if not emitted: return surface
-            surface, first = fold(unanimated(surface)), len(ex.ops)
-            # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
-            # them out
-            for length, slot, mark in ((28, 25, 'COAT'), (25, 24, 'DISPERSION'), (24, 23, 'TOON'), (23, 22, 'VELVET'),
-                    (22, 21, 'PHASE'), (21, 20, 'HAIR'), (20, 19, None), (19, 16, 'ANISOTROPIC'), (16, 14, 'SHEEN'),
-                    (14, 13, 'TRANSLUCENT')):  # Cut from the slot of a mark absent; 19: the volume's emission, 0
-                if len(surface) == length and not (marks(surface[slot], mark) if mark else nonzero(surface[slot])):
-                    surface = surface[:slot]
-            emit(surface, [], ex.textures, ex.texels, alpha, uses, keys=keyed)
-            load = OP['LOAD']
-            # The slots a step reads, by a LOAD or as its operand, and keeps its result in, numbered once per value
-            slots_read = lambda op: [op[1]] if op[0] == load else [op[4]] if len(op) > 4 and op[4] is not None else []
-            keeps = lambda op: [op[5]] if len(op) > 4 and op[5] is not None else []
-            # Each value kept for reuse takes the lowest slot free from its store to its last load, as the steps run
-            # straight through, so a program needs only as many slots as it keeps values at once; while that is more
-            # than SLOTS, the value kept longest of those live at the most crowded step is computed again where read
-            while True:
-                del ex.ops[first:]
-                slots.clear()
-                radiant = emit(surface, ex.ops, ex.textures, ex.texels, alpha, uses, slots, keys=keyed)
-                last = {slot: k for k, op in enumerate(ex.ops[first:], first) for slot in slots_read(op)}
-                taken, renamed, stored, crowded = set(), {}, {}, set()
-                for k in range(first, len(ex.ops)):
-                    for slot in keeps(ex.ops[k]):
-                        renamed[slot] = min(set(range(len(taken) + 1)) - taken)
-                        taken.add(renamed[slot]), stored.update({slot: k})
-                    if len(taken) > len(crowded): crowded = {s for s in stored if last[s] >= k}
-                    for slot in slots_read(ex.ops[k]):
-                        if last[slot] == k: taken.discard(renamed[slot])
-                if len(crowded) <= SLOTS:
-                    ex.ops[first:] = [(code, renamed[op[0]], 0, 0) if code == load else (code | (op[3] is not None and
-                        renamed[op[3]] << 8) | (op[4] is not None and KEEP | renamed[op[4]] << 13), *op[:3])
-                        if len(op) > 3 else (code, *op) for code, *op in ex.ops[first:]]
-                    break
-                spilled = max(crowded, key=lambda s: last[s] - stored[s])
-                uses[next(key for key, slot in slots.items() if slot == spilled)][0] = 1
-            # Opaque where it covers and passes nothing whatever the point: coverage 1, and ior not 1 or transparency 0
-            scalar = lambda k: None if isinstance(surface[k], tuple) else numpy.float32(triple(surface[k])[0])
-            opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
-            ex.hints[first] = max(radiant, 1e-6 if isinstance(surface[4], tuple) else 0)
-            return ex.hints[first], first, opaque
-        ex.bumped, ex.program = bumped, program
-        empty = program(GRAY)  # An empty slot renders gray
+            again, images, keys, failed, current, places, moved)
+        empty = ex.program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
@@ -2601,7 +2600,7 @@ class Flex(bpy.types.RenderEngine):
             before, hairs = recording and ([dict(d) for d in ledgers()], dict(HAIRS), set(derived), set(subsurface),
                 len(current.get('made', ()))), dict(HAIRS)
             SEALING['asked'] = False
-            row = shade(material, program, filler)
+            row = shade(material, ex.program, filler)
             if SEALING['asked']: subsurface.add(material)
             if recording and HAIRS == hairs: spans.append((key, context, (at, spots(), [{k: v for k, v in d.items()
                 if k not in b or b[k] is not v} for d, b in zip(ledgers(), before[0])], (derived - before[2],
@@ -2911,8 +2910,8 @@ class Flex(bpy.types.RenderEngine):
                 # pass through it straight as Cycles' lights occlude none and what lies within it is lit; an area
                 # light, which its black back occludes all the same, and a sun stay black
                 sphere = light.type in ('POINT', 'SPOT')
-                shades = [(*row, row[1]) for row in (program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
-                    else [*BLACK[:4], emission, *BLACK[5:]]), program(BLACK))]
+                shades = [(*row, row[1]) for row in (ex.program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]]
+                    if sphere else [*BLACK[:4], emission, *BLACK[5:]]), ex.program(BLACK))]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
@@ -2992,9 +2991,9 @@ class Flex(bpy.types.RenderEngine):
         grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if outlet and \
             scene.world.flex_sample_light and isinstance(fold(surface)[4], tuple) else (0, 0)
         world_path = grid[0] and any(marks(x, 'LIGHT_PATH') for x in surface)  # Its sky samples asked per lobe
-        backdrop = program(surface)
+        backdrop = ex.program(surface)
         materials.append([(*backdrop[:2], 0, 0, backdrop[1])])
-        self.lensing = program(lensed(viewer, *size))[1] if custom else 0  # The custom camera's, run per sample
+        self.lensing = ex.program(lensed(viewer, *size))[1] if custom else 0  # The custom camera's, run per sample
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, row[3]) for row in rows.values()], \
             textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
