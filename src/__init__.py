@@ -2301,6 +2301,13 @@ def strands_of(ob, mode):
         colors.append(color.reshape(-1, 4)[offsets[:-1] if layer and layer.domain == 'POINT' else slice(None)])
     return paths, counts, index, uvs, colors
 
+# Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too
+def dark(ob): return ob.type == 'LIGHT' and not ob.data.use_shadow
+def tabled(shades, ob):  # Per slot a material
+    shadowless = dark(ob)
+    hidden = (not ob.visible_shadow or shadowless) and 2 | shadowless << 2
+    return numpy.array([(*row[:2], not ob.visible_camera, hidden or row[2], row[3]) for row in shades])
+
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
@@ -2539,6 +2546,41 @@ class Export:
         values = instance.is_instance and INSTANCER and instancer(instance).ravel()
         return values is not False and len(values) and values.any() and (self.attributes.append(values)
             or len(self.attributes) - 1) * len(INSTANCER) or 0
+    def variant(self, material):  # Apart for open objects where its subsurface scattering asked
+        return (material, None) if material in self.subsurface and not SEALING['closed'] else material
+    # An object's strands, of its particle hair rendered as paths and its curves, its rows' and entries' among those
+    def hair(self, rows, entries, strands, mode, i, instance, ob):
+        points, segments, hairs, bounds, roots, spaces = strands
+        SEALING['closed'] = False
+        shades = [rows[variant] if (variant := self.variant(material)) in rows else self.current.update(scales=None,
+            made=[]) or rows.setdefault(variant, self.shaded_row(material)) for material in [slot.material
+            for slot in ob.material_slots] or [None]]
+        self.current.clear()
+        if self.shaded: return  # Its rows alone
+        key = 'STRANDS', ob.name
+        if key not in entries:  # Its strands, piped once
+            paths, counts, index, uvs, colors = strands_of(ob, mode)
+            count = numpy.hstack([[], *counts]).astype('I')  # Per strand its points
+            strand = numpy.repeat(numpy.arange(len(count), dtype='I'), count)
+            p = numpy.concatenate([numpy.empty((0, 4)), *paths], dtype='f')
+            segment = numpy.flatnonzero(strand[:-1] == strand[1:]).astype('I')  # Of each two points of a strand, by its
+            box = [f(p[:-1, :3] + sign * p[:-1, 3:], p[1:, :3] + sign * p[1:, 3:])[segment] for sign, f in ((-1,
+                numpy.minimum), (1, numpy.maximum))]  # first; its spheres' bounds
+            entries[key] = sum(map(len, segments)), len(segment), STRANDS
+            segments.append(numpy.column_stack((segment + sum(map(len, points)), strand[segment]
+                + sum(map(len, hairs)))))
+            bounds.append(numpy.hstack(box))
+            roots.append(numpy.column_stack(((numpy.cumsum(count) - count + sum(map(len, points))).astype('I').view(
+                'f'), count.view('f'), numpy.random.default_rng(0).random(len(count), 'f'), numpy.zeros(len(count)),
+                numpy.vstack([numpy.empty((0, 2)), *uvs]), numpy.zeros((len(count), 2)), numpy.vstack([
+                numpy.empty((0, 4)), *colors]))).astype('f'))
+            low, high = (p[:, :3].min(0), p[:, :3].max(0)) if ob.type == 'CURVES' and len(p) else (numpy.array(
+                ob.data.texspace_location) - ob.data.texspace_size, numpy.array(ob.data.texspace_location)
+                + ob.data.texspace_size) if ob.type == 'MESH' else (numpy.zeros(3), numpy.ones(3))
+            spaces[key] = ((*(low + high) / 2, *(high - low) / 2), 0)  # Its generated points' texture space
+            points.append(p)
+            hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
+        self.record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -2694,7 +2736,6 @@ class Flex(bpy.types.RenderEngine):
             instances, attributes)
         empty = ex.program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
-        variant = lambda material: (material, None) if material in ex.subsurface and not SEALING['closed'] else material
         # An object's slots; a volume object without any, one empty slot the default volume fills
         slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
         slots, volumes = ex.placements, {}  # Index, triangle count and key of each instance exported; BVHs of those
@@ -2703,44 +2744,10 @@ class Flex(bpy.types.RenderEngine):
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
             members(ob.instance_collection) if ob.instance_type == 'COLLECTION' and ob.instance_collection else ()))})
-        points, segments, hairs, bounds, roots, spaces = [numpy.empty((0, 4), 'f')], [], [], [], [], {}  # Strands:
+        strands = [numpy.empty((0, 4), 'f')], [], [], [], [], {}  # Strands:
         # their points in their object's space and radius; per segment its first point and strand, material and bounds;
         # per strand its first point, point count, random number, root's UV and color; per object its texture space
-        # Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too
-        dark = lambda ob: ob.type == 'LIGHT' and not ob.data.use_shadow
-        tabled = lambda shades, ob: numpy.array([(*row[:2], not ob.visible_camera, 2 | dark(ob) << 2
-            if not ob.visible_shadow or dark(ob) else row[2], row[3])
-            for row in shades])  # Per slot a material
-        def hair(i, instance, ob):  # An object's strands, of its particle hair rendered as paths and its curves
-            SEALING['closed'] = False
-            shades = [rows[variant(material)] if variant(material) in rows else current.update(scales=None, made=[])
-                or rows.setdefault(variant(material), ex.shaded_row(material)) for material in [slot.material
-                for slot in ob.material_slots] or [None]]
-            current.clear()
-            if shaded or (key := ('STRANDS', ob.name)) in entries:  # Its rows alone, or its strands piped once
-                return shaded or ex.record(~i, instance, ob, entries[key], media=spaces[key])
-            paths, counts, index, uvs, colors = strands_of(ob, depsgraph.mode)
-            count = numpy.hstack([[], *counts]).astype('I')  # Per strand its points
-            strand = numpy.repeat(numpy.arange(len(count), dtype='I'), count)
-            p = numpy.concatenate([numpy.empty((0, 4)), *paths], dtype='f')
-            segment = numpy.flatnonzero(strand[:-1] == strand[1:]).astype('I')  # Of each two points of a strand, by its
-            box = [f(p[:-1, :3] + sign * p[:-1, 3:], p[1:, :3] + sign * p[1:, 3:])[segment] for sign, f in ((-1,
-                numpy.minimum), (1, numpy.maximum))]  # first; its spheres' bounds
-            entries[key] = sum(map(len, segments)), len(segment), STRANDS
-            segments.append(numpy.column_stack((segment + sum(map(len, points)), strand[segment]
-                + sum(map(len, hairs)))))
-            bounds.append(numpy.hstack(box))
-            roots.append(numpy.column_stack(((numpy.cumsum(count) - count + sum(map(len, points))).astype('I').view(
-                'f'), count.view('f'), numpy.random.default_rng(0).random(len(count), 'f'), numpy.zeros(len(count)),
-                numpy.vstack([numpy.empty((0, 2)), *uvs]), numpy.zeros((len(count), 2)), numpy.vstack([
-                numpy.empty((0, 4)), *colors]))).astype('f'))
-            low, high = (p[:, :3].min(0), p[:, :3].max(0)) if ob.type == 'CURVES' and len(p) else (numpy.array(
-                ob.data.texspace_location) - ob.data.texspace_size, numpy.array(ob.data.texspace_location)
-                + ob.data.texspace_size) if ob.type == 'MESH' else (numpy.zeros(3), numpy.ones(3))
-            spaces[key] = ((*(low + high) / 2, *(high - low) / 2), 0)  # Its generated points' texture space
-            points.append(p)
-            hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
-            ex.record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
+        points, segments, hairs, bounds, roots, spaces = strands
         output = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         SIDE['volume'] = True  # The world's volume, boxed where it has any extinction, (s + 1 - a) d
         filled = output and output.inputs['Volume'].is_linked and resolve(output.inputs['Volume'])
@@ -2758,7 +2765,8 @@ class Flex(bpy.types.RenderEngine):
                     if ~i not in self.slots: return self.start(depsgraph, keeping)
                     ex.record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
-                if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
+                if not moved and not (ob.hide_render and not instance.is_instance):
+                    ex.hair(rows, entries, strands, depsgraph.mode, i, instance, ob)
                 if ob.type == 'CURVES':
                     if box and not (ob.hide_render and not instance.is_instance): hold(corners, instance, ob)
                     continue
@@ -2779,11 +2787,11 @@ class Flex(bpy.types.RenderEngine):
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
                 SEALING['closed'] = closed(ob, ob.data)
                 for slot in ob.material_slots:  # Of those the last export cut, not its linked duplicates'
-                    if variant(slot.material) in rows or (slot.material, ob.name) in rows \
+                    if ex.variant(slot.material) in rows or (slot.material, ob.name) in rows \
                         or (slot.material, ob.name) not in self.cuts: continue
                     current.update(self.cuts[(slot.material, ob.name)], made=[])
                     row = ex.shaded_row(slot.material)
-                    rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
+                    rows[(slot.material, ob.name) if current['made'] else ex.variant(slot.material)] = row
                 current.clear()
                 continue
             key = ob.type != 'LIGHT' and not moved and (ob.data and ob.data.as_pointer(), ob.visible_camera,
@@ -2861,7 +2869,7 @@ class Flex(bpy.types.RenderEngine):
                 DOMAIN = fluid(ob, scene.frame_current, lattices)
                 for slot in slotted(ob):  # Of a material with units baked over this object's UVs or filling a
                     # domain's grids, its own row
-                    if variant(slot.material) in rows and not (DOMAIN and (slot.material or ob.type == 'VOLUME')) \
+                    if ex.variant(slot.material) in rows and not (DOMAIN and (slot.material or ob.type == 'VOLUME')) \
                             or (slot.material, ob.name) in rows:
                         continue
                     mask = numpy.isin(index, [k for k, other in enumerate(slotted(ob))
@@ -2874,9 +2882,9 @@ class Flex(bpy.types.RenderEngine):
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
                     row = ex.shaded_row(slot.material, ob.type == 'VOLUME')
-                    rows[(slot.material, ob.name) if current['made'] or DOMAIN else variant(slot.material)] = row
+                    rows[(slot.material, ob.name) if current['made'] or DOMAIN else ex.variant(slot.material)] = row
                 current.clear()
-                shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
+                shades = [rows.get((slot.material, ob.name), rows.get(ex.variant(slot.material)))
                     for slot in slotted(ob)] or [rows[None]]
             # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
             if ob.type == 'LIGHT':
