@@ -2193,6 +2193,39 @@ def lensed(camera, width, height):
     surface[0], surface[1], surface[4] = outputs['direction'], outputs['position'], outputs['throughput']
     return surface
 
+ALIKE = {'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'MULTIPLY_ADD', 'MAXIMUM', 'MINIMUM', 'LESS_THAN', 'POWER',
+    'LOGARITHM', 'EXPONENT', 'FLOOR', 'SNAP', 'DOT_PRODUCT', 'SELECT'}  # Channels alike in, alike out
+def substituted(x, values, memo):  # Each part once, as shared
+    if not isinstance(x, tuple): return x
+    if id(x) not in memo:  # The same where no step is in it
+        parts = [substituted(part, values, memo) for part in x[1:]]
+        memo[id(x)] = values[id(x)] if id(x) in values else x if all(map(operator.is_, parts, x[1:])) else \
+            (x[0], *parts)
+    return memo[id(x)]
+
+# The shading of an export's materials: what its bakes and programs share
+class Export:
+    def __init__(self):
+        self.alive, self.leaves, self.found = [], {}, {}  # The variants kept while summaries holds their ids; per id,
+        # as below
+    # Steps of an object's own scalars (its alpha, pass indices, random number) or a vertex's alpha against
+    # constants alike in every channel: 0 or 1, equal in all three, so a chain live only for at most two of them
+    # equals, at every point, its bake with each step at 0 or 1 selected by the steps live
+    def leaf(self, x):  # Whether an expression varies only by such scalars, and by one
+        if not isinstance(x, tuple): return None if len(set(triple(x))) > 1 else False
+        if self.leaves.get(id(x), (None,))[0] is not x:  # Each part once, kept with it, as ids are reused
+            parts = [self.leaf(part) for part in x[1:]] if x[0] in ALIKE else [None]
+            self.leaves[id(x)] = x, x[0] == 'VERTEX_ALPHA' or x[0] == 'OBJECT_INFO' and not isinstance(x[1], tuple) \
+                and triple(x[1])[0] >= 2 or None if x[0] in ('OBJECT_INFO', 'VERTEX_ALPHA') else None if None in \
+                parts else any(parts)
+        return self.leaves[id(x)][1]
+    def stepwise(self, x):  # Its steps as above, outermost, by id
+        if not isinstance(x, tuple): return {}
+        if self.found.get(id(x), (None,))[0] is not x:
+            self.found[id(x)] = x, {id(x): x} if x[0] == 'LESS_THAN' and self.leaf(x) else {k: v for part in x[1:]
+                for k, v in self.stepwise(part).items()}
+        return self.found[id(x)][1]
+
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
     bl_label = 'Flex'
@@ -2363,39 +2396,13 @@ class Flex(bpy.types.RenderEngine):
             memo = {} if memo is None else memo  # whole: baked whole or not at all
             if id(expression) not in memo: memo[id(expression)] = baking(expression, memo, whole)
             return memo[id(expression)]
-        # Steps of an object's own scalars (its alpha, pass indices, random number) or a vertex's alpha against
-        # constants alike in every channel: 0 or 1, equal in all three, so a chain live only for at most two of them
-        # equals, at every point, its bake with each step at 0 or 1 selected by the steps live
-        alive, leaves, found = [], {}, {}  # The variants kept while summaries holds their ids; per id, as below
-        ALIKE = {'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'MULTIPLY_ADD', 'MAXIMUM', 'MINIMUM', 'LESS_THAN', 'POWER',
-            'LOGARITHM', 'EXPONENT', 'FLOOR', 'SNAP', 'DOT_PRODUCT', 'SELECT'}  # Channels alike in, alike out
-        def leaf(x):  # Whether an expression varies only by such scalars, and by one
-            if not isinstance(x, tuple): return None if len(set(triple(x))) > 1 else False
-            if leaves.get(id(x), (None,))[0] is not x:  # Each part once, kept with it, as ids are reused
-                parts = [leaf(part) for part in x[1:]] if x[0] in ALIKE else [None]
-                leaves[id(x)] = x, x[0] == 'VERTEX_ALPHA' or x[0] == 'OBJECT_INFO' and not isinstance(x[1], tuple) and \
-                    triple(x[1])[0] >= 2 or None if x[0] in ('OBJECT_INFO', 'VERTEX_ALPHA') else None if None in \
-                    parts else any(parts)
-            return leaves[id(x)][1]
-        def stepwise(x):  # Its steps as above, outermost, by id
-            if not isinstance(x, tuple): return {}
-            if found.get(id(x), (None,))[0] is not x:
-                found[id(x)] = x, {id(x): x} if x[0] == 'LESS_THAN' and leaf(x) else {k: v for part in x[1:] for k, v
-                    in stepwise(part).items()}
-            return found[id(x)][1]
-        def substituted(x, values, memo):  # Each part once, as shared
-            if not isinstance(x, tuple): return x
-            if id(x) not in memo:  # The same where no step is in it
-                parts = [substituted(part, values, memo) for part in x[1:]]
-                memo[id(x)] = values[id(x)] if id(x) in values else x if all(map(operator.is_, parts, x[1:])) else \
-                    (x[0], *parts)
-            return memo[id(x)]
+        ex = Export()
         def stepped(expression):  # Its select between such variants, each baked whole; None where not
-            if not 0 < len(stepwise(expression)) <= 2: return None
-            stepping, variants = list(stepwise(expression).values()), []
+            if not 0 < len(ex.stepwise(expression)) <= 2: return None
+            stepping, variants = list(ex.stepwise(expression).values()), []
             for k in range(1 << len(stepping)):
                 variant = substituted(expression, {id(s): float(k >> i & 1) for i, s in enumerate(stepping)}, {})
-                alive.append(variant)
+                ex.alive.append(variant)
                 if (summarize(variant, summaries, current.get('scales')).cost or 0) < 10: return None
                 variants.append(variant)
             shared = {}  # Each baked whole, none in part, or the chain as today
