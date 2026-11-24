@@ -2255,12 +2255,13 @@ def recorded(spans, relocation, ops, aside, bakes, placed, again):
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places, moved, shaded, keeping, kept):
+            again, images, keys, failed, current, places, moved, shaded, keeping, kept, instances, attributes):
         self.ops, self.hints, self.aside, self.tilings, self.textures = ops, hints, aside, tilings, textures
         self.texels, self.derived, self.baked, self.bakes, self.units = texels, derived, baked, bakes, units
         self.summaries, self.placed, self.again, self.images, self.keys = summaries, placed, again, images, keys
         self.failed, self.current, self.places, self.moved = failed, current, places, moved
         self.shaded, self.keeping, self.kept, self.spans = shaded, keeping, kept, []  # Kept rows; this export's spans
+        self.instances, self.attributes, self.placements = instances, attributes, []  # What record() appends to
         self.subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open
         # objects apart
         self.alive, self.leaves, self.found = [], {}, {}  # The variants kept while summaries holds their ids; per id,
@@ -2472,6 +2473,23 @@ class Export:
             - before[2], self.subsurface - before[3]), self.current.get('made', [])[before[4]:], row), True))  # Made,
             # its spans to cut
         return row
+    def record(self, i, instance, ob, entry, light=False, media=((0,) * 6, 0)):  # An instance exported, of the
+        # object's mesh entry, and of one filling a volume its texture space and largest extinction, 0 unless it varies
+        # An object's random number, not instanced: a hash of its name's
+        random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
+            lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
+        matrix = instance.matrix_world
+        self.instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
+            numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
+            ob.pass_index, random, *numpy.array(matrix.to_3x3()).T.ravel()],
+            numpy.array([self.attributed(instance)], 'u4').view('f'), numpy.array((*media[0], media[1]), 'f')),
+            dtype='f')))
+        self.placements.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
+            for slot in ob.material_slots], light)))
+    def attributed(self, instance):  # The first of its instancer attributes, the zeros' without
+        values = instance.is_instance and INSTANCER and instancer(instance).ravel()
+        return values is not False and len(values) and values.any() and (self.attributes.append(values)
+            or len(self.attributes) - 1) * len(INSTANCER) or 0
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -2595,19 +2613,6 @@ class Flex(bpy.types.RenderEngine):
         materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
         # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
         # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
-        def record(i, instance, ob, entry, light=False, media=((0,) * 6, 0)):  # An instance exported, of the object's
-            # mesh entry, and of one filling a volume its texture space and largest extinction, 0 unless it varies
-            # Cycles' random number of an object, not instanced, by Jenkins' hash of its name's
-            random = instance.random_id / 0xFFFFFFFF if instance.is_instance else hashed(functools.reduce(
-                lambda h, c: (h * 37 + c) & 0xFFFFFFFF, ob.name.encode(), 0), 0)
-            matrix = instance.matrix_world
-            instances.append((*entry, numpy.concatenate((numpy.array(matrix, 'f')[:3].ravel(),
-                numpy.array(matrix.to_3x3().adjugated(), 'f').ravel(), [*matrix.translation, *ob.color,
-                ob.pass_index, random, *numpy.array(matrix.to_3x3()).T.ravel()],
-                numpy.array([attributed(instance)], 'u4').view('f'), numpy.array((*media[0], media[1]), 'f')),
-                dtype='f')))
-            slots.append((i, entry[1], (ob.visible_camera, [slot.material and slot.material.name
-                for slot in ob.material_slots], light)))
         ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
         aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         HAIRS.clear()
@@ -2623,10 +2628,6 @@ class Flex(bpy.types.RenderEngine):
         INSTANCER.clear(), INSTANCER.update((name, k) for k, name in enumerate(sorted({node.attribute_name for tree in
             trees if tree for node in tree.nodes if node.type == 'ATTRIBUTE' and node.attribute_type == 'INSTANCER'})))
         attributes = [numpy.zeros(4 * len(INSTANCER), 'f')]
-        def attributed(instance):  # The first of its instancer attributes, the zeros' without
-            values = instance.is_instance and INSTANCER and instancer(instance).ravel()
-            return values is not False and len(values) and values.any() and (attributes.append(values)
-                or len(attributes) - 1) * len(INSTANCER) or 0
         derived = set()  # Images a Bump differentiates, kept floats
         baked, bakes, units, summaries, placed, again = [0], [], {}, {}, [], []  # Texels baked after those piped, each
         # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
@@ -2640,14 +2641,15 @@ class Flex(bpy.types.RenderEngine):
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
         for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
         ex = Export(ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places, moved, shaded, keeping, self.kept if shaded else {})
+            again, images, keys, failed, current, places, moved, shaded, keeping, self.kept if shaded else {},
+            instances, attributes)
         empty = ex.program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
         variant = lambda material: (material, None) if material in ex.subsurface and not SEALING['closed'] else material
         # An object's slots; a volume object without any, one empty slot the default volume fills
         slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
-        slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling
-        # volumes
+        slots, volumes = ex.placements, {}  # Index, triangle count and key of each instance exported; BVHs of those
+        # filling volumes
         varying = set()  # Those whose volume varies, bounded inside where they are: moved, exported anew
         cuts = {}  # What each material of each object was cut over
         members = functools.cache(lambda collection: {name for ob in collection.all_objects for name in (ob.name, *(
@@ -2670,7 +2672,7 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots] or [None]]
             current.clear()
             if shaded or (key := ('STRANDS', ob.name)) in entries:  # Its rows alone, or its strands piped once
-                return shaded or record(~i, instance, ob, entries[key], media=spaces[key])
+                return shaded or ex.record(~i, instance, ob, entries[key], media=spaces[key])
             paths, counts, index, uvs, colors = [], [], [], [], []  # Per path or object its points and radius, per
             # strand its count, material's slot, and at its root the UV and color of the surface it grows from
             for system, modifier in pathed(ob):  # As evaluated
@@ -2732,7 +2734,7 @@ class Flex(bpy.types.RenderEngine):
             spaces[key] = ((*(low + high) / 2, *(high - low) / 2), 0)  # Its generated points' texture space
             points.append(p)
             hairs.append(tabled(shades, ob)[numpy.minimum(numpy.hstack([[], *index]).astype('i'), len(shades) - 1)])
-            record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
+            ex.record(~i, instance, ob, entries[key], media=spaces[key])  # Apart from its emitter's mesh
         output = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         SIDE['volume'] = True  # The world's volume, boxed where it has any extinction, (s + 1 - a) d
         filled = output and output.inputs['Volume'].is_linked and resolve(output.inputs['Volume'])
@@ -2748,7 +2750,7 @@ class Flex(bpy.types.RenderEngine):
             if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
                 if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
                     if ~i not in self.slots: return self.start(depsgraph, keeping)
-                    record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
+                    ex.record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
                 if ob.type == 'CURVES':
@@ -2782,7 +2784,7 @@ class Flex(bpy.types.RenderEngine):
                 ob.visible_shadow, tuple(slot.material for slot in ob.material_slots))
             if key in entries:  # Another instance of a mesh, or another object linking it, with the same materials:
                 # its mesh and materials piped once
-                record(i, instance, ob, entries[key])
+                ex.record(i, instance, ob, entries[key])
                 continue
             if ob.type == 'VOLUME':  # The box of its bounds, as boxed() makes it
                 sealing, (co, vertex, loops, index, normal, uv, tangent, color, orco, space) = False, boxed(ob)
@@ -2959,7 +2961,7 @@ class Flex(bpy.types.RenderEngine):
                 media = (*space[0], *space[1]), kinds[0] if exact else max([0, *map(abs, kinds)])
                 if media[1]: varying.add(i)
             DOMAIN = None
-            record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
+            ex.record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
         if box:
             rows[box] = ex.shaded_row(box)
@@ -2987,7 +2989,7 @@ class Flex(bpy.types.RenderEngine):
                 i = -2 ** 31  # Apart from the objects' indices and their strands'
                 volumes[i] = BVHTree.FromPolygons(positions.reshape(-1, 3).tolist(),
                     numpy.arange(len(positions) * 3).reshape(-1, 3).tolist()), 0
-                record(i, types.SimpleNamespace(is_instance=False, matrix_world=Matrix.Identity(4)), ob, entry,
+                ex.record(i, types.SimpleNamespace(is_instance=False, matrix_world=Matrix.Identity(4)), ob, entry,
                     media=((*(low + high) / 2, *(high - low) / 2), kind))
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene,
         # its object's info and its transform's rows and adjugate
