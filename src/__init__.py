@@ -2252,6 +2252,55 @@ def recorded(spans, relocation, ops, aside, bakes, placed, again):
         rows[key or row_key(*context)] = record
     return rows
 
+def pathed(ob, mode):  # Its hair shown as paths
+    return [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
+        and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
+        and (m.show_render if mode == 'RENDER' else m.show_viewport)]
+# An object's strands, of its particle hair rendered as paths and its curves, in a depsgraph of the mode
+def strands_of(ob, mode):
+    paths, counts, index, uvs, colors = [], [], [], [], []  # Per path or object its points and radius, per
+    # strand its count, material's slot, and at its root the UV and color of the surface it grows from
+    for system, modifier in pathed(ob, mode):  # As evaluated
+        settings = system.settings
+        # Of the render's steps in a render, children alone if any, but parents shown too
+        steps = 2 ** (settings.render_step if mode == 'RENDER' else settings.display_step) + 1
+        parents, children = len(system.particles), len(system.child_particles)
+        radius = lambda n: (settings.tip_radius + (settings.root_radius - settings.tip_radius) * (1
+            - numpy.linspace(0, 1, n)) ** (1 + settings.shape if settings.shape < 0 else 1 / (1
+            - settings.shape) if settings.shape < 1 else numpy.inf)) * settings.radius_scale / 2 * (
+            numpy.arange(n) < n - settings.use_close_tip)  # Half its thickness by its shape, of n points
+        for k in [*(range(parents) if not children or settings.use_parent_particles else ()),
+                *range(parents, parents + children)]:  # In the world of the original, moved into its space;
+            # its steps up to its own end, past which a shorter child's are the origin
+            co = numpy.array([system.co_hair(ob, particle_no=k, step=s) for s in range(steps)])
+            n = int(numpy.argmin(numpy.append(co[1:].any(1), False))) + 1
+            paths.append(numpy.column_stack((transformed(co[:n], ob.matrix_world.inverted()), radius(n))))
+            counts.append(n)
+            index.append(settings.material - 1)
+            particle = system.particles[min(k, parents - 1)]  # A child's by its number, its parent iterated
+            active = next((n for n, layer in enumerate(ob.data.uv_layers) if layer.active_render), 0)  # past
+            uvs.append(system.uv_on_emitter(modifier, particle=particle, particle_no=k, uv_no=active)
+                if ob.data.uv_layers else (0, 0))
+            colors.append((*system.mcol_on_emitter(modifier, particle=particle, particle_no=k, vcol_no=max(
+                ob.data.color_attributes.render_color_index, 0)), 1) if ob.data.color_attributes else (0,) * 4)
+    if ob.type == 'CURVES' and len(ob.data.curves):  # Its points by curve and their radius (Blender's default
+        # without), its own space
+        curves, offsets = ob.data, numpy.empty(len(ob.data.curves) + 1, 'i')
+        read = lambda name, n, value, kind='f': (a := numpy.full(n, value, kind), name in curves.attributes
+            and curves.attributes[name].data.foreach_get('value' if curves.attributes[name].data_type
+            in ('FLOAT', 'INT') else 'vector', a))[0]  # By its type: per curve, a Float2 is no value either
+        curves.curve_offset_data.foreach_get('value', offsets)
+        paths.append(numpy.column_stack((read('position', 3 * len(curves.points), 0).reshape(-1, 3),
+            read('radius', len(curves.points), 0.005)))), counts.append(numpy.diff(offsets))
+        index.append(read('material_index', len(curves.curves), 0, 'i'))
+        uvs.append(read('surface_uv_coordinate', 2 * len(curves.curves), 0).reshape(-1, 2))
+        layer = curves.color_attributes[curves.color_attributes.render_color_index] \
+            if curves.color_attributes else None  # Of its curve, or its root's
+        color = numpy.zeros(4 * len(curves.points if layer and layer.domain == 'POINT' else curves.curves), 'f')
+        if layer: layer.data.foreach_get('color', color)
+        colors.append(color.reshape(-1, 4)[offsets[:-1] if layer and layer.domain == 'POINT' else slice(None)])
+    return paths, counts, index, uvs, colors
+
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
@@ -2662,9 +2711,6 @@ class Flex(bpy.types.RenderEngine):
         tabled = lambda shades, ob: numpy.array([(*row[:2], not ob.visible_camera, 2 | dark(ob) << 2
             if not ob.visible_shadow or dark(ob) else row[2], row[3])
             for row in shades])  # Per slot a material
-        pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
-            and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
-            and (m.show_render if depsgraph.mode == 'RENDER' else m.show_viewport)]  # Its hair shown as paths
         def hair(i, instance, ob):  # An object's strands, of its particle hair rendered as paths and its curves
             SEALING['closed'] = False
             shades = [rows[variant(material)] if variant(material) in rows else current.update(scales=None, made=[])
@@ -2673,47 +2719,7 @@ class Flex(bpy.types.RenderEngine):
             current.clear()
             if shaded or (key := ('STRANDS', ob.name)) in entries:  # Its rows alone, or its strands piped once
                 return shaded or ex.record(~i, instance, ob, entries[key], media=spaces[key])
-            paths, counts, index, uvs, colors = [], [], [], [], []  # Per path or object its points and radius, per
-            # strand its count, material's slot, and at its root the UV and color of the surface it grows from
-            for system, modifier in pathed(ob):  # As evaluated
-                settings = system.settings
-                # Of the render's steps in a render, children alone if any, but parents shown too
-                steps = 2 ** (settings.render_step if depsgraph.mode == 'RENDER' else settings.display_step) + 1
-                parents, children = len(system.particles), len(system.child_particles)
-                radius = lambda n: (settings.tip_radius + (settings.root_radius - settings.tip_radius) * (1
-                    - numpy.linspace(0, 1, n)) ** (1 + settings.shape if settings.shape < 0 else 1 / (1
-                    - settings.shape) if settings.shape < 1 else numpy.inf)) * settings.radius_scale / 2 * (
-                    numpy.arange(n) < n - settings.use_close_tip)  # Half its thickness by its shape, of n points
-                for k in [*(range(parents) if not children or settings.use_parent_particles else ()),
-                        *range(parents, parents + children)]:  # In the world of the original, moved into its space;
-                    # its steps up to its own end, past which a shorter child's are the origin
-                    co = numpy.array([system.co_hair(ob, particle_no=k, step=s) for s in range(steps)])
-                    n = int(numpy.argmin(numpy.append(co[1:].any(1), False))) + 1
-                    paths.append(numpy.column_stack((transformed(co[:n], ob.matrix_world.inverted()), radius(n))))
-                    counts.append(n)
-                    index.append(settings.material - 1)
-                    particle = system.particles[min(k, parents - 1)]  # A child's by its number, its parent iterated
-                    active = next((n for n, layer in enumerate(ob.data.uv_layers) if layer.active_render), 0)  # past
-                    uvs.append(system.uv_on_emitter(modifier, particle=particle, particle_no=k, uv_no=active)
-                        if ob.data.uv_layers else (0, 0))
-                    colors.append((*system.mcol_on_emitter(modifier, particle=particle, particle_no=k, vcol_no=max(
-                        ob.data.color_attributes.render_color_index, 0)), 1) if ob.data.color_attributes else (0,) * 4)
-            if ob.type == 'CURVES' and len(ob.data.curves):  # Its points by curve and their radius (Blender's default
-                # without), its own space
-                curves, offsets = ob.data, numpy.empty(len(ob.data.curves) + 1, 'i')
-                read = lambda name, n, value, kind='f': (a := numpy.full(n, value, kind), name in curves.attributes
-                    and curves.attributes[name].data.foreach_get('value' if curves.attributes[name].data_type
-                    in ('FLOAT', 'INT') else 'vector', a))[0]  # By its type: per curve, a Float2 is no value either
-                curves.curve_offset_data.foreach_get('value', offsets)
-                paths.append(numpy.column_stack((read('position', 3 * len(curves.points), 0).reshape(-1, 3),
-                    read('radius', len(curves.points), 0.005)))), counts.append(numpy.diff(offsets))
-                index.append(read('material_index', len(curves.curves), 0, 'i'))
-                uvs.append(read('surface_uv_coordinate', 2 * len(curves.curves), 0).reshape(-1, 2))
-                layer = curves.color_attributes[curves.color_attributes.render_color_index] \
-                    if curves.color_attributes else None  # Of its curve, or its root's
-                color = numpy.zeros(4 * len(curves.points if layer and layer.domain == 'POINT' else curves.curves), 'f')
-                if layer: layer.data.foreach_get('color', color)
-                colors.append(color.reshape(-1, 4)[offsets[:-1] if layer and layer.domain == 'POINT' else slice(None)])
+            paths, counts, index, uvs, colors = strands_of(ob, depsgraph.mode)
             count = numpy.hstack([[], *counts]).astype('I')  # Per strand its points
             strand = numpy.repeat(numpy.arange(len(count), dtype='I'), count)
             p = numpy.concatenate([numpy.empty((0, 4)), *paths], dtype='f')
@@ -2747,7 +2753,7 @@ class Flex(bpy.types.RenderEngine):
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
-            if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
+            if ob.type == 'CURVES' or pathed(ob, depsgraph.mode):  # Its strands: anew when it moved
                 if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
                     if ~i not in self.slots: return self.start(depsgraph, keeping)
                     ex.record(~i, instance, ob, (0, self.slots[~i][1], STRANDS))  # Its transform and info alone
