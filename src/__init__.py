@@ -2203,6 +2203,39 @@ def substituted(x, values, memo):  # Each part once, as shared
             (x[0], *parts)
     return memo[id(x)]
 
+def listed(p): return ('LIST', *map(listed, p)) if isinstance(p, list) else p  # Lists as steps, to key
+def digest(a): return a is not None and hashlib.sha1(numpy.ascontiguousarray(a).tobytes()).digest()  # Of an array
+# A kept engine's rows: recorded as shaded, keyed once piped, taken again where key and places match
+def row_key(material, filler, closed, sealed, cut):
+    output = material and material.node_tree and material.node_tree.get_output_node('CYCLES')
+    parts = None
+    if output:
+        parts = []
+        for name in ('Surface', 'Volume', 'Displacement'):
+            SIDE['volume'] = name == 'Volume'
+            parts.append(resolve(output.inputs[name]) if output.inputs[name].is_linked else None)
+        SIDE['volume'] = False
+    return (material, filler, closed, sealed, tuple(INSTANCER.items()), digest(cut.get('uv')),
+        digest(cut.get('triangles')), repr(cut.get('scales')), parts and expression_key(listed(parts)))
+def hold(corners, instance, ob):  # An object's bounds, a light's by its size
+    light = ob.type == 'LIGHT' and ob.data
+    r = light and max(light.shadow_soft_size, getattr(light, 'size', 0), getattr(light, 'size_y', 0), 0.01)
+    corners.extend([instance.matrix_world.translation + Vector((x, y, z)) * r for x in (-1, 1) for y in (-1, 1)
+        for z in (-1, 1)] if light else [instance.matrix_world @ Vector(c) for c in ob.bound_box])
+def compact(pixels):  # A float image's texture in the smallest format exact for it, or that its read
+    words = numpy.rint(pixels * 65535).astype('u2')  # rounds to within an ulp: 16-bit UNORM where Blender
+    if numpy.array_equal(words * (numpy.float32(1) / numpy.float32(65535)), pixels): return words, 3  # read
+    halves = pixels.astype(numpy.float16)  # k * (1 / 65535), its hardware read the correctly rounded k /
+    return (halves, 2) if numpy.array_equal(halves, pixels) else (pixels, 0)  # 65535; halves where exact
+def anew(key):  # An image only bakes read, read again as piped
+    texture(types.SimpleNamespace(type='TEX_IMAGE', image=key[0], extension=key[1]), {}, data := [])
+    return data
+def relocated(ops, at, form):  # Of their reads' and tiles' firsts, those piped apart flagged
+    return [(code, at[texel][0], width, height | at[texel][1] << 30 | form(texel))
+        if (code == 0 or reads_texel(code)) and not height >> 28 & 1
+        else (code, texel, width, height)
+        for code, texel, width, height in ops]
+
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
@@ -2568,20 +2601,6 @@ class Flex(bpy.types.RenderEngine):
         variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
         # An object's slots; a volume object without any, one empty slot the default volume fills
         slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
-        # A kept engine's rows: recorded as shaded, keyed once piped, taken again where key and places match
-        listed = lambda p: ('LIST', *map(listed, p)) if isinstance(p, list) else p
-        digest = lambda a: a is not None and hashlib.sha1(numpy.ascontiguousarray(a).tobytes()).digest()
-        def keyed(material, filler, closed, sealed, cut):
-            output = material and material.node_tree and material.node_tree.get_output_node('CYCLES')
-            parts = None
-            if output:
-                parts = []
-                for name in ('Surface', 'Volume', 'Displacement'):
-                    SIDE['volume'] = name == 'Volume'
-                    parts.append(resolve(output.inputs[name]) if output.inputs[name].is_linked else None)
-                SIDE['volume'] = False
-            return (material, filler, closed, sealed, tuple(INSTANCER.items()), digest(cut.get('uv')),
-                digest(cut.get('triangles')), repr(cut.get('scales')), parts and expression_key(listed(parts)))
         spots = lambda: (len(ops), len(aside[0]), len(bakes), len(placed), len(again), baked[0])
         ledgers = lambda: (hints, aside[1], textures, tilings, units, SOURCES, MEDIA, FOLDED, PROGRAMS)
         kept, spans = self.kept if shaded else {}, []
@@ -2589,7 +2608,7 @@ class Flex(bpy.types.RenderEngine):
         def shaded_row(material, filler=False):
             recording, at = (shaded or keeping) and not DOMAIN, spots()
             context = recording and (material, filler, SEALING['closed'], material in subsurface, dict(current))
-            key = shaded and recording and keyed(*context)
+            key = shaded and recording and row_key(*context)
             if key in kept and kept[key][0] == at:
                 lists, dicts, sets, made, row, baked[0] = kept[key][1:]
                 for target, items in zip((ops, aside[0], bakes, placed, again), lists): target.extend(items)
@@ -2619,7 +2638,7 @@ class Flex(bpy.types.RenderEngine):
                         dicts[2] = {k: v for k, v in dicts[2].items() if isinstance(k, Bake)}
                     record = at, [ops[at[0]:end[0]], steps, bakes[at[2]:end[2]], placed[at[3]:end[3]],
                         again[at[4]:end[4]]], dicts, sets, made, row, end[5]
-                rows[key or keyed(*context)] = record
+                rows[key or row_key(*context)] = record
             return rows
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling
         # volumes
@@ -2717,11 +2736,6 @@ class Flex(bpy.types.RenderEngine):
         # Of what the box holds: the camera's near-plane center, where its rays and its medium's test start
         corners = [scene.camera.matrix_world @ Vector((0, 0, -scene.camera.data.clip_start))] if box and scene.camera \
             else []
-        def held(instance, ob):  # An object's bounds, a light's by its size
-            light = ob.type == 'LIGHT' and ob.data
-            r = light and max(light.shadow_soft_size, getattr(light, 'size', 0), getattr(light, 'size_y', 0), 0.01)
-            corners.extend([instance.matrix_world.translation + Vector((x, y, z)) * r for x in (-1, 1) for y in (-1, 1)
-                for z in (-1, 1)] if light else [instance.matrix_world @ Vector(c) for c in ob.bound_box])
         for i, instance in enumerate(depsgraph.object_instances):
             ob = instance.object
             bm = bmesh.new()
@@ -2732,7 +2746,7 @@ class Flex(bpy.types.RenderEngine):
                     for column in columns: column.append(column[0])
                 if not moved and not (ob.hide_render and not instance.is_instance): hair(i, instance, ob)
                 if ob.type == 'CURVES':
-                    if box and not (ob.hide_render and not instance.is_instance): held(instance, ob)
+                    if box and not (ob.hide_render and not instance.is_instance): hold(corners, instance, ob)
                     continue
             # Hidden from renders as Blender's are: an object by its setting, though particles' and geometry nodes'
             # instances of it are kept, nested in collection instances too, whose members it isn't; an instancer of
@@ -2747,7 +2761,7 @@ class Flex(bpy.types.RenderEngine):
                 or ob.type not in {'MESH', 'LIGHT', 'VOLUME'} \
                 or moved and ob.name not in moved and not (instance.is_instance and instance.parent.name in moved):
                 continue
-            if box and not (ob.type == 'LIGHT' and ob.data.type == 'SUN'): held(instance, ob)
+            if box and not (ob.type == 'LIGHT' and ob.data.type == 'SUN'): hold(corners, instance, ob)
             if shaded and ob.type != 'LIGHT':  # Its rows alone, cut over its UVs as the last export's
                 SEALING['closed'] = closed(ob, ob.data)
                 for slot in ob.material_slots:  # Of those the last export cut, not its linked duplicates'
@@ -3003,11 +3017,6 @@ class Flex(bpy.types.RenderEngine):
             image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
                 for k, (first, entry) in enumerate(zip(starts, texels))]  # shares its first with the next: no image
-            def compact(pixels):  # A float image's texture in the smallest format exact for it, or that its read
-                words = numpy.rint(pixels * 65535).astype('u2')  # rounds to within an ulp: 16-bit UNORM where Blender
-                if numpy.array_equal(words * (numpy.float32(1) / numpy.float32(65535)), pixels): return words, 3  # read
-                halves = pixels.astype(numpy.float16)  # k * (1 / 65535), its hardware read the correctly rounded k /
-                return (halves, 2) if numpy.array_equal(halves, pixels) else (pixels, 0)  # 65535; halves where exact
             # Filtered in hardware, 16-bit UNORM errs by up to half its ulp and halves round to halves, which a Bump's
             # differences magnify: the images it differentiates keep floats
             derived = {entry[0] for key, entry in textures.items() if isinstance(key, tuple) and key[0] in derived}
@@ -3019,13 +3028,8 @@ class Flex(bpy.types.RenderEngine):
             at, counts = {}, [0, 0, 0]
             for first, entry, side in zip(starts, texels, apart):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
-            def relocated(ops):  # Of their reads' and tiles' firsts, those piped apart flagged
-                return [(code, at[texel][0], width, height | at[texel][1] << 30 | form(texel))
-                    if (code == 0 or reads_texel(code)) and not height >> 28 & 1
-                    else (code, texel, width, height)
-                    for code, texel, width, height in ops]
-            ops[:], aside[0][:] = relocated(ops), relocated(aside[0])
-            placed = [(at[tile][0], key, unit, (hint, relocated(steps)), value)
+            ops[:], aside[0][:] = relocated(ops, at, form), relocated(aside[0], at, form)
+            placed = [(at[tile][0], key, unit, (hint, relocated(steps, at, form)), value)
                 for tile, key, unit, (hint, steps), value in placed]
             textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30 | form(entry[0]),
                 entry[3])
@@ -3066,9 +3070,6 @@ class Flex(bpy.types.RenderEngine):
             # the world's grid where the world or a node group changed, else none, its last bake kept
             regrid = grid if any(isinstance(update.id, (bpy.types.World, bpy.types.NodeTree))
                 for update in depsgraph.updates) else (0, 0)
-            def anew(key):  # An image only bakes read, read again as piped
-                texture(types.SimpleNamespace(type='TEX_IMAGE', image=key[0], extension=key[1]), {}, data := [])
-                return data
             tables = [(entry[0] | (entry[2] >> 30 & 1) << 31, sum(map(len, tables[key])) // 4, tables[key])
                 for key, entry in textures.items() if key in tables] + [(entry[0] | 1 << 31, len(data[0]) // 4, data)
                 for key, entry in textures.items() if again and isinstance(key, tuple) and entry[2] >> 30 & 1
