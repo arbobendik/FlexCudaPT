@@ -2236,14 +2236,33 @@ def relocated(ops, at, form):  # Of their reads' and tiles' firsts, those piped 
         else (code, texel, width, height)
         for code, texel, width, height in ops]
 
+# This export's rows by key in the steps path's form: a scene's at its final texels, of textures the bakes'
+def recorded(spans, relocation, ops, aside, bakes, placed, again):
+    rows = {}
+    for key, context, record, fresh in spans:
+        if fresh:
+            at, end, dicts, sets, made, row = record
+            steps = [(0, t, w, h & ~(3 << 30)) if relocation is not None and c == 0 and not h >> 28 & 1
+                else (c, t, w, h) for c, t, w, h in aside[0][at[1]:end[1]]]
+            if relocation is not None:
+                dicts[3] = {relocation[tile][0]: tiles for tile, tiles in dicts[3].items()}
+                dicts[2] = {k: v for k, v in dicts[2].items() if isinstance(k, Bake)}
+            record = at, [ops[at[0]:end[0]], steps, bakes[at[2]:end[2]], placed[at[3]:end[3]],
+                again[at[4]:end[4]]], dicts, sets, made, row, end[5]
+        rows[key or row_key(*context)] = record
+    return rows
+
 # The shading of an export's materials: what its bakes and programs share
 class Export:
     def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places, moved):
+            again, images, keys, failed, current, places, moved, shaded, keeping, kept):
         self.ops, self.hints, self.aside, self.tilings, self.textures = ops, hints, aside, tilings, textures
         self.texels, self.derived, self.baked, self.bakes, self.units = texels, derived, baked, bakes, units
         self.summaries, self.placed, self.again, self.images, self.keys = summaries, placed, again, images, keys
         self.failed, self.current, self.places, self.moved = failed, current, places, moved
+        self.shaded, self.keeping, self.kept, self.spans = shaded, keeping, kept, []  # Kept rows; this export's spans
+        self.subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open
+        # objects apart
         self.alive, self.leaves, self.found = [], {}, {}  # The variants kept while summaries holds their ids; per id,
         # as below
     # Steps of an object's own scalars (its alpha, pass indices, random number) or a vertex's alpha against
@@ -2426,6 +2445,33 @@ class Export:
         opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
         self.hints[first] = max(radiant, 1e-6 if isinstance(surface[4], tuple) else 0)
         return self.hints[first], first, opaque
+    def spots(self): return len(self.ops), len(self.aside[0]), len(self.bakes), len(self.placed), len(self.again), \
+        self.baked[0]
+    def ledgers(self): return self.hints, self.aside[1], self.textures, self.tilings, self.units, SOURCES, MEDIA, \
+        FOLDED, PROGRAMS
+    # Its row, apart for open objects of a material with subsurface scattering
+    def shaded_row(self, material, filler=False):
+        recording, at = (self.shaded or self.keeping) and not DOMAIN, self.spots()
+        context = recording and (material, filler, SEALING['closed'], material in self.subsurface, dict(self.current))
+        key = self.shaded and recording and row_key(*context)
+        if key in self.kept and self.kept[key][0] == at:
+            lists, dicts, sets, made, row, self.baked[0] = self.kept[key][1:]
+            for target, items in zip((self.ops, self.aside[0], self.bakes, self.placed, self.again), lists):
+                target.extend(items)
+            for target, items in zip(self.ledgers(), dicts): target.update(items)
+            self.derived.update(sets[0]), self.subsurface.update(sets[1]), self.current.get('made', []).extend(made)
+            self.spans.append((key, context, self.kept[key], False))  # Kept as recorded
+            return row
+        before, hairs = recording and ([dict(d) for d in self.ledgers()], dict(HAIRS), set(self.derived),
+            set(self.subsurface), len(self.current.get('made', ()))), dict(HAIRS)
+        SEALING['asked'] = False
+        row = shade(material, self.program, filler)
+        if SEALING['asked']: self.subsurface.add(material)
+        if recording and HAIRS == hairs: self.spans.append((key, context, (at, self.spots(), [{k: v for k, v
+            in d.items() if k not in b or b[k] is not v} for d, b in zip(self.ledgers(), before[0])], (self.derived
+            - before[2], self.subsurface - before[3]), self.current.get('made', [])[before[4]:], row), True))  # Made,
+            # its spans to cut
+        return row
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -2594,52 +2640,12 @@ class Flex(bpy.types.RenderEngine):
         places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
         for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
         ex = Export(ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places, moved)
+            again, images, keys, failed, current, places, moved, shaded, keeping, self.kept if shaded else {})
         empty = ex.program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
-        subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
-        variant = lambda material: (material, None) if material in subsurface and not SEALING['closed'] else material
+        variant = lambda material: (material, None) if material in ex.subsurface and not SEALING['closed'] else material
         # An object's slots; a volume object without any, one empty slot the default volume fills
         slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
-        spots = lambda: (len(ops), len(aside[0]), len(bakes), len(placed), len(again), baked[0])
-        ledgers = lambda: (hints, aside[1], textures, tilings, units, SOURCES, MEDIA, FOLDED, PROGRAMS)
-        kept, spans = self.kept if shaded else {}, []
-        # Its row, apart for open objects of a material with subsurface scattering
-        def shaded_row(material, filler=False):
-            recording, at = (shaded or keeping) and not DOMAIN, spots()
-            context = recording and (material, filler, SEALING['closed'], material in subsurface, dict(current))
-            key = shaded and recording and row_key(*context)
-            if key in kept and kept[key][0] == at:
-                lists, dicts, sets, made, row, baked[0] = kept[key][1:]
-                for target, items in zip((ops, aside[0], bakes, placed, again), lists): target.extend(items)
-                for target, items in zip(ledgers(), dicts): target.update(items)
-                derived.update(sets[0]), subsurface.update(sets[1]), current.get('made', []).extend(made)
-                spans.append((key, context, kept[key], False))  # Kept as recorded
-                return row
-            before, hairs = recording and ([dict(d) for d in ledgers()], dict(HAIRS), set(derived), set(subsurface),
-                len(current.get('made', ()))), dict(HAIRS)
-            SEALING['asked'] = False
-            row = shade(material, ex.program, filler)
-            if SEALING['asked']: subsurface.add(material)
-            if recording and HAIRS == hairs: spans.append((key, context, (at, spots(), [{k: v for k, v in d.items()
-                if k not in b or b[k] is not v} for d, b in zip(ledgers(), before[0])], (derived - before[2],
-                subsurface - before[3]), current.get('made', [])[before[4]:], row), True))  # Made, its spans to cut
-            return row
-        # This export's rows by key in the steps path's form: a scene's at its final texels, of textures the bakes'
-        def recorded(moved):
-            rows = {}
-            for key, context, record, fresh in spans:
-                if fresh:
-                    at, end, dicts, sets, made, row = record
-                    steps = [(0, t, w, h & ~(3 << 30)) if moved is not None and c == 0 and not h >> 28 & 1
-                        else (c, t, w, h) for c, t, w, h in aside[0][at[1]:end[1]]]
-                    if moved is not None:
-                        dicts[3] = {moved[tile][0]: tiles for tile, tiles in dicts[3].items()}
-                        dicts[2] = {k: v for k, v in dicts[2].items() if isinstance(k, Bake)}
-                    record = at, [ops[at[0]:end[0]], steps, bakes[at[2]:end[2]], placed[at[3]:end[3]],
-                        again[at[4]:end[4]]], dicts, sets, made, row, end[5]
-                rows[key or row_key(*context)] = record
-            return rows
         slots, volumes = [], {}  # Index, triangle count and key of each instance exported; BVHs of those filling
         # volumes
         varying = set()  # Those whose volume varies, bounded inside where they are: moved, exported anew
@@ -2660,7 +2666,7 @@ class Flex(bpy.types.RenderEngine):
         def hair(i, instance, ob):  # An object's strands, of its particle hair rendered as paths and its curves
             SEALING['closed'] = False
             shades = [rows[variant(material)] if variant(material) in rows else current.update(scales=None, made=[])
-                or rows.setdefault(variant(material), shaded_row(material)) for material in [slot.material
+                or rows.setdefault(variant(material), ex.shaded_row(material)) for material in [slot.material
                 for slot in ob.material_slots] or [None]]
             current.clear()
             if shaded or (key := ('STRANDS', ob.name)) in entries:  # Its rows alone, or its strands piped once
@@ -2768,7 +2774,7 @@ class Flex(bpy.types.RenderEngine):
                     if variant(slot.material) in rows or (slot.material, ob.name) in rows \
                         or (slot.material, ob.name) not in self.cuts: continue
                     current.update(self.cuts[(slot.material, ob.name)], made=[])
-                    row = shaded_row(slot.material)
+                    row = ex.shaded_row(slot.material)
                     rows[(slot.material, ob.name) if current['made'] else variant(slot.material)] = row
                 current.clear()
                 continue
@@ -2859,7 +2865,7 @@ class Flex(bpy.types.RenderEngine):
                         scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
                     cuts[(slot.material, ob.name)] = dict(current)
-                    row = shaded_row(slot.material, ob.type == 'VOLUME')
+                    row = ex.shaded_row(slot.material, ob.type == 'VOLUME')
                     rows[(slot.material, ob.name) if current['made'] or DOMAIN else variant(slot.material)] = row
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
@@ -2956,7 +2962,7 @@ class Flex(bpy.types.RenderEngine):
             record(i, instance, ob, entry, ob.type == 'LIGHT' and (f'{radiance:.4g}', isinstance(shaped, tuple)
                 and f'{numpy.array(instance.matrix_world.to_3x3()).round(4)}'), media)
         if box:
-            rows[box] = shaded_row(box)
+            rows[box] = ex.shaded_row(box)
             if not shaded:  # A margin past all it holds; its triangles in the world, generated points over it
                 low, high = numpy.min(corners, 0), numpy.max(corners, 0)
                 margin = BOX_MARGIN * max(numpy.linalg.norm(high - low), 1)
@@ -3079,7 +3085,7 @@ class Flex(bpy.types.RenderEngine):
                 width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
                 numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
                 numpy.array(again, 'I'), struct.pack('<2I', *regrid)))
-            self.visible, self.kept = visible, recorded(None)
+            self.visible, self.kept = visible, recorded(ex.spans, None, ops, aside, bakes, placed, again)
             return
         self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
@@ -3113,7 +3119,7 @@ class Flex(bpy.types.RenderEngine):
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
-        self.visible, self.kept = visible, recorded(at) if keeping else {}
+        self.visible, self.kept = visible, recorded(ex.spans, at, ops, aside, bakes, placed, again) if keeping else {}
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
