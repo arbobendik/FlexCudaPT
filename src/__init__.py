@@ -2230,6 +2230,91 @@ class Export:
             self.found[id(x)] = x, {id(x): x} if x[0] == 'LESS_THAN' and self.leaf(x) else {k: v for part in x[1:]
                 for k, v in self.stepwise(part).items()}
         return self.found[id(x)][1]
+    def bake(self, expression, memo=None, whole=False):  # Each part once per outermost call, as the recursions above;
+        memo = {} if memo is None else memo  # whole: baked whole or not at all
+        if id(expression) not in memo: memo[id(expression)] = self.baking(expression, memo, whole)
+        return memo[id(expression)]
+    def stepped(self, expression):  # Its select between such variants, each baked whole; None where not
+        if not 0 < len(self.stepwise(expression)) <= 2: return None
+        stepping, variants = list(self.stepwise(expression).values()), []
+        for k in range(1 << len(stepping)):
+            variant = substituted(expression, {id(s): float(k >> i & 1) for i, s in enumerate(stepping)}, {})
+            self.alive.append(variant)
+            if (summarize(variant, self.summaries, self.current.get('scales')).cost or 0) < 10: return None
+            variants.append(variant)
+        shared = {}  # Each baked whole, none in part, or the chain as today
+        variants = [self.bake(variant, shared, True) for variant in variants]
+        if any(variant[0] != 'BAKED' for variant in variants): return None
+        for s in stepping: variants = [('SELECT', s, b, a) for a, b in zip(variants[::2], variants[1::2])]
+        return variants[0]
+    def baking(self, expression, memo, whole):  # A unit of math, ramps, noise and linear reads on the point inputs,
+        # costing two reads, baked up to 4K and read at the UV: of generated points without reads over its object's
+        # UVs, as fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for
+        # every object where it repeats with the UV. Never affine in one image's read: it would only bake that
+        # texture again
+        reads, affine, cost, inputs, need = self.summaries[id(expression)] if isinstance(expression, tuple) \
+            else (set(), False, None, set(), 0)
+        uvs = self.current.get('uv', numpy.empty((0, 3, 2))).reshape(-1, 2)
+        # An image's read is never one, but a ramp's or curves' lookup, a read of its table, is a step as others
+        unit = isinstance(expression, tuple) and expression[0] != 'UNASSOCIATE' and not (expression[0] in READS
+            and isinstance(expression[-1], ImageRead)) and not (affine and len(reads) == 1) and (cost or 0) >= 10 \
+            and self.current.get('scales')
+        domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, self.images,
+            self.failed, self.keys)
+        size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
+            if unit and 'GENERATED' in (self.current.get('scales') or ()) and not reads and inputs and need else None
+        if size is None or (size > 4096).any():
+            if isinstance(expression, tuple) and expression[0] == 'BUMP':
+                return self.bumped(*expression[1:], memo, whole)
+            if whole: return expression
+            if variant := self.stepped(expression): return variant  # Baked by the steps it's live for
+            if not isinstance(expression, tuple) or self.summaries[id(expression)].affine is None \
+                    and len(self.summaries[id(expression)].reads) == 1:  # Inexact on one image, live whole: baked
+                # parts add fetches
+                return expression  # Else as its operands are, but the alpha read an unassociation divides by
+            return (expression[0], *(self.bake(part, memo, whole) for part in expression[1:])) \
+                if expression[0] != 'UNASSOCIATE' else \
+                (expression[0], self.bake(expression[1], memo, whole), expression[2])
+        point = ('DIVIDE', ('SUBTRACT', ('UV',), domain[0]), domain[1]) if domain else ('UV',)
+        if (key := (None if domain and domain[3] else tuple(numpy.r_[domain[0], domain[1]]) if domain else int(
+                self.current['triangles'][0]), expression_key(expression, self.keys))) in self.units:  # Baked over the
+            self.current['made'] += [self.units[key]] * (key[0] is not None)  # same UVs, its row the object's own
+            # unless repeating
+            return 'BAKED', point, self.units[key]
+        t = self.current['uv'][:0 if domain else None] * size[0]  # Over UV space none: the bake pass takes every
+        # texel
+        low, high = (numpy.clip((f(1) + d) // 16, 0, size[0] // 16 - 1).astype(int) for f, d in ((t.min, -1),
+            (t.max, 1)))  # The 16 x 16 tiles of texels each triangle's UVs reach, a texel off its edges included
+        n = (high - low + 1).prod(1)
+        k, j = numpy.arange(n.sum()) - numpy.repeat(n.cumsum() - n, n), numpy.repeat(numpy.arange(len(n)), n)
+        width = high[j, 0] - low[j, 0] + 1
+        tiles = numpy.stack((self.current['triangles'][j], low[j, 0] + k % width, low[j, 1] + k // width, 0 * j), 1)
+        if domain:  # Over UV space the texels' own UVs, the bake pass baking texel by texel
+            expression = moved_to(expression, ('ADD', ('MULTIPLY', ('UV',), domain[1]), domain[0]), {})
+        # In an update of values the last export's unit, its steps and value again unless its expression changed;
+        # its steps and hint among the bakes'
+        (self.ops, self.hints), outer = self.aside, (self.ops, self.hints)
+        tile, last, self.units[key], steps, value = self.places[len(self.bakes)] \
+            if len(self.bakes) < len(self.places) else (sum(map(len, self.texels)) // 4, None, Bake(), None, None)
+        self.ops.append((0, tile, len(tiles), 0))
+        self.tilings[tile] = tiles.astype('u4').view('f').ravel()  # Its own, though another's empty list starts there
+        self.texels.append(self.tilings[tile])
+        self.ops.append((0, self.baked[0], size[0], size[1] | 1 << 28))
+        if last == key:
+            self.hints[len(self.ops)] = steps[0]
+            self.bakes.append(len(self.ops))
+            self.ops.extend(steps[1])
+        else:
+            self.bakes.append(self.program([GRAY[0], expression, *GRAY[2:]], cut=False)[1])
+            value = triple(emit(expression, [], self.textures, self.texels, set(), {}))
+            if last: self.again.append(self.bakes[-1])
+        self.placed.append((tile, key, self.units[key], (self.hints[self.bakes[-1]], self.ops[self.bakes[-1]:]), value))
+        self.current['made'].append(self.bakes[-1])
+        self.textures[self.units[key]] = (self.baked[0], size[0], size[1] | 1 << 28 | bool(domain and domain[3]) << 29,
+            numpy.array((*value, 1)))
+        self.baked[0] += -(-size.prod() // 2)
+        self.ops, self.hints = outer
+        return 'BAKED', point, self.units[key]
 
 class Flex(bpy.types.RenderEngine):
     bl_idname = 'FLEX'
@@ -2399,91 +2484,6 @@ class Flex(bpy.types.RenderEngine):
         for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
         ex = Export(ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
             again, images, keys, failed, current, places)
-        def bake(expression, memo=None, whole=False):  # Each part once per outermost call, as the recursions above;
-            memo = {} if memo is None else memo  # whole: baked whole or not at all
-            if id(expression) not in memo: memo[id(expression)] = baking(expression, memo, whole)
-            return memo[id(expression)]
-        def stepped(expression):  # Its select between such variants, each baked whole; None where not
-            if not 0 < len(ex.stepwise(expression)) <= 2: return None
-            stepping, variants = list(ex.stepwise(expression).values()), []
-            for k in range(1 << len(stepping)):
-                variant = substituted(expression, {id(s): float(k >> i & 1) for i, s in enumerate(stepping)}, {})
-                ex.alive.append(variant)
-                if (summarize(variant, ex.summaries, ex.current.get('scales')).cost or 0) < 10: return None
-                variants.append(variant)
-            shared = {}  # Each baked whole, none in part, or the chain as today
-            variants = [bake(variant, shared, True) for variant in variants]
-            if any(variant[0] != 'BAKED' for variant in variants): return None
-            for s in stepping: variants = [('SELECT', s, b, a) for a, b in zip(variants[::2], variants[1::2])]
-            return variants[0]
-        def baking(expression, memo, whole):  # A unit of math, ramps, noise and linear reads on the point inputs,
-            # costing two reads, baked up to 4K and read at the UV: of generated points without reads over its object's
-            # UVs, as fine as its frequencies need; of the UV alone over UV space as uv_domain() plans it, once for
-            # every object where it repeats with the UV. Never affine in one image's read: it would only bake that
-            # texture again
-            reads, affine, cost, inputs, need = ex.summaries[id(expression)] if isinstance(expression, tuple) \
-                else (set(), False, None, set(), 0)
-            uvs = ex.current.get('uv', numpy.empty((0, 3, 2))).reshape(-1, 2)
-            # An image's read is never one, but a ramp's or curves' lookup, a read of its table, is a step as others
-            unit = isinstance(expression, tuple) and expression[0] != 'UNASSOCIATE' and not (expression[0] in READS
-                and isinstance(expression[-1], ImageRead)) and not (affine and len(reads) == 1) and (cost or 0) >= 10 \
-                and ex.current.get('scales')
-            domain = unit and inputs == {'UV'} and len(uvs) > 0 and uv_domain(expression, uvs, need, ex.images,
-                ex.failed, ex.keys)
-            size = numpy.array(domain[2]) if domain else numpy.full(2, int(-(-max(64, round(need, 6)) // 16) * 16)) \
-                if unit and 'GENERATED' in (ex.current.get('scales') or ()) and not reads and inputs and need else None
-            if size is None or (size > 4096).any():
-                if isinstance(expression, tuple) and expression[0] == 'BUMP':
-                    return bumped(*expression[1:], memo, whole)
-                if whole: return expression
-                if variant := stepped(expression): return variant  # Baked by the steps it's live for
-                if not isinstance(expression, tuple) or ex.summaries[id(expression)].affine is None \
-                        and len(ex.summaries[id(expression)].reads) == 1:  # Inexact on one image, live whole: baked
-                    # parts add fetches
-                    return expression  # Else as its operands are, but the alpha read an unassociation divides by
-                return (expression[0], *(bake(part, memo, whole) for part in expression[1:])) \
-                    if expression[0] != 'UNASSOCIATE' else \
-                    (expression[0], bake(expression[1], memo, whole), expression[2])
-            point = ('DIVIDE', ('SUBTRACT', ('UV',), domain[0]), domain[1]) if domain else ('UV',)
-            if (key := (None if domain and domain[3] else tuple(numpy.r_[domain[0], domain[1]]) if domain else int(
-                    ex.current['triangles'][0]), expression_key(expression, ex.keys))) in ex.units:  # Baked over the
-                ex.current['made'] += [ex.units[key]] * (key[0] is not None)  # same UVs, its row the object's own
-                # unless repeating
-                return 'BAKED', point, ex.units[key]
-            t = ex.current['uv'][:0 if domain else None] * size[0]  # Over UV space none: the bake pass takes every
-            # texel
-            low, high = (numpy.clip((f(1) + d) // 16, 0, size[0] // 16 - 1).astype(int) for f, d in ((t.min, -1),
-                (t.max, 1)))  # The 16 x 16 tiles of texels each triangle's UVs reach, a texel off its edges included
-            n = (high - low + 1).prod(1)
-            k, j = numpy.arange(n.sum()) - numpy.repeat(n.cumsum() - n, n), numpy.repeat(numpy.arange(len(n)), n)
-            width = high[j, 0] - low[j, 0] + 1
-            tiles = numpy.stack((ex.current['triangles'][j], low[j, 0] + k % width, low[j, 1] + k // width, 0 * j), 1)
-            if domain:  # Over UV space the texels' own UVs, the bake pass baking texel by texel
-                expression = moved_to(expression, ('ADD', ('MULTIPLY', ('UV',), domain[1]), domain[0]), {})
-            # In an update of values the last export's unit, its steps and value again unless its expression changed;
-            # its steps and hint among the bakes'
-            (ex.ops, ex.hints), outer = ex.aside, (ex.ops, ex.hints)
-            tile, last, ex.units[key], steps, value = ex.places[len(ex.bakes)] if len(ex.bakes) < len(ex.places) else (
-                sum(map(len, ex.texels)) // 4, None, Bake(), None, None)
-            ex.ops.append((0, tile, len(tiles), 0))
-            ex.tilings[tile] = tiles.astype('u4').view('f').ravel()  # Its own, though another's empty list starts there
-            ex.texels.append(ex.tilings[tile])
-            ex.ops.append((0, ex.baked[0], size[0], size[1] | 1 << 28))
-            if last == key:
-                ex.hints[len(ex.ops)] = steps[0]
-                ex.bakes.append(len(ex.ops))
-                ex.ops.extend(steps[1])
-            else:
-                ex.bakes.append(program([GRAY[0], expression, *GRAY[2:]], cut=False)[1])
-                value = triple(emit(expression, [], ex.textures, ex.texels, set(), {}))
-                if last: ex.again.append(ex.bakes[-1])
-            ex.placed.append((tile, key, ex.units[key], (ex.hints[ex.bakes[-1]], ex.ops[ex.bakes[-1]:]), value))
-            ex.current['made'].append(ex.bakes[-1])
-            ex.textures[ex.units[key]] = (ex.baked[0], size[0], size[1] | 1 << 28 | bool(domain and domain[3]) << 29,
-                numpy.array((*value, 1)))
-            ex.baked[0] += -(-size.prod() // 2)
-            ex.ops, ex.hints = outer
-            return 'BAKED', point, ex.units[key]
         # A Bump's heights as its height's gradient along its one point input, baked whole, at its shifted points, its
         # height at its own point no matter; where no gradient bakes, its height baked on its images' lattice, else all
         def bumped(normal, height, first, second, factors, memo, whole):  # live, as a bake's texels differ none
@@ -2497,15 +2497,15 @@ class Flex(bpy.types.RenderEngine):
                 gradient = fold(vector(*(('DIVIDE', ('SUBTRACT', shifted(e * step), shifted(-e * step)), 2 * step)
                     if k < 2 or point != 'UV' else 0 for k, e in enumerate(numpy.eye(3)))))
                 summarize(gradient, ex.summaries, scales)
-                if (read := bake(gradient, {}, True))[0] == 'BAKED':
-                    return 'BUMP', bake(normal, memo, whole), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED',
-                        ('SHIFT', k), (point,)), (point,))) for k in (1, 2)), bake(factors, memo, whole)
+                if (read := ex.bake(gradient, {}, True))[0] == 'BAKED':
+                    return 'BUMP', ex.bake(normal, memo, whole), 0, *(('DOT_PRODUCT', read, ('SUBTRACT', ('SHIFTED',
+                        ('SHIFT', k), (point,)), (point,))) for k in (1, 2)), ex.bake(factors, memo, whole)
             seen = {}  # Of images alone, its texels' own gradient as live has it: the height baked on their lattice
             noisy = lambda e: isinstance(e, tuple) and (seen[id(e)] if id(e) in seen else seen.setdefault(id(e), e[0] ==
                 'NOISE' or any(map(noisy, e[1:]))))
             if isinstance(height, tuple) and ex.summaries[id(height)].reads and not noisy(height):
-                return 'BUMP', *(bake(part, memo, whole) for part in (normal, height, first, second, factors))
-            return 'BUMP', bake(normal, memo, whole), height, first, second, bake(factors, memo, whole)
+                return 'BUMP', *(ex.bake(part, memo, whole) for part in (normal, height, first, second, factors))
+            return 'BUMP', ex.bake(normal, memo, whole), height, first, second, ex.bake(factors, memo, whole)
         # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
         def program(surface, reads=None, cut=not moved, emitted=True):  # baked, but in an update of moves: its bakes
             # the last's; with emitted false only cut
@@ -2519,7 +2519,7 @@ class Flex(bpy.types.RenderEngine):
             if cut:  # Its expressions as units, all, then its units cut
                 ex.summaries.clear()
                 for attribute in surface: summarize(attribute, ex.summaries, ex.current.get('scales'))
-                surface = [attribute if k in LIVE else bake(attribute) for k, attribute in enumerate(surface)]
+                surface = [attribute if k in LIVE else ex.bake(attribute) for k, attribute in enumerate(surface)]
             if not emitted: return surface
             surface, first = fold(unanimated(surface)), len(ex.ops)
             # Its translucent color, sheen and anisotropy only marked: scenes without them run programs that compile
@@ -2562,6 +2562,7 @@ class Flex(bpy.types.RenderEngine):
             opaque = scalar(9) == 1 and (scalar(6) not in (None, 1) or scalar(5) == 0)
             ex.hints[first] = max(radiant, 1e-6 if isinstance(surface[4], tuple) else 0)
             return ex.hints[first], first, opaque
+        ex.bumped, ex.program = bumped, program
         empty = program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
         subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open objects
