@@ -2021,11 +2021,9 @@ DEFAULT_VOLUME.links = [types.SimpleNamespace(is_valid=True, is_muted=False, fro
     (1, 1, 1, 1)), ('Blackbody Intensity', 'VALUE', 0), ('Blackbody Tint', 'RGBA', (1, 1, 1, 1)),
     ('Temperature', 'VALUE', 1000), ('Temperature Attribute', 'STRING', 'temperature')))))]
 # filler: a volume object's: no surface, and the default volume where no Volume output is linked
-def shade(material, program, filler=False):
+def shade(material, export, filler=False):
     output = material and material.node_tree.get_output_node('CYCLES')
-    if not output and not filler:
-        row = program(BLACK)
-        return *row, row[1]
+    if not output and not filler: return export.lit(BLACK)
     filling = output.inputs['Volume'] if output and output.inputs['Volume'].is_linked else filler and DEFAULT_VOLUME
     surface = resolve(output.inputs['Surface']) if output and not filler else BLACK
     # Its volume, or the medium its subsurface scattering fills
@@ -2058,9 +2056,9 @@ def shade(material, program, filler=False):
     while marked and not marked[-1]: marked.pop()
     attribute = [*base, *volume, *surface[13:19], glow, *marked]
     # Cut first, so the bakes the cut makes come before the row
-    row = program(program(attribute, emitted=False), attribute, cut=False)
+    row = export.program(export.program(attribute, emitted=False), attribute, cut=False)
     # Light sampling reads the emission alone, its colors associated as in the row's program
-    return *row, program([*BLACK[:4], base[4], *BLACK[5:]], [*base, *volume])[1]
+    return *row, export.program([*BLACK[:4], base[4], *BLACK[5:]], [*base, *volume])[1]
 
 class Boxed:  # The world as its box's material: its volume, behind faces passing rays straight
     def __init__(self, world):
@@ -2469,6 +2467,9 @@ class Export:
             return 'BUMP', *(self.bake(part, memo, whole) for part in (normal, height, first, second, factors))
         return 'BUMP', self.bake(normal, memo, whole), height, first, second, self.bake(factors, memo, whole)
     # Counted, then emitted keeping what it uses again, its colors associated as in the surface reads, its units
+    def lit(self, surface):  # Its row, emitting by its own program
+        row = self.program(surface)
+        return *row, row[1]
     def program(self, surface, reads=None, cut=True, emitted=True):  # baked, but in an update of moves: its bakes
         # the last's; with emitted false only cut
         surface = [skied(attribute, memo) for memo in [{}] for attribute in surface]  # Skies' chains read once
@@ -2544,7 +2545,7 @@ class Export:
         before, hairs = recording and ([dict(d) for d in self.ledgers()], dict(HAIRS), set(self.derived),
             set(self.subsurface), len(self.current.get('made', ()))), dict(HAIRS)
         SEALING['asked'] = False
-        row = shade(material, self.program, filler)
+        row = shade(material, self, filler)
         if SEALING['asked']: self.subsurface.add(material)
         if recording and HAIRS == hairs: self.spans.append((key, context, (at, self.spots(), [{k: v for k, v
             in d.items() if k not in b or b[k] is not v} for d, b in zip(self.ledgers(), before[0])], (self.derived
@@ -2738,8 +2739,7 @@ class Flex(bpy.types.RenderEngine):
             trees if tree for node in tree.nodes if node.type == 'ATTRIBUTE' and node.attribute_type == 'INSTANCER'})))
         ex = Export(shaded, keeping, moved, self.kept if shaded else {}, dict(self.shape[2]) if shaded else {},
             self.placed if shaded else [])
-        empty = ex.program(GRAY)  # An empty slot renders gray
-        rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
+        rows = {None: ex.lit(GRAY)}  # Rows of the surface each material renders; an empty slot renders gray
         # An object's slots; a volume object without any, one empty slot the default volume fills
         slotted = lambda ob: ob.material_slots or [types.SimpleNamespace(material=None)] * (ob.type == 'VOLUME')
         volumes = {}  # Index, triangle count and key of each instance exported; BVHs of those filling
@@ -2947,8 +2947,8 @@ class Flex(bpy.types.RenderEngine):
                 # pass through it straight as Cycles' lights occlude none and what lies within it is lit; an area
                 # light, which its black back occludes all the same, and a sun stay black
                 sphere = light.type in ('POINT', 'SPOT')
-                shades = [(*row, row[1]) for row in (ex.program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]]
-                    if sphere else [*BLACK[:4], emission, *BLACK[5:]]), ex.program(BLACK))]
+                shades = [ex.lit([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
+                    else [*BLACK[:4], emission, *BLACK[5:]]), ex.lit(BLACK)]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
