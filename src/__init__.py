@@ -2310,13 +2310,29 @@ def tabled(shades, ob):  # Per slot a material
 
 # The shading of an export's materials: what its bakes and programs share
 class Export:
-    def __init__(self, ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places, moved, shaded, keeping, kept, instances, attributes):
-        self.ops, self.hints, self.aside, self.tilings, self.textures = ops, hints, aside, tilings, textures
-        self.texels, self.derived, self.baked, self.bakes, self.units = texels, derived, baked, bakes, units
-        self.summaries, self.placed, self.again, self.images, self.keys = summaries, placed, again, images, keys
-        self.failed, self.current, self.places, self.moved = failed, current, places, moved
-        self.shaded, self.keeping, self.kept, self.spans = shaded, keeping, kept, []  # Kept rows; this export's spans
+    # shaded: whether the last export's rows are taken again; kept: those rows; textures and places: the last export's
+    def __init__(self, shaded, keeping, moved, kept, textures, places, instances, attributes):
+        self.ops, self.hints = [], {}  # Steps of all programs; the light power hint of each by its first
+        self.aside, self.tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once
+        # baked; tiles
+        self.textures = textures  # First texel, width, height and mean per image and ramp
+        self.texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
+        self.derived = set()  # Images a Bump differentiates, kept floats
+        self.baked, self.bakes, self.units, self.summaries, self.placed, self.again = [0], [], {}, {}, [], []  # Texels
+        # baked after those piped, each bake's program, each unit's texture, what each expression of the surface the
+        # cut takes is as a unit, each unit's place, and the bakes to run again. A unit's texture's steps, and the end
+        # before its program with its first texel and size, count from the baked texels, as halves two to a texel,
+        # flagged in their height's bit 28.
+        self.images, self.keys = {None: None if shaded else (self.textures, self.texels)}, {}  # Images units over UVs
+        # read; parts' keys, a memo of expression_key's for the export, holding its parts as it does, its keys made
+        # one with the last's
+        self.failed = set()  # Units of the UV alone no domain bakes
+        self.current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the
+        # scales of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
+        self.places = places  # The last export's units, which an update of values keeps in place
+        for place in places: interned(place[1][1], self.keys)  # So a unit kept compares its key in its arity
+        self.moved, self.shaded, self.keeping, self.kept, self.spans = moved, shaded, keeping, kept, []  # Kept rows;
+        # this export's spans
         self.instances, self.attributes, self.placements = instances, attributes, []  # What record() appends to
         self.subsurface = set()  # Materials whose subsurface scattering asked for their object's closedness: on open
         # objects apart
@@ -2704,36 +2720,19 @@ class Flex(bpy.types.RenderEngine):
         materials, entries, instances = [], {}, []  # A row per triangle of each mesh, as each object's mesh by its key
         # (its first triangle, count and whether in world space), and per instance its mesh, transform and adjugate and
         # its object's location, color, pass index, random number and axes, as Cycles' object info node tells
-        ops, hints = [], {}  # Steps of all programs; the light power hint of each by its first
-        aside, tilings = ([], {}), {}  # The bakes' steps and hints, apart, which the renderer frees once baked; tiles
         HAIRS.clear()
         PROGRAMS.clear()
         if not shaded:  # An update keeps each folded chain's table, its key
             FOLDED.clear()
             SOURCES.clear()
-        textures = dict(self.shape[2]) if shaded else {}  # First texel, width, height and mean per image and ramp
-        texels = [numpy.ones(4, 'f')]  # Linear floats after a white texel: the renderer loads no empty array
         # Instancer attributes the materials read by name, each instance's float4 of each after a row of zeros for those
         # without: its info names its first
         IDS.clear()
         INSTANCER.clear(), INSTANCER.update((name, k) for k, name in enumerate(sorted({node.attribute_name for tree in
             trees if tree for node in tree.nodes if node.type == 'ATTRIBUTE' and node.attribute_type == 'INSTANCER'})))
         attributes = [numpy.zeros(4 * len(INSTANCER), 'f')]
-        derived = set()  # Images a Bump differentiates, kept floats
-        baked, bakes, units, summaries, placed, again = [0], [], {}, {}, [], []  # Texels baked after those piped, each
-        # bake's program, each unit's texture, what each expression of the surface the cut takes is as a unit, each
-        # unit's place, and the bakes to run again. A unit's texture's steps, and the end before its program with its
-        # first texel and size, count from the baked texels, as halves two to a texel, flagged in their height's bit 28.
-        images, keys = {None: None if shaded else (textures, texels)}, {}  # Images units over UVs read; parts' keys, a
-        # memo of expression_key's for the export, holding its parts as it does, its keys made one with the last's
-        failed = set()  # Units of the UV alone no domain bakes
-        current = {}  # Of the object whose materials are shaded: the triangles of the material, their UVs, the scales
-        # of its point inputs along them if they lie in [0, 1] without overlap, the bakes made over them
-        places = self.placed if shaded else []  # The last export's units, which an update of values keeps in place
-        for place in places: interned(place[1][1], keys)  # So a unit kept compares its key in its arity
-        ex = Export(ops, hints, aside, tilings, textures, texels, derived, baked, bakes, units, summaries, placed,
-            again, images, keys, failed, current, places, moved, shaded, keeping, self.kept if shaded else {},
-            instances, attributes)
+        ex = Export(shaded, keeping, moved, self.kept if shaded else {}, dict(self.shape[2]) if shaded else {},
+            self.placed if shaded else [], instances, attributes)
         empty = ex.program(GRAY)  # An empty slot renders gray
         rows = {None: (*empty, empty[1])}  # Rows of the surface each material renders
         # An object's slots; a volume object without any, one empty slot the default volume fills
@@ -2789,10 +2788,10 @@ class Flex(bpy.types.RenderEngine):
                 for slot in ob.material_slots:  # Of those the last export cut, not its linked duplicates'
                     if ex.variant(slot.material) in rows or (slot.material, ob.name) in rows \
                         or (slot.material, ob.name) not in self.cuts: continue
-                    current.update(self.cuts[(slot.material, ob.name)], made=[])
+                    ex.current.update(self.cuts[(slot.material, ob.name)], made=[])
                     row = ex.shaded_row(slot.material)
-                    rows[(slot.material, ob.name) if current['made'] else ex.variant(slot.material)] = row
-                current.clear()
+                    rows[(slot.material, ob.name) if ex.current['made'] else ex.variant(slot.material)] = row
+                ex.current.clear()
                 continue
             key = ob.type != 'LIGHT' and not moved and (ob.data and ob.data.as_pointer(), ob.visible_camera,
                 ob.visible_shadow, tuple(slot.material for slot in ob.material_slots))
@@ -2877,13 +2876,13 @@ class Flex(bpy.types.RenderEngine):
                     t = uv[mask]
                     flat = numpy.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1]) - (t[:, 1, 1] - t[:, 0, 1])
                         * (t[:, 2, 0] - t[:, 0, 0])).sum() / 2
-                    current.update(triangles=sum(slot[1] for slot in slots) + numpy.nonzero(mask)[0], uv=t, made=[],
+                    ex.current.update(triangles=sum(slot[1] for slot in slots) + numpy.nonzero(mask)[0], uv=t, made=[],
                         scales=not trivial(slot.material) and {'UV': 1, **(not moved and 0 < flat <= 1 and 0 <= t.min()
                         and t.max() <= 1 and {'GENERATED': stretch(orco[mask], t)} or {})})
-                    cuts[(slot.material, ob.name)] = dict(current)
+                    cuts[(slot.material, ob.name)] = dict(ex.current)
                     row = ex.shaded_row(slot.material, ob.type == 'VOLUME')
-                    rows[(slot.material, ob.name) if current['made'] or DOMAIN else ex.variant(slot.material)] = row
-                current.clear()
+                    rows[(slot.material, ob.name) if ex.current['made'] or DOMAIN else ex.variant(slot.material)] = row
+                ex.current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(ex.variant(slot.material)))
                     for slot in slotted(ob)] or [rows[None]]
             # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
@@ -3030,60 +3029,68 @@ class Flex(bpy.types.RenderEngine):
         backdrop = ex.program(surface)
         materials.append([(*backdrop[:2], 0, 0, backdrop[1])])
         self.lensing = ex.program(lensed(viewer, *size))[1] if custom else 0  # The custom camera's, run per sample
-        shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, row[3]) for row in rows.values()], \
-            textures
+        shape = [op[0] for op in ex.ops + ex.aside[0]], [(row[1], row[2], row[0] > 0, row[3])
+            for row in rows.values()], \
+            ex.textures
         if not shaded:  # The texels the materials' programs read first, then those only bakes read, flagged in bit 30;
-            starts = numpy.cumsum([0, *map(len, texels)])[:-1] // 4  # the images they read apart, by their index,
-            read = {texel for code, texel, _, height in ops if reads_texel(code)  # in 31
+            starts = numpy.cumsum([0, *map(len, ex.texels)])[:-1] // 4  # the images they read apart, by their index,
+            read = {texel for code, texel, _, height in ex.ops if reads_texel(code)  # in 31
                 and not height >> 28 & 1}
-            image = {entry[0]: entry[1:3] for key, entry in textures.items() if isinstance(key, tuple)}  # Width, height
+            image = {entry[0]: entry[1:3] for key, entry in ex.textures.items() if isinstance(key, tuple)}  # Width,
+            # height
             apart = [1 if k > 0 and first not in read else 2 if first in image and len(entry) else 0  # An empty entry
-                for k, (first, entry) in enumerate(zip(starts, texels))]  # shares its first with the next: no image
+                for k, (first, entry) in enumerate(zip(starts, ex.texels))]  # shares its first with the next: no image
             # Filtered in hardware, 16-bit UNORM errs by up to half its ulp and halves round to halves, which a Bump's
             # differences magnify: the images it differentiates keep floats
-            derived = {entry[0] for key, entry in textures.items() if isinstance(key, tuple) and key[0] in derived}
-            formats = {first: compact(entry) for first, entry, side in zip(starts, texels, apart)  # Bits 26 and 27: 2
-                if side == 2 and not image[first][1] >> 26 & 1 and first not in derived}  # halves, 3 16-bit UNORM
+            ex.derived = {entry[0] for key, entry in ex.textures.items()
+                if isinstance(key, tuple) and key[0] in ex.derived}
+            formats = {first: compact(entry)  # Bits 26 and 27: 2
+                for first, entry, side in zip(starts, ex.texels, apart)
+                if side == 2 and not image[first][1] >> 26 & 1 and first not in ex.derived}  # halves, 3 16-bit UNORM
             form = lambda first: formats[first][1] << 26 if first in formats else 0
-            chained = {texel for code, texel, width, _ in ops if NAMES[code & CODE] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
+            chained = {texel for code, texel, width, _ in ex.ops
+                if NAMES[code & CODE] in ('IMAGE_LINEAR', 'ALPHA_LINEAR')
                 and width >> 20 != 2048}  # Read by a ray's cone at some level: a mip chain, flagged in bit 31 of width
             at, counts = {}, [0, 0, 0]
-            for first, entry, side in zip(starts, texels, apart):
+            for first, entry, side in zip(starts, ex.texels, apart):
                 at[first], counts[side] = (counts[side], side), counts[side] + (len(entry) // 4 if side < 2 else 1)
-            ops[:], aside[0][:] = relocated(ops, at, form), relocated(aside[0], at, form)
-            placed = [(at[tile][0], key, unit, (hint, relocated(steps, at, form)), value)
-                for tile, key, unit, (hint, steps), value in placed]
-            textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30 | form(entry[0]),
+            ex.ops[:], ex.aside[0][:] = relocated(ex.ops, at, form), relocated(ex.aside[0], at, form)
+            ex.placed = [(at[tile][0], key, unit, (hint, relocated(steps, at, form)), value)
+                for tile, key, unit, (hint, steps), value in ex.placed]
+            ex.textures.update({key: (*at[entry[0]][:1], entry[1], entry[2] | at[entry[0]][1] << 30 | form(entry[0]),
                 entry[3])
-                for key, entry in textures.items() if not isinstance(key, Bake)})
-            images = [(numpy.concatenate((formats[first][0], numpy.zeros(-len(entry) % 8, formats[first][0].dtype)))
+                for key, entry in ex.textures.items() if not isinstance(key, Bake)})
+            ex.images = [(numpy.concatenate((formats[first][0], numpy.zeros(-len(entry) % 8, formats[first][0].dtype)))
                 .view('f') if form(first) else entry, (image[first][0] | (first in chained) << 31, image[first][1]
                 | form(first)))  # 16-bit: two
-                for first, entry, side in zip(starts, texels, apart) if side == 2]  # texels to a float4
-            texels = [entry for entry, side in zip(texels, apart) if not side] + [
-                entry for entry, side in zip(texels, apart) if side == 1]
-        piped, ahead = self.piped if shaded else counts[0], len(ops)
-        bakes, again = [k + ahead for k in bakes], [k + ahead for k in again]  # The bakes' steps after the materials'
-        ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or NAMES[code & CODE] in READS)
-            and height >> 28 & 1 else (code, texel, width, height) for code, texel, width, height in ops + aside[0]]
-        ops += [(OP[name], 0, 0, 0) for name, any in (('MEDIUM', varying),
+                for first, entry, side in zip(starts, ex.texels, apart) if side == 2]  # texels to a float4
+            ex.texels = [entry for entry, side in zip(ex.texels, apart) if not side] + [
+                entry for entry, side in zip(ex.texels, apart) if side == 1]
+        piped, ahead = self.piped if shaded else counts[0], len(ex.ops)
+        ex.bakes, ex.again = [k + ahead for k in ex.bakes], [k + ahead for k in ex.again]  # The bakes' steps after
+        # the materials'
+        ex.ops = [(code, texel + piped, width, height & ~(1 << 28)) if (code == 0 or NAMES[code & CODE] in READS)
+            and height >> 28 & 1 else (code, texel, width, height)
+            for code, texel, width, height in ex.ops + ex.aside[0]]
+        ex.ops += [(OP[name], 0, 0, 0) for name, any in (('MEDIUM', varying),
             ('CURVES', sum(map(len, hairs))), ('WORLD', box), ('SKY', grid[0]), ('PANORAMA', panoramic),
             ('WORLD_PATH', world_path)) if any]
         if shaded:  # Steps on stdin: their count, then the steps as in a scene, while their codes, the rows and the
-            if self.varying or shape[:2] != self.shape[:2] or len(textures) != len(self.shape[2]) or [*HAIRS] != \
+            if self.varying or shape[:2] != self.shape[:2] or len(ex.textures) != len(self.shape[2]) or [*HAIRS] != \
                     self.hairs or any(  # textures, and hair tables,
                 # keep their shape, and no volume varies, whose bounds a value changed may move
-                    textures[key][:3] != entry[:3] for key, entry in self.shape[2].items() if isinstance(key, Bake)) \
-                    or any(entry[2] >> 26 & 2 for key, entry in textures.items()  # and no image a Bump now
-                    if isinstance(key, tuple) and key[0] in derived):  # differentiates stays compacted
+                    ex.textures[key][:3] != entry[:3] for key, entry in self.shape[2].items()
+                    if isinstance(key, Bake)) \
+                    or any(entry[2] >> 26 & 2 for key, entry in ex.textures.items()  # and no image a Bump now
+                    if isinstance(key, tuple) and key[0] in ex.derived):  # differentiates stays compacted
                 return True
-            read = {texel for code, texel, *_ in ops if NAMES[code & CODE][:5] in ('IMAGE', 'ALPHA')}  # The tables
-            tables = {key: [] for key, entry in textures.items()
+            read = {texel for code, texel, *_ in ex.ops if NAMES[code & CODE][:5] in ('IMAGE', 'ALPHA')}  # The tables
+            tables = {key: [] for key, entry in ex.textures.items()
                 if not isinstance(key, (tuple, Bake)) and entry[0] in read}
             # read, rebuilt from their evaluated nodes; their means, which the hints take, as the renderer has them
             means = {key: texture(SOURCES[key], {}, tables[key])[3] for key in tables}
-            if any((means[key] != textures[key][3]).any() for key in tables):
-                self.shape[2].update({key: (*textures[key][:3], means[key]) for key in tables})
+            if any((means[key] != ex.textures[key][3]).any() for key in tables):
+                self.shape[2].update({key: (*ex.textures[key][:3], means[key]) for key in tables})
                 self.visible = visible  # The same scene: start() pipes its steps again
                 return True
             # Then per table its first texel, texel count and texels, until a count of 0, those only bakes read flagged
@@ -3093,21 +3100,23 @@ class Flex(bpy.types.RenderEngine):
             regrid = grid if any(isinstance(update.id, (bpy.types.World, bpy.types.NodeTree))
                 for update in depsgraph.updates) else (0, 0)
             tables = [(entry[0] | (entry[2] >> 30 & 1) << 31, sum(map(len, tables[key])) // 4, tables[key])
-                for key, entry in textures.items() if key in tables] + [(entry[0] | 1 << 31, len(data[0]) // 4, data)
-                for key, entry in textures.items() if again and isinstance(key, tuple) and entry[2] >> 30 & 1
+                for key, entry in ex.textures.items() if key in tables] + [(entry[0] | 1 << 31, len(data[0]) // 4, data)
+                for key, entry in ex.textures.items() if ex.again and isinstance(key, tuple) and entry[2] >> 30 & 1
                 for data in [anew(key)]] + [
-                (first | 1 << 31, len(tiles) // 4, [tiles]) for first, tiles in tilings.items() if again and len(tiles)]
-            self.requests.writelines((struct.pack('<2I', STEPS, len(ops)), numpy.array(ops, 'I'), *(part for first,
-                width, data in tables for part in (struct.pack('<2I', first, width), *data)), struct.pack('<2I', 0, 0),
-                numpy.array([*hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(again)),
-                numpy.array(again, 'I'), struct.pack('<2I', *regrid)))
-            self.visible, self.kept = visible, recorded(ex.spans, None, ops, aside, bakes, placed, again)
+                (first | 1 << 31, len(tiles) // 4, [tiles]) for first, tiles in ex.tilings.items()
+                if ex.again and len(tiles)]
+            self.requests.writelines((struct.pack('<2I', STEPS, len(ex.ops)), numpy.array(ex.ops, 'I'),
+                *(part for first, width, data in tables for part in (struct.pack('<2I', first, width), *data)),
+                struct.pack('<2I', 0, 0),
+                numpy.array([*ex.hints.items(), (2 ** 32 - 1, 0)], 'u4, f4'), struct.pack('<I', len(ex.again)),
+                numpy.array(ex.again, 'I'), struct.pack('<2I', *regrid)))
+            self.visible, self.kept = visible, recorded(ex.spans, None, ex.ops, ex.aside, ex.bakes, ex.placed, ex.again)
             return
         self.shape, self.hairs = shape, [*HAIRS]
         firsts = numpy.cumsum([0] + [count for _, count, _ in slots])
         self.slots = {i: (int(first), count, key) for (i, count, key), first in zip(slots, firsts)}
         self.volumes, self.varying, self.box = volumes, varying, len(slots) - 1 if box else 2 ** 32 - 1
-        self.cuts, self.placed, self.piped = cuts, placed, piped
+        self.cuts, self.placed, self.piped = cuts, ex.placed, piped
         materials = numpy.concatenate(materials)
         # Scene on stdin: triangle, step, texel, baked texel and bake counts, the steps of the materials' programs and
         # the texels only bakes read, mesh triangle, instance and image counts; the steps of 4 integers, first, as the
@@ -3120,8 +3129,9 @@ class Flex(bpy.types.RenderEngine):
         # strand's material; then the texels and the programs of the bakes; then each image's width and height, RGBA8
         # in its bit 26, and its texels; the hair tables' count and entries after the steps, baked as the rest loads;
         # last the instancer attributes and the world's grid
-        self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ops), piped, baked[0], len(bakes), ahead,
-            counts[1], sum(map(len, columns[0])), len(instances), counts[2]), numpy.array(ops, 'I'),
+        self.requests.writelines((struct.pack('<11I', SCENE, firsts[-1], len(ex.ops), piped, ex.baked[0],
+            len(ex.bakes), ahead, counts[1], sum(map(len, columns[0])), len(instances), counts[2]),
+            numpy.array(ex.ops, 'I'),
             struct.pack('<I', len(HAIRS)), numpy.array([*HAIRS], 'f'),
             *(part for first, count, in_world, values in instances
             for part in (numpy.array((first, count, in_world), 'I'), values)),
@@ -3132,10 +3142,11 @@ class Flex(bpy.types.RenderEngine):
             table[segment[:, 1]] for hair_rows in [numpy.concatenate((numpy.empty((0, 5)), *hairs), dtype='f')]
             for table in [numpy.hstack((hair_rows[:, :1].view('I'), hair_rows[:, 1:].astype('I')))]
             for segment in segments),
-            *texels, numpy.array(bakes, 'I'),
-            numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
+            *ex.texels, numpy.array(ex.bakes, 'I'),
+            numpy.array([shape for _, shape in ex.images], 'I'), *(entry for entry, _ in ex.images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
-        self.visible, self.kept = visible, recorded(ex.spans, at, ops, aside, bakes, placed, again) if keeping else {}
+        self.visible, self.kept = visible, recorded(ex.spans, at, ex.ops, ex.aside, ex.bakes, ex.placed, ex.again) \
+            if keeping else {}
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view
