@@ -1,4 +1,4 @@
-#include "slang-cpp-prelude.h"
+#include "/home/bendik/projects/FlexKernels-2/.deps/slang-2026.19/include/slang-cpp-prelude.h"
 
 #ifdef SLANG_PRELUDE_NAMESPACE
 using namespace SLANG_PRELUDE_NAMESPACE;
@@ -465,91 +465,84 @@ static Random Random_x24init_0(uint32_t state_0, float value_0)
     return _S99;
 }
 
-static float random_0(uint32_t * state_1)
-{
-    uint32_t _S100 = hash(*state_1);
-    *state_1 = _S100;
-    return float((*state_1) >> int(8)) * 5.9604644775390625e-08f;
-}
-
 SLANG_PRELUDE_EXPORT
-Random pcg(uint32_t state_2)
+Random pcg(uint32_t state_1)
 {
-    uint32_t _S101 = state_2;
-    float value_1 = random_0(&_S101);
-    return Random_x24init_0(_S101, value_1);
+    uint32_t _S100 = hash(state_1);
+    float value_1 = float(_S100 >> int(8)) * 5.9604644775390625e-08f;
+    return Random_x24init_0(_S100, value_1);
 }
 
 SLANG_PRELUDE_EXPORT
 Vector<uint32_t, 2>  noiseOffset(uint32_t k_2)
 {
-    Vector<uint32_t, 2>  _S102 = Vector<uint32_t, 2> (k_2 * 3242174889U, k_2 * 2447445414U) >> ((Vector<uint32_t, 2> )16U);
-    uint32_t _S103 = (fkBlueNoiseSize());
-    return (_S102 * (Vector<uint32_t, 2> )_S103) >> ((Vector<uint32_t, 2> )16U);
+    Vector<uint32_t, 2>  _S101 = Vector<uint32_t, 2> (k_2 * 3242174889U, k_2 * 2447445414U) >> ((Vector<uint32_t, 2> )16U);
+    uint32_t _S102 = (fkBlueNoiseSize());
+    return (_S101 * (Vector<uint32_t, 2> )_S102) >> ((Vector<uint32_t, 2> )16U);
 }
 
 SLANG_PRELUDE_EXPORT
 uint32_t noiseOrigin(Vector<uint32_t, 2>  p_0, uint32_t k_3)
 {
-    uint32_t _S104 = ((p_0.x) >> 11U) | (((p_0.y) >> 11U) << 4U);
-    Vector<uint32_t, 2>  _S105 = noiseOffset(8192U + (k_3 >> 10U) + (_S104 << 20U));
-    Vector<uint32_t, 2>  _S106 = (p_0 + _S105) & ((Vector<uint32_t, 2> )2047U);
-    return ((_S106.x) | ((_S106.y) << 11U)) | ((k_3 & 1023U) << 22U);
+    uint32_t _S103 = ((p_0.x) >> 11U) | (((p_0.y) >> 11U) << 4U);
+    Vector<uint32_t, 2>  _S104 = noiseOffset(8192U + (k_3 >> 10U) + (_S103 << 20U));
+    Vector<uint32_t, 2>  _S105 = (p_0 + _S104) & ((Vector<uint32_t, 2> )2047U);
+    return ((_S105.x) | ((_S105.y) << 11U)) | ((k_3 & 1023U) << 22U);
 }
 
 SLANG_PRELUDE_EXPORT
 uint32_t noiseAddress(uint32_t origin_0, uint32_t bounce_0)
 {
-    Vector<uint32_t, 2>  _S107 = Vector<uint32_t, 2> (origin_0 & 2047U, (origin_0 >> 11U) & 2047U);
-    Vector<uint32_t, 2>  _S108 = noiseOffset(64U + bounce_0 * 17U);
-    Vector<uint32_t, 2>  _S109 = (_S107 + _S108) & ((Vector<uint32_t, 2> )2047U);
-    return ((_S109.x) | ((_S109.y) << 11U)) | ((origin_0 >> 22U) << 22U);
+    Vector<uint32_t, 2>  _S106 = Vector<uint32_t, 2> (origin_0 & 2047U, (origin_0 >> 11U) & 2047U);
+    Vector<uint32_t, 2>  _S107 = noiseOffset(64U + bounce_0 * 17U);
+    Vector<uint32_t, 2>  _S108 = (_S106 + _S107) & ((Vector<uint32_t, 2> )2047U);
+    return ((_S108.x) | ((_S108.y) << 11U)) | ((origin_0 >> 22U) << 22U);
 }
 
 SLANG_PRELUDE_EXPORT
 Random draw(uint32_t address_0, uint32_t variable_0)
 {
-    uint32_t _S110 = address_0 >> 22U;
-    uint32_t _S111 = _S110 / 32U;
-    Vector<uint32_t, 2>  _S112 = Vector<uint32_t, 2> (address_0 & 2047U, (address_0 >> 11U) & 2047U);
-    uint32_t _S113 = variable_0 & 2147483647U;
-    Vector<uint32_t, 2>  _S114 = noiseOffset(_S113);
-    Vector<uint32_t, 2>  _S115 = _S112 + _S114;
-    Vector<uint32_t, 2>  _S116 = noiseOffset(4096U + _S111);
-    Vector<uint32_t, 2>  _S117 = _S115 + _S116;
-    uint32_t _S118 = (fkBlueNoiseSize());
-    Vector<uint32_t, 2>  _S119 = _S117 & ((Vector<uint32_t, 2> )(_S118 - 1U));
-    uint32_t _S120 = (fkBlueNoise((_S119.x), (_S119.y), ((_S110 + ((_S111 * 2654435769U) >> 27U)) % 32U)));
-    bool _S121 = (variable_0 & 2147483648U) != 0U;
-    uint32_t _S122 = stream(address_0, _S113);
-    Random _S123 = pcg(_S122);
-    float _S124;
-    if(_S120 == 4294967295U)
+    uint32_t _S109 = address_0 >> 22U;
+    uint32_t _S110 = _S109 / 32U;
+    Vector<uint32_t, 2>  _S111 = Vector<uint32_t, 2> (address_0 & 2047U, (address_0 >> 11U) & 2047U);
+    uint32_t _S112 = variable_0 & 2147483647U;
+    Vector<uint32_t, 2>  _S113 = noiseOffset(_S112);
+    Vector<uint32_t, 2>  _S114 = _S111 + _S113;
+    Vector<uint32_t, 2>  _S115 = noiseOffset(4096U + _S110);
+    Vector<uint32_t, 2>  _S116 = _S114 + _S115;
+    uint32_t _S117 = (fkBlueNoiseSize());
+    Vector<uint32_t, 2>  _S118 = _S116 & ((Vector<uint32_t, 2> )(_S117 - 1U));
+    uint32_t _S119 = (fkBlueNoise((_S118.x), (_S118.y), ((_S109 + ((_S110 * 2654435769U) >> 27U)) % 32U)));
+    bool _S120 = (variable_0 & 2147483648U) != 0U;
+    uint32_t _S121 = stream(address_0, _S112);
+    Random _S122 = pcg(_S121);
+    float _S123;
+    if(_S119 == 4294967295U)
     {
-        if(_S121)
+        if(_S120)
         {
-            Random _S125 = pcg(_S123.state);
-            _S124 = _S125.value;
+            Random _S124 = pcg(_S122.state);
+            _S123 = _S124.value;
         }
         else
         {
-            _S124 = _S123.value;
+            _S123 = _S122.value;
         }
     }
     else
     {
-        uint32_t _S126;
-        if(_S121)
+        uint32_t _S125;
+        if(_S120)
         {
-            _S126 = _S120 >> 16U;
+            _S125 = _S119 >> 16U;
         }
         else
         {
-            _S126 = _S120 & 65535U;
+            _S125 = _S119 & 65535U;
         }
-        _S124 = (float(_S126) + 0.5f) / 6.5536e+04f;
+        _S123 = (float(_S125) + 0.5f) / 6.5536e+04f;
     }
-    return Random_x24init_0(address_0, _S124);
+    return Random_x24init_0(address_0, _S123);
 }
 
 SLANG_PRELUDE_EXPORT
