@@ -2313,7 +2313,7 @@ __device__ __forceinline__ float3  coatBSDF(Weights w_13)
     return w_13.coat / make_float3 (w_13.p_coat);
 }
 
-__device__ __forceinline__ void BSDF(float3  in_dir_2, float3  out_dir_0, float3  n_6, BSDFMaterial material_13, float eta_i_4, float eta_o_3, bool refracted_2, uint random_state_2, FixedArray<float3 , 6>  * throughputs_0, FixedArray<float, 6>  * pdfs_0)
+__device__ __forceinline__ void BSDF(float3  in_dir_2, float3  out_dir_0, float3  n_6, BSDFMaterial material_13, float eta_i_4, float eta_o_3, bool refracted_2, FixedArray<float3 , 6>  * throughputs_0, FixedArray<float, 6>  * pdfs_0)
 {
     float3  _S659 = negate_0(in_dir_2);
     float _S660 = dot_0(n_6, _S659);
@@ -2428,10 +2428,10 @@ __device__ __forceinline__ void BSDF(float3  in_dir_2, float3  out_dir_0, float3
     return;
 }
 
-static __device__ __forceinline__ float3  skyLobes_0(float3  in_dir_3, float3  dir_3, FKSurface * surface_1, BSDFMaterial * material_14, float2  eta_1, bool is_inside_2, float pdf_0, uint random_state_3, FixedArray<float3 , 6>  * terms_0, FixedArray<float, 6>  * pdfs_1)
+static __device__ __forceinline__ float3  skyLobes_0(float3  in_dir_3, float3  dir_3, FKSurface * surface_1, BSDFMaterial * material_14, float2  eta_1, bool is_inside_2, float pdf_0, FixedArray<float3 , 6>  * terms_0, FixedArray<float, 6>  * pdfs_1)
 {
     bool _S706 = wrongSide_0(is_inside_2, false, dir_3, surface_1->geometry_n);
-    BSDF(in_dir_3, dir_3, surface_1->smooth_n, *material_14, eta_1.x, eta_1.y, _S706, random_state_3, terms_0, pdfs_1);
+    BSDF(in_dir_3, dir_3, surface_1->smooth_n, *material_14, eta_1.x, eta_1.y, _S706, terms_0, pdfs_1);
     float3  _S707 = make_float3 (0.0f);
     uint i_8 = 0U;
     float3  f_2 = _S707;
@@ -2458,13 +2458,13 @@ static __device__ __forceinline__ float3  skyLobes_0(float3  in_dir_3, float3  d
     return f_2;
 }
 
-static __device__ SkySample SkySample_x24init_0(float3  dir_4, float3  radiance_0, float3  color_0, uint random_state_4)
+static __device__ SkySample SkySample_x24init_0(float3  dir_4, float3  radiance_0, float3  color_0, uint random_state_2)
 {
     SkySample _S710;
     (&_S710)->dir = dir_4;
     (&_S710)->radiance = radiance_0;
     (&_S710)->color = color_0;
-    (&_S710)->random_state = random_state_4;
+    (&_S710)->random_state = random_state_2;
     return _S710;
 }
 
@@ -2544,7 +2544,7 @@ static __device__ __noinline__ float3  skyColor_0(float3  dir_5, FixedArray<floa
     return color_1;
 }
 
-static __device__ SkySample sampleSky_0(FKRay * ray_0, FKSurface * surface_2, float wavelength_3, float2  eta_2, bool is_inside_3, uint init_random_state_0, uint lobe_state_0, ShadowContext * context_2)
+static __device__ SkySample sampleSky_0(FKRay * ray_0, FKSurface * surface_2, float wavelength_3, float2  eta_2, bool is_inside_3, uint init_random_state_0, ShadowContext * context_2)
 {
     uint2  _S717 = (fcptEnvironmentCdfSize());
     uint2  _S718 = make_uint2 (1U, 0U);
@@ -2567,7 +2567,7 @@ static __device__ SkySample sampleSky_0(FKRay * ray_0, FKSurface * surface_2, fl
     BSDFMaterial _S735 = _S734;
     FixedArray<float3 , 6>  terms_2;
     FixedArray<float, 6>  pdfs_3;
-    float3  _S736 = skyLobes_0(ray_0->unit_direction, _S732, surface_2, &_S735, eta_2, is_inside_3, _S733, lobe_state_0, &terms_2, &pdfs_3);
+    float3  _S736 = skyLobes_0(ray_0->unit_direction, _S732, surface_2, &_S735, eta_2, is_inside_3, _S733, &terms_2, &pdfs_3);
     bool _S737 = !(_S733 > 0.0f);
     bool _S738;
     if(_S737)
@@ -2638,13 +2638,13 @@ static __device__ float3  hairLight_0(FKSurface * surface_3, float3  in_dir_4, T
     return _S747 / make_float3 (_S751) * light_1->radiance;
 }
 
-static __device__ TreeSample TreeSample_x24init_0(float3  dir_6, float3  radiance_1, float density_0, uint random_state_5)
+static __device__ TreeSample TreeSample_x24init_0(float3  dir_6, float3  radiance_1, float density_0, uint random_state_3)
 {
     TreeSample _S752;
     (&_S752)->dir = dir_6;
     (&_S752)->radiance = radiance_1;
     (&_S752)->density = density_0;
-    (&_S752)->random_state = random_state_5;
+    (&_S752)->random_state = random_state_3;
     return _S752;
 }
 
@@ -4025,27 +4025,27 @@ __device__ float survivalProbability(float3  throughput_0, float density_1)
     return (F32_min(((F32_max(((F32_max((throughput_0.x), ((F32_max((throughput_0.y), (throughput_0.z)))))) / density_1), (0.0f)))), (1.0f)));
 }
 
-static __device__ float3  isotropic_0(uint random_state_6)
+static __device__ float3  isotropic_0(uint random_state_4)
 {
-    Random _S1122 = draw(random_state_6, 11U);
-    Random _S1123 = draw(random_state_6, 2147483659U);
+    Random _S1122 = draw(random_state_4, 11U);
+    Random _S1123 = draw(random_state_4, 2147483659U);
     float _S1124 = 1.0f - 2.0f * _S1122.value;
     float _S1125 = (F32_sqrt(((F32_max((1.0f - _S1124 * _S1124), (0.0f))))));
     float _S1126 = 6.28318548202514648f * _S1123.value;
     return make_float3 (_S1125 * (F32_cos((_S1126))), _S1125 * (F32_sin((_S1126))), _S1124);
 }
 
-static __device__ float3  samplePhase_0(float g_1, float3  dir_9, uint random_state_7, float * pdf_4)
+static __device__ float3  samplePhase_0(float g_1, float3  dir_9, uint random_state_5, float * pdf_4)
 {
     bool _S1127 = (F32_abs((g_1))) < 0.00100000004749745f;
     if(_S1127)
     {
         *pdf_4 = 0.07957746833562851f;
-        float3  _S1128 = isotropic_0(random_state_7);
+        float3  _S1128 = isotropic_0(random_state_5);
         return _S1128;
     }
-    Random _S1129 = draw(random_state_7, 11U);
-    Random _S1130 = draw(random_state_7, 2147483659U);
+    Random _S1129 = draw(random_state_5, 11U);
+    Random _S1130 = draw(random_state_5, 2147483659U);
     float _S1131 = g_1 * g_1;
     float _S1132 = 2.0f * g_1;
     float _S1133 = (1.0f - _S1131) / (1.0f - g_1 + _S1132 * _S1129.value);
@@ -4102,7 +4102,7 @@ static __device__ FKMedium Medium_x24init_0(float3  scatter_1, float3  extinctio
     return _S1141;
 }
 
-static __device__ FKSurface Surface_x24init_0(float3  smooth_n_4, float3  geometry_n_2, float geometry_offset_2, BSDFMaterial * material_15, bool skip_0, uint random_state_8, float coverage_0, bool encloses_0, FKMedium * volume_0, uint fills_0, float3  hair_0)
+static __device__ FKSurface Surface_x24init_0(float3  smooth_n_4, float3  geometry_n_2, float geometry_offset_2, BSDFMaterial * material_15, bool skip_0, uint random_state_6, float coverage_0, bool encloses_0, FKMedium * volume_0, uint fills_0, float3  hair_0)
 {
     FKSurface _S1142;
     (&_S1142)->smooth_n = smooth_n_4;
@@ -4110,7 +4110,7 @@ static __device__ FKSurface Surface_x24init_0(float3  smooth_n_4, float3  geomet
     (&_S1142)->geometry_offset = geometry_offset_2;
     (&_S1142)->material = *material_15;
     (&_S1142)->skip = skip_0;
-    (&_S1142)->random_state = random_state_8;
+    (&_S1142)->random_state = random_state_6;
     (&_S1142)->coverage = coverage_0;
     (&_S1142)->encloses = encloses_0;
     (&_S1142)->volume = *volume_0;
@@ -4482,13 +4482,13 @@ static __device__ bool any_1(bool3  x_24)
     return result_14;
 }
 
-static __device__ __forceinline__ float3  lightBSDF_0(float3  in_dir_5, TreeSample * light_2, float3  smooth_n_5, float3  geometry_n_4, BSDFMaterial * material_22, float eta_i_6, float eta_o_5, bool competing_1, uint random_state_9)
+static __device__ __forceinline__ float3  lightBSDF_0(float3  in_dir_5, TreeSample * light_2, float3  smooth_n_5, float3  geometry_n_4, BSDFMaterial * material_22, float eta_i_6, float eta_o_5, bool competing_1)
 {
     float3  _S1208 = light_2->dir;
     bool _S1209 = (dot_0(geometry_n_4, - in_dir_5) * dot_0(geometry_n_4, light_2->dir)) <= 0.0f;
     FixedArray<float3 , 6>  throughputs_1;
     FixedArray<float, 6>  pdfs_4;
-    BSDF(in_dir_5, _S1208, smooth_n_5, *material_22, eta_i_6, eta_o_5, _S1209, random_state_9, &throughputs_1, &pdfs_4);
+    BSDF(in_dir_5, _S1208, smooth_n_5, *material_22, eta_i_6, eta_o_5, _S1209, &throughputs_1, &pdfs_4);
     bool _S1210;
     if(competing_1)
     {
@@ -4542,22 +4542,22 @@ static __device__ __forceinline__ float3  lightBSDF_0(float3  in_dir_5, TreeSamp
     return f_7;
 }
 
-__device__ float3  skyBSDF(float3  in_dir_6, float3  dir_14, FKSurface surface_10, BSDFMaterial material_23, float2  eta_3, bool is_inside_5, float pdf_5, uint random_state_10)
+__device__ float3  skyBSDF(float3  in_dir_6, float3  dir_14, FKSurface surface_10, BSDFMaterial material_23, float2  eta_3, bool is_inside_5, float pdf_5)
 {
     FKSurface _S1215 = surface_10;
     BSDFMaterial _S1216 = material_23;
     FixedArray<float3 , 6>  terms_3;
     FixedArray<float, 6>  pdfs_5;
-    float3  _S1217 = skyLobes_0(in_dir_6, dir_14, &_S1215, &_S1216, eta_3, is_inside_5, pdf_5, random_state_10, &terms_3, &pdfs_5);
+    float3  _S1217 = skyLobes_0(in_dir_6, dir_14, &_S1215, &_S1216, eta_3, is_inside_5, pdf_5, &terms_3, &pdfs_5);
     return _S1217;
 }
 
-static __device__ SampleBSDF SampleBSDF_x24init_0(float3  unit_direction_1, float3  throughput_1, uint random_state_11, bool refracted_3, uint lobe_4, float pdf_6)
+static __device__ SampleBSDF SampleBSDF_x24init_0(float3  unit_direction_1, float3  throughput_1, uint random_state_7, bool refracted_3, uint lobe_4, float pdf_6)
 {
     SampleBSDF _S1218;
     (&_S1218)->unit_direction = unit_direction_1;
     (&_S1218)->throughput = throughput_1;
-    (&_S1218)->random_state = random_state_11;
+    (&_S1218)->random_state = random_state_7;
     (&_S1218)->refracted = refracted_3;
     (&_S1218)->lobe = lobe_4;
     (&_S1218)->pdf = pdf_6;
@@ -4623,11 +4623,11 @@ __device__ float3  worldToTangent(float3  v_8, float3  n_9)
     return make_float3 (dot_0(v_8, _S1241), dot_0(v_8, n_9), dot_0(v_8, _S1242));
 }
 
-__device__ __forceinline__ float3  sampleHalfVector(float3  v_9, float3  n_i_11, float alpha_7, AnisotropicFrame frame_5, uint * random_state_12, uint first_2)
+__device__ __forceinline__ float3  sampleHalfVector(float3  v_9, float3  n_i_11, float alpha_7, AnisotropicFrame frame_5, uint * random_state_8, uint first_2)
 {
-    Random _S1243 = draw(*random_state_12, first_2);
-    Random _S1244 = draw(*random_state_12, first_2 | 2147483648U);
-    *random_state_12 = _S1244.state;
+    Random _S1243 = draw(*random_state_8, first_2);
+    Random _S1244 = draw(*random_state_8, first_2 | 2147483648U);
+    *random_state_8 = _S1244.state;
     float _S1245 = frame_5.alphas.x;
     bool _S1246 = _S1245 > 0.0f;
     if(_S1246)
@@ -4648,25 +4648,25 @@ __device__ __forceinline__ float3  sampleHalfVector(float3  v_9, float3  n_i_11,
     return _S1257;
 }
 
-__device__ __forceinline__ float3  coatHalf(float3  v_10, CoatFrame coat_frame_4, uint random_state_13)
+__device__ __forceinline__ float3  coatHalf(float3  v_10, CoatFrame coat_frame_4, uint random_state_9)
 {
     bool _S1258 = !((dot_0(coat_frame_4.normal, v_10)) > 0.0f);
     if(_S1258)
     {
         return make_float3 (0.0f);
     }
-    uint state_3 = random_state_13;
+    uint state_3 = random_state_9;
     float3  _S1259 = sampleHalfVector(v_10, coat_frame_4.normal, coat_frame_4.alpha, AnisotropicFrame_x24init_0(make_float3 (0.0f), make_float2 (0.0f)), &state_3, 1U);
     return _S1259;
 }
 
-__device__ __forceinline__ SampleBSDF sheenVelvetSample(float3  v_11, float3  n_i_12, float n_i_dot_v_3, BSDFMaterial material_24, Weights w_14, uint random_state_14)
+__device__ __forceinline__ SampleBSDF sheenVelvetSample(float3  v_11, float3  n_i_12, float n_i_dot_v_3, BSDFMaterial material_24, Weights w_14, uint random_state_10)
 {
     float3  _S1260 = make_float3 (1.0f);
     SampleBSDF _S1261 = SampleBSDF_x24init_0(_S1260, _S1260, 0U, false, 0U, 0.0f);
     SampleBSDF sample_1 = _S1261;
-    Random _S1262 = draw(random_state_14, 3U);
-    Random _S1263 = draw(random_state_14, 2147483651U);
+    Random _S1262 = draw(random_state_10, 3U);
+    Random _S1263 = draw(random_state_10, 2147483651U);
     (&sample_1)->random_state = _S1263.state;
     float _S1264 = _S1262.value;
     float _S1265 = (F32_sqrt(((F32_max((0.0f), (1.0f - _S1264 * _S1264))))));
@@ -4681,7 +4681,7 @@ __device__ __forceinline__ SampleBSDF sheenVelvetSample(float3  v_11, float3  n_
     return sample_1;
 }
 
-__device__ __forceinline__ SampleBSDF coatSample(float3  in_dir_7, float3  v_12, float3  coat_h_3, CoatFrame coat_frame_5, Weights w_15, uint random_state_15)
+__device__ __forceinline__ SampleBSDF coatSample(float3  in_dir_7, float3  v_12, float3  coat_h_3, CoatFrame coat_frame_5, Weights w_15, uint random_state_11)
 {
     float3  _S1270 = make_float3 (1.0f);
     SampleBSDF _S1271 = SampleBSDF_x24init_0(_S1270, _S1270, 0U, false, 0U, 0.0f);
@@ -4689,7 +4689,7 @@ __device__ __forceinline__ SampleBSDF coatSample(float3  in_dir_7, float3  v_12,
     float3  _S1272 = reflect_0(in_dir_7, coat_h_3);
     float3  _S1273 = ((((_S1272)) * make_float3(rnorm3df(((_S1272)).x, ((_S1272)).y, ((_S1272)).z))));
     (&sample_2)->unit_direction = _S1273;
-    (&sample_2)->random_state = random_state_15;
+    (&sample_2)->random_state = random_state_11;
     (&sample_2)->lobe = 5U;
     float3  _S1274 = coatBSDF(w_15);
     (&sample_2)->throughput = _S1274;
@@ -4708,13 +4708,13 @@ __device__ float3  sampleCosWeightedHemisphere(float random_1_0, float random_2_
     return make_float3 (_S1278, _S1280, _S1279);
 }
 
-__device__ __forceinline__ SampleBSDF diffuseSample(float u_4, float3  n_i_13, float n_i_dot_v_4, BSDFMaterial material_25, Weights w_16, uint random_state_16)
+__device__ __forceinline__ SampleBSDF diffuseSample(float u_4, float3  n_i_13, float n_i_dot_v_4, BSDFMaterial material_25, Weights w_16, uint random_state_12)
 {
     float3  _S1281 = make_float3 (1.0f);
     SampleBSDF _S1282 = SampleBSDF_x24init_0(_S1281, _S1281, 0U, false, 0U, 0.0f);
     SampleBSDF sample_3 = _S1282;
-    Random _S1283 = draw(random_state_16, 3U);
-    Random _S1284 = draw(random_state_16, 2147483651U);
+    Random _S1283 = draw(random_state_12, 3U);
+    Random _S1284 = draw(random_state_12, 2147483651U);
     (&sample_3)->random_state = _S1284.state;
     float3  _S1285 = sampleCosWeightedHemisphere(_S1283.value, _S1284.value);
     float _S1286 = translucentShare(material_25);
@@ -4733,13 +4733,13 @@ __device__ __forceinline__ SampleBSDF diffuseSample(float u_4, float3  n_i_13, f
     return sample_3;
 }
 
-__device__ __forceinline__ SampleBSDF toonSample(float3  n_i_14, ToonProfile profile_3, Weights w_17, uint random_state_17)
+__device__ __forceinline__ SampleBSDF toonSample(float3  n_i_14, ToonProfile profile_3, Weights w_17, uint random_state_13)
 {
     float3  _S1294 = make_float3 (1.0f);
     SampleBSDF _S1295 = SampleBSDF_x24init_0(_S1294, _S1294, 0U, false, 0U, 0.0f);
     SampleBSDF sample_4 = _S1295;
-    Random _S1296 = draw(random_state_17, 3U);
-    Random _S1297 = draw(random_state_17, 2147483651U);
+    Random _S1296 = draw(random_state_13, 3U);
+    Random _S1297 = draw(random_state_13, 2147483651U);
     (&sample_4)->random_state = _S1297.state;
     float _S1298 = _S1296.value * profile_3.norm / 6.28318548202514648f;
     float t_23;
@@ -4803,13 +4803,13 @@ __device__ __forceinline__ SampleBSDF toonSample(float3  n_i_14, ToonProfile pro
     return sample_4;
 }
 
-__device__ __forceinline__ SampleBSDF refractSample(float3  ggx_n_1, float3  n_i_15, float alpha_8, AnisotropicFrame frame_6, BSDFMaterial material_26, Weights w_18, float pdf_h_3, float eta_i_7, float eta_o_6, uint random_state_18)
+__device__ __forceinline__ SampleBSDF refractSample(float3  ggx_n_1, float3  n_i_15, float alpha_8, AnisotropicFrame frame_6, BSDFMaterial material_26, Weights w_18, float pdf_h_3, float eta_i_7, float eta_o_6, uint random_state_14)
 {
     float3  _S1314 = make_float3 (1.0f);
     SampleBSDF _S1315 = SampleBSDF_x24init_0(_S1314, _S1314, 0U, false, 0U, 0.0f);
     SampleBSDF sample_5 = _S1315;
     (&sample_5)->unit_direction = w_18.refracted;
-    (&sample_5)->random_state = random_state_18;
+    (&sample_5)->random_state = random_state_14;
     (&sample_5)->refracted = true;
     (&sample_5)->lobe = 1U;
     float3  _S1316 = refractBSDF((&sample_5)->unit_direction, n_i_15, alpha_8, frame_6, material_26, w_18);
@@ -4819,7 +4819,7 @@ __device__ __forceinline__ SampleBSDF refractSample(float3  ggx_n_1, float3  n_i
     return sample_5;
 }
 
-__device__ __forceinline__ SampleBSDF reflectSample(float3  in_dir_8, float3  ggx_n_2, float3  n_i_16, float alpha_9, AnisotropicFrame frame_7, Weights w_19, float pdf_h_4, uint random_state_19)
+__device__ __forceinline__ SampleBSDF reflectSample(float3  in_dir_8, float3  ggx_n_2, float3  n_i_16, float alpha_9, AnisotropicFrame frame_7, Weights w_19, float pdf_h_4, uint random_state_15)
 {
     float3  _S1318 = make_float3 (1.0f);
     SampleBSDF _S1319 = SampleBSDF_x24init_0(_S1318, _S1318, 0U, false, 0U, 0.0f);
@@ -4827,7 +4827,7 @@ __device__ __forceinline__ SampleBSDF reflectSample(float3  in_dir_8, float3  gg
     float3  _S1320 = reflect_0(in_dir_8, ggx_n_2);
     float3  _S1321 = ((((_S1320)) * make_float3(rnorm3df(((_S1320)).x, ((_S1320)).y, ((_S1320)).z))));
     (&sample_6)->unit_direction = _S1321;
-    (&sample_6)->random_state = random_state_19;
+    (&sample_6)->random_state = random_state_15;
     (&sample_6)->lobe = 2U;
     float3  _S1322 = reflectBSDF((&sample_6)->unit_direction, n_i_16, alpha_9, frame_7, w_19);
     (&sample_6)->throughput = _S1322;
@@ -4838,7 +4838,7 @@ __device__ __forceinline__ SampleBSDF reflectSample(float3  in_dir_8, float3  gg
 
 __device__ __forceinline__ SampleBSDF sampleBSDF(float3  in_dir_9, float3  n_10, BSDFMaterial material_27, float eta_i_8, float eta_o_7, uint random_init_0, float2  screen_space_0)
 {
-    uint random_state_20 = random_init_0;
+    uint random_state_16 = random_init_0;
     float3  _S1324 = negate_0(in_dir_9);
     float _S1325 = dot_0(n_10, _S1324);
     float _S1326 = sign_0(_S1325);
@@ -4850,46 +4850,46 @@ __device__ __forceinline__ SampleBSDF sampleBSDF(float3  in_dir_9, float3  n_10,
     SheenProfile _S1331 = sheenProfile(_S1324, n_i_17, material_27);
     CoatFrame _S1332 = coatFrame(material_27, n_i_17);
     float3  _S1333 = coatSeries(_S1332, material_27);
-    float3  _S1334 = sampleHalfVector(_S1324, n_i_17, _S1329, _S1330, &random_state_20, 0U);
+    float3  _S1334 = sampleHalfVector(_S1324, n_i_17, _S1329, _S1330, &random_state_16, 0U);
     float3  _S1335 = coatHalf(_S1324, _S1332, random_init_0);
     Weights _S1336 = lobeWeights(in_dir_9, _S1324, n_i_17, _S1334, _S1335, _S1330, _S1331, _S1332, _S1333, material_27, eta_i_8, eta_o_7);
-    Random _S1337 = draw(random_state_20, 2U);
-    random_state_20 = _S1337.state;
+    Random _S1337 = draw(random_state_16, 2U);
+    random_state_16 = _S1337.state;
     bool _S1338 = (_S1337.value) < (_S1336.p_sheen_velvet);
     if(_S1338)
     {
-        SampleBSDF _S1339 = sheenVelvetSample(_S1324, n_i_17, _S1327, material_27, _S1336, random_state_20);
+        SampleBSDF _S1339 = sheenVelvetSample(_S1324, n_i_17, _S1327, material_27, _S1336, random_state_16);
         return _S1339;
     }
     float _S1340 = _S1337.value - _S1336.p_sheen_velvet;
     bool _S1341 = _S1340 < (_S1336.p_coat);
     if(_S1341)
     {
-        SampleBSDF _S1342 = coatSample(in_dir_9, _S1324, _S1335, _S1332, _S1336, random_state_20);
+        SampleBSDF _S1342 = coatSample(in_dir_9, _S1324, _S1335, _S1332, _S1336, random_state_16);
         return _S1342;
     }
     float _S1343 = _S1340 - _S1336.p_coat;
     bool _S1344 = _S1343 < (_S1336.p_diffuse);
     if(_S1344)
     {
-        SampleBSDF _S1345 = diffuseSample(_S1343, n_i_17, _S1327, material_27, _S1336, random_state_20);
+        SampleBSDF _S1345 = diffuseSample(_S1343, n_i_17, _S1327, material_27, _S1336, random_state_16);
         return _S1345;
     }
     bool _S1346 = _S1343 < (_S1336.p_diffuse + _S1336.p_toon);
     if(_S1346)
     {
         ToonProfile _S1347 = toonProfile(_S1324, n_i_17, material_27);
-        SampleBSDF _S1348 = toonSample(n_i_17, _S1347, _S1336, random_state_20);
+        SampleBSDF _S1348 = toonSample(n_i_17, _S1347, _S1336, random_state_16);
         return _S1348;
     }
     float _S1349 = vndfPDF(_S1324, _S1334, n_i_17, _S1327, _S1329, _S1330, _S1336.v_dot_h);
     bool _S1350 = (_S1343 - _S1336.p_toon) < (_S1336.p_diffuse + _S1336.p_refract);
     if(_S1350)
     {
-        SampleBSDF _S1351 = refractSample(_S1334, n_i_17, _S1329, _S1330, material_27, _S1336, _S1349, eta_i_8, eta_o_7, random_state_20);
+        SampleBSDF _S1351 = refractSample(_S1334, n_i_17, _S1329, _S1330, material_27, _S1336, _S1349, eta_i_8, eta_o_7, random_state_16);
         return _S1351;
     }
-    SampleBSDF _S1352 = reflectSample(in_dir_9, _S1334, n_i_17, _S1329, _S1330, _S1336, _S1349, random_state_20);
+    SampleBSDF _S1352 = reflectSample(in_dir_9, _S1334, n_i_17, _S1329, _S1330, _S1336, _S1349, random_state_16);
     return _S1352;
 }
 
@@ -4911,9 +4911,9 @@ __device__ __forceinline__ float3  refractedHalf(float3  in_dir_11, float3  out_
     return _S1358 * make_float3 (_S1360);
 }
 
-__device__ __forceinline__ float3  sampledHalf(float3  v_13, float3  n_i_18, float alpha_10, AnisotropicFrame frame_8, uint random_state_21)
+__device__ __forceinline__ float3  sampledHalf(float3  v_13, float3  n_i_18, float alpha_10, AnisotropicFrame frame_8, uint random_state_17)
 {
-    uint state_4 = random_state_21;
+    uint state_4 = random_state_17;
     float3  _S1361 = sampleHalfVector(v_13, n_i_18, alpha_10, frame_8, &state_4, 0U);
     return _S1361;
 }
@@ -6091,7 +6091,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_2, f
                     bool _S1668 = b_7 < _S1667;
                     TreeSample _S1669 = _S1658;
                     BSDFMaterial _S1670 = _S1583;
-                    float3  _S1671 = lightBSDF_0((&ray_2)->unit_direction, &_S1669, _S1560.smooth_n, _S1655.geometry_n, &_S1670, _S1665, _S1666, _S1668, surface_12.random_state);
+                    float3  _S1671 = lightBSDF_0((&ray_2)->unit_direction, &_S1669, _S1560.smooth_n, _S1655.geometry_n, &_S1670, _S1665, _S1666, _S1668);
                     lit_0 = _S1671;
                 }
             }
@@ -6191,7 +6191,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_2, f
                     BSDFMaterial _S1686 = _S1583;
                     FixedArray<float3 , 6>  terms_4;
                     FixedArray<float, 6>  pdfs_6;
-                    float3  _S1687 = skyLobes_0((&ray_2)->unit_direction, _S1683, &_S1685, &_S1686, _S1584, is_inside_7, _S1684, surface_12.random_state, &terms_4, &pdfs_6);
+                    float3  _S1687 = skyLobes_0((&ray_2)->unit_direction, _S1683, &_S1685, &_S1686, _S1584, is_inside_7, _S1684, &terms_4, &pdfs_6);
                     uint _S1688 = b_7 + 1U;
                     FixedArray<float3 , 6>  _S1689 = terms_4;
                     FixedArray<float, 6>  _S1690 = pdfs_6;
@@ -6200,7 +6200,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_2, f
                     return Shift_x24init_0(_S1692 / make_float3 (r_8->jac), density_5 / r_8->jac);
                 }
                 float _S1693 = environmentPdf_0(r_8->dir);
-                float3  _S1694 = skyBSDF((&ray_2)->unit_direction, r_8->dir, surface_12, _S1583, _S1584, is_inside_7, _S1693, surface_12.random_state);
+                float3  _S1694 = skyBSDF((&ray_2)->unit_direction, r_8->dir, surface_12, _S1583, _S1584, is_inside_7, _S1693);
                 float3  _S1695 = pathColor(throughput_8 * _S1694 * r_8->radiance, spectral_weight_0, wavelength_8);
                 return Shift_x24init_0(_S1695 / make_float3 (r_8->jac), density_5 / r_8->jac);
             }
@@ -6284,7 +6284,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_2, f
                     FKRay _S1702 = ray_2;
                     FKSurface _S1703 = surface_12;
                     ShadowContext _S1704 = context_5;
-                    SkySample _S1705 = sampleSky_0(&_S1702, &_S1703, wavelength_8, _S1584, is_inside_7, _S1701, surface_12.random_state, &_S1704);
+                    SkySample _S1705 = sampleSky_0(&_S1702, &_S1703, wavelength_8, _S1584, is_inside_7, _S1701, &_S1704);
                     float3  _S1706 = pathColor(throughput_6 * _S1705.color, spectral_weight_0, wavelength_8);
                     return Shift_x24init_0(_S1706, 1.0f);
                 }
@@ -6465,7 +6465,7 @@ static __device__ Shift walk_0(Domain * dom_7, Reservoir * r_8, bool replay_2, f
                         FKRay _S1727 = ray_2;
                         FKSurface _S1728 = surface_12;
                         ShadowContext _S1729 = context_5;
-                        SkySample _S1730 = sampleSky_0(&_S1727, &_S1728, wavelength_8, _S1584, is_inside_7, _S1726, surface_12.random_state, &_S1729);
+                        SkySample _S1730 = sampleSky_0(&_S1727, &_S1728, wavelength_8, _S1584, is_inside_7, _S1726, &_S1729);
                         float3  _S1731 = pathColor(throughput_6 * _S1730.color, spectral_weight_0, wavelength_8);
                         Reservoir candidate_7 = chain_0;
                         if(_S1613)
