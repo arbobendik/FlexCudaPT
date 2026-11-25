@@ -1,4 +1,4 @@
-#include "/home/runner/work/FlexKernels/FlexKernels/.deps/slang-2026.19/include/slang-cpp-prelude.h"
+#include "slang-cpp-prelude.h"
 
 #ifdef SLANG_PRELUDE_NAMESPACE
 using namespace SLANG_PRELUDE_NAMESPACE;
