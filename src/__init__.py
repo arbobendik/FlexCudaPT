@@ -216,6 +216,119 @@ def sky(node, width=512, height=129):
         * numpy.cos(gamma)) ** 1.5 + c[:, 7] * numpy.sqrt(cos_theta)) * c[:, 9] * (2 * math.pi / 683)
     return numpy.concatenate((radiance.transpose(1, 2, 0), numpy.ones((height, width, 1))), -1)
 
+# Blender 5.3's Multiple Scattering sky (intern/sky/source/sky_multiple_scattering.cpp, MIT, by Fernando Garcia Linan
+# and the Blender Authors): its table of XYZ radiance off the sun's azimuth, at elevations l |l| pi / 2 of l = 2 v - 1,
+# read as its node's shader reads it into an equirectangular image in scene linear, once per settings, and its sun's
+# disc as a sun lamp. Atmosphere in km, 4 wavelengths
+EARTH, ATMOSPHERE = 6371, 6471
+SUN_IRRADIANCE, SPECTRAL_XYZ = numpy.array((1.679, 1.828, 1.986, 1.307)), numpy.array(((53.386917738564668023,
+    22.981337506691024754, 0), (43.904844466369358263, 71.347795700053393866, 0.102506867965741307),
+    (1.6137278251608962005, 18.422960591455485011, 31.742921188390805758),
+    (20.762668673810577145, 2.3614213523314368527, 110.48009643252140334)))
+
+def sphere(o, d, radius):  # Distance along d from o to the sphere about the earth's center, else -1
+    b, c = (o * d).sum(-1), (o * o).sum(-1) - radius ** 2
+    root = numpy.sqrt(numpy.maximum(b * b - c, 0))
+    return numpy.where(c > 0, numpy.where((b > 0) | (b * b < c), -1, -b - root), -b + root)
+
+def atmosphere(h, air, aerosol, ozone):  # Molecular and aerosol scattering and extinction at altitudes h
+    aerosols = 1.3681e20 * (numpy.exp(-h / 0.73) + 2e6 / 1.3681e20)[..., None] * aerosol
+    log = numpy.log(numpy.maximum(h, 1e-4))
+    molecular = (6.605e-3, 1.067e-2, 1.842e-2, 3.156e-2) * numpy.exp(-0.07771971 * h ** 1.16364243)[..., None] * air
+    return molecular, aerosols * (1.5908e-22, 1.7711e-22, 2.0942e-22, 2.4033e-22), molecular + aerosols * (
+        1.5908e-22 + 2.8722e-24, 1.7711e-22 + 4.6168e-24, 2.0942e-22 + 7.9706e-24, 2.4033e-22 + 1.3578e-23) \
+        + (3.472e-25, 3.914e-25, 1.349e-25, 11.03e-27) * (334.5 * 3.78547397e20 * numpy.exp(-(log - 3.22261) ** 2
+        * 5.55555555 - log))[..., None] * ozone
+
+def transmitted(c, n, *density):  # To the sun at zenith cosines c from normalized altitudes n, in 64 steps
+    c, n = numpy.broadcast_arrays(numpy.asarray(c, 'd'), numpy.asarray(n, 'd'))
+    d = numpy.stack((-numpy.sqrt(numpy.maximum(1 - c * c, 0)), 0 * c, c), -1)
+    o = numpy.stack((0 * n, 0 * n, EARTH + 100 * n), -1)
+    step = sphere(o, d, ATMOSPHERE)[..., None] / 64
+    return numpy.exp(-sum(atmosphere(numpy.maximum(numpy.linalg.norm(o + d * (s + 0.5) * step, axis=-1) - EARTH, 0),
+        *density)[2] * step for s in range(64)))
+
+def looked(lut, c, n):  # The transmittance table's bilinear read
+    x, y = 255 * numpy.clip(c * 0.5 + 0.5, 0, 1), 63 * numpy.clip(n, 0, 1)
+    x1, y1 = x.astype(int), y.astype(int)
+    x2, y2, fx, fy = numpy.minimum(x1 + 1, 255), numpy.minimum(y1 + 1, 63), (x - x1)[..., None], (y - y1)[..., None]
+    bottom = lut[y1, x1] + fx * (lut[y1, x2] - lut[y1, x1])
+    return bottom + fy * (lut[y2, x1] + fx * (lut[y2, x2] - lut[y2, x1]) - bottom)
+
+def simplified(elevation, rotation):  # Into [-pi/2, pi/2], the rotation turned to keep the sun, as the node's
+    elevation = math.fmod(elevation, 2 * math.pi)
+    if abs(elevation) >= math.pi: elevation -= math.copysign(2 * math.pi, elevation)
+    if abs(elevation) >= math.pi / 2:
+        elevation, rotation = math.copysign(math.pi, elevation) - elevation, rotation + math.pi
+    return elevation, 2 * math.pi - math.fmod(math.fmod(rotation, 2 * math.pi) + 2 * math.pi, 2 * math.pi)
+
+scene_linear = lambda xyz: xyz @ numpy.array([Color(axis).from_xyz_d65_to_scene_linear() for axis in numpy.eye(3)])
+
+@functools.cache
+def scattered_sky(elevation, rotation, altitude, *density, width=1024, height=512):
+    elevation, rotation = simplified(elevation, rotation)
+    lut = transmitted(*numpy.meshgrid(numpy.arange(256) / 255 * 2 - 1, numpy.arange(64) / 63), *density)
+    h = min(max(altitude, 1), 99999) / 1000
+    sun = numpy.array((-math.cos(elevation), 0, math.sin(elevation)))
+    azimuth, l = numpy.meshgrid(2 * math.pi * (numpy.arange(256) + 0.5) / 512, (numpy.arange(128) + 0.5) / 64 - 1)
+    up = numpy.copysign(l * l, l) * math.pi / 2
+    rays = numpy.stack((numpy.cos(up) * numpy.cos(azimuth), numpy.cos(up) * numpy.sin(azimuth), numpy.sin(up)), -1)
+    origin = numpy.array((0, 0, EARTH + h))
+    ground = sphere(origin, rays, EARTH)
+    dt = numpy.where(ground < 0, sphere(origin, rays, ATMOSPHERE), ground)[..., None] / 64
+    c = -rays @ sun
+    phases = (3 / (16 * math.pi) * (1 + c * c))[..., None], (0.36 / (4 * math.pi) / (1.64 + 1.6 * c) ** 1.5)[..., None]
+    radiance, passed = 0, 1
+    for i in range(64):
+        x = origin + rays * (i + 0.5) * dt
+        r = numpy.linalg.norm(x, axis=-1)
+        n, cosine = numpy.maximum(r - EARTH, 0) / 100, x @ sun / r
+        molecular, aerosol, extinction = atmosphere(n * 100, *density)
+        toward = looked(lut, cosine, n)
+        multiple = 0.02 * numpy.array((0.217, 0.347, 0.594, 1)) / (1 + 5 * numpy.exp(-17.92 * cosine))[..., None] \
+            + (0.5 * (1 - numpy.sqrt(numpy.maximum(1 - (EARTH / r) ** 2, 0))) * 0.3 / math.pi * cosine)[..., None] \
+            * looked(lut, cosine, 0 * n) * looked(lut, 1 + 0 * n, 0 * n) / looked(lut, 1 + 0 * n, n)
+        s = SUN_IRRADIANCE * (molecular * (phases[0] * toward + multiple) + aerosol * (phases[1] * toward + multiple))
+        step = numpy.exp(-dt * extinction)
+        radiance, passed = radiance + passed * (s - s * step) / numpy.maximum(extinction, 1e-7), passed * step
+    table = radiance @ SPECTRAL_XYZ
+    table = numpy.concatenate((table, table[:, ::-1]), 1)
+    a, e = numpy.meshgrid((0.5 - (numpy.arange(width) + 0.5) / width) * 2 * math.pi,
+        ((numpy.arange(height) + 0.5) / height - 0.5) * math.pi)
+    x = ((numpy.arctan2(numpy.cos(e) * numpy.cos(a), numpy.cos(e) * numpy.sin(a)) + math.pi + rotation)
+        / (2 * math.pi)) * 512 - 0.5
+    y = (numpy.sqrt(abs(e) / (math.pi / 2)) * numpy.sign(e) * 0.5 + 0.5) * 128 - 0.5
+    i, j = numpy.floor(x).astype(int), numpy.floor(y).astype(int)
+    fx, fy = (x - i)[..., None], (y - j)[..., None]
+    texel = lambda j, i: table[numpy.clip(j, 0, 127), i % 512]  # Rows extended, columns repeated, as the node's sampler
+    xyz = (1 - fy) * ((1 - fx) * texel(j, i) + fx * texel(j, i + 1)) + fy * ((1 - fx) * texel(j + 1, i)
+        + fx * texel(j + 1, i + 1))
+    return numpy.concatenate((scene_linear(xyz), numpy.ones((height, width, 1))), -1)
+
+def scattered_sun(node, emission):  # The instance of a sun lamp of the sky's sun's disc and size, above the horizon:
+    # its irradiance, limb darkened by 0.8 on the mean, of its bottom's and top's radiance, as the sky's color through
+    # the world's emission
+    elevation, rotation = simplified(node.sun_elevation, node.sun_rotation)
+    if not node.sun_disc or elevation <= math.asin(EARTH / (EARTH + node.altitude / 1000)) - math.pi / 2: return None
+    size = max(node.sun_size, 0.0005)
+    irradiance = scene_linear(SUN_IRRADIANCE * transmitted(numpy.cos(math.pi / 2 - elevation + numpy.array((size,
+        -size)) / 2), min(max(node.altitude, 1), 99999) / 1e5, node.air_density, node.aerosol_density,
+        node.ozone_density).mean(0) @ SPECTRAL_XYZ) * node.sun_intensity * 0.8
+    def swapped(e, color, made):  # The emission with the sky's reads the color
+        if isinstance(e, tuple) and id(e) not in made:
+            made[id(e)] = color if e[0] in READS and getattr(e[-1], 'type', None) == 'TEX_SKY' and e[-1] == node \
+                else (e[0], *(swapped(x, color, made) for x in e[1:]))
+        return made[id(e)] if isinstance(e, tuple) else e
+    light = types.SimpleNamespace(type='SUN', angle=size, energy=1, exposure=0, normalize=True, color=(1, 1, 1),
+        use_temperature=False, use_nodes=False, shadow_soft_size=0, use_shadow=True, emission=('SUBTRACT',
+        swapped(emission, irradiance, {}), swapped(emission, numpy.zeros(3), {})))
+    up = Vector((-math.cos(elevation) * math.sin(rotation), math.cos(elevation) * math.cos(rotation),
+        math.sin(elevation)))
+    return types.SimpleNamespace(is_instance=False, matrix_world=up.to_track_quat('Z', 'Y').to_matrix().to_4x4(),
+        object=types.SimpleNamespace(name=node.name, type='LIGHT', data=light, hide_render=False, particle_systems=[],
+        instance_type='NONE', parent=None, show_instancer_for_render=True, modifiers=[], material_slots=[],
+        visible_camera=True, visible_shadow=True, color=(1, 1, 1, 1), pass_index=0))
+
 class Folded:  # A sky table of an expression of one sky read alone: its values at the texels of the read's table, as
     type = 'TEX_SKY'  # shaded() takes them, read in its place; evaluated where taken, so an update reads its nodes anew
     def __init__(self, expression, read): self.expression, self.read = expression, read
@@ -252,7 +365,9 @@ def skied(expression, memo):  # The expression with each largest part a function
     return memo['parts', id(expression)]
 
 def table(node):  # Colors of a wavelength, blackbody, ramp or curves node, RGB curves after the combined curve, or sky
-    if node.type == 'TEX_SKY': return node.texels() if isinstance(node, Folded) else sky(node)
+    if node.type == 'TEX_SKY': return node.texels() if isinstance(node, Folded) else sky(node) \
+        if node.sky_type == 'HOSEK_WILKIE' else scattered_sky(node.sun_elevation, node.sun_rotation, node.altitude,
+        node.air_density, node.aerosol_density, node.ozone_density)
     if node.type == 'WAVELENGTH': return [(*numpy.array(Color(xyz).from_xyz_d65_to_scene_linear()) / 2.52, 1)
         for xyz in CIE]
     if node.type in ('BLACKBODY', 'PRINCIPLED_VOLUME'):
@@ -1318,9 +1433,10 @@ NODES = {'NORMAL_MAP': normal_map, 'REROUTE': lambda node, inputs, index: inputs
         ('SUBTRACT', inputs[1], ('MULTIPLY', inputs[2], 0.5))), 0),
     'RGBTOBW': lambda node, inputs, index: ('DOT_PRODUCT', inputs[0], WEIGHTS['RGBA']),
     'BLACKBODY': lambda node, inputs, index: blackbody(inputs[0], node),
-    'TEX_SKY': lambda node, inputs, index: ('IMAGE_LINEAR', ('EQUIRECTANGULAR', point_of(node, inputs[0],
-        ('POSITION',)), 1), node) if node.sky_type == 'HOSEK_WILKIE' else 0,  # Along its direction, sky()'s rows;
-    # other skies black
+    'TEX_SKY': lambda node, inputs, index: ('IMAGE_LINEAR', ('EQUIRECTANGULAR', point_of(node, (*inputs,
+        ('POSITION',))[0], ('POSITION',)), *(1,)[:node.sky_type == 'HOSEK_WILKIE']), node) if node.sky_type in
+        ('HOSEK_WILKIE', 'MULTIPLE_SCATTERING') else 0,  # Along its direction, sky()'s rows, or scattered_sky()'s
+    # equirectangular image, its vector disabled under a sun disc; other skies black
     'WAVELENGTH': wavelength,
     'HUE_SAT': lambda node, inputs, index: hue_saturation(*inputs),
     'SEPARATE_COLOR': lambda node, inputs, index: ('DOT_PRODUCT', MODES[node.mode][0](inputs[0]), numpy.eye(3)[index]),
@@ -2683,6 +2799,9 @@ class Flex(bpy.types.RenderEngine):
         SIDE['volume'] = True  # The world's volume, boxed where it has any extinction, (s + 1 - a) d
         filled = output and output.inputs['Volume'].is_linked and resolve(output.inputs['Volume'])
         SIDE['volume'] = False
+        suns = [sun for node in (output.id_data.nodes if output else ()) if node.type == 'TEX_SKY'  # Its skies' suns'
+            and node.sky_type == 'MULTIPLE_SCATTERING' and node.sun_disc  # discs, lamps
+            and (sun := scattered_sun(node, resolve(output.inputs['Surface'])[4]))]
         box = not moved and filled and nonzero(fold(('MULTIPLY', ('SUBTRACT', ('ADD', filled[12], 1), filled[10]),
             filled[11]))) and Boxed(scene.world)
         # Of what the box holds: the camera's near-plane center, where its rays and its medium's test start
@@ -2693,7 +2812,7 @@ class Flex(bpy.types.RenderEngine):
             r = light and max(light.shadow_soft_size, getattr(light, 'size', 0), getattr(light, 'size_y', 0), 0.01)
             corners.extend([instance.matrix_world.translation + Vector((x, y, z)) * r for x in (-1, 1) for y in (-1, 1)
                 for z in (-1, 1)] if light else [instance.matrix_world @ Vector(c) for c in ob.bound_box])
-        for i, instance in enumerate(depsgraph.object_instances):
+        for i, instance in enumerate(x for instances in (depsgraph.object_instances, suns) for x in instances):
             ob = instance.object
             bm = bmesh.new()
             if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
@@ -2855,6 +2974,8 @@ class Flex(bpy.types.RenderEngine):
                 if light.use_nodes and light.node_tree and known(light.node_tree) and (out :=
                     light.node_tree.get_output_node('CYCLES')):  # By its nodes, as Cycles', unless one is unknown
                     emission = 'MULTIPLY', emission, resolve(out.inputs['Surface'])[4]
+                if isinstance(light, types.SimpleNamespace):  # A sky's sun, through the world's emission
+                    emission = 'MULTIPLY', emission, light.emission
                 shaped = 1
                 # Spot cone and area spread on the direction emitted, as Cycles'; the lights pass, shading no ray, takes
                 # the unshaped power, a bound for the cone and exact for the spread, whose mean over the hemisphere is 1
