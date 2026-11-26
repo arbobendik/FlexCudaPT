@@ -81,7 +81,9 @@ inline std::string nativeProgram(const std::vector<Op>& ops, unsigned start, boo
         const unsigned word = ops[end].code, code = word & CODE;
         const Emitter* e = std::find_if(std::begin(EMITTERS), std::end(EMITTERS),
             [&](const Emitter& e) { return e.code == code; });
-        if (e == std::end(EMITTERS) || stack.size() < unsigned(e->pops)) return {};
+        // A binary step pops two less its own and its saved operand, as the interpreter's
+        if (e == std::end(EMITTERS) || stack.size() < (e->kind == 'b' ? 2u - bool(word & IMMEDIATE) - bool(word & FROM)
+            : unsigned(e->pops))) return {};
         const std::string own = "o[" + std::to_string(end - start) + "]";
         if (e->kind == 'p') stack.push_back(own + ".value");
         else if (e->kind == 's') saved[ops[end].texel] = stack.back();
