@@ -1383,12 +1383,20 @@ Medium outside(Scene* scene, uint instance) {
     // where it lets light through, the layers start an ulp short of it
     Hit first = onSurface && skip == NONE ? traverse(scene, from, toward, left, at, NONE, 1e-4f, mask)
         : traverse(scene, from, toward, left, at, skip, 0, mask);
-    if (first.triangle != NONE && scene.materials[key(scene, first)].opaque == 0)
+    if (first.triangle != NONE && (scene.materials[key(scene, first)].opaque & 1) == 0)
         at = asfloat(asuint(at) - 1), first = nextLayer(scene, from, toward, left, at, NONE, mask);
     for (Hit hit = first; hit.triangle != NONE;
         before = at, hit = nextLayer(scene, from, toward, left, at, key(scene, hit), mask)) {
         occluder = at - before;
-        if (scene.materials[key(scene, hit)].opaque != 0) return true;  // Shading it would pass nothing
+        const uint opaque = scene.materials[key(scene, hit)].opaque;
+        if ((opaque & 1) != 0) return true;  // Shading it would pass nothing
+        if ((opaque & 8) != 0) {  // A volume hidden from shadows: its faces and medium pass them whole
+            const bool leaves = dot(faceNormal(scene, hit), toward) > 0;
+            if (!leaves)
+                transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
+            medium = leaves ? outside(scene, hit.instance) : NO_MEDIUM, filling = NONE;
+            continue;
+        }
         transmitted = transmitted * passing(scene, medium, filling, from, toward, before, at, state, ray);
         const Surface surface = shade(scene, hit.instance, hit.triangle, hit.uv.x, hit.uv.y, smoothNormal(scene, hit),
             toward, Ray(ray.camera, true, ray.lobe, ray.depth + 1, occluder));

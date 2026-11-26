@@ -2601,10 +2601,11 @@ class Flex(bpy.types.RenderEngine):
         points, segments, hairs, bounds, roots, spaces = [numpy.empty((0, 4), 'f')], [], [], [], [], {}  # Strands:
         # their points in their object's space and radius; per segment its first point and strand, material and bounds;
         # per strand its first point, point count, random number, root's UV and color; per object its texture space
-        # Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too
+        # Opaque in bit 0; hidden from shadows in bit 1, an object's or a light's casting none, which bit 2 marks too;
+        # one filling a volume in bit 3 instead, its faces met by shadow rays, which pass it and its medium whole
         dark = lambda ob: ob.type == 'LIGHT' and not ob.data.use_shadow
-        tabled = lambda shades, ob: numpy.array([(*row[:2], not ob.visible_camera, 2 | dark(ob) << 2
-            if not ob.visible_shadow or dark(ob) else row[2], row[3] if len(row) > 3 else row[1])
+        tabled = lambda shades, ob, filling=False: numpy.array([(*row[:2], not ob.visible_camera, 8 if filling
+            else 2 | dark(ob) << 2 if not ob.visible_shadow or dark(ob) else row[2], row[3] if len(row) > 3 else row[1])
             for row in shades])  # Per slot a material
         pathed = lambda ob: [(system, m) for m in ob.modifiers if ob.type == 'MESH' and m.type == 'PARTICLE_SYSTEM'
             and (system := m.particle_system).settings.type == 'HAIR' and system.settings.render_type == 'PATH'
@@ -2893,7 +2894,7 @@ class Flex(bpy.types.RenderEngine):
             for column, array in zip(columns, (positions if world else point, (normals if world else
                 normal.reshape(-1, 3)[loops]).reshape(-1, 3, 3), orco, point, uv, color, tangent,
                 passes[numpy.minimum(index, len(passes) - 1)])): column.append(array)
-            materials.append(tabled(shades, ob)[index])
+            materials.append(tabled(shades, ob, i in volumes and not ob.visible_shadow)[index])
             if key and not world: entries[key] = entry  # Not under an update, which pipes each mesh moved
             media = ((0,) * 6, 0)
             if i in volumes:  # Its volumes' bound inside its points: in the world, its object and their generated
