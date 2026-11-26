@@ -18,6 +18,7 @@ static __device__ Hit nativeHit(FKHit hit) { return {hit.triangle_index, hit.ins
 static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface,
     FKHit left, bool viewed) {
     const Scene& scene = hookScene();
+    const Probe probe(scene.calls, 5);
     float distance = 0;
     Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
         left.instance_index != NONE && left.distance >= MARGIN ? key(scene, nativeHit(left)) : NONE)
@@ -35,6 +36,7 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
 static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float l, float3 extinction, unsigned filling,
     unsigned random_state, unsigned depth, unsigned lobe, bool surface, float length, float width, FKHit left,
     FKHit light) {
+    const Probe probe(hookScene().calls, 6);
     float3 transmitted;
     return occluded(hookScene(), ray.origin, ray.unit_direction, l, Medium{make_float3(0, 0, 0), extinction}, filling,
         random_state, Ray{depth == 0, false, lobe, float(depth), length, width}, surface, transmitted,
@@ -86,6 +88,7 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
 static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir,
     unsigned depth, float length) {
     const Scene& scene = hookScene();
+    const Probe probe(scene.calls, 7);
     const Hit at = nativeHit(hit);
     const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
     FKSurface light = walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
@@ -98,6 +101,7 @@ static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 po
 static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width,
     unsigned layer, unsigned depth, unsigned lobe, float3 dir) {
     const Scene& scene = hookScene();
+    const Probe probe(scene.calls, 8);
     const Hit at = nativeHit(hit);
     return walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
         smoothNormal(scene, at), dir, Ray{depth == 0, false, lobe, float(depth), hit.distance, width}),

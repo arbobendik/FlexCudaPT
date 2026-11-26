@@ -8,6 +8,20 @@
 constexpr int STACK = 64;
 constexpr int SLOTS = 32; // Values a program keeps for reuse
 extern "C" __constant__ Params params;
+// Probe: SM cycles and calls per part, of one launch index in 32, in the 32 words before the scene's call counts
+constexpr unsigned PROBE_SLOTS = 16;
+__device__ __forceinline__ bool probing() {
+    const uint3 i = optixGetLaunchIndex(), d = optixGetLaunchDimensions();
+    return ((i.z * d.y + i.y) * d.x + i.x & 31) == 0;
+}
+struct Probe {
+    unsigned long long* slots; unsigned slot; long long start;
+    __device__ Probe(const unsigned* calls, unsigned slot) : slots(probing() && calls
+        ? (unsigned long long*)calls - 2 * PROBE_SLOTS : nullptr), slot(slot), start(clock64()) {}
+    __device__ ~Probe() {
+        if (slots) atomicAdd(slots + slot, (unsigned long long)(clock64() - start)), atomicAdd(slots + PROBE_SLOTS + slot, 1ull);
+    }
+};
 constexpr float PI = 3.14159265f;
 constexpr float INV_PI = 0.3183098861837907f;
 #ifdef STANDIN
@@ -927,6 +941,7 @@ OP op_DIELECTRIC(float3 a, float3 b) { return make_float3(1, 1, 1) * fresnel(fab
 template <bool HOT = false> __device__ SHADE_INLINE Surface shade(const Scene& scene, unsigned program, float3 normal,
     SlangMatrix<float, 3, 3> tbn, const Point& point, float3 incoming, bool backfacing, const Ray& ray,
     const Info& info, float material = 0) {
+    const Probe probe(HOT ? scene.calls : nullptr, 3);
     Shading x{scene, program, normal, tbn, point, incoming, backfacing, ray, info, material};
     x.at(point);
 #ifdef NATIVE // Counted no more once native
@@ -934,6 +949,7 @@ template <bool HOT = false> __device__ SHADE_INLINE Surface shade(const Scene& s
 #else
     if (HOT) atomicAdd(scene.calls + program, 1u);
 #endif
+    const Probe interpreted(HOT ? scene.calls : nullptr, 4);
     float3 stack[STACK], *top = stack, saved[SLOTS];
     for (const Op* op = scene.ops + program; op->code; ++op) { const unsigned code = op->code & CODE; switch (code) {
         CASE(PUSH) *top++ = op->value; break;
@@ -1671,6 +1687,7 @@ __device__ SampleBSDF sampleHair(const Scene& scene, const Surface& surface, flo
 // read: the first pass's, the pass's; then the shift's, the pass's and the anchor's
 #define WALK_CALLABLE(name, replay) extern "C" __device__ Shift name(const Domain* dom, const Reservoir* r, \
     float scale, Selection* sel) { \
+    const Probe probe(((const Scene*)optixGetSbtDataPointer())->calls, replay ? 1 : 0); \
     return walk_hook(FKDomain{dom->x0, dom->x1, {dom->hit.uv, dom->hit.instance, dom->hit.triangle, 0, \
         length(dom->x1 - dom->x0)}, dom->width, dom->spread}, *r, replay, scale, sel); \
 }

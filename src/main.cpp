@@ -406,6 +406,22 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         release((CUdeviceptr)scene.noise), scene.noise = nullptr;
 #endif
     };
+    // Probe: GPU time per pass by events, the device's counters per part, wall time per request and load, to stderr
+    constexpr unsigned PROBE_WORDS = 64; // 16 cycle sums and 16 call counts of 64 bits before the call counts
+#ifndef VK_VERSION_1_0
+    const bool probe = std::getenv("FLEX_PROBE");
+    std::vector<std::pair<unsigned, std::pair<CUevent, CUevent>>> probed;
+    std::vector<CUevent> spare;
+    const auto event = [&] {
+        CUevent e;
+        if (spare.empty()) CHECK(cuEventCreate(&e, CU_EVENT_DEFAULT)); else e = spare.back(), spare.pop_back();
+        return e;
+    };
+#else
+    constexpr bool probe = false;
+#endif
+    const auto now = [] { return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
     for (unsigned done = 0, launched, kind; receive(&kind, sizeof(kind), 1); std::fflush(stdout)) {
         // At a frame's start, every launch before it ended: the scene's module swapped in once compiled, its renders
         // a stand-in's to rounding; those of earlier op sets dropped once compiled
@@ -429,13 +445,27 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (WIFEXITED(status) && !WEXITSTATUS(status)) adopt();
         }
         if (native && pipeline == special->pipeline && compiled(*native)) linked(*native), use(*native);
-        if (!chosen && counted >= NATIVE_AFTER && special && pipeline == special->pipeline) {
+        if (!chosen && counted >= NATIVE_AFTER && special && pipeline == special->pipeline
+            && !std::getenv("FLEX_PROBE_INTERPRET")) {
             chosen = true;
             std::vector<unsigned> calls(loaded.rows); // Chosen by their calls so far
             CHECK(cuMemcpyDtoH(calls.data(), (CUdeviceptr)scene.calls, calls.size() * sizeof(unsigned)));
             const std::vector<unsigned> programs = chooseNative(loaded.ops, calls);
             const bool exact = std::getenv("FLEX_NATIVE_EXACT"), rare = extended(special->params);
             const std::string text = generateNative(loaded.ops, programs, exact);
+            if (probe) {
+                size_t emitted = 0, called = 0, total = 0;
+                for (size_t at = 0; (at = text.find(" case ", at)) != std::string::npos; ++at) ++emitted;
+                for (unsigned start = 0; start < calls.size(); ++start) if (calls[start]) ++called, total += calls[start];
+                std::fprintf(stderr, "PROBE native chosen %zu emitted %zu of %zu programs called %zu times\n",
+                    programs.size(), emitted, called, total);
+                for (unsigned start : programs) if (nativeProgram(loaded.ops, start, false).empty()) {
+                    std::fprintf(stderr, "PROBE native %u empty, calls %u:", start, calls[start]);
+                    for (unsigned end = start; loaded.ops[end].code; ++end)
+                        std::fprintf(stderr, " %u/%x", loaded.ops[end].code & CODE, loaded.ops[end].code & ~CODE);
+                    std::fprintf(stderr, "\n");
+                }
+            }
             char key[17]; // Its source's, of this build and its options
             std::snprintf(key, sizeof(key), "%016zx", std::hash<std::string>{}(text + char('0' + 2 * exact + rare)
                 + nativeBuild()));
@@ -466,13 +496,21 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             }
 #endif
             const unsigned count = scene.count;
+            const double loading = now();
             kind == SCENE ? loadSteps(scene, loaded) : kind == UPDATE ? updateScene(context, scene, loaded)
                 : updateSteps(scene, loaded);
 #ifndef VK_VERSION_1_0
+            if (probe) {
+                CHECK(cuCtxSynchronize());
+                std::fprintf(stderr, "PROBE load %s %.3f ms\n", kind == SCENE ? "scene" : kind == UPDATE ? "update"
+                    : "steps", now() - loading);
+            }
+#endif
+#ifndef VK_VERSION_1_0
             if (kind != UPDATE) { // Its programs' calls, counted from none
-                if (scene.calls) release((CUdeviceptr)scene.calls);
-                scene.calls = (unsigned*)allocate(loaded.rows * sizeof(unsigned));
-                CHECK(cuMemsetD32((CUdeviceptr)scene.calls, 0, loaded.rows));
+                if (scene.calls) release((CUdeviceptr)(scene.calls - PROBE_WORDS));
+                scene.calls = (unsigned*)allocate((PROBE_WORDS + loaded.rows) * sizeof(unsigned)) + PROBE_WORDS;
+                CHECK(cuMemsetD32((CUdeviceptr)(scene.calls - PROBE_WORDS), 0, PROBE_WORDS + loaded.rows));
             }
 #endif
             Params next{};
@@ -614,6 +652,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             continue;
         }
         receive(&request, sizeof(request), 1);
+        const double requested = now();
         if (request.view.settings.noise != scene.noiseSize) noised(request.view.settings.noise); // A size changed
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
@@ -704,9 +743,18 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (pass == PASS_TEMPORAL_COUNT || pass == PASS_COUNT)
                     CHECK(cuMemsetD32((CUdeviceptr)scene.queue, 0, QUEUE_HEADER));
                 sbt.raygenRecord = table + (pass + 1) * sizeof(Record);
+#ifndef VK_VERSION_1_0
+                if (probe) {
+                    probed.push_back({pass, {event(), event()}});
+                    CHECK(cuEventRecord(probed.back().second.first, 0));
+                }
+#endif
                 CHECK(pass == PASS_TEMPORAL_SHIFT || pass == PASS_SHIFT ? optixLaunch(pipeline, nullptr, launch,
                     sizeof(params), &sbt, jobs[pass == PASS_SHIFT], 1, 1) : optixLaunch(pipeline, nullptr, launch,
                     sizeof(params), &sbt, view.width, view.height, depths[pass]));
+#ifndef VK_VERSION_1_0
+                if (probe) CHECK(cuEventRecord(probed.back().second.second, 0));
+#endif
             }
             scene.previousCamera = scene.camera, scene.previousCameraProjection = scene.cameraProjection;
         }
@@ -723,6 +771,29 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.anchorHandle = buildScene(context, scene.anchorVertices, loaded.instances, anchorMeshes,
                 OPTIX_BUILD_OPERATION_BUILD, anchorTop, loaded);
         }
+#ifndef VK_VERSION_1_0
+        if (probe && scene.calls) {
+            CHECK(cuCtxSynchronize());
+            double ms[PASSES] = {}, total = 0;
+            for (auto& [pass, events] : probed) {
+                float t;
+                CHECK(cuEventElapsedTime(&t, events.first, events.second));
+                ms[pass] += t, total += t, spare.push_back(events.first), spare.push_back(events.second);
+            }
+            probed.clear();
+            unsigned long long slots[PROBE_WORDS / 2];
+            CHECK(cuMemcpyDtoH(slots, (CUdeviceptr)(scene.calls - PROBE_WORDS), sizeof(slots)));
+            CHECK(cuMemsetD32((CUdeviceptr)(scene.calls - PROBE_WORDS), 0, PROBE_WORDS));
+            std::fprintf(stderr, "PROBE request launches %u wall %.3f ms gpu %.3f ms native %d passes", launched,
+                now() - requested, total, native && pipeline == native->pipeline);
+            for (unsigned pass = 0; pass < PASSES; ++pass) std::fprintf(stderr, " %.3f", ms[pass]);
+            std::fprintf(stderr, " cycles");
+            for (unsigned k = 0; k < 16; ++k) std::fprintf(stderr, " %llu", slots[k]);
+            std::fprintf(stderr, " calls");
+            for (unsigned k = 0; k < 16; ++k) std::fprintf(stderr, " %llu", slots[16 + k]);
+            std::fprintf(stderr, "\n");
+        }
+#endif
         std::fwrite(&launched, sizeof(launched), 1, stdout);
         counted += launched;
         const float memory[] = {float(memory_used) / (1024 * 1024), float(memory_peak) / (1024 * 1024)};
