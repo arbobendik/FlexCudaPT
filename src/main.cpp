@@ -433,7 +433,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             chosen = true;
             std::vector<unsigned> calls(loaded.rows); // Chosen by their calls so far
             CHECK(cuMemcpyDtoH(calls.data(), (CUdeviceptr)scene.calls, calls.size() * sizeof(unsigned)));
-            const std::vector<unsigned> programs = chooseNative(loaded.ops, calls);
+            const std::vector<unsigned> programs = chooseNative(calls);
             const bool exact = std::getenv("FLEX_NATIVE_EXACT"), rare = extended(special->params);
             const std::string text = generateNative(loaded.ops, programs, exact);
             char key[17]; // Its source's, of this build and its options

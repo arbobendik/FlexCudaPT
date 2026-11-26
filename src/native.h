@@ -13,23 +13,10 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
-// The programs worth native code: by shade()'s calls at the hot call sites times their length, the fewest covering 90 %
-inline std::vector<unsigned> chooseNative(const std::vector<Op>& ops, const std::vector<unsigned>& calls) {
-    std::vector<std::pair<double, unsigned>> costs;
-    double total = 0;
-    for (unsigned start = 0; start < calls.size(); ++start) {
-        if (!calls[start]) continue;
-        unsigned end = start;
-        for (; ops[end].code; ++end) {}
-        costs.push_back({double(calls[start]) * (end - start), start}), total += costs.back().first;
-    }
-    std::sort(costs.rbegin(), costs.rend());
+// The programs worth native code: every one shade()'s calls at the hot call sites reached
+inline std::vector<unsigned> chooseNative(const std::vector<unsigned>& calls) {
     std::vector<unsigned> chosen;
-    double covered = 0;
-    for (const auto& [cost, start] : costs) {
-        if (covered >= 0.9 * total) break;
-        chosen.push_back(start), covered += cost;
-    }
+    for (unsigned start = 0; start < calls.size(); ++start) if (calls[start]) chosen.push_back(start);
     return chosen;
 }
 
