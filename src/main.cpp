@@ -76,7 +76,29 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         const OptixModuleCompileBoundValueEntry bound{0, sizeof(words.ops), &words};
         const OptixModuleCompileOptions options{.boundValues = &bound, .numBoundValues = 1};
         OptixModule module;
-        CHECK(optixModuleCreate(context, &options, &compile, ptx.data(), ptx.size(), nullptr, nullptr, &module));
+        OptixTask first;
+        CHECK(optixModuleCreateWithTasks(context, &options, &compile, ptx.data(), ptx.size(), nullptr, nullptr, &module,
+            &first));
+        // Its compile's tasks on every core, as the renderer's workers run them: each task run leaves more for the rest
+        std::vector<OptixTask> tasks{first};
+        std::mutex mutex;
+        std::condition_variable changed;
+        unsigned running = 0;
+        std::vector<std::thread> threads;
+        for (unsigned k = 0; k < std::max(1u, std::thread::hardware_concurrency()); ++k) threads.emplace_back([&] {
+            std::unique_lock lock(mutex);
+            while (true) {
+                changed.wait(lock, [&] { return !tasks.empty() || !running; });
+                if (tasks.empty()) return;
+                const OptixTask task = tasks.back();
+                tasks.pop_back(), ++running, lock.unlock();
+                OptixTask more[16];
+                unsigned count;
+                CHECK(optixTaskExecute(task, more, std::size(more), &count));
+                lock.lock(), --running, tasks.insert(tasks.end(), more, more + count), changed.notify_all();
+            }
+        });
+        for (std::thread& thread : threads) thread.join();
         CHECK(optixModuleDestroy(module));
         CHECK(optixDeviceContextDestroy(context));
         CHECK(cuCtxDestroy(cuda));
