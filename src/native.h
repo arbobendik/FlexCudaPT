@@ -14,16 +14,13 @@
 #include <unistd.h>
 
 // The programs worth native code: by shade()'s calls at the hot call sites times their length, the fewest covering 90 %
-// of those reading no bake, whose cost is their texel fetches, which native code keeps
 inline std::vector<unsigned> chooseNative(const std::vector<Op>& ops, const std::vector<unsigned>& calls) {
     std::vector<std::pair<double, unsigned>> costs;
     double total = 0;
     for (unsigned start = 0; start < calls.size(); ++start) {
         if (!calls[start]) continue;
         unsigned end = start;
-        bool baked = false;
-        for (; ops[end].code; ++end) baked |= (ops[end].code & CODE) == BAKED;
-        if (baked) continue;
+        for (; ops[end].code; ++end) {}
         costs.push_back({double(calls[start]) * (end - start), start}), total += costs.back().first;
     }
     std::sort(costs.rbegin(), costs.rend());
