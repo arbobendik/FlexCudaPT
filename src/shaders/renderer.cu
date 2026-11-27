@@ -108,9 +108,6 @@ __device__ float3 fromHsl(float3 c) {
     const float chroma = (1 - fabsf(2 * c.z - 1)) * c.y;
     return each(n, [&](float a) { return (fminf(fmaxf(a, 0), 1) - 0.5f) * chroma + c.z; });
 }
-__device__ float3 divide(float3 a, float3 b) {
-    return make_float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
-}
 __device__ unsigned rotate(unsigned x, int k) { return x << k | x >> (32 - k); }
 // Bob Jenkins' lookup3 hash of n keys
 __device__ unsigned jenkins(int n, unsigned x, unsigned y = 0, unsigned z = 0, unsigned w = 0) {
@@ -523,8 +520,8 @@ __device__ float convolved(float3 p, int dims, float3 direction, float bandwidth
             const float3 at = make_float3(ax, ay, dims > 2 ? c[2] + drawn(state) : 0), x = (q - at) * radius;
             const float sign = drawn(state) < 0.5f ? -1 : 1, phi = 2 * PI * drawn(state), z = 2 * drawn(state) - 1;
             const float3 omega = anisotropic ? along : dims == 1 ? make_float3(1, 0, 0) : dims == 2
-                ? make_float3(cosf(phi), sinf(phi), 0) : make_float3(sqrtf(1 - z * z) * cosf(phi),
-                sqrtf(1 - z * z) * sinf(phi), z);
+                ? make_float3(cosf(phi), sinf(phi), 0) : make_float3(sine(z) * cosf(phi),
+                sine(z) * sinf(phi), z);
             if (dot(x, x) < radius * radius) sum += sign * expf(-PI * a * a * dot(x, x)) * cosf(2 * PI * dot(x, omega));
         }
     }
@@ -862,9 +859,9 @@ OP op_MULTIPLY_ADD(float3 a, float3 b, float3 c) { return a * b + c; }
 OP op_SELECT(float3 c, float3 a, float3 b) {
     return make_float3(c.x != 0 ? a.x : b.x, c.y != 0 ? a.y : b.y, c.z != 0 ? a.z : b.z);
 }
-OP op_DIVIDE(float3 a, float3 b) { return divide(a, b); }
+OP op_DIVIDE(float3 a, float3 b) { return safeDivide(a, b); }
 OP op_SNAP(float3 a, float3 b) {
-    const float3 q = divide(a, b);
+    const float3 q = safeDivide(a, b);
     return make_float3(floorf(q.x) * b.x, floorf(q.y) * b.y, floorf(q.z) * b.z);
 }
 OP op_BOX(float3 a, float3 b) { return box(a, b.x); }
@@ -1239,7 +1236,7 @@ __device__ bool strand(float3 o, float3 d, float4 a, float4 b, float lo, float& 
     const float3 e = make_float3(a.x, a.y, a.z), axis = make_float3(b.x, b.y, b.z) - e, w = normalize(axis);
     const float s = dot(e + axis * 0.5f - o, d) / dot(d, d); // From beside the segment, for float precision
     o = o + d * s, lo -= s, t -= s; // t and lo shifted alike
-    const float length2 = dot(axis, axis), k = (a.w - b.w) / sqrtf(length2), c = sqrtf(fmaxf(1 - k * k, 0.0f)), t0 = t;
+    const float length2 = dot(axis, axis), k = (a.w - b.w) / sqrtf(length2), c = sine(k), t0 = t;
     float3 n;
     for (int end = 0; end < 2; ++end) { // Each sphere
         const float3 center = end ? make_float3(b.x, b.y, b.z) : e, oc = o - center;

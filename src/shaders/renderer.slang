@@ -179,9 +179,6 @@ float3 fromHsl(float3 c) {
     const float chroma = (1 - abs(2 * c.z - 1)) * c.y;
     return (min(max(n, 0), 1) - 0.5f) * chroma + c.z;
 }
-float3 divide(float3 a, float3 b) {
-    return float3(b.x != 0 ? a.x / b.x : 0, b.y != 0 ? a.y / b.y : 0, b.z != 0 ? a.z / b.z : 0);
-}
 uint rotate(uint x, int k) { return x << k | x >> (32 - k); }
 // Bob Jenkins' lookup3 hash of n keys
 uint jenkins(int n, uint x, uint y = 0, uint z = 0, uint w = 0) {
@@ -612,7 +609,7 @@ float convolved(float3 p, int dims, float3 direction, float bandwidth, int impul
             const float3 at = float3(ax, ay, dims > 2 ? c[2] + drawn(state) : 0), x = (q - at) * radius;
             const float sign = drawn(state) < 0.5f ? -1 : 1, phi = 2 * PI * drawn(state), z = 2 * drawn(state) - 1;
             const float3 omega = anisotropic ? along : dims == 1 ? float3(1, 0, 0) : dims == 2
-                ? float3(cos(phi), sin(phi), 0) : float3(sqrt(1 - z * z) * cos(phi), sqrt(1 - z * z) * sin(phi), z);
+                ? float3(cos(phi), sin(phi), 0) : float3(sine(z) * cos(phi), sine(z) * sin(phi), z);
             if (dot(x, x) < radius * radius) sum += sign * exp(-PI * a * a * dot(x, x)) * cos(2 * PI * dot(x, omega));
         }
     }
@@ -873,9 +870,9 @@ bool used(uint code) { return ((code >> 6 == 0 ? OPS0 : OPS1) >> (code & 63) & 1
         CASE(MULTIPLY_ADD) top -= 2; stack[top - 1] = stack[top - 1] * stack[top] + stack[top + 1]; break;
         CASE(SELECT) top -= 2; stack[top - 1] = select(stack[top - 1] != float3(0, 0, 0), stack[top], stack[top + 1]);
             break;
-        BINARY(DIVIDE, divide(a, b))
+        BINARY(DIVIDE, safeDivide(a, b))
         CASE(SNAP) { --top;
-            const float3 q = divide(stack[top - 1], stack[top]);
+            const float3 q = safeDivide(stack[top - 1], stack[top]);
             stack[top - 1] = floor(q) * stack[top];
         } break;
         CASE(BOX) --top; stack[top - 1] = box(stack[top - 1], stack[top].x); break;
@@ -1093,7 +1090,7 @@ bool strand(float3 o, float3 d, float4 a, float4 b, float lo, inout float t, ino
     const float3 axis = b.xyz - a.xyz, w = normalize(axis);
     const float s = dot(a.xyz + axis * 0.5f - o, d) / dot(d, d); // From beside the segment, for float precision
     o = o + d * s, lo -= s, t -= s; // t and lo shifted alike
-    const float length2 = dot(axis, axis), k = (a.w - b.w) / sqrt(length2), c = sqrt(max(1 - k * k, 0.0f)), t0 = t;
+    const float length2 = dot(axis, axis), k = (a.w - b.w) / sqrt(length2), c = sine(k), t0 = t;
     float3 n = float3(0);
     for (int end = 0; end < 2; ++end) { // Each sphere
         const float3 center = end == 1 ? b.xyz : a.xyz, oc = o - center;
