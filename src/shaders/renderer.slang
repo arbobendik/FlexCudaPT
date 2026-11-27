@@ -1574,6 +1574,10 @@ struct VkScene : IScene {
     float3 env_map_sample(float3 dir, uint depth, uint lobe) {
         return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
     }
+    // Blender's z up
+    [ForceInline] bool zUp() { return true; }
+    // Emitters emit on both sides
+    [ForceInline] bool twoSided() { return true; }
     // Its luminance CDF by cell, (cdf, share), the marginal in the last column; none where the world is not sampled
     float4 environmentCdf(uint2 cell) {
         const float2 c = scene.environmentCdf[cell.y * scene.cdfWidth + cell.x];
