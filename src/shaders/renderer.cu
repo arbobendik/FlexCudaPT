@@ -899,7 +899,7 @@ OP op_ROTATE(float3 v, float3 k, float3 angle) { // Around the unit axis by the 
 // Image coordinates (u, v) of a direction; with rows (its texel), v a sky table's row, as equirectangular()
 OP op_EQUIRECTANGULAR(const Op& op, float3 d) {
     const float v = 0.5f + atan2f(d.z, sqrtf(d.x * d.x + d.y * d.y)) / PI;
-    return make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI), op.texel ? (0.5f + 128 * cbrtf(fmaxf(2 * v - 1, 0))) / 129
+    return make_float3(0.5f - atan2f(d.y, d.x) / (2 * PI), op.texel ? (0.5f + 128 * (1 + cbrtf(2 * v - 1))) / 257
         : v, 0);
 }
 OP op_MIRROR_BALL(float3 a) { // Image coordinates of a direction on a mirror ball

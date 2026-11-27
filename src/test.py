@@ -2437,6 +2437,13 @@ scene.camera.data.sensor_width, scene.camera.data.lens = 1, 0.5 / math.tan(math.
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     assert numpy.allclose(render().mean((0, 1)), (0.0027952, 0.0015028, 0.00047345), rtol=0.02), ('grazing sky', device)
+# Below the horizon, its zenith angle held at the horizon's and its angle to the sun the view's: 10 degrees down toward
+# the sun of the zenith's sky, (0.3154, 0.2863, 0.1828) as Cycles renders it, not the horizon's below the sun
+dome.turbidity, dome.ground_albedo, dome.sun_direction = 2.9, 0.3, (-0.946, 0.062, 0.318)
+scene.camera.rotation_euler = (math.pi / 2 - math.radians(10), 0, math.atan2(0.062, -0.946) - math.pi / 2)
+for device in ('OPTIX', 'VULKAN'):
+    preferences.device = device
+    assert numpy.allclose(render().mean((0, 1)), (0.3154, 0.2863, 0.1828), rtol=0.05), ('sky below the horizon', device)
 # A value edited in a material whose emission is a folded sky chain pipes steps alone, the chain's table kept, as in a
 # material without one, where a table made anew would count as a new texture and export the scene anew; also after
 # Blender copied the material anew in between, as new data makes it do, its nodes at new addresses: tables are keyed by
