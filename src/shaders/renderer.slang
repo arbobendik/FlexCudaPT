@@ -1494,11 +1494,10 @@ struct VkScene : IScene {
     // A light sample's emission: its emission program toward the face, and its smooth normal
     FKSurface lightSurfaceAt(FKHit hit, float3 point, uint init_random_state, float3 dir, uint depth, float length) {
         const Hit at = nativeHit(hit);
-        const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
+        const float3 n = smoothNormal(scene, at);
         FKSurface light = walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
-            cross(corner[1] - corner[0], corner[2] - corner[0]), dir, Ray(false, false, LOBE_NONE, float(depth + 1),
-            length), true), point, init_random_state);
-        light.smooth_n = smoothNormal(scene, at);
+            n, dir, Ray(false, false, LOBE_NONE, float(depth + 1), length), true), point, init_random_state);
+        light.smooth_n = n;
         return light;
     }
     // The emitter shaded before its shadow query
