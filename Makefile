@@ -29,7 +29,11 @@ build/native: src/shaders/renderer.cu src/shaders/renderer.h src/shaders/adapter
 	cp src/shaders/flexkernels/pathtracer.cuh $@/flexkernels
 	cp -L $(CUDA_PATH)/lib64/libnvrtc.so.13 $(CUDA_PATH)/lib64/libnvrtc-builtins.so.13.? $@
 
-build/renderer: src/main.cpp src/loader.h src/native.h src/shaders/renderer.h build/shaders.h
+# With DLSS where the DLSS SDK's headers are given, as Blender builds it, its runtime the driver's
+ifdef DLSS_SDK_ROOT
+build/renderer: CPPFLAGS += -DDLSS -I$(DLSS_SDK_ROOT)/include
+endif
+build/renderer: src/main.cpp src/loader.h src/native.h src/dlss.h src/shaders/renderer.h build/shaders.h
 	$(CXX) $(CPPFLAGS) -Ibuild $(CXXFLAGS) -ffp-contract=off $< -o $@ $(LDLIBS)
 
 # The walk's CUDA reads Slang's prelude from the Slang it pins

@@ -29,6 +29,9 @@
 #ifndef VK_VERSION_1_0
 #include "native.h"
 #endif
+#ifdef DLSS
+#include "dlss.h"
+#endif
 
 // Whether a scene's module, while it compiles, has the generic one stand in: OptiX's compile runs as tasks beside
 // frames; Vulkan compiles a pipeline whole, at once, so there each scene takes its own as before
@@ -106,6 +109,11 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     }
 #endif
     if (!argv[1]) return 0; // Probe: whether this machine's device runs it
+#ifdef DLSS // Probe: whether it runs DLSS Ray Reconstruction, 2 if built without
+    if (!std::strcmp(argv[1], "dlss")) return !dlssStart();
+#else
+    if (!std::strcmp(argv[1], "dlss")) return 2;
+#endif
 #ifdef VK_VERSION_1_0
     if (!std::strcmp(argv[1], "compile")) { // A helper renderer: of the op mask and SPIR-V given, the temporal round's
         helping = argv[5]; // pipelines into the file given (optixPipelineCreate)
@@ -141,6 +149,12 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     OptixDenoiserOptions denoiserOptions{.guideAlbedo = 1, .guideNormal = 1};
     OptixDenoiser denoiser;
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
+#ifdef DLSS
+    // DLSS views where it runs, each upscaled into its own; NGX failing to start here leaves them undenoised
+    const bool ngx = dlssStart();
+    if (ngx) std::atexit([] { NVSDK_NGX_CUDA_Shutdown(); });
+    Dlss upscaler; CUdeviceptr upscaled;
+#endif
 
     // Embedded PTX compiled for the steps the scene's programs take, bound in params, once the first scene's arrive
     Params params{}; // Those of the module launches take
@@ -674,6 +688,9 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen, (CUdeviceptr)scene.albedo,
                     (CUdeviceptr)scene.normal, (CUdeviceptr)scene.specular, (CUdeviceptr)scene.depth,
                     (CUdeviceptr)scene.deferred}) release(array);
+#ifdef DLSS
+                if (view.settings.denoise == 3) dlssDestroy(upscaler), release(upscaled);
+#endif
                 if (request.view.settings.denoise) {
                     const unsigned width = request.view.width, height = request.view.height;
                     CHECK(optixDenoiserComputeMemoryResources(denoiser, width, height, &sizes));
@@ -688,6 +705,11 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     const size_t upscaling = request.view.settings.denoise == 3 ? pixels : 0; // DLSS's alone
                     scene.specular = zeros<float4>(upscaling), scene.depth = zeros<float>(upscaling);
                     scene.deferred = zeros<float4>(pixels);
+#ifdef DLSS
+                    const Settings& set = request.view.settings;
+                    if (set.denoise == 3) upscaler = dlssCreate(width, height, set.outputWidth, set.outputHeight,
+                        set.upscale), upscaled = (CUdeviceptr)zeros<float4>(shown);
+#endif
                     scene.seen = zeros<unsigned>(pixels), scene.previousSeen = zeros<unsigned>(pixels);
                     CHECK(optixDenoiserSetup(denoiser, nullptr, width, height, state, sizes.stateSizeInBytes, scratch,
                         sizes.withoutOverlapScratchSizeInBytes));
