@@ -121,6 +121,7 @@ static const uint LOBE_NONE = 3u;
 static const uint LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
 static const uint LOBE_COAT = 5u;  // The coat's, a glossy reflection
 static const uint LOBE_TOON = 6u;  // The toon lobe, which Light Path reads as a diffuse reflection
+static const uint LOBE_ESCAPE = 8u;  // Flagging an escape's lobe, for the denoising guides (FlexKernels' walk)
 // Share of a ray cone's width a mip level covers, 2^-1.5
 static const float CONE_SHARE = 0.35355339;
 // Ray a surface or the world is shaded for: from the camera or a shadow ray, its lobe, bounce and length,
@@ -1571,8 +1572,8 @@ struct VkScene : IScene {
     uint triangleOffset(uint instance_index) { return scene.instances[instance_index].first; }
     float3 calculatePointLightContrib(uint index) { return float3(0, 0, 0); }
     // The world along an escape's direction, shaded at bounce depth + 2 by lobe
-    float3 env_map_sample(float3 dir, uint depth, uint lobe) {
-        return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
+    float3 env_map_sample(float3 dir, uint depth, uint lobe) { // An escape's lobe flagged
+        return environment(scene, dir, Ray(false, false, lobe & ~LOBE_ESCAPE, float(depth + 2u), 0));
     }
     // Its luminance CDF by cell, (cdf, share), the marginal in the last column; none where the world is not sampled
     float4 environmentCdf(uint2 cell) {

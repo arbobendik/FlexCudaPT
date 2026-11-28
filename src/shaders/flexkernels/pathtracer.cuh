@@ -3225,7 +3225,7 @@ static __device__ Shift escape_0(Reservoir * r_4, bool replay_1, uint stop_0, ui
     float3  _S1012 = ray_2->unit_direction;
     float _S1013 = escapeWeight_0(_S1011, ray_2->unit_direction);
     uint _S1014 = prev_0->lobe;
-    float3  _S1015 = environment_0(_S1012, b_4, prev_0->lobe);
+    float3  _S1015 = environment_0(_S1012, b_4, (prev_0->lobe) | 8U);
     float3  _S1016 = pathColor(throughput_0 * _S1015, spectral_weight_0, wavelength_5);
     if(replay_1)
     {
@@ -7891,57 +7891,73 @@ __device__ float geometryOffset(float3  t0_0, float3  t1_0, float3  t2_2, float3
     return clamp_1(dot_0(_S2223 * _S2230, uvw_0), 0.0f, _S2222 * 0.125f);
 }
 
-__device__ float3  straightThrough(BSDFMaterial material_29)
+__device__ Weights normalWeights(float3  in_dir_13, float3  n_14, BSDFMaterial material_29, float eta_i_10, float eta_o_9)
 {
-    return make_float3 (material_29.transmission * (1.0f - material_29.metallic)) * material_29.albedo;
+    float3  _S2231 = negate_0(in_dir_13);
+    float _S2232 = sign_0(dot_0(n_14, _S2231));
+    float3  _S2233 = n_14 * make_float3 (_S2232);
+    CoatFrame _S2234 = coatFrame(material_29, _S2233);
+    float3  _S2235 = make_float3 (0.0f);
+    bool _S2236 = (material_29.coat) > 0.0f;
+    float3  _S2237 = _slang_select(_S2236, _S2234.normal,_S2235);
+    AnisotropicFrame _S2238 = anisotropicFrame(material_29, _S2233);
+    SheenProfile _S2239 = sheenProfile(_S2231, _S2233, material_29);
+    float3  _S2240 = coatSeries(_S2234, material_29);
+    Weights _S2241 = lobeWeights(in_dir_13, _S2231, _S2233, _S2233, _S2237, _S2233, _S2237, _S2238, _S2239, _S2234, _S2240, material_29, eta_i_10, eta_o_9);
+    return _S2241;
 }
 
-__device__ float hairRow(float3  in_dir_13, float3  t_26, float3  out_dir_3, uint p_15, float w_20, float alpha_9, uint nt_0)
+__device__ float3  straightThrough(BSDFMaterial material_30)
 {
-    uint _S2231 = p_15 % 4U;
-    float _S2232 = w_20 * HAIR_WIDTHS_0[_S2231];
-    float _S2233 = (F32_asin((clamp_1(dot_0(out_dir_3, t_26), -1.0f, 1.0f)))) - (F32_asin((clamp_1(dot_0(in_dir_13, t_26), -1.0f, 1.0f)))) - HAIR_TILTS_0[_S2231] * alpha_9;
-    return ((F32_asinh((_S2233 / _S2232))) / (F32_asinh((3.14159274101257324f / _S2232))) + 1.0f) * 0.5f * float(nt_0);
+    return make_float3 (material_30.transmission * (1.0f - material_30.metallic)) * material_30.albedo;
 }
 
-__device__ float hairColumn(float3  in_dir_14, float3  t_27, float3  out_dir_4, uint np_0)
+__device__ float hairRow(float3  in_dir_14, float3  t_26, float3  out_dir_3, uint p_15, float w_20, float alpha_9, uint nt_0)
 {
-    float3  _S2234 = worldToTangent(out_dir_4, t_27);
-    float3  _S2235 = worldToTangent(in_dir_14, t_27);
-    return (F32_frac((((F32_atan2((_S2234.z), (_S2234.x + 1.17549435082228751e-38f))) - (F32_atan2((- _S2235.z), (1.17549435082228751e-38f - _S2235.x)))) / 6.28318548202514648f + 0.5f))) * float(np_0);
+    uint _S2242 = p_15 % 4U;
+    float _S2243 = w_20 * HAIR_WIDTHS_0[_S2242];
+    float _S2244 = (F32_asin((clamp_1(dot_0(out_dir_3, t_26), -1.0f, 1.0f)))) - (F32_asin((clamp_1(dot_0(in_dir_14, t_26), -1.0f, 1.0f)))) - HAIR_TILTS_0[_S2242] * alpha_9;
+    return ((F32_asinh((_S2244 / _S2243))) / (F32_asinh((3.14159274101257324f / _S2243))) + 1.0f) * 0.5f * float(nt_0);
 }
 
-__device__ float3  hairDirection(float3  in_dir_15, float3  t_28, uint p_16, float row_0, float column_0, float w_21, float alpha_10, uint nt_1, uint np_1)
+__device__ float hairColumn(float3  in_dir_15, float3  t_27, float3  out_dir_4, uint np_0)
 {
-    float3  _S2236 = worldToTangent(in_dir_15, t_28);
-    uint _S2237 = p_16 % 4U;
-    float _S2238 = w_21 * HAIR_WIDTHS_0[_S2237];
-    float _S2239 = (F32_asin((clamp_1(dot_0(in_dir_15, t_28), -1.0f, 1.0f)))) + HAIR_TILTS_0[_S2237] * alpha_10 + _S2238 * (F32_sinh(((row_0 * 2.0f / float(nt_1) - 1.0f) * (F32_asinh((3.14159274101257324f / _S2238))))));
-    float _S2240 = column_0 * 2.0f * 3.14159274101257324f / float(np_1) - 3.14159274101257324f + (F32_atan2((- _S2236.z), (1.17549435082228751e-38f - _S2236.x)));
-    float _S2241 = (F32_cos((_S2239)));
-    float3  _S2242 = tangentToWorld(make_float3 (_S2241 * (F32_cos((_S2240))), (F32_sin((_S2239))), _S2241 * (F32_sin((_S2240)))), t_28);
-    return _S2242;
+    float3  _S2245 = worldToTangent(out_dir_4, t_27);
+    float3  _S2246 = worldToTangent(in_dir_15, t_27);
+    return (F32_frac((((F32_atan2((_S2245.z), (_S2245.x + 1.17549435082228751e-38f))) - (F32_atan2((- _S2246.z), (1.17549435082228751e-38f - _S2246.x)))) / 6.28318548202514648f + 0.5f))) * float(np_0);
 }
 
-__device__ float3  occluderTransmittance(float3  toward_1, float3  n_14, BSDFMaterial material_30, float coverage_1)
+__device__ float3  hairDirection(float3  in_dir_16, float3  t_28, uint p_16, float row_0, float column_0, float w_21, float alpha_10, uint nt_1, uint np_1)
+{
+    float3  _S2247 = worldToTangent(in_dir_16, t_28);
+    uint _S2248 = p_16 % 4U;
+    float _S2249 = w_21 * HAIR_WIDTHS_0[_S2248];
+    float _S2250 = (F32_asin((clamp_1(dot_0(in_dir_16, t_28), -1.0f, 1.0f)))) + HAIR_TILTS_0[_S2248] * alpha_10 + _S2249 * (F32_sinh(((row_0 * 2.0f / float(nt_1) - 1.0f) * (F32_asinh((3.14159274101257324f / _S2249))))));
+    float _S2251 = column_0 * 2.0f * 3.14159274101257324f / float(np_1) - 3.14159274101257324f + (F32_atan2((- _S2247.z), (1.17549435082228751e-38f - _S2247.x)));
+    float _S2252 = (F32_cos((_S2250)));
+    float3  _S2253 = tangentToWorld(make_float3 (_S2252 * (F32_cos((_S2251))), (F32_sin((_S2250))), _S2252 * (F32_sin((_S2251)))), t_28);
+    return _S2253;
+}
+
+__device__ float3  occluderTransmittance(float3  toward_1, float3  n_15, BSDFMaterial material_31, float coverage_1)
 {
     float3  through_2;
-    if((material_30.ior) == 1.0f)
+    if((material_31.ior) == 1.0f)
     {
-        float3  _S2243 = straightThrough(material_30);
-        through_2 = _S2243;
+        float3  _S2254 = straightThrough(material_31);
+        through_2 = _S2254;
     }
     else
     {
         through_2 = make_float3 (0.0f);
     }
-    CoatFrame _S2244 = coatFrame(material_30, n_14);
-    bool _S2245 = (_S2244.ior) > 0.0f;
-    if(_S2245)
+    CoatFrame _S2255 = coatFrame(material_31, n_15);
+    bool _S2256 = (_S2255.ior) > 0.0f;
+    if(_S2256)
     {
-        float _S2246 = fresnel((F32_abs((dot_0(_S2244.normal, toward_1)))), 1.0f, _S2244.ior);
-        float3  _S2247 = mix_0(make_float3 (1.0f), make_float3 (1.0f - _S2246) * material_30.coat_tint, material_30.coat);
-        float3  through_3 = through_2 * _S2247;
+        float _S2257 = fresnel((F32_abs((dot_0(_S2255.normal, toward_1)))), 1.0f, _S2255.ior);
+        float3  _S2258 = mix_0(make_float3 (1.0f), make_float3 (1.0f - _S2257) * material_31.coat_tint, material_31.coat);
+        float3  through_3 = through_2 * _S2258;
         through_2 = through_3;
     }
     return through_2 * make_float3 (coverage_1) + make_float3 (1.0f - coverage_1);
@@ -7949,10 +7965,10 @@ __device__ float3  occluderTransmittance(float3  toward_1, float3  n_14, BSDFMat
 
 __device__ Shift walk_hook(Domain dom_8, Reservoir r_10, bool replay_3, float scale_5, Selection * sel_9)
 {
-    Domain _S2248 = dom_8;
-    Reservoir _S2249 = r_10;
-    Shift _S2250 = walk_0(&_S2248, &_S2249, replay_3, scale_5, sel_9);
-    return _S2250;
+    Domain _S2259 = dom_8;
+    Reservoir _S2260 = r_10;
+    Shift _S2261 = walk_0(&_S2259, &_S2260, replay_3, scale_5, sel_9);
+    return _S2261;
 }
 
 __device__ void restir_initial_hook(uint3  global_invocation_id_9)
@@ -8028,11 +8044,11 @@ __device__ uint noiseWhite(uint x_29, uint y_8, uint t_29, uint size_0)
         {
             break;
         }
-        uint _S2251 = size_0 - 1U;
-        uint _S2252 = (x_29 + size_0 / 2U) & _S2251;
-        bool _S2253 = i_27 < 2U;
-        uint _S2254 = _slang_select(_S2253, x_29,_S2252);
-        uint l_5 = _S2254;
+        uint _S2262 = size_0 - 1U;
+        uint _S2263 = (x_29 + size_0 / 2U) & _S2262;
+        bool _S2264 = i_27 < 2U;
+        uint _S2265 = _slang_select(_S2264, x_29,_S2263);
+        uint l_5 = _S2265;
         uint r_11 = y_8;
         uint k_4 = 0U;
         for(;;)
@@ -8044,91 +8060,91 @@ __device__ uint noiseWhite(uint x_29, uint y_8, uint t_29, uint size_0)
             {
                 break;
             }
-            uint _S2255 = hash(((r_11 ^ (t_29 << 16U)) ^ (k_4 << 28U)) ^ ((i_27 & 1U) << 31U));
-            uint _S2256 = l_5 ^ (_S2255 & _S2251);
+            uint _S2266 = hash(((r_11 ^ (t_29 << 16U)) ^ (k_4 << 28U)) ^ ((i_27 & 1U) << 31U));
+            uint _S2267 = l_5 ^ (_S2266 & _S2262);
             uint k_5 = k_4 + 1U;
             l_5 = r_11;
-            r_11 = _S2256;
+            r_11 = _S2267;
             k_4 = k_5;
         }
-        uint _S2257 = l_5 + r_11 * size_0;
-        uint _S2258 = size_0 * size_0;
-        uint _S2259;
-        if(_S2258 >= 65536U)
+        uint _S2268 = l_5 + r_11 * size_0;
+        uint _S2269 = size_0 * size_0;
+        uint _S2270;
+        if(_S2269 >= 65536U)
         {
-            uint _S2260 = _S2257 / (_S2258 / 65536U);
-            _S2259 = _S2260;
+            uint _S2271 = _S2268 / (_S2269 / 65536U);
+            _S2270 = _S2271;
         }
         else
         {
-            uint _S2261 = 65536U / _S2258;
-            _S2259 = _S2257 * _S2261;
+            uint _S2272 = 65536U / _S2269;
+            _S2270 = _S2268 * _S2272;
         }
-        ranks_0[i_27] = _S2259;
+        ranks_0[i_27] = _S2270;
         uint i_28 = i_27 + 1U;
         i_27 = i_28;
     }
-    bool _S2262 = (ranks_0[int(0)]) == 65535U;
-    bool _S2263;
-    if(_S2262)
+    bool _S2273 = (ranks_0[int(0)]) == 65535U;
+    bool _S2274;
+    if(_S2273)
     {
-        _S2263 = (ranks_0[int(1)]) == 65535U;
+        _S2274 = (ranks_0[int(1)]) == 65535U;
     }
     else
     {
-        _S2263 = false;
+        _S2274 = false;
     }
-    bool _S2264 = (ranks_0[int(2)]) == 65535U;
-    bool _S2265;
-    if(_S2264)
+    bool _S2275 = (ranks_0[int(2)]) == 65535U;
+    bool _S2276;
+    if(_S2275)
     {
-        _S2265 = (ranks_0[int(3)]) == 65535U;
-    }
-    else
-    {
-        _S2265 = false;
-    }
-    if(_S2263)
-    {
-        _S2263 = (ranks_0[int(3)]) != 65535U;
+        _S2276 = (ranks_0[int(3)]) == 65535U;
     }
     else
     {
-        _S2263 = false;
+        _S2276 = false;
     }
-    if(_S2263)
+    if(_S2274)
     {
-        _S2263 = true;
+        _S2274 = (ranks_0[int(3)]) != 65535U;
     }
     else
     {
-        if(_S2265)
+        _S2274 = false;
+    }
+    if(_S2274)
+    {
+        _S2274 = true;
+    }
+    else
+    {
+        if(_S2276)
         {
-            _S2263 = (ranks_0[int(1)]) != 65535U;
+            _S2274 = (ranks_0[int(1)]) != 65535U;
         }
         else
         {
-            _S2263 = false;
+            _S2274 = false;
         }
     }
-    uint _S2266 = ranks_0[int(0)];
-    uint _S2267 = ranks_0[int(1)];
-    uint _S2268 = ranks_0[int(3)];
-    uint _S2269 = _slang_select(_S2263, _S2268,_S2267);
-    return _S2266 | (_S2269 << 16U);
+    uint _S2277 = ranks_0[int(0)];
+    uint _S2278 = ranks_0[int(1)];
+    uint _S2279 = ranks_0[int(3)];
+    uint _S2280 = _slang_select(_S2274, _S2279,_S2278);
+    return _S2277 | (_S2280 << 16U);
 }
 
 __device__ uint3  noiseBlock(uint sweep_0, uint colour_0, uint block_0, uint size_1)
 {
-    uint _S2270 = hash(sweep_0 * 7919U + 1U);
-    uint _S2271 = size_1 / 16U;
-    uint _S2272 = block_0 % _S2271;
-    uint _S2273 = block_0 / _S2271;
-    uint _S2274 = _S2273 % _S2271;
-    uint _S2275 = block_0 / (_S2271 * _S2271);
-    uint3  _S2276 = make_uint3 (_S2272, _S2274, _S2275);
-    uint3  _S2277 = make_uint3 (colour_0 & 1U, (colour_0 >> 1U) & 1U, colour_0 >> 2U);
-    return _S2276 * make_uint3 (16U) + _S2277 * make_uint3 (8U) + make_uint3 (_S2270 & 7U, (_S2270 >> 3U) & 7U, (_S2270 >> 6U) & 7U);
+    uint _S2281 = hash(sweep_0 * 7919U + 1U);
+    uint _S2282 = size_1 / 16U;
+    uint _S2283 = block_0 % _S2282;
+    uint _S2284 = block_0 / _S2282;
+    uint _S2285 = _S2284 % _S2282;
+    uint _S2286 = block_0 / (_S2282 * _S2282);
+    uint3  _S2287 = make_uint3 (_S2283, _S2285, _S2286);
+    uint3  _S2288 = make_uint3 (colour_0 & 1U, (colour_0 >> 1U) & 1U, colour_0 >> 2U);
+    return _S2287 * make_uint3 (16U) + _S2288 * make_uint3 (8U) + make_uint3 (_S2281 & 7U, (_S2281 >> 3U) & 7U, (_S2281 >> 6U) & 7U);
 }
 
 #undef Matrix

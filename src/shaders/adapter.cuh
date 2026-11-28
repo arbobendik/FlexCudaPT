@@ -186,8 +186,8 @@ static __device__ float3 fcptCalculatePointLightContrib(unsigned index) { return
 // The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
 // b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
 // world always shades. No ambient color without a world
-static __device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe) {
-    return environment(hookScene(), dir, Ray{false, false, lobe, float(depth + 2u), 0});
+static __device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe) { // An escape's lobe flagged
+    return environment(hookScene(), dir, Ray{false, false, lobe & ~LOBE_ESCAPE, float(depth + 2u), 0});
 }
 // Its luminance CDF by cell, (cdf, share), the marginal in the last column; none where the world is not sampled
 static __device__ float4 fcptEnvironmentCdf(uint2 cell) {

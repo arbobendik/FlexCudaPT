@@ -46,6 +46,7 @@ constexpr unsigned LOBE_NONE = 3u;
 constexpr unsigned LOBE_SHEEN_VELVET = 4u;  // The sheen or velvet lobe, which Light Path reads as a diffuse reflection
 constexpr unsigned LOBE_COAT = 5u;  // The coat's, a glossy reflection
 constexpr unsigned LOBE_TOON = 6u;  // The toon lobe, which Light Path reads as a diffuse reflection
+constexpr unsigned LOBE_ESCAPE = 8u;  // Flagging an escape's lobe, for the denoising guides (FlexKernels' walk)
 constexpr float BIAS = 0.0000152587890625f;
 // Share of a ray cone's width a mip level covers, 2^-1.5
 constexpr float CONE_SHARE = 0.35355339f;
