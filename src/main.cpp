@@ -341,6 +341,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     struct { unsigned samples, reuse; float distance, cosine; unsigned launches; View view; } request;
     bool reused = false;
     size_t pixels = 1, reservoirs = 1; // The view's pixels, and of them those with reservoirs: one without ReSTIR
+    size_t shown = 1; // Its output's pixels, DLSS's upscaled
     float4* sums = (float4*)mmap(nullptr, sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
     loadView(scene, 1, 1); // For the first view to free like any later one's
     scene.vertices = scene.previousVertices = (float3*)allocate(0); // For the first scene to keep or free
@@ -648,12 +649,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 for (void* array : {(void*)scene.accumulation, (void*)scene.previous, (void*)scene.initial,
                     (void*)scene.temporal, (void*)scene.shifts, (void*)scene.queue, (void*)anchor})
                     release((CUdeviceptr)array);
-                CHECK(munmap(sums, pixels * sizeof(float4)));
+                CHECK(munmap(sums, shown * sizeof(float4)));
                 pixels = request.view.width * request.view.height;
+                shown = request.view.settings.outputWidth * request.view.settings.outputHeight;
                 reservoirs = request.view.settings.restir ? pixels : 1;
                 loadView(scene, pixels, reservoirs);
-                CHECK(ftruncate(shared, pixels * sizeof(float4)));
-                sums = (float4*)mmap(nullptr, pixels * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
+                CHECK(ftruncate(shared, shown * sizeof(float4)));
+                sums = (float4*)mmap(nullptr, shown * sizeof(float4), PROT_WRITE, MAP_SHARED, shared, 0);
                 CHECK(sums == MAP_FAILED);
                 anchor = (CUdeviceptr)zeros<char>(reservoirs * (sizeof(Reservoir) + sizeof(float)));
                 anchorCamera = request.view.camera, anchorProjection = request.view.projection;
@@ -798,8 +800,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.denoisedCamera = scene.camera, scene.denoisedCameraProjection = scene.cameraProjection;
             history = true;
         }
-        CHECK(cuMemcpyDtoH(sums, result, pixels * sizeof(float4)));
-        if (denoise) for (size_t i = 0; i < pixels; ++i) sums[i] = {sums[i].x * done, sums[i].y * done,
+        CHECK(cuMemcpyDtoH(sums, result, shown * sizeof(float4)));
+        if (denoise) for (size_t i = 0; i < shown; ++i) sums[i] = {sums[i].x * done, sums[i].y * done,
             sums[i].z * done, float(done)};
     }
 }

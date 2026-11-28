@@ -781,8 +781,9 @@ module['quality'], split = quality, new('split')
 assert all(getattr(split, 'flex_preview_' + name[5:]) == getattr(split, name) for name in flex.QUALITY
     if name != 'flex_samples'), 'viewport defaults'
 split.flex_preview_bounces, split.flex_preview_samples = 0, 8
-assert flex.settings(split, True, 'OPTIX')[3] == 0 and flex.settings(split, False, 'OPTIX')[3] == 16 and \
-    flex.sampling(split, True, True)[0] == 8 and flex.sampling(split, False, False)[0] == 256, 'viewport settings'
+assert flex.settings(split, True, 'OPTIX', 64, 64)[3] == 0 and \
+    flex.settings(split, False, 'OPTIX', 64, 64)[3] == 16 and flex.sampling(split, True, True)[0] == 8 and \
+    flex.sampling(split, False, False)[0] == 256, 'viewport settings'
 for viewport, prefix in ((True, 'flex_preview_'), (False, 'flex_')):
     flex.Sampling.draw(types.SimpleNamespace(layout=(layout := types.SimpleNamespace(drawn=[], row=lambda: layout,
         prop=lambda _, name: layout.drawn.append(name))), viewport=viewport), types.SimpleNamespace(scene=split))

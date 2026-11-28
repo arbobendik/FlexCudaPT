@@ -2207,11 +2207,12 @@ def inside(tree, point):
 def quality(scene, viewport): return types.SimpleNamespace(**{name[5:]: getattr(scene, PREFIXES[viewport] + name[5:])
     for name in QUALITY})
 
-# The scene's settings of the renderer, in its order, which denoises on OptiX alone; the viewport denoises every result
-def settings(scene, viewport, device):
+# The scene's settings of the renderer, in its order, for an output of width x height, which denoises on OptiX alone;
+# the viewport denoises every result
+def settings(scene, viewport, device, width, height):
     q = quality(scene, viewport)
     return q.restir, q.decorrelation, q.neighbors, q.bounces, q.paths, \
-        q.denoise * (1 + viewport) * (device == 'OPTIX'), 1 << q.noise_size.bit_length() - 1
+        q.denoise * (1 + viewport) * (device == 'OPTIX'), 1 << q.noise_size.bit_length() - 1, 0, width, height
 
 # The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
 # angle its camera moves and turns at most from the last one's to reuse them and continue its denoised sequence; a view
@@ -3244,8 +3245,9 @@ class Flex(bpy.types.RenderEngine):
         answer = self.answers.read(12)
         if len(answer) < 12: return self.report({'ERROR'}, 'Flex: the renderer stopped') or (0, None)
         launched, *self.memory = struct.unpack('<I2f', answer)
-        sums = mmap.mmap(self.shared.fileno(), 16 * width * height, access=mmap.ACCESS_READ)
-        return launched, numpy.frombuffer(sums, 'f').reshape(-1, width, 4)[::-1]
+        shown = settings[-2:]  # The output's size, DLSS's upscaled
+        sums = mmap.mmap(self.shared.fileno(), 16 * shown[0] * shown[1], access=mmap.ACCESS_READ)
+        return launched, numpy.frombuffer(sums, 'f').reshape(-1, shown[0], 4)[::-1]
 
     # Shows the result after ever larger batches of samples, until it has them all or the render is cancelled
     def render(self, depsgraph):
@@ -3271,7 +3273,7 @@ class Flex(bpy.types.RenderEngine):
         count = 0  # Shown none yet: a view that already has its samples is shown once
         while not self.test_break():
             launched, sums = self.trace(width, height, sampling(scene, False, follows), min(count or 1, RENDER_SAMPLES),
-                settings(scene, False, self.device), *camera)
+                settings(scene, False, self.device, width, height), *camera)
             if sums is None or count and not launched: break
             count = int(sums[0, 0, 3])
             pixels = sums[y:y + result.resolution_y, x:x + result.resolution_x] * (1 / count)
@@ -3297,8 +3299,9 @@ class Flex(bpy.types.RenderEngine):
         scene = depsgraph.scene
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
         launched, sums = self.trace(region.width, region.height, sampling(scene, True, True), VIEWPORT_SAMPLES,
-            settings(scene, True, self.device), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
-            camera.evaluated_get(depsgraph) if camera else None, context.space_data.clip_end)
+            settings(scene, True, self.device, region.width, region.height), context.region_data.view_matrix.inverted(),
+            context.region_data.window_matrix, camera.evaluated_get(depsgraph) if camera else None,
+            context.space_data.clip_end)
         if launched:
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
             self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',

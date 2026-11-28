@@ -114,8 +114,10 @@ struct Reservoir {
 struct Shift { float3 f; float jac; };
 // Of the scene: whether ReSTIR reuses paths, whether it lowers temporal reuse where samples repeat, which biases it, the
 // spatial neighbors it reuses from, the bounces of a path after the camera's hit and the paths per pixel and sample,
-// the side of its blue-noise tensor, and a triangle of the volume the camera is in, or none
-struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, noise, medium; };
+// its denoising (1 once, 2 every result, 3 by DLSS), the side of its blue-noise tensor, DLSS's Upscale Mode and the
+// output's size, DLSS's upscaled, and a triangle of the volume the camera is in, or none
+struct Settings { unsigned restir, decorrelation, neighbors, bounces, paths, denoise, noise, upscale, outputWidth,
+    outputHeight, medium; };
 // Reuse texture sizes, different per neighbor to avoid repeating patterns (Sec. 3.2)
 constexpr int PAIRING_SIZES[] = {254, 230, 210};
 // Per triangle of the meshes, in their own space: three vertices, normals, generated points, points in their object,
