@@ -1541,23 +1541,29 @@ struct VkScene : IScene {
     }
     float3 hitPosition(FKHit hit) { return fcpt.hitPosition(scene, scene.vertices, nativeHit(hit)); }
     float3x3 worldTriangle(uint instance_index, uint triangle_index) {
+        if (triangle_index == NONE) {  // A lamp's: its center and half axes' ends
+            const float3 c = light(instance_index).position;
+            return float3x3(c, c + lightShape(instance_index, 0).xyz, c + lightShape(instance_index, 1).xyz);
+        }
         const Corners corner = corners(scene.vertices, scene.instances[instance_index], triangle_index);
         return float3x3(corner[0], corner[1], corner[2]);
     }
-    // Light tree node: x 0 a node, 1 a triangle; a leaf's y its instance, z its triangle; the first child next
+    // Light tree node: x 0 a node, 1 a triangle, 2 a lamp; a leaf's y its instance, z its triangle, a lamp's y its FK
+    // light number; the first child next
     LightBounds lightBounds(uint n) {
         const LightNode node = scene.lights[n];
         return {node.low, node.high, node.w, node.phi, node.cos_theta_o};
     }
     uint4 lightNode(uint n) {
         const LightNode node = scene.lights[n];
-        return uint4(node.leaf, node.instance, node.child - scene.instances[node.instance].first, 0);
+        return uint4(min(uint(node.leaf), 2), node.instance,
+            node.leaf >= 2 ? 0 : node.child - scene.instances[node.instance].first, max(uint(node.leaf), 2) - 2);
     }
     uint lightSecond(uint n) { return scene.lights[n].child; }
-    // A light's slot, its triangle's number; none of a strand
+    // A light's slot, its triangle's number or a lamp's material's; none of a strand
     uint lightSlot(FKHit hit) {
-        return used(CURVES) && scene.instances[hit.instance_index].world == STRANDS ? NONE
-            : key(scene, nativeHit(hit));
+        return hit.is_point_light != 0 ? scene.count + 1 + hit.instance_index
+            : used(CURVES) && scene.instances[hit.instance_index].world == STRANDS ? NONE : key(scene, nativeHit(hit));
     }
     uint4 lightTrail(uint j) {
         const uint64_t trail = scene.trails[j];
@@ -1565,10 +1571,12 @@ struct VkScene : IScene {
     }
     bool slotLeaf(uint n, uint j, uint4 trail_texel) {
         const Hit light = owned(scene, j);
-        return scene.lights[n].child == light.triangle && scene.lights[n].instance == light.instance;
+        return j >= scene.count + 1 ? scene.lights[n].child == j
+            : scene.lights[n].child == light.triangle && scene.lights[n].instance == light.instance;
     }
-    // No point lights
-    FKLight light(uint index) { return {}; }
+    // The lamps, each at its center of its radius, shaded as emitters
+    FKLight light(uint index) { return {scene.lamps[4 * index].xyz, 0, float3(0), 0, scene.lamps[4 * index].w}; }
+    float4 lightShape(uint index, uint row) { return scene.lamps[4 * index + 1 + row]; }
     uint triangleOffset(uint instance_index) { return scene.instances[instance_index].first; }
     float3 calculatePointLightContrib(uint index, float3 dir, uint depth, uint lobe, float length) { return float3(0); }
     // The world along an escape's direction, shaded at bounce depth + 2 by lobe

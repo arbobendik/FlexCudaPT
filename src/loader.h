@@ -213,10 +213,10 @@ inline float3 place(const Instance& instance, float3 p) {
 }
 
 // Light BVH over the instances' emitting triangles, as leaves of their bounds, normal and power pi * emitted * area in
-// the world, else a leaf of no power, uploaded to the GPU with the trails to the triangles' leaves by their numbers in
-// the scene's order (pbrt-v4's bit trails)
+// the world and over the lamps, else a leaf of no power, uploaded to the GPU with the trails to the triangles' leaves
+// by their numbers in the scene's order, then the lamps' (pbrt-v4's bit trails)
 inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Instance>& instances,
-    const std::vector<Material>& materials, unsigned long long*& trails) {
+    const std::vector<Material>& materials, const std::vector<float4>& lamps, unsigned long long*& trails) {
     std::vector<LightNode> lights, nodes;
     for (unsigned i = 0; i < instances.size(); ++i) for (unsigned m = instances[i].first; m < instances[i].first +
         instances[i].count; ++m) {
@@ -228,6 +228,13 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
             lights.push_back({lower(lower(a, b), c), upper(upper(a, b), c), n * (1 / length(n)),
                 float(M_PI) * materials[t].emitted * length(n) / 2, 1, m, i, true});
     }
+    for (unsigned k = 0; 4 * k < lamps.size(); ++k) { // A lamp's bounds: its sphere's, or its area light's rectangle's
+        const float* row = &lamps[4 * k].x;
+        const float3 c{row[0], row[1], row[2]}, e{row[3] + std::abs(row[4]) + std::abs(row[8]),
+            row[3] + std::abs(row[5]) + std::abs(row[9]), row[3] + std::abs(row[6]) + std::abs(row[10])};
+        lights.push_back({c - e, c + e, {row[12], row[13], row[14]}, row[11], row[15],
+            unsigned(materials.size() - lamps.size() / 4) + k, k, row[3] > 0 ? 2 : 3 + (row[7] > 0)});
+    }
     if (lights.empty()) lights.push_back({.leaf = true});
     buildLights(nodes, lights, 0, lights.size());
     std::vector<unsigned long long> trail(nodes.size()), leaves(materials.size());
@@ -235,8 +242,9 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
     for (size_t i = 0; i < nodes.size(); ++i) {
         if (!nodes[i].leaf) trail[i + 1] = trail[i], trail[nodes[i].child] = trail[i] | 1ull << depth[i],
             depth[i + 1] = depth[nodes[i].child] = depth[i] + 1;
-        else if (nodes[i].phi > 0) leaves[instances[nodes[i].instance].key + nodes[i].child
-            - instances[nodes[i].instance].first] = trail[i]; // Not the placeholder of a scene without emitters
+        else if (nodes[i].phi > 0) leaves[nodes[i].leaf >= 2 ? nodes[i].child : instances[nodes[i].instance].key
+            + nodes[i].child - instances[nodes[i].instance].first] = trail[i]; // Not the placeholder of a scene
+            // without emitters
     }
     trails = (unsigned long long*)allocate(leaves.size() * sizeof(unsigned long long), leaves.data());
     return (LightNode*)allocate(nodes.size() * sizeof(LightNode), nodes.data());

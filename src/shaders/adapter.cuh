@@ -154,22 +154,29 @@ static __device__ float3 fcptHitPosition(FKHit hit) {
     return hitPosition(hookScene(), hookScene().vertices, nativeHit(hit));
 }
 static __device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, unsigned triangle) {
+    if (triangle == NONE) {  // A lamp's: its center and half axes' ends
+        const float3 c = fcptLight(instance).position;
+        const float4 a = fcptLightShape(instance, 0), b = fcptLightShape(instance, 1);
+        return makeMatrix<float, 3, 3>(c, c + make_float3(a.x, a.y, a.z), c + make_float3(b.x, b.y, b.z));
+    }
     const Corners corner = corners(hookScene().vertices, hookScene().instances[instance], triangle);
     return makeMatrix<float, 3, 3>(corner[0], corner[1], corner[2]);
 }
-// The light tree's nodes as FlexLight's texels: x whether a leaf (0 a node, 1 a triangle, 2 a point light, none here),
-// a leaf's y its instance and z its triangle within it, which a node's leave meaningless, w unused; a node's second
-// child, the first following it
+// The light tree's nodes as FlexLight's texels: x whether a leaf (0 a node, 1 a triangle, 2 a lamp, of shape w), a
+// leaf's y its instance and z its triangle within it, a lamp's y its FK light, which a node's leave meaningless; a
+// node's second child, the first following it
 static __device__ LightNode fcptLightBounds(unsigned n) { return hookScene().lights[n]; }
 static __device__ uint4 fcptLightNode(unsigned n) {
     const LightNode& node = hookScene().lights[n];
-    return make_uint4(node.leaf, node.instance, node.child - hookScene().instances[node.instance].first, 0);
+    return make_uint4(min(node.leaf, 2), node.instance,
+        node.leaf >= 2 ? 0 : node.child - hookScene().instances[node.instance].first, max(node.leaf, 2) - 2);
 }
 static __device__ unsigned fcptLightSecond(unsigned n) { return hookScene().lights[n].child; }
-// A light's slot, its triangle's number, whose trail of 64 bits is x low and y high; none of a strand, which no light
-// sampling picks
+// A light's slot, its triangle's number or a lamp's material's, whose trail of 64 bits is x low and y high; none of a
+// strand, which no light sampling picks
 static __device__ unsigned fcptLightSlot(FKHit hit) {
-    return STRAND(hookScene(), hit.instance_index) ? NONE : key(hookScene(), nativeHit(hit));
+    return hit.is_point_light ? hookScene().count + 1 + hit.instance_index
+        : STRAND(hookScene(), hit.instance_index) ? NONE : key(hookScene(), nativeHit(hit));
 }
 static __device__ uint4 fcptLightTrail(unsigned j) {
     const unsigned long long trail = hookScene().trails[j];
@@ -177,10 +184,15 @@ static __device__ uint4 fcptLightTrail(unsigned j) {
 }
 static __device__ bool fcptSlotLeaf(unsigned n, unsigned j) {
     const Hit light = owned(hookScene(), j);
-    return hookScene().lights[n].child == light.triangle && hookScene().lights[n].instance == light.instance;
+    return j >= hookScene().count + 1 ? hookScene().lights[n].child == j
+        : hookScene().lights[n].child == light.triangle && hookScene().lights[n].instance == light.instance;
 }
-// FK: point lights, which the renderer has none of; no node names one
-static __device__ FKLight fcptLight(unsigned index) { return {}; }
+// FK: its lights the lamps, each at its center of its radius, shaded as emitters
+static __device__ FKLight fcptLight(unsigned index) {
+    const float4 lamp = hookScene().lamps[4 * index];
+    return {make_float3(lamp.x, lamp.y, lamp.z), 0, {}, 0, lamp.w};
+}
+static __device__ float4 fcptLightShape(unsigned index, unsigned row) { return hookScene().lamps[4 * index + 1 + row]; }
 static __device__ unsigned fcptTriangleOffset(unsigned instance) { return hookScene().instances[instance].first; }
 static __device__ __noinline__ float3 fcptCalculatePointLightContrib(unsigned index, float3 dir, unsigned depth,
     unsigned lobe, float length) { return make_float3(0, 0, 0); }
