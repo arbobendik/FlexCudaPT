@@ -101,7 +101,7 @@ struct Scene {
     uint* noise; uint noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
     uint64_t noiseTexture; // while built; then as a layered texture of 32 layers
     float4* albedo; float4* normal; float4* specular; float* depth; // OptiX's alone: the denoisers' guides
-    float4* deferred; uint guiding;
+    float2* specularFlow; float4* deferred; float4* mirrors; uint guiding;
 };
 // The images' textures, bindless: RGBA8 ones as their bytes, others as their floats' words
 [[vk::binding(0, 0)]] Texture2D<uint4> textures[];

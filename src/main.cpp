@@ -693,7 +693,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     (CUdeviceptr)scene.mean, (CUdeviceptr)scene.flow, (CUdeviceptr)scene.trust,
                     (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen, (CUdeviceptr)scene.albedo,
                     (CUdeviceptr)scene.normal, (CUdeviceptr)scene.specular, (CUdeviceptr)scene.depth,
-                    (CUdeviceptr)scene.deferred}) release(array);
+                    (CUdeviceptr)scene.specularFlow, (CUdeviceptr)scene.deferred, (CUdeviceptr)scene.mirrors})
+                    release(array);
 #ifdef DLSS
                 if (view.settings.denoise == 3) dlssDestroy(upscaler), release(upscaled);
 #endif
@@ -710,6 +711,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     scene.albedo = zeros<float4>(pixels), scene.normal = zeros<float4>(pixels);
                     const size_t upscaling = request.view.settings.denoise == 3 ? pixels : 0; // DLSS's alone
                     scene.specular = zeros<float4>(upscaling), scene.depth = zeros<float>(upscaling);
+                    scene.specularFlow = zeros<float2>(upscaling), scene.mirrors = zeros<float4>(2 * upscaling);
                     scene.deferred = zeros<float4>(pixels);
 #ifdef DLSS
                     const Settings& set = request.view.settings;
@@ -755,6 +757,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             for (CUdeviceptr guide : {(CUdeviceptr)scene.albedo, (CUdeviceptr)scene.normal,
                 (CUdeviceptr)scene.specular}) CHECK(cuMemsetD32(guide, 0, 4 * pixels));
             CHECK(cuMemsetD32((CUdeviceptr)scene.depth, 0, pixels));
+            CHECK(cuMemsetD32((CUdeviceptr)scene.specularFlow, 0, 2 * pixels));
             jitter = dlssJitter(scene.frame * scene.settings.paths % 1024 / (scene.settings.paths * DLSS_SAMPLES) + 1);
         }
 #endif
@@ -834,8 +837,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 sizes.stateSizeInBytes, &guide, &layer, 1, 0, 0, scratch, sizes.withoutOverlapScratchSizeInBytes));
 #ifdef DLSS
             else dlssRun(upscaler, {(CUdeviceptr)scene.mean, (CUdeviceptr)scene.depth, (CUdeviceptr)scene.albedo,
-                (CUdeviceptr)scene.specular, (CUdeviceptr)scene.normal, (CUdeviceptr)scene.flow}, jitter,
-                result = upscaled, !history);
+                (CUdeviceptr)scene.specular, (CUdeviceptr)scene.normal, (CUdeviceptr)scene.flow,
+                (CUdeviceptr)scene.specularFlow}, jitter, result = upscaled, !history);
 #endif
             // The frame denoised is the last one now
             std::swap(guides[0], guides[1]);

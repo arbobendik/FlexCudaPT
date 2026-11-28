@@ -11,8 +11,8 @@ constexpr char DLSS_PROJECT[] = "974758a4-3ed1-4a97-be35-515a49466fca"; // Flex'
 constexpr NVSDK_NGX_PerfQuality_Value DLSS_QUALITY[] = {NVSDK_NGX_PerfQuality_Value_DLAA,
     NVSDK_NGX_PerfQuality_Value_MaxQuality, NVSDK_NGX_PerfQuality_Value_Balanced, NVSDK_NGX_PerfQuality_Value_MaxPerf,
     NVSDK_NGX_PerfQuality_Value_UltraPerformance};
-// Channels of colour, depth, diffuse and specular albedo, normal and roughness, motion, and the output
-constexpr unsigned DLSS_CHANNELS[] = {4, 1, 4, 4, 4, 2, 4};
+// Channels of colour, depth, diffuse and specular albedo, normal and roughness, motion, specular motion, the output
+constexpr unsigned DLSS_CHANNELS[] = {4, 1, 4, 4, 4, 2, 2, 4};
 
 // Whether NGX, started on the current context, runs Ray Reconstruction
 inline bool dlssStart() {
@@ -88,11 +88,12 @@ inline void dlssRun(const Dlss& dlss, const CUdeviceptr (&inputs)[std::size(DLSS
     parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, jitter.x);
     parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, jitter.y);
     const char* names[] = {NVSDK_NGX_Parameter_Color, NVSDK_NGX_Parameter_Depth, NVSDK_NGX_Parameter_DiffuseAlbedo,
-        NVSDK_NGX_Parameter_SpecularAlbedo, NVSDK_NGX_Parameter_GBuffer_Normals, NVSDK_NGX_Parameter_MotionVectors};
+        NVSDK_NGX_Parameter_SpecularAlbedo, NVSDK_NGX_Parameter_GBuffer_Normals, NVSDK_NGX_Parameter_MotionVectors,
+        NVSDK_NGX_Parameter_GBuffer_SpecularMvec};
     for (size_t k = 0; k < std::size(names); ++k) parameters->Set(names[k], (void*)&dlss.textures[k]);
     parameters->Set(NVSDK_NGX_Parameter_GBuffer_Roughness, (void*)&dlss.textures[4]);
     parameters->Set(NVSDK_NGX_Parameter_Output, (void*)&dlss.output);
-    // The motion as the flow's opposite: from where a pixel's point is now to where it was
+    // The motions as the flows' opposites: from where a pixel's point is now to where it was
     parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, -1.0f), parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, -1.0f);
     parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, dlss.width);
     parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, dlss.height);
