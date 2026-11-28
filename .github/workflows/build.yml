@@ -37,6 +37,13 @@ jobs:
             https://github.com/arbobendik/FlexCudaPT/releases/download/noise-512/bluenoise-512x512x32.bin
           echo "de6572dcca1e6fca0b3b8dbaa552bd355f6bd69f61fb653718426bd86871c321  build/bluenoise-512x512x32.bin" \
             | sha256sum -c
+      - name: The DLSS SDK's headers, which the renderer builds DLSS with, outside the repository; NGX comes with the driver
+        run: |
+          git clone -q --depth 1 --branch v310.9.16 --filter=blob:none --sparse https://github.com/NVIDIA/DLSS \
+            "$RUNNER_TEMP/dlss-sdk"
+          git -C "$RUNNER_TEMP/dlss-sdk" sparse-checkout set include
+          test "$(git -C "$RUNNER_TEMP/dlss-sdk" rev-parse HEAD)" = 9981c6350dc58c0ce21f024fd65e31e851c31689
+          echo "DLSS_SDK_ROOT=$RUNNER_TEMP/dlss-sdk" >> "$GITHUB_ENV"
       - run: make
       - uses: actions/upload-artifact@v7
         with:
