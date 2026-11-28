@@ -1345,11 +1345,14 @@ __device__ float2 aperture(const Lens& lens, unsigned seed) {
     return make_float2((x * cosf(angle) - y * sinf(angle)) / lens.ratio, x * sinf(angle) + y * cosf(angle));
 }
 
-// Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray
+// Camera and primary hit of a pixel by its seed's jitter and lens point; on a miss x1 is one along the ray. A DLSS
+// frame's samples all at its offset from their centers, the frame its seed's sample over its samples' paths
 __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, uint3 size, unsigned seed) {
     unsigned state = stream(seed, STREAM_JITTER);
-    const float x = pixel % size.x + draw(seed, NOISE_CAMERA_X).value;
-    const float y = pixel / size.x + draw(seed, NOISE_CAMERA_Y).value;
+    const float2 offset = scene.settings.denoise == 3 ? make_float2(0.5f, 0.5f) - dlssJitter((seed >> 22)
+        / (scene.settings.paths * DLSS_SAMPLES) + 1)
+        : make_float2(draw(seed, NOISE_CAMERA_X).value, draw(seed, NOISE_CAMERA_Y).value);
+    const float x = pixel % size.x + offset.x, y = pixel / size.x + offset.y;
     const float3 plane = camera.x * (2 * x / size.x - 1) + camera.y * (1 - 2 * y / size.y) + camera.z;
     float3 direction = camera.lens.ortho ? normalize(cross(camera.y, camera.x)) : normalize(plane);
     float3 origin = camera.lens.ortho ? camera.origin + plane : camera.origin;
@@ -1811,7 +1814,8 @@ extern "C" __global__ void __raygen__denoise() {
     const Scene& scene = *(Scene*)optixGetSbtDataPointer();
     const float4 sum = scene.accumulation[index];
     scene.mean[index] = make_float4(sum.x / sum.w, sum.y / sum.w, sum.z / sum.w, 1.0f);
-    const Domain dom = pixelDomain(scene, VIEW(scene.camera), index, size, index);
+    const Domain dom = pixelDomain(scene, VIEW(scene.camera), index, size, scene.settings.denoise == 3
+        ? (scene.frame - 1) * scene.settings.paths % 1024 << 22 : index); // A DLSS frame's at its offset
     const Camera& last = scene.denoisedCamera;
 #ifdef EXTENDED
     const Projection& lastProjection = scene.denoisedCameraProjection;

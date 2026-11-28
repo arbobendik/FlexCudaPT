@@ -69,3 +69,37 @@ inline void dlssDestroy(const Dlss& dlss) {
     for (const CUtexObject texture : dlss.textures) CHECK(cuTexObjectDestroy(texture));
     for (const CUarray array : dlss.arrays) CHECK(cuArrayDestroy(array));
 }
+
+// The inputs, rows top to bottom (colour, linear depth, diffuse and specular albedo, normal and roughness, the motion
+// since the last frame) of a frame at the jitter's offset, denoised and upscaled into output; reset where the last
+// frame continues none
+inline void dlssRun(const Dlss& dlss, const CUdeviceptr (&inputs)[std::size(DLSS_CHANNELS) - 1], float2 jitter,
+    CUdeviceptr output, bool reset) {
+    for (size_t k = 0; k < std::size(inputs); ++k) {
+        const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_DEVICE, .srcDevice = inputs[k],
+            .srcPitch = dlss.width * DLSS_CHANNELS[k] * sizeof(float), .dstMemoryType = CU_MEMORYTYPE_ARRAY,
+            .dstArray = dlss.arrays[k], .WidthInBytes = dlss.width * DLSS_CHANNELS[k] * sizeof(float),
+            .Height = dlss.height};
+        CHECK(cuMemcpy2D(&copy));
+    }
+    NVSDK_NGX_Parameter* parameters;
+    CHECK(NVSDK_NGX_FAILED(NVSDK_NGX_CUDA_AllocateParameters(&parameters)));
+    parameters->Set(NVSDK_NGX_Parameter_Reset, int(reset));
+    parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_X, jitter.x);
+    parameters->Set(NVSDK_NGX_Parameter_Jitter_Offset_Y, jitter.y);
+    const char* names[] = {NVSDK_NGX_Parameter_Color, NVSDK_NGX_Parameter_Depth, NVSDK_NGX_Parameter_DiffuseAlbedo,
+        NVSDK_NGX_Parameter_SpecularAlbedo, NVSDK_NGX_Parameter_GBuffer_Normals, NVSDK_NGX_Parameter_MotionVectors};
+    for (size_t k = 0; k < std::size(names); ++k) parameters->Set(names[k], (void*)&dlss.textures[k]);
+    parameters->Set(NVSDK_NGX_Parameter_GBuffer_Roughness, (void*)&dlss.textures[4]);
+    parameters->Set(NVSDK_NGX_Parameter_Output, (void*)&dlss.output);
+    // The motion as the flow's opposite: from where a pixel's point is now to where it was
+    parameters->Set(NVSDK_NGX_Parameter_MV_Scale_X, -1.0f), parameters->Set(NVSDK_NGX_Parameter_MV_Scale_Y, -1.0f);
+    parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, dlss.width);
+    parameters->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, dlss.height);
+    CHECK(NVSDK_NGX_FAILED(NVSDK_NGX_CUDA_EvaluateFeature(dlss.feature, parameters)));
+    CHECK(NVSDK_NGX_FAILED(NVSDK_NGX_CUDA_DestroyParameters(parameters)));
+    const CUDA_MEMCPY2D copy{.srcMemoryType = CU_MEMORYTYPE_ARRAY, .srcArray = dlss.arrays[std::size(inputs)],
+        .dstMemoryType = CU_MEMORYTYPE_DEVICE, .dstDevice = output, .dstPitch = dlss.outputWidth * sizeof(float4),
+        .WidthInBytes = dlss.outputWidth * sizeof(float4), .Height = dlss.outputHeight};
+    CHECK(cuMemcpy2D(&copy));
+}

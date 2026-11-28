@@ -154,6 +154,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     const bool ngx = dlssStart();
     if (ngx) std::atexit([] { NVSDK_NGX_CUDA_Shutdown(); });
     Dlss upscaler; CUdeviceptr upscaled;
+    float2 jitter; // A DLSS frame's offset, its samples' (pixelDomain)
 #endif
 
     // Embedded PTX compiled for the steps the scene's programs take, bound in params, once the first scene's arrive
@@ -651,6 +652,11 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             continue;
         }
         receive(&request, sizeof(request), 1);
+#ifdef DLSS
+        if (!ngx && request.view.settings.denoise == 3) // Undenoised at its traced size, which the extension finds
+            request.view.settings.denoise = 0, request.view.settings.outputWidth = request.view.width,
+            request.view.settings.outputHeight = request.view.height;
+#endif
         if (request.view.settings.noise != scene.noiseSize) noised(request.view.settings.noise); // A size changed
         if (std::memcmp(&view, &request.view, sizeof(View))) {
             const Camera &last = anchorCamera, &next = request.view.camera;
@@ -743,6 +749,15 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
         scene.width = view.width, scene.height = view.height;
         scene.anchor = (const Scene*)(table + offsetof(Record, data));
         const unsigned samples = reused ? request.reuse : request.samples;
+#ifdef DLSS
+        if (view.settings.denoise == 3) { // A DLSS frame of each request: its samples alone, at its offset
+            CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * pixels));
+            for (CUdeviceptr guide : {(CUdeviceptr)scene.albedo, (CUdeviceptr)scene.normal,
+                (CUdeviceptr)scene.specular}) CHECK(cuMemsetD32(guide, 0, 4 * pixels));
+            CHECK(cuMemsetD32((CUdeviceptr)scene.depth, 0, pixels));
+            jitter = dlssJitter(scene.frame * scene.settings.paths % 1024 / (scene.settings.paths * DLSS_SAMPLES) + 1);
+        }
+#endif
         for (launched = 0; launched < request.launches && done < samples; ++launched, ++done, ++scene.frame) {
             for (Record& record : records) record.data = scene;
             Scene& anchored = records[0].data;
@@ -815,8 +830,13 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 .previousOutputInternalGuideLayer = image(guides[0], stride, OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER),
                 .outputInternalGuideLayer = image(guides[1], stride, OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER),
                 .flowTrustworthiness = image((CUdeviceptr)scene.trust, sizeof(float), OPTIX_PIXEL_FORMAT_FLOAT1)};
-            CHECK(optixDenoiserInvoke(denoiser, nullptr, &params, state, sizes.stateSizeInBytes, &guide, &layer, 1,
-                0, 0, scratch, sizes.withoutOverlapScratchSizeInBytes));
+            if (view.settings.denoise < 3) CHECK(optixDenoiserInvoke(denoiser, nullptr, &params, state,
+                sizes.stateSizeInBytes, &guide, &layer, 1, 0, 0, scratch, sizes.withoutOverlapScratchSizeInBytes));
+#ifdef DLSS
+            else dlssRun(upscaler, {(CUdeviceptr)scene.mean, (CUdeviceptr)scene.depth, (CUdeviceptr)scene.albedo,
+                (CUdeviceptr)scene.specular, (CUdeviceptr)scene.normal, (CUdeviceptr)scene.flow}, jitter,
+                result = upscaled, !history);
+#endif
             // The frame denoised is the last one now
             std::swap(guides[0], guides[1]);
             std::swap(scene.seen, scene.previousSeen);

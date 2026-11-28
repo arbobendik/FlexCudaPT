@@ -14,6 +14,20 @@ struct Camera { float3 origin, x, y, z; Lens lens; };
 struct Projection { unsigned type; float range[8], shift[2]; };
 // A custom camera's type: its program's first step in range[0], run per sample
 constexpr unsigned CUSTOM_CAMERA = 8;
+constexpr unsigned DLSS_SAMPLES = 4; // A DLSS frame's samples, all at its offset: the extension's per viewport draw
+#ifdef __CUDACC__
+#define SHARED __host__ __device__
+#else
+#define SHARED
+#endif
+// Halton's point k in bases 2 and 3 about a pixel's center, the offset of DLSS's frame k, as Cycles jitters them: the
+// samples' (pixelDomain) and DLSS's
+SHARED inline float2 dlssJitter(unsigned k) {
+    float offset[2] = {-0.5f, -0.5f};
+    for (unsigned base = 2; base <= 3; ++base)
+        for (unsigned i = k, scale = base; i; i /= base, scale *= base) offset[base - 2] += float(i % base) / scale;
+    return float2{offset[0], offset[1]};
+}
 // Step of a program on a stack of values: pushes its value, the UV or the normal, replaces a UV with the color or alpha
 // there of the width * height linear texels from texel on or a color with the normal it encodes in tangent space, or
 // combines the two or three topmost. It also pushes the generated point or replaces a point with the noise there, or a
