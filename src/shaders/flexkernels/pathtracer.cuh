@@ -1064,7 +1064,7 @@ __device__ float importance(LightNode node_0, float3  p_11, float3  normal_0)
         return 0.0f;
     }
     float _S251 = - dot_0(_S234, normal_0);
-    float _S252 = node_0.phi * _S249 / (F32_max((_S235), (length_0(_S232) / 2.0f)));
+    float _S252 = node_0.phi * _S249 / (F32_max((_S235), (_S236)));
     float _S253 = sine(_S251);
     float _S254 = cosSubClamped(_S253, _S251, _S242, _S241);
     bool _S255 = (dot_0(normal_0, normal_0)) == 0.0f;
