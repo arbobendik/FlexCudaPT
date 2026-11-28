@@ -625,7 +625,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 scene.environmentCdf = (float2*)next, scene.cdfWidth = luminance.w + 1, scene.cdfHeight = luminance.h;
             }
             unsigned long long* trails;
-            LightNode* const lights = loadLights(loaded.vertices, loaded.instances, materials, trails);
+            LightNode* const lights = loadLights(loaded.vertices, loaded.instances, materials, loaded.lamps, trails);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.trails, (CUdeviceptr)trails);
             release((CUdeviceptr)scene.lights), release((CUdeviceptr)scene.trails);

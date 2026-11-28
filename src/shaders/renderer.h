@@ -84,8 +84,9 @@ struct Material { float emitted; unsigned program, hidden, opaque, emission; };
 struct Info { float location[3], color[4], index, random, axes[9]; unsigned attributes; };
 // Light BVH node (Conty Estevez and Kulla 2018, as in pbrt-v4) over two sided, diffuse emitting triangles: bounds of
 // their points, their power and the cone of their normals around w. A leaf holds triangle child of the instance, an
-// interior node is followed by its first child, child is its second.
-struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, instance; bool leaf; };
+// interior node is followed by its first child, child is its second. A lamp's leaf, 2, 3 or 4 of a sphere, rectangle or
+// ellipse, holds its slot as child and its FK light number as instance.
+struct LightNode { float3 low, high, w; float phi, cos_theta_o; unsigned child, instance; unsigned char leaf; };
 // Per instance of a mesh: its first triangle and count, whether its mesh is in world space, its transform's rows, the
 // adjugate turning its normals, its object's info and its first triangle in the scene's order
 // Of an instance filling a volume: its mesh's texture space (location and size), by which a point inside has its
