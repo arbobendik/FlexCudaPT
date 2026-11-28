@@ -325,9 +325,10 @@ def scattered_sun(node, emission):  # The instance of a sun lamp of the sky's su
     up = Vector((-math.cos(elevation) * math.sin(rotation), math.cos(elevation) * math.cos(rotation),
         math.sin(elevation)))
     return types.SimpleNamespace(is_instance=False, matrix_world=up.to_track_quat('Z', 'Y').to_matrix().to_4x4(),
-        object=types.SimpleNamespace(name=node.name, type='LIGHT', data=light, hide_render=False, particle_systems=[],
-        instance_type='NONE', parent=None, show_instancer_for_render=True, modifiers=[], material_slots=[],
-        visible_camera=True, visible_shadow=True, color=(1, 1, 1, 1), pass_index=0))
+        object=types.SimpleNamespace(name=node.name, name_full=node.name_full, type='LIGHT', data=light,
+        hide_render=False, particle_systems=[], instance_type='NONE', parent=None, show_instancer_for_render=True,
+        modifiers=[], material_slots=[], visible_camera=True, visible_shadow=True, color=(1, 1, 1, 1), pass_index=0),
+        persistent_id=())
 
 class Folded:  # A sky table of an expression of one sky read alone: its values at the texels of the read's table, as
     type = 'TEX_SKY'  # shaded() takes them, read in its place; evaluated where taken, so an update reads its nodes anew
@@ -2798,7 +2799,8 @@ class Flex(bpy.types.RenderEngine):
         suns = [sun for node in (output.id_data.nodes if output else ()) if node.type == 'TEX_SKY'  # Its skies' suns'
             and node.sky_type == 'MULTIPLE_SCATTERING' and node.sun_disc  # discs, lamps
             and (sun := scattered_sun(node, resolve(output.inputs['Surface'])[4]))]
-        lights, lit = [], []  # Per point, spot or area light its rows, as renderer.h lists them, and its material
+        lights, lit, named = [], [], []  # Per point, spot or area light its rows, as renderer.h lists them, its
+        # material and its object's full name and instance
         box = not moved and filled and nonzero(fold(('MULTIPLY', ('SUBTRACT', ('ADD', filled[12], 1), filled[10]),
             filled[11]))) and Boxed(scene.world)
         # Of what the box holds: the camera's near-plane center, where its rays and its medium's test start
@@ -2985,14 +2987,17 @@ class Flex(bpy.types.RenderEngine):
                         1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), shaped
                 if isinstance(shaped, tuple): emission = 'MULTIPLY', emission, shaped
                 # Its rows, its power that of its emission unshaped a unit away, as a hint takes
-                # it, and its cone along -z, and its emission; moved, all anew
-                if moved: return self.start(depsgraph, keeping)
+                # it, and its cone along -z, and its emission; moved, its rows alone, but a spot's or a shaped area
+                # light's, whose program holds its axis: all anew
+                if moved and (light.type == 'SPOT' or light.type == 'AREA' and light.spread < math.pi):
+                    return self.start(depsgraph, keeping)
                 lights += [(*(SUN_FAR * numpy.array(instance.matrix_world.to_3x3().col[2].normalized())
                     if light.type == 'SUN' else instance.matrix_world.translation), radius), (*a, ellipse),
                     (*b, math.pi * numpy.sum(triple(emit(unshaped, [], {}, [], (), {}))) * area),
                     (*-numpy.array(instance.matrix_world.to_3x3().col[2].normalized()),
                     math.cos(light.spot_size / 2) if light.type == 'SPOT' else 1 if light.type == 'AREA' else -1)]
-                lit.append(tabled([program([*BLACK[:4], emission, *BLACK[5:]])], ob))
+                named.append((ob.name_full, *instance.persistent_id))
+                if not moved: lit.append(tabled([program([*BLACK[:4], emission, *BLACK[5:]])], ob))
                 continue
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
             world = ob.type == 'LIGHT' or i in volumes  # In world space: a light or filling a volume, kept apart
@@ -3048,16 +3053,19 @@ class Flex(bpy.types.RenderEngine):
             record(i, types.SimpleNamespace(is_instance=False, matrix_world=Matrix.Identity(4)), ob, entry,
                 media=((*(low + high) / 2, *(high - low) / 2), kind))
         # Update on stdin: slot count; per slot its first triangle and triangle count, then its arrays as in a scene, its
-        # object's info and its transform's rows and adjugate
+        # object's info and its transform's rows and adjugate; then the lamps moved: their count, each its number, rows
         if moved:
             if varying or self.box != 2 ** 32 - 1 or not all(self.slots.get(i, ())[1:] == (count, key)
                     for i, count, key in slots):  # Or the world's box, which what moved may leave
                 return self.start(depsgraph, keeping)
             self.volumes.update(volumes)
+            moves = {self.named.index(key): lights[4 * k:4 * k + 4] for k, key in enumerate(named)}  # By number
             self.requests.writelines((struct.pack('<2I', UPDATE, len(slots)), *(array for k, (i, count, _) in
                 enumerate(slots) for array in (struct.pack('<2I', self.slots[i][0], len(columns[0][k + 1])),
                 *(column[k + 1].astype('f') for column in columns[:8]), instances[k][3][21:40].astype('f'),
-                instances[k][3][:21].astype('f')))))
+                instances[k][3][:21].astype('f'))), struct.pack('<I', len(moves)),
+                *(struct.pack('<I', j) + numpy.array(rows, 'f').tobytes() for j, rows in moves.items())))
+            for j, rows in moves.items(): self.lights[4 * j:4 * j + 4] = rows
             self.visible = visible
             return
         if shaded and lights != self.lights: return self.start(depsgraph, keeping)  # Lights anew
@@ -3190,7 +3198,7 @@ class Flex(bpy.types.RenderEngine):
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
-        self.visible, self.kept, self.lights = visible, recorded(at) if keeping else {}, lights
+        self.visible, self.kept, self.lights, self.named = visible, recorded(at) if keeping else {}, lights, named
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view

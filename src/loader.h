@@ -725,6 +725,9 @@ inline void updateScene(OptixDeviceContext context, Scene& scene, Loaded& loaded
             CHECK(cuMemcpyHtoD((CUdeviceptr)&scene.instances[instance], &entry, sizeof(Instance)));
         }
     }
+    unsigned lamps; // The lamps moved: each its number and rows, as a scene pipes them
+    receive(&lamps, sizeof(lamps), 1);
+    for (unsigned k = 0, j; k < lamps; ++k) receive(&j, sizeof(j), 1), update(scene.lamps, 4 * j, 4, &loaded.lamps[4 * j]);
     scene.handle = buildScene(context, scene.vertices, loaded.instances, loaded.meshes, OPTIX_BUILD_OPERATION_UPDATE,
         loaded.top, loaded);
 }

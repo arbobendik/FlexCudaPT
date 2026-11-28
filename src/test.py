@@ -2953,6 +2953,26 @@ for vector, kind in ((spot.location, flex.SCENE), (spot.rotation_euler, flex.SCE
     bpy.context.view_layer.update()
     exporter.start(updated(depsgraph, spot))
     assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == kind, ('spot update', kind)
+# Moved, a point light updates its rows alone, kept as rendered anew
+point = lights['point'][0]
+for other, _ in lights.values(): other.hide_render = other != point
+bpy.context.view_layer.update()
+exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
+exporter.start, exporter.requests = lambda depsgraph, keeping=False: Viewport.engine.start(exporter, depsgraph, keeping), \
+    io.BytesIO()
+point.location.x += 0.5
+bpy.context.view_layer.update()
+exporter.start(updated(depsgraph, point))
+assert numpy.frombuffer(exporter.requests.getvalue(), 'I', count=1)[0] == flex.UPDATE, 'point update'
+for preferences.device in ('OPTIX', 'VULKAN'):
+    scene.render.use_persistent_data = True
+    render()
+    point.location.x -= 0.5
+    kept = render()
+    scene.render.use_persistent_data = False
+    assert numpy.allclose(kept, render(), atol=2e-3), ('moved point light', preferences.device)
+    point.location.x += 0.5
+point.location.x -= 0.5
 # A spread of 0, Blender's parallel beam, renders as 5 degrees: under the footprint, inside its edge by the reach of 5
 # degrees and a pixel, the disk's exitance P / A within 5%; past the footprint 5.5% of the light, none past the reach
 beam = lights['spread'][0]
