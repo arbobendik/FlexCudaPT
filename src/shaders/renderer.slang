@@ -1569,7 +1569,7 @@ struct VkScene : IScene {
     // No point lights
     FKLight light(uint index) { return {}; }
     uint triangleOffset(uint instance_index) { return scene.instances[instance_index].first; }
-    float3 calculatePointLightContrib(uint index) { return float3(0, 0, 0); }
+    float3 calculatePointLightContrib(uint index, float3 dir, uint depth, uint lobe, float length) { return float3(0); }
     // The world along an escape's direction, shaded at bounce depth + 2 by lobe
     float3 env_map_sample(float3 dir, uint depth, uint lobe) {
         return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));

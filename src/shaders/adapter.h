@@ -46,7 +46,8 @@ static __device__ uint4 fcptLightTrail(unsigned j);
 static __device__ bool fcptSlotLeaf(unsigned n, unsigned j);
 static __device__ FKLight fcptLight(unsigned index);
 static __device__ unsigned fcptTriangleOffset(unsigned instance);
-static __device__ float3 fcptCalculatePointLightContrib(unsigned index);
+static __device__ float3 fcptCalculatePointLightContrib(unsigned index, float3 dir, unsigned depth, unsigned lobe,
+    float length);
 static __device__ float3 fcptEnvMapSample(float3 dir, unsigned depth, unsigned lobe);
 static __device__ float4 fcptEnvironmentCdf(uint2 cell);
 static __device__ uint2 fcptEnvironmentCdfSize();
