@@ -3323,7 +3323,7 @@ class FlexPreferences(bpy.types.AddonPreferences):  # The API the renderer trace
             button.enabled = key in runnable
             button.prop_enum(self, 'device', key)
 
-class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
+class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine, the viewport's and renders' below
     bl_label = 'Flex'
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
@@ -3332,13 +3332,29 @@ class RENDER_PT_flex(bpy.types.Panel):  # Render properties of the Flex engine
     @classmethod
     def poll(cls, context): return context.engine == Flex.bl_idname
 
+    def draw(self, context): pass
+
+class Sampling:  # Quality settings of the viewport or of renders, as Cycles' Sampling panel has them
+    bl_parent_id = 'RENDER_PT_flex'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'render'
+
     def draw(self, context):
         self.layout.use_property_split = True
-        for name in ('flex_samples', 'flex_bounces', 'flex_paths', 'flex_noise_size'):
-            self.layout.prop(context.scene, name)
+        for name in ('samples', 'bounces', 'paths', 'noise_size'):
+            self.layout.prop(context.scene, PREFIXES[self.viewport] + name)
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
-        denoise.prop(context.scene, 'flex_denoise')
+        denoise.prop(context.scene, PREFIXES[self.viewport] + 'denoise')
+
+class RENDER_PT_flex_viewport(Sampling, bpy.types.Panel):
+    bl_label = 'Viewport'
+    viewport = True
+
+class RENDER_PT_flex_render(Sampling, bpy.types.Panel):
+    bl_label = 'Render'
+    viewport = False
 
 class DATA_PT_flex_light(bpy.types.Panel):  # A light's settings the engine reads, of its type
     bl_label = 'Light'
@@ -3391,34 +3407,38 @@ class WORLD_PT_flex(bpy.types.Panel):  # The world's settings of the Flex engine
         self.layout.use_property_split = True
         self.layout.prop(context.world, 'flex_sample_light')
 
-class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex engine
+class ReSTIR(Sampling):  # ReSTIR settings of the viewport or of renders
     bl_label = 'ReSTIR'
-    bl_parent_id = 'RENDER_PT_flex'
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = 'render'
 
     def draw(self, context):
-        scene = context.scene
+        scene, q, prefix = context.scene, quality(context.scene, self.viewport), PREFIXES[self.viewport]
         self.layout.use_property_split = True
-        self.layout.prop(scene, 'flex_restir')
+        self.layout.prop(scene, prefix + 'restir')
         column = self.layout.column()
-        column.active = scene.flex_restir
-        column.prop(scene, 'flex_decorrelation')
-        if scene.flex_decorrelation:
+        column.active = q.restir
+        column.prop(scene, prefix + 'decorrelation')
+        if q.decorrelation:
             column.label(text='Biased: trades correlation artifacts for energy loss', icon='ERROR')
-        column.prop(scene, 'flex_neighbors')
+        column.prop(scene, prefix + 'neighbors')
         row = column.row(heading='Reuse Samples')
-        row.prop(scene, 'flex_reuse', text='')
+        row.prop(scene, prefix + 'reuse', text='')
         samples = row.row()
-        samples.active = scene.flex_reuse
-        samples.prop(scene, 'flex_reuse_samples', text='')
+        samples.active = q.reuse
+        samples.prop(scene, prefix + 'reuse_samples', text='')
         header, body = column.panel('RENDER_PT_flex_jump', default_closed=True)
         header.label(text='Camera Jump')
         if body:
-            body.active = scene.flex_reuse
-            body.prop(scene, 'flex_jump_distance')
-            body.prop(scene, 'flex_jump_angle')
+            body.active = q.reuse
+            body.prop(scene, prefix + 'jump_distance')
+            body.prop(scene, prefix + 'jump_angle')
+
+class RENDER_PT_flex_viewport_restir(ReSTIR, bpy.types.Panel):
+    bl_parent_id = 'RENDER_PT_flex_viewport'
+    viewport = True
+
+class RENDER_PT_flex_render_restir(ReSTIR, bpy.types.Panel):
+    bl_parent_id = 'RENDER_PT_flex_render'
+    viewport = False
 
 QUALITY = {
     'flex_samples': bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
@@ -3474,7 +3494,8 @@ HANDLERS = ((bpy.app.handlers.render_init, persist), (bpy.app.handlers.render_pr
 WORLD_PROPERTIES = {'flex_sample_light': bpy.props.BoolProperty(name='Sample World Light', description='Sample the '
     'world toward its bright parts, as lights are; off, bounces alone reach it, faster where little of it is seen',
     default=True, update=lambda world, _: world.update_tag())}  # Its change an update of the world, exported anew
-CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_restir, DATA_PT_flex_light, OBJECT_PT_flex_visibility,
+CLASSES = (FlexPreferences, Flex, RENDER_PT_flex, RENDER_PT_flex_viewport, RENDER_PT_flex_render,
+    RENDER_PT_flex_viewport_restir, RENDER_PT_flex_render_restir, DATA_PT_flex_light, OBJECT_PT_flex_visibility,
     WORLD_PT_flex)
 
 # Timer: once make install has replaced this build, has Blender unregister, reload and register the extension

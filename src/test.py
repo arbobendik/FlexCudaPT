@@ -770,16 +770,23 @@ scene.flex_bounces = bounces
 context = types.SimpleNamespace(engine='FLEX', camera=scene.camera.data)
 for name in ('DATA_PT_lens', 'DATA_PT_camera', 'DATA_PT_camera_dof', 'DATA_PT_camera_dof_aperture'):
     assert getattr(bpy.types, name).poll(context), name
-panel, subpanel = bpy.types.RENDER_PT_flex, bpy.types.RENDER_PT_flex_restir  # Shown on the render tab
+panel = bpy.types.RENDER_PT_flex  # Shown on the render tab, the viewport's and renders' beneath, ReSTIR's under each
 assert getattr(panel, 'bl_context', None) == 'render' and panel.poll(context), 'Flex panel'
-assert subpanel.bl_parent_id == 'RENDER_PT_flex' and getattr(subpanel, 'bl_context', None) == 'render', 'ReSTIR panel'
-# Each quality setting has a viewport copy of its default, which the viewport traces; renders theirs
+for kind in ('viewport', 'render'):
+    sampled, restir = (getattr(bpy.types, f'RENDER_PT_flex_{kind}{part}') for part in ('', '_restir'))
+    assert sampled.bl_parent_id == 'RENDER_PT_flex' and restir.bl_parent_id == f'RENDER_PT_flex_{kind}' and all(
+        getattr(shown, 'bl_context', None) == 'render' for shown in (sampled, restir)), ('panels', kind)
+# Each quality setting has a viewport copy of its default, which the viewport traces and its panel draws; renders theirs
 module['quality'], split = quality, new('split')
 assert all(getattr(split, 'flex_preview_' + name[5:]) == getattr(split, name) for name in flex.QUALITY
     if name != 'flex_samples'), 'viewport defaults'
 split.flex_preview_bounces, split.flex_preview_samples = 0, 8
 assert flex.settings(split, True, 'OPTIX')[3] == 0 and flex.settings(split, False, 'OPTIX')[3] == 16 and \
     flex.sampling(split, True, True)[0] == 8 and flex.sampling(split, False, False)[0] == 256, 'viewport settings'
+for viewport, prefix in ((True, 'flex_preview_'), (False, 'flex_')):
+    flex.Sampling.draw(types.SimpleNamespace(layout=(layout := types.SimpleNamespace(drawn=[], row=lambda: layout,
+        prop=lambda _, name: layout.drawn.append(name))), viewport=viewport), types.SimpleNamespace(scene=split))
+    assert layout.drawn == [prefix + name for name in ('samples', 'bounces', 'paths', 'noise_size', 'denoise')], prefix
 module['quality'] = lambda scene, viewport: quality(scene, False)
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.render.use_border = False
