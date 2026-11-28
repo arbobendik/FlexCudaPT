@@ -8,7 +8,7 @@ from mathutils.bvhtree import BVHTree
 from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 from bpy_extras import anim_utils
 
-SUN_DISTANCE = 1e5
+SUN_FAR = 1e9  # A sun's sphere's distance, of its angle: short of FK's POW32, its rays' reach, where lamps dim
 BOX_MARGIN = 0.01  # Of the world's box past what it holds: of their extent's diagonal, floored at 1
 SUN_MIN_ANGLE = 1e-4  # Blender's parallel sun of angle 0 as the smallest disk, which delivers the same irradiance
 SPREAD_ZERO = math.radians(5)  # An area light's spread of 0, a parallel beam no light sample meets, as 5 degrees
@@ -2184,10 +2184,6 @@ class Boxed:  # The world as its box's material: its volume, behind faces passin
         self.name, self.pass_index = world.name, 0
         self.node_tree = types.SimpleNamespace(get_output_node=lambda target: types.SimpleNamespace(inputs=inputs))
 
-def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with diameters x, y
-    bmesh.ops.create_circle(bm, cap_ends=True, segments=sides, radius=0.5 / math.cos(math.pi / sides),
-        matrix=Matrix.Translation((0, 0, z)) @ Matrix.Diagonal((x, y, 1, 1)) @ Matrix.Rotation(math.pi / sides, 4, 'Z'))
-
 BACKENDS = (('OPTIX', ''), ('VULKAN', '-vulkan'))  # The renderer of each, by the suffix of its binary
 runnable = ()  # The backends whose renderer starts on this machine, which register finds
 def noises():  # The directory the blue-noise tensors are stored in, the add-on's user data
@@ -2815,7 +2811,6 @@ class Flex(bpy.types.RenderEngine):
                 for z in (-1, 1)] if light else [instance.matrix_world @ Vector(c) for c in ob.bound_box])
         for i, instance in enumerate(x for instances in (depsgraph.object_instances, suns) for x in instances):
             ob = instance.object
-            bm = bmesh.new()
             if ob.type == 'CURVES' or pathed(ob):  # Its strands: anew when it moved
                 if moved and (ob.name in moved or instance.is_instance and instance.parent.name in moved):
                     if ~i not in self.slots: return self.start(depsgraph, keeping)
@@ -2873,6 +2868,7 @@ class Flex(bpy.types.RenderEngine):
                 totals = numpy.empty(len(mesh.polygons), 'i')  # Corners per face, read at once
                 mesh.polygons.foreach_get('loop_total', totals)
                 if (totals > 4).any():
+                    bm = bmesh.new()
                     bm.from_mesh(mesh)
                     # By the mesh's own fill, which Cycles triangulates n-gons by, without BMesh's beautify
                     bmesh.ops.triangulate(bm, faces=[face for face in bm.faces if len(face.verts) > 4],
@@ -2945,25 +2941,20 @@ class Flex(bpy.types.RenderEngine):
             if ob.type == 'LIGHT':  # Lights shine down -z
                 light = ob.data
                 # A sphere's radius, unscaled as Cycles', else an area light's half axes, x and y, in the world, its
-                # front facing -(a x b), and the area of either, else a sun's disc's
-                radius = max(light.shadow_soft_size, 0.01) * (light.type != 'AREA')
+                # front facing -(a x b), and the area of either; a sun's sphere SUN_FAR away along +z
+                radius = SUN_FAR * math.sin(max(light.angle, SUN_MIN_ANGLE) / 2) if light.type == 'SUN' \
+                    else max(light.shadow_soft_size, 0.01) * (light.type != 'AREA')
                 size = (light.size, light.size_y if light.shape in {'RECTANGLE', 'ELLIPSE'} else light.size) \
                     if light.type == 'AREA' else (0, 0)
                 a, b = (numpy.array(instance.matrix_world.to_3x3().col[k]) * size[k] / 2 for k in (0, 1))
                 b *= math.copysign(1, instance.matrix_world.determinant())
                 ellipse = light.type == 'AREA' and light.shape in {'DISK', 'ELLIPSE'}
-                if light.type == 'SUN':
-                    disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2)], SUN_DISTANCE)
-            bmesh.ops.triangulate(bm, faces=bm.faces[:])
-            bm.transform(instance.matrix_world)
-            bm.normal_update()  # Of the faces of lights, which have no corner normals
-            if ob.type == 'LIGHT':
-                area = sum(face.calc_area() for face in bm.faces) or 4 * math.pi * radius ** 2 \
-                    or numpy.linalg.norm(numpy.cross(a, b)) * (math.pi if ellipse else 4)
+                area = 4 * math.pi * radius ** 2 or numpy.linalg.norm(numpy.cross(a, b)) * (math.pi if ellipse else 4)
                 # Sun irradiance, else watts, by the exposure; unless normalized, by Cycles' area of the light as well:
                 # a sphere's, 4 of a point; a sun's of its angle, 1 of a parallel one; the area light's
                 radiance = light.energy * 2 ** light.exposure \
-                    * (SUN_DISTANCE ** 2 if light.type == 'SUN' else 1 / math.pi) / area
+                    * (1 / (math.pi * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2) ** 2) if light.type == 'SUN'
+                    else 1 / math.pi / area)
                 if not light.normalize:
                     radiance *= area if light.type == 'AREA' else (math.pi * math.sin(light.angle / 2) ** 2 or 1) \
                         if light.type == 'SUN' else 4 * math.pi * light.shadow_soft_size ** 2 or 4
@@ -2993,21 +2984,16 @@ class Flex(bpy.types.RenderEngine):
                     shaped = 'MULTIPLY', ('MAXIMUM', ('MULTIPLY', ('SUBTRACT', math.tan(half), tangent),
                         1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), shaped
                 if isinstance(shaped, tuple): emission = 'MULTIPLY', emission, shaped
-                if light.type != 'SUN':  # Its rows, its power that of its emission unshaped a unit away, as a hint takes
-                    # it, and its cone along -z, and its emission; moved, all anew
-                    if moved: return self.start(depsgraph, keeping)
-                    lights += [(*instance.matrix_world.translation, radius), (*a, ellipse),
-                        (*b, math.pi * numpy.sum(triple(emit(unshaped, [], {}, [], (), {}))) * area),
-                        (*-numpy.array(instance.matrix_world.to_3x3().col[2].normalized()),
-                        math.cos(light.spot_size / 2) if light.type == 'SPOT' else 1 if light.type == 'AREA' else -1)]
-                    lit.append(tabled([program([*BLACK[:4], emission, *BLACK[5:]])], ob))
-                    continue
-                # Black reflects nothing: a sun's disc stays black
-                shades = [program([*BLACK[:4], emission, *BLACK[5:]])]
-                positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
-                normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
-                uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
-                index = numpy.array([face.material_index for face in bm.faces], 'i')
+                # Its rows, its power that of its emission unshaped a unit away, as a hint takes
+                # it, and its cone along -z, and its emission; moved, all anew
+                if moved: return self.start(depsgraph, keeping)
+                lights += [(*(SUN_FAR * numpy.array(instance.matrix_world.to_3x3().col[2].normalized())
+                    if light.type == 'SUN' else instance.matrix_world.translation), radius), (*a, ellipse),
+                    (*b, math.pi * numpy.sum(triple(emit(unshaped, [], {}, [], (), {}))) * area),
+                    (*-numpy.array(instance.matrix_world.to_3x3().col[2].normalized()),
+                    math.cos(light.spot_size / 2) if light.type == 'SPOT' else 1 if light.type == 'AREA' else -1)]
+                lit.append(tabled([program([*BLACK[:4], emission, *BLACK[5:]])], ob))
+                continue
             passes = numpy.array([slot.material and slot.material.pass_index or 0 for slot in ob.material_slots] or [0])
             world = ob.type == 'LIGHT' or i in volumes  # In world space: a light or filling a volume, kept apart
             entry = (sum(map(len, columns[0])), len(index), world)
