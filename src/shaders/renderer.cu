@@ -1674,10 +1674,10 @@ __device__ SampleBSDF sampleHair(const Scene& scene, const Surface& surface, flo
 
 // The walk as direct callables the passes call, one per replay; their records hold the scene the hooks
 // read: the first pass's, the pass's; then the shift's, the pass's and the anchor's
+static __device__ FKDomain fkDomain(const Domain& dom);
 #define WALK_CALLABLE(name, replay) extern "C" __device__ Shift name(const Domain* dom, const Reservoir* r, \
     float scale, Selection* sel) { \
-    return walk_hook(FKDomain{dom->x0, dom->x1, {dom->hit.uv, dom->hit.instance, dom->hit.triangle, 0, \
-        length(dom->x1 - dom->x0)}, dom->width, dom->spread}, *r, replay, scale, sel); \
+    return walk_hook(fkDomain(*dom), *r, replay, scale, sel); \
 }
 WALK_CALLABLE(__direct_callable__first, false)
 WALK_CALLABLE(__direct_callable__walk, true)

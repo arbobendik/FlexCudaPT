@@ -11,7 +11,20 @@ static __device__ unsigned fkBlueNoise(unsigned x, unsigned y, unsigned t) {
 }
 static __device__ unsigned fkBlueNoiseSize() { return params.noise ? params.noise : 512; }
 static __device__ Hit nativeHit(FKHit hit) { return {hit.triangle_index, hit.instance_index, hit.uv}; }
-// A miss has no instance, as the walk tests it; no point lights exist to consider. Off a surface, past its margin, as
+// The nearest of hit, else a miss reaching max_len, and the lamps the ray meets, but the one it leaves and those hidden
+// from it when viewed: point lights to the walk, which passes through them, at their FK light numbers
+static __device__ FKHit lamped(FKRay ray, FKHit hit, float max_len, bool viewed, FKHit left = {}) {
+    const Scene& scene = hookScene();
+    for (unsigned k = 0; k < scene.lampCount; ++k) {
+        const float reach = hit.instance_index == NONE ? max_len : hit.distance;
+        const float t = rayLight(fcptLight(k), fcptLightShape(k, 0), fcptLightShape(k, 1), ray, reach);
+        const FKHit lamp = {make_float2(0, 0), k, 0, 1, t};
+        if (t < reach && !(left.is_point_light && left.instance_index == k)
+            && !(viewed && scene.materials[fcptLightSlot(lamp)].hidden)) hit = lamp;
+    }
+    return hit;
+}
+// A miss has no instance, as the walk tests it; every lamp but one left met. Off a surface, past its margin, as
 // traverse starts by default, skipping the face a straight pass leaves by, if it was reached past that margin; from no
 // margin, as from a medium's vertex, skipping the face it starts on, if any. Seen straight from the camera, hidden
 // layers passed as pixelDomain passes them
@@ -20,15 +33,16 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
     const Scene& scene = hookScene();
     float distance = 0;
     Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
-        left.instance_index != NONE && left.distance >= MARGIN ? key(scene, nativeHit(left)) : NONE)
-        : traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
+        left.instance_index != NONE && !left.is_point_light && left.distance >= MARGIN ? key(scene, nativeHit(left))
+        : NONE) : traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
         left.instance_index != NONE ? key(scene, nativeHit(left)) : NONE, 0);
     for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
         first = false) {
         if (first) distance = __uint_as_float(__float_as_uint(distance) - 1);
         hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
     }
-    return {hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance};
+    const FKHit met = {hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance};
+    return lamped(ray, met, max_len, viewed, left);
 }
 // Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone
 // width
@@ -39,7 +53,7 @@ static __device__ __noinline__ float3 fcptShadowTransmittanceIn(FKRay ray, float
     return occluded(hookScene(), ray.origin, ray.unit_direction, l, Medium{make_float3(0, 0, 0), extinction}, filling,
         random_state, Ray{depth == 0, false, lobe, float(depth), length, width}, surface, transmitted,
         left.instance_index != NONE ? key(hookScene(), nativeHit(left)) : NONE,  // A light casting none: past all
-        light.instance_index != NONE && hookScene().materials[key(hookScene(), nativeHit(light))].opaque & 4 ? 0
+        light.instance_index != NONE && hookScene().materials[fcptLightSlot(light)].opaque & 4 ? 0
         : SHADOWS)
         ? make_float3(0, 0, 0) : transmitted;
 }
@@ -86,6 +100,12 @@ static __device__ FKSurface walkSurface(const Scene& scene, Hit at, const Surfac
 static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 point, unsigned random_state, float3 dir,
     unsigned depth, float length) {
     const Scene& scene = hookScene();
+    if (hit.is_point_light) {  // A lamp's, its emission alone
+        FKSurface lamp{};
+        lamp.material.emissive = fcptCalculatePointLightContrib(hit.instance_index, dir, depth + 1, LOBE_NONE, length);
+        lamp.random_state = random_state;
+        return lamp;
+    }
     const Hit at = nativeHit(hit);
     const float3 n = smoothNormal(scene, at);
     FKSurface light = walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
@@ -194,7 +214,9 @@ static __device__ FKLight fcptLight(unsigned index) {
 static __device__ float4 fcptLightShape(unsigned index, unsigned row) { return hookScene().lamps[4 * index + 1 + row]; }
 static __device__ unsigned fcptTriangleOffset(unsigned instance) { return hookScene().instances[instance].first; }
 static __device__ __noinline__ float3 fcptCalculatePointLightContrib(unsigned index, float3 dir, unsigned depth,
-    unsigned lobe, float length) { return make_float3(0, 0, 0); }
+    unsigned lobe, float length) {  // A lamp's, by its program, as the world's, kept out of the walk's hit path
+    return environment(hookScene(), dir, Ray{depth == 0, false, lobe, float(depth), length}, 1 + index);
+}
 // The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
 // b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
 // world always shades. No ambient color without a world
@@ -219,12 +241,15 @@ static __device__ unsigned pixelIndex(int2 p) { return p.y * hookScene().width +
 static __device__ bool onImage(int2 p) {
     return p.x >= 0 && p.y >= 0 && p.x < int(hookScene().width) && p.y < int(hookScene().height);
 }
+// A lamp seen first, at its point, none along a blind ray, else within FK's POW32; to the renderer a miss
 static __device__ FKDomain fkDomain(const Domain& dom) {
-    return {dom.x0, dom.x1, {dom.hit.uv, dom.hit.triangle == NONE ? NONE : dom.hit.instance, dom.hit.triangle, 0,
-        length(dom.x1 - dom.x0)}, dom.width, dom.spread};
+    const float3 dir = normalize(dom.x1 - dom.x0);
+    const FKHit hit = lamped({dom.x0, dir}, {dom.hit.uv, dom.hit.triangle == NONE ? NONE : dom.hit.instance,
+        dom.hit.triangle, 0, length(dom.x1 - dom.x0)}, dom.spread < 0 ? 0 : 4294967296.0f, true);
+    return {dom.x0, hit.is_point_light ? dom.x0 + hit.distance * dir : dom.x1, hit, dom.width, dom.spread};
 }
 static __device__ Domain nativeDomain(const FKDomain& dom) {
-    return {dom.x0, dom.x1, nativeHit(dom.hit), dom.width, dom.spread};
+    return {dom.x0, dom.x1, dom.hit.is_point_light ? Hit{NONE, NONE} : nativeHit(dom.hit), dom.width, dom.spread};
 }
 // The scene the previous frame traced: the anchor's on a view's first frame, which reuses its reservoirs
 static __device__ const Scene& previousScene() { return hookScene().frame == 0 ? *hookScene().anchor : hookScene(); }
