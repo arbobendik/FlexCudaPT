@@ -2941,16 +2941,14 @@ class Flex(bpy.types.RenderEngine):
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
                     for slot in slotted(ob)] or [rows[None]]
-            # Emitter faces use material 0, black faces shaping the light material 1; lights shine down -z.
+            # Emitter faces use material 0; lights shine down -z.
             if ob.type == 'LIGHT':
                 light = ob.data
                 radius = max(light.shadow_soft_size, 0.01)
-                if light.type == 'AREA':  # Back side
+                if light.type == 'AREA':
                     sides = 4 if light.shape in {'SQUARE', 'RECTANGLE'} else 32
                     size = light.size, light.size_y if light.shape in {'RECTANGLE', 'ELLIPSE'} else light.size
-                    disk(bm, sides, *size, 1e-3)
-                for face in bm.faces: face.material_index = 1
-                if light.type == 'AREA': disk(bm, sides, *size, 0)
+                    disk(bm, sides, *size, 0)
                 elif light.type == 'SUN':
                     disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2)], SUN_DISTANCE)
                 else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
@@ -2987,7 +2985,7 @@ class Flex(bpy.types.RenderEngine):
                     if light.spot_blend:
                         t = clamp(('MULTIPLY', ('SUBTRACT', cosine, edge), 1 / ((1 - edge) * light.spot_blend)))
                         shaped = 'MULTIPLY', ('MULTIPLY', t, t), ('SUBTRACT', 3, ('MULTIPLY', t, 2))
-                if light.type == 'AREA':  # None behind it at any distance, past where its black back is met
+                if light.type == 'AREA':  # None behind it at any distance
                     normal = -numpy.array(instance.matrix_world.to_3x3().col[2].normalized())
                     cosine = 'DOT_PRODUCT', ('INCOMING',), normal
                     shaped = 'LESS_THAN', 0, cosine
@@ -2999,12 +2997,12 @@ class Flex(bpy.types.RenderEngine):
                         1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), shaped
                 if isinstance(shaped, tuple):
                     emission = 'MULTIPLY', emission, mix(1, shaped, ('LESS_THAN', 0, ('LIGHT_PATH', 8)))
-                # Black reflects nothing. A sphere light's shell transmits all, white and smooth at an ior of 1, so rays
-                # pass through it straight as Cycles' lights occlude none and what lies within it is lit; an area
-                # light, which its black back occludes all the same, and a sun stay black
-                sphere = light.type in ('POINT', 'SPOT')
+                # Black reflects nothing. A sphere light's shell and an area light transmit all, white and smooth at an
+                # ior of 1, so rays pass through them straight as Cycles' lights occlude none and what lies within a
+                # sphere is lit; a sun stays black
+                sphere = light.type != 'SUN'
                 shades = [program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
-                    else [*BLACK[:4], emission, *BLACK[5:]]), program(BLACK)]
+                    else [*BLACK[:4], emission, *BLACK[5:]])]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))
