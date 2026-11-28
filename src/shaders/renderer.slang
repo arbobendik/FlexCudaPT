@@ -1269,14 +1269,14 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
         hit, camera.lens.ortho != 0 ? across : 0, camera.lens.ortho != 0 ? 0 : across / length(plane));
 }
 
-// World: equirectangular texture along the direction
-float3 environment(Scene* scene, float3 direction, Ray ray) {
+// World: equirectangular texture along the direction; row 1 + i sun i's emission
+float3 environment(Scene* scene, float3 direction, Ray ray, uint row = 0) {
     const Point point = Point(0.5f - atan2(direction.y, direction.x) / (2 * PI),
         0.5f + atan2(direction.z, sqrt(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, float4(0, 0, 0, 0), direction, 0, 0, NONE, NONE);
     const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}};
-    return shade(scene, scene.materials[scene.count].program, direction, float3x3(float3(0), float3(0), float3(0)),
-        point, -direction, false, ray, info).emissive;
+    return shade(scene, scene.materials[scene.count + row].program, direction,
+        float3x3(float3(0), float3(0), float3(0)), point, -direction, false, ray, info).emissive;
 }
 
 // Scattering and extinction coefficients and Henyey-Greenstein g of a medium, none by default
@@ -1476,8 +1476,22 @@ struct VkScene : IScene {
             if (first) distance = asfloat(asuint(distance) - 1);
             hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
         }
+        const uint sun = consider_point_lights && hit.triangle == NONE
+            ? sunMet(ray.origin, ray.unit_direction, max_len) : NONE;
+        if (sun != NONE) // A point light
+            return FKHit(float2(0), sun, NONE, 1, length(scene.suns[2 * sun].xyz - ray.origin));
         return FKHit(hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance);
     }
+    // The sun whose sphere the ray from origin along dir meets within max_len, else NONE; its radiance
+    uint sunMet(float3 origin, float3 dir, float max_len) {
+        for (uint i = 0; i < scene.sunCount; ++i) {
+            const float3 c = scene.suns[2 * i].xyz - origin;
+            const float r = scene.suns[2 * i].w;
+            if (dot(dir, c) > sqrt(dot(c, c) - r * r) && length(c) - r <= max_len) return i;
+        }
+        return NONE;
+    }
+    float3 sunRadiance(uint i) { return scene.suns[2 * i + 1].xyz; }
     // Transmittance toward the light, zero if blocked
     float3 shadowTransmittanceIn(FKRay ray, float l, float3 extinction, uint filling, uint random_state, uint depth,
         uint lobe, bool surface, float length, float width, FKHit left, FKHit light) {
@@ -1539,7 +1553,10 @@ struct VkScene : IScene {
         scatter = medium.scatter, extinction = medium.extinction, g = medium.g;
         return along;
     }
-    float3 hitPosition(FKHit hit) { return fcpt.hitPosition(scene, scene.vertices, nativeHit(hit)); }
+    float3 hitPosition(FKHit hit) { // A sun's its center
+        return hit.is_point_light != 0 ? scene.suns[2 * hit.instance_index].xyz
+            : fcpt.hitPosition(scene, scene.vertices, nativeHit(hit));
+    }
     float3x3 worldTriangle(uint instance_index, uint triangle_index) {
         const Corners corner = corners(scene.vertices, scene.instances[instance_index], triangle_index);
         return float3x3(corner[0], corner[1], corner[2]);
@@ -1551,12 +1568,14 @@ struct VkScene : IScene {
     }
     uint4 lightNode(uint n) {
         const LightNode node = scene.lights[n];
-        return uint4(node.leaf, node.instance, node.child - scene.instances[node.instance].first, 0);
+        return node.instance == NONE ? uint4(2, node.child, 0, 0) // A sun's
+            : uint4(node.leaf, node.instance, node.child - scene.instances[node.instance].first, 0);
     }
     uint lightSecond(uint n) { return scene.lights[n].child; }
     // A light's slot, its triangle's number; none of a strand
     uint lightSlot(FKHit hit) {
-        return used(CURVES) && scene.instances[hit.instance_index].world == STRANDS ? NONE
+        return hit.is_point_light != 0 ? scene.count + 1 + hit.instance_index // A sun's its row's
+            : used(CURVES) && scene.instances[hit.instance_index].world == STRANDS ? NONE
             : key(scene, nativeHit(hit));
     }
     uint4 lightTrail(uint j) {
@@ -1564,13 +1583,17 @@ struct VkScene : IScene {
         return uint4(uint(trail), uint(trail >> 32), 0, 0);
     }
     bool slotLeaf(uint n, uint j, uint4 trail_texel) {
+        if (j > scene.count) return scene.lights[n].instance == NONE && scene.lights[n].child == j - scene.count - 1;
         const Hit light = owned(scene, j);
         return scene.lights[n].child == light.triangle && scene.lights[n].instance == light.instance;
     }
-    // No point lights
-    FKLight light(uint index) { return {}; }
+    // Its point lights the suns
+    FKLight light(uint index) {
+        const float r = scene.suns[2 * index].w;
+        return {scene.suns[2 * index].xyz, 0, sunRadiance(index), PI * r * r, r};
+    }
     uint triangleOffset(uint instance_index) { return scene.instances[instance_index].first; }
-    float3 calculatePointLightContrib(uint index) { return float3(0, 0, 0); }
+    float3 calculatePointLightContrib(uint index) { return sunRadiance(index); }
     // The world along an escape's direction, shaded at bounce depth + 2 by lobe
     float3 env_map_sample(float3 dir, uint depth, uint lobe) {
         return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
@@ -1710,8 +1733,10 @@ struct VkScene : IScene {
     void storeColor(int2 p, uint layer, float4 color) {}
     bool restirUsed() { return scene.settings.restir != 0; }
     // The world seen along a path whose camera ray hits nothing, at its share of the pixel's paths
-    float3 missed(int2 p, FKDomain dom, float scale) {
-        return environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0)) / scene.settings.paths;
+    float3 missed(int2 p, FKDomain dom, float scale) { // And the sun it meets
+        const uint sun = sunMet(dom.x0, normalize(dom.x1 - dom.x0), float.maxValue);
+        return (environment(scene, normalize(dom.x1 - dom.x0), Ray(true, false, LOBE_NONE, 1, 0))
+            + (sun == NONE ? float3(0) : sunRadiance(sun))) / scene.settings.paths;
     }
     // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
     void addColor(int2 p, float4 color) { scene.accumulation[index(p)] += color; }
@@ -1910,6 +1935,11 @@ void lights(uint3 p, Scene* scene) {
         return;
     }
     const uint triangle = p.x;
+    if (triangle >= scene.count) { // Past the triangles a sun's radiance, of its row
+        scene.suns[2 * (triangle - scene.count) + 1] = float4(environment(scene, float3(0, 0, 1),
+            Ray(false, false, LOBE_NONE, 2, 0), triangle - scene.count + 1), 0);
+        return;
+    }
     const float emitted = scene.materials[triangle].emitted;
     const Hit light = owned(scene, triangle);
     if (!(emitted > 0) || scene.instances[light.instance].world == STRANDS) return; // Sampled by no light
