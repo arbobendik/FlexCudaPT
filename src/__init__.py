@@ -2802,6 +2802,8 @@ class Flex(bpy.types.RenderEngine):
         suns = [sun for node in (output.id_data.nodes if output else ()) if node.type == 'TEX_SKY'  # Its skies' suns'
             and node.sky_type == 'MULTIPLE_SCATTERING' and node.sun_disc  # discs, lamps
             and (sun := scattered_sun(node, resolve(output.inputs['Surface'])[4]))]
+        lamps, glows = [], []  # Per sun its sphere's center and radius, FK's point light, its radiance's place; its
+        # emission, a row after the world's the lights pass fills that place from
         box = not moved and filled and nonzero(fold(('MULTIPLY', ('SUBTRACT', ('ADD', filled[12], 1), filled[10]),
             filled[11]))) and Boxed(scene.world)
         # Of what the box holds: the camera's near-plane center, where its rays and its medium's test start
@@ -3075,6 +3077,7 @@ class Flex(bpy.types.RenderEngine):
                 instances[k][3][:21].astype('f')))))
             self.visible = visible
             return
+        if shaded and lamps != self.lamps: return self.start(depsgraph, keeping)  # Suns anew
         world = scene.world and scene.world.node_tree.get_output_node('CYCLES')
         surface = resolve(world.inputs['Surface']) if world else BLACK
         # The grid the world bakes over: its largest Environment Texture's, else 1024 x 512; none where its emission is
@@ -3084,8 +3087,9 @@ class Flex(bpy.types.RenderEngine):
         grid = max(sizes, key=lambda size: size[0] * size[1], default=(1024, 512)) if world and \
             scene.world.flex_sample_light and isinstance(fold(surface)[4], tuple) else (0, 0)
         world_path = grid[0] and any(marks(x, 'LIGHT_PATH') for x in surface)  # Its sky samples asked per lobe
-        world = program(surface)
-        materials.append([(*world[:2], 0, 0, world[1])])
+        world = program(surface)  # Its row, then the suns'
+        materials.append([(*row[:2], 0, 0, row[1]) for row in [world, *(program([*BLACK[:4], glow, *BLACK[5:]])
+            for glow in glows)]])
         self.lensing = program(lensed(viewer, *size))[1] if custom else 0  # The custom camera's, run per sample
         shape = [op[0] for op in ops + aside[0]], [(row[1], row[2], row[0] > 0, *row[3:]) for row in rows.values()], \
             textures
@@ -3195,6 +3199,7 @@ class Flex(bpy.types.RenderEngine):
             struct.pack('<I', len(HAIRS)), numpy.array([*HAIRS], 'f'),
             *(part for first, count, world, values in instances for part in (numpy.array((first, count, world), 'I'),
             values)), *(numpy.concatenate(column, dtype='f') for column in columns),
+            struct.pack('<I', len(lamps)), numpy.array(lamps, 'f'),
             numpy.hstack((materials[:, :1].astype('f').view('I'), materials[:, 1:].astype('I'))),
             struct.pack('<3I', sum(map(len, points)), sum(map(len, segments)), sum(map(len, hairs))), *points,
             *segments, *bounds, *roots, *(
@@ -3203,7 +3208,7 @@ class Flex(bpy.types.RenderEngine):
             *texels, numpy.array(bakes, 'I'),
             numpy.array([shape for _, shape in images], 'I'), *(entry for entry, _ in images),
             struct.pack('<I', len(attributes) * len(INSTANCER)), *attributes, struct.pack('<2I', *grid)))
-        self.visible, self.kept = visible, recorded(at) if keeping else {}
+        self.visible, self.kept, self.lamps = visible, recorded(at) if keeping else {}, lamps
 
     # Samples launched, then radiance sums and sample count per pixel, rows bottom to top, after up to launches more
     # samples, at most the first of sampling's samples or, reusing the last view's reservoirs, the second, of the view

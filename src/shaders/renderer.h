@@ -150,6 +150,7 @@ struct Scene {
     // and absorptions; its lobes' weights
     unsigned environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
     float2* environmentCdf; unsigned cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
+    float4* suns; unsigned sunCount; // Per sun its sphere's center and radius, FK's point light, then its radiance
     unsigned* queue; // The shift queue
     const Scene* anchor; // The anchor's scene, in its record
     unsigned width, height; // The image's size, which shift passes launched over their queue need

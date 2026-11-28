@@ -216,7 +216,7 @@ inline float3 place(const Instance& instance, float3 p) {
 // the world, else a leaf of no power, uploaded to the GPU with the trails to the triangles' leaves by their numbers in
 // the scene's order (pbrt-v4's bit trails)
 inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vector<Instance>& instances,
-    const std::vector<Material>& materials, unsigned long long*& trails) {
+    const std::vector<Material>& materials, const std::vector<float4>& suns, unsigned long long*& trails) {
     std::vector<LightNode> lights, nodes;
     for (unsigned i = 0; i < instances.size(); ++i) for (unsigned m = instances[i].first; m < instances[i].first +
         instances[i].count; ++m) {
@@ -228,13 +228,20 @@ inline LightNode* loadLights(const std::vector<float3>& vertices, const std::vec
             lights.push_back({lower(lower(a, b), c), upper(upper(a, b), c), n * (1 / length(n)),
                 float(M_PI) * materials[t].emitted * length(n) / 2, 1, m, i, true});
     }
+    for (unsigned i = 0; i < suns.size() / 2; ++i) { // A sun's sphere as its center, of no instance, its power pi *
+        const float4 s = suns[2 * i], l = suns[2 * i + 1]; // irradiance * distance^2 with pi * radiance * radius^2 that
+        const float3 c{s.x, s.y, s.z}; // irradiance, its radiance summed as an emitter's
+        lights.push_back({c, c, c * (-1 / length(c)), float(M_PI * M_PI) * (l.x + l.y + l.z) * s.w * s.w, 1, i, NONE,
+            true});
+    }
     if (lights.empty()) lights.push_back({.leaf = true});
     buildLights(nodes, lights, 0, lights.size());
-    std::vector<unsigned long long> trail(nodes.size()), leaves(materials.size());
+    std::vector<unsigned long long> trail(nodes.size()), leaves(materials.size()); // Suns' their rows'
     std::vector<unsigned> depth(nodes.size());
     for (size_t i = 0; i < nodes.size(); ++i) {
         if (!nodes[i].leaf) trail[i + 1] = trail[i], trail[nodes[i].child] = trail[i] | 1ull << depth[i],
             depth[i + 1] = depth[nodes[i].child] = depth[i] + 1;
+        else if (nodes[i].instance == NONE) leaves[materials.size() - suns.size() / 2 + nodes[i].child] = trail[i];
         else if (nodes[i].phi > 0) leaves[instances[nodes[i].instance].key + nodes[i].child
             - instances[nodes[i].instance].first] = trail[i]; // Not the placeholder of a scene without emitters
     }
@@ -248,7 +255,7 @@ struct Mesh { unsigned long long handle; CUdeviceptr temp, output; };
 // light BVH is built from, the BVHs of its meshes by first triangle and the buffer of the BVH over its instances
 struct HairTable;
 struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; std::vector<Instance> instances;
-    std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{};
+    std::vector<Material> materials; std::map<unsigned, Mesh> meshes; CUdeviceptr top{}; std::vector<float4> suns;
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps, bounds; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
     std::vector<HairTable> tables; std::vector<float4> hairs; std::future<void> baking; // Hair tables, as they bake
@@ -592,7 +599,9 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.objects = upload(read<float3>(3 * meshes)), scene.uvs = upload(read<float2>(3 * meshes));
     scene.colors = upload(read<float4>(3 * meshes)), scene.tangents = upload(read<float4>(3 * meshes));
     scene.passes = upload(read<float>(meshes)); // Per triangle of the meshes its material's pass index, then its
-    const std::vector<Material> table = read<Material>(meshes + 1); // material and the world's
+    receive(&scene.sunCount, sizeof(unsigned), 1); // Per sun its sphere's center and radius, then its radiance, which
+    loaded.suns = read<float4>(2 * scene.sunCount), scene.suns = upload(loaded.suns); // the lights pass fills
+    const std::vector<Material> table = read<Material>(meshes + 1 + scene.sunCount); // material, the world's, the suns'
     struct { unsigned points, segments, strands; } hair; // Strands: their points, per segment its first point and
     receive(&hair, sizeof(hair), 1); // strand and its bounds, per strand its first point, count and random, its root's
     scene.points = upload(read<float4>(hair.points)), scene.segments = upload(read<unsigned>(2 * hair.segments));
@@ -607,7 +616,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         if (instance.world == 1)
             std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
-    loaded.materials.push_back(table[meshes]);
+    loaded.materials.insert(loaded.materials.end(), table.begin() + meshes, table.end());
     scene.instances = upload(instances), scene.instanceCount = instances.size();
     scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
@@ -642,7 +651,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
         (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
         (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds, (CUdeviceptr)scene.strands,
-        (CUdeviceptr)scene.hairs};
+        (CUdeviceptr)scene.hairs, (CUdeviceptr)scene.suns};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only

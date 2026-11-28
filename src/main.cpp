@@ -592,13 +592,14 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.ops, loaded.ops.data(), loaded.rows * sizeof(Op)));
             }
             std::vector<Material> materials = loaded.materials;
-            if (scene.count) {
+            if (scene.count + scene.sunCount) { // Its emitters and suns
                 CHECK(cuMemcpyHtoD((CUdeviceptr)scene.materials, materials.data(), materials.size() * sizeof(Material)));
                 records[PASSES - 1].data = scene;
                 CHECK(cuMemcpyHtoD(table + (PASSES - 1) * sizeof(Record), &records[PASSES - 1], sizeof(Record)));
                 const OptixShaderBindingTable sbt = {.raygenRecord = table + (PASSES - 1) * sizeof(Record)};
-                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count, 1, 1));
+                CHECK(optixLaunch(pipeline, nullptr, launch, sizeof(params), &sbt, scene.count + scene.sunCount, 1, 1));
                 CHECK(cuMemcpyDtoH(materials.data(), (CUdeviceptr)scene.materials, materials.size() * sizeof(Material)));
+                CHECK(cuMemcpyDtoH(loaded.suns.data(), (CUdeviceptr)scene.suns, loaded.suns.size() * sizeof(float4)));
             }
             if (kind == SCENE) scene.environmentCdf = {}, scene.cdfWidth = scene.cdfHeight = 0; // Freed with its arrays
             if (kind != UPDATE && scene.environmentWidth) { // The world over its grid, 64 rows a launch, and its CDF
@@ -625,7 +626,7 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 scene.environmentCdf = (float2*)next, scene.cdfWidth = luminance.w + 1, scene.cdfHeight = luminance.h;
             }
             unsigned long long* trails;
-            LightNode* const lights = loadLights(loaded.vertices, loaded.instances, materials, trails);
+            LightNode* const lights = loadLights(loaded.vertices, loaded.instances, materials, loaded.suns, trails);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.lights, (CUdeviceptr)lights);
             std::replace(loaded.arrays.begin(), loaded.arrays.end(), (CUdeviceptr)scene.trails, (CUdeviceptr)trails);
             release((CUdeviceptr)scene.lights), release((CUdeviceptr)scene.trails);

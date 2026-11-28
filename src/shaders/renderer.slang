@@ -89,6 +89,7 @@ struct Scene {
     float4* hairs; // Per level of a hair table
     uint environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
     float2* environmentCdf; uint cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
+    float4* suns; uint sunCount; // Per sun its sphere's center and radius, FK's point light, then its radiance
     uint* queue; // The shift queue
     Scene* anchor; // The anchor's scene, in its record
     uint width, height; // The image's size, which shift passes launched over their queue need

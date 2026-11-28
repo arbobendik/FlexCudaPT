@@ -11,7 +11,23 @@ static __device__ unsigned fkBlueNoise(unsigned x, unsigned y, unsigned t) {
 }
 static __device__ unsigned fkBlueNoiseSize() { return params.noise ? params.noise : 512; }
 static __device__ Hit nativeHit(FKHit hit) { return {hit.triangle_index, hit.instance_index, hit.uv}; }
-// A miss has no instance, as the walk tests it; no point lights exist to consider. Off a surface, past its margin, as
+// Sun i's center, of its sphere; the sun a ray meets; and its radiance
+static __device__ float3 sunCenter(unsigned i) {
+    return make_float3(hookScene().suns[2 * i].x, hookScene().suns[2 * i].y, hookScene().suns[2 * i].z);
+}
+// Within max_len, else NONE
+static __device__ unsigned sunMet(float3 origin, float3 dir, float max_len) {
+    for (unsigned i = 0; i < hookScene().sunCount; ++i) {
+        const float3 c = sunCenter(i) - origin;
+        const float r = hookScene().suns[2 * i].w;
+        if (dot(dir, c) > sqrtf(dot(c, c) - r * r) && length(c) - r <= max_len) return i;
+    }
+    return NONE;
+}
+static __device__ float3 sunRadiance(unsigned i) {
+    return make_float3(hookScene().suns[2 * i + 1].x, hookScene().suns[2 * i + 1].y, hookScene().suns[2 * i + 1].z);
+}
+// A miss has no instance, as the walk tests it; a sun met is a point light. Off a surface, past its margin, as
 // traverse starts by default, skipping the face a straight pass leaves by, if it was reached past that margin; from no
 // margin, as from a medium's vertex, skipping the face it starts on, if any. Seen straight from the camera, hidden
 // layers passed as pixelDomain passes them
@@ -28,6 +44,9 @@ static __device__ FKHit fcptTraverseInstanceBVH(FKRay ray, bool consider_point_l
         if (first) distance = __uint_as_float(__float_as_uint(distance) - 1);
         hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
     }
+    const unsigned sun = consider_point_lights && hit.triangle == NONE
+        ? sunMet(ray.origin, ray.unit_direction, max_len) : NONE;
+    if (sun != NONE) return {{}, sun, NONE, 1, length(sunCenter(sun) - ray.origin)}; // Its point light
     return {hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance};
 }
 // Blocked, all zero; the medium's scattering passing reads none of. The vertex's ray: its incoming segment and cone
@@ -151,7 +170,8 @@ static __device__ float fcptTrackMedium(unsigned filling, float3 origin, float3 
     return along;
 }
 static __device__ float3 fcptHitPosition(FKHit hit) {
-    return hitPosition(hookScene(), hookScene().vertices, nativeHit(hit));
+    return hit.is_point_light ? sunCenter(hit.instance_index) // A sun's its center
+        : hitPosition(hookScene(), hookScene().vertices, nativeHit(hit));
 }
 static __device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, unsigned triangle) {
     const Corners corner = corners(hookScene().vertices, hookScene().instances[instance], triangle);
@@ -163,26 +183,33 @@ static __device__ SlangMatrix<float, 3, 3> fcptWorldTriangle(unsigned instance, 
 static __device__ LightNode fcptLightBounds(unsigned n) { return hookScene().lights[n]; }
 static __device__ uint4 fcptLightNode(unsigned n) {
     const LightNode& node = hookScene().lights[n];
-    return make_uint4(node.leaf, node.instance, node.child - hookScene().instances[node.instance].first, 0);
+    return node.instance == NONE ? make_uint4(2, node.child, 0, 0) // A sun's
+        : make_uint4(node.leaf, node.instance, node.child - hookScene().instances[node.instance].first, 0);
 }
 static __device__ unsigned fcptLightSecond(unsigned n) { return hookScene().lights[n].child; }
 // A light's slot, its triangle's number, whose trail of 64 bits is x low and y high; none of a strand, which no light
 // sampling picks
 static __device__ unsigned fcptLightSlot(FKHit hit) {
-    return STRAND(hookScene(), hit.instance_index) ? NONE : key(hookScene(), nativeHit(hit));
+    return hit.is_point_light ? hookScene().count + 1 + hit.instance_index // A sun's its row's
+        : STRAND(hookScene(), hit.instance_index) ? NONE : key(hookScene(), nativeHit(hit));
 }
 static __device__ uint4 fcptLightTrail(unsigned j) {
     const unsigned long long trail = hookScene().trails[j];
     return make_uint4(unsigned(trail), unsigned(trail >> 32), 0, 0);
 }
 static __device__ bool fcptSlotLeaf(unsigned n, unsigned j) {
+    const LightNode& node = hookScene().lights[n];
+    if (j > hookScene().count) return node.instance == NONE && node.child == j - hookScene().count - 1; // A sun's
     const Hit light = owned(hookScene(), j);
     return hookScene().lights[n].child == light.triangle && hookScene().lights[n].instance == light.instance;
 }
-// FK: point lights, which the renderer has none of; no node names one
-static __device__ FKLight fcptLight(unsigned index) { return {}; }
+// FK: its point lights the suns
+static __device__ FKLight fcptLight(unsigned index) {
+    const float r = hookScene().suns[2 * index].w;
+    return {sunCenter(index), 0, sunRadiance(index), PI * r * r, r};
+}
 static __device__ unsigned fcptTriangleOffset(unsigned instance) { return hookScene().instances[instance].first; }
-static __device__ float3 fcptCalculatePointLightContrib(unsigned index) { return make_float3(0, 0, 0); }
+static __device__ float3 fcptCalculatePointLightContrib(unsigned index) { return sunRadiance(index); }
 // The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
 // b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
 // world always shades. No ambient color without a world
@@ -331,8 +358,9 @@ static __device__ bool fcptRestirUsed() { return hookScene().settings.restir; }
 // (spread -1), off a fisheye's circle
 static __device__ float3 fcptMissed(int2 p, FKDomain dom, float scale) {
     if (dom.spread < 0) return make_float3(0, 0, 0);
-    return environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
-        / hookScene().settings.paths;
+    const unsigned sun = sunMet(dom.x0, normalize(dom.x1 - dom.x0), INFINITY); // And the sun it meets
+    return (environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
+        + (sun == NONE ? make_float3(0, 0, 0) : sunRadiance(sun))) / hookScene().settings.paths;
 }
 // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without; through a custom
 // camera times the throughput of the pixel's own sample, which its own thread stored as the initial pass drew it

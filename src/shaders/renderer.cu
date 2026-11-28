@@ -1407,13 +1407,13 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
 #endif
 }
 
-// World: equirectangular texture along the direction
-__device__ float3 environment(const Scene& scene, float3 direction, const Ray& ray) {
+// World: equirectangular texture along the direction; row 1 + i sun i's emission
+__device__ float3 environment(const Scene& scene, float3 direction, const Ray& ray, unsigned row = 0) {
     const Point point = {0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, make_float4(0, 0, 0, 0), direction, 0, 0, NONE};
-    return shade<true>(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{}, point,
-        -direction, false, ray, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
+    return shade<true>(scene, scene.materials[scene.count + row].program, direction, SlangMatrix<float, 3, 3>{},
+        point, -direction, false, ray, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
 }
 
 __device__ float3 exponential(float3 a) { return make_float3(expf(a.x), expf(a.y), expf(a.z)); }
@@ -1776,6 +1776,12 @@ extern "C" __global__ void __raygen__lights() {
         const float3 c = environment(scene, make_float3(-sinf(theta) * cosf(phi), sinf(theta) * sinf(phi),
             cosf(theta)), Ray{false, false, LOBE_NONE, 2, 0}); // At the depth and lobe its sky samples see it
         scene.bakeTexels[p.y * scene.environmentWidth + p.x] = make_float4(c.x, c.y, c.z, 0);
+        return;
+    }
+    if (triangle >= scene.count) { // Past the triangles a sun's radiance, of its row
+        const float3 c = environment(scene, make_float3(0, 0, 1), {false, false, LOBE_NONE, 2, 0},
+            triangle - scene.count + 1);
+        scene.suns[2 * (triangle - scene.count) + 1] = make_float4(c.x, c.y, c.z, 0);
         return;
     }
     Material& material = scene.materials[triangle];
