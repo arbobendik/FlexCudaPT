@@ -480,15 +480,19 @@ Random draw(uint32_t address_0, uint32_t variable_0)
     bool _S124 = (variable_0 & 2147483648U) != 0U;
     uint32_t _S125 = stream(address_0, _S116);
     Random _S126 = pcg(_S125);
-    uint32_t _S127 = _S123 & 65535U;
-    uint32_t _S128 = _S123 >> 16U;
-    uint32_t _S129 = _slang_select(_S124, _S128,_S127);
-    float _S130 = (float(_S129) + 0.5f) / 6.5536e+04f;
-    Random _S131 = pcg(_S126.state);
-    float _S132 = _slang_select(_S124, _S131.value,_S126.value);
-    bool _S133 = _S123 == 4294967295U;
-    float _S134 = _slang_select(_S133, _S132,_S130);
-    return Random_x24init_0(address_0, _S134);
+    float _S127;
+    if(_S123 == 4294967295U)
+    {
+        Random _S128 = pcg(_S126.state);
+        _S127 = _slang_select(_S124, _S128.value,_S126.value);
+    }
+    else
+    {
+        uint32_t _S129 = _S123 & 65535U;
+        uint32_t _S130 = _S123 >> 16U;
+        _S127 = (float(_slang_select(_S124, _S130,_S129)) + 0.5f) / 6.5536e+04f;
+    }
+    return Random_x24init_0(address_0, _S127);
 }
 
 SLANG_PRELUDE_EXPORT

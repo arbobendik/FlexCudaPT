@@ -445,14 +445,18 @@ __device__ __noinline__ Random draw(uint address_0, uint variable_0)
     bool _S119 = (variable_0 & 2147483648U) != 0U;
     uint _S120 = stream(address_0, _S111);
     Random _S121 = pcg(_S120);
-    uint _S122 = _S118 & 65535U;
-    uint _S123 = _S118 >> 16U;
-    uint _S124 = _slang_select(_S119, _S123,_S122);
-    float _S125 = (float(_S124) + 0.5f) / 6.5536e+04f;
-    Random _S126 = pcg(_S121.state);
-    float _S127 = _slang_select(_S119, _S126.value,_S121.value);
-    bool _S128 = _S118 == 4294967295U;
-    float _S129 = _slang_select(_S128, _S127,_S125);
-    return Random_x24init_0(address_0, _S129);
+    float _S122;
+    if(_S118 == 4294967295U)
+    {
+        Random _S123 = pcg(_S121.state);
+        _S122 = _slang_select(_S119, _S123.value,_S121.value);
+    }
+    else
+    {
+        uint _S124 = _S118 & 65535U;
+        uint _S125 = _S118 >> 16U;
+        _S122 = (float(_slang_select(_S119, _S125,_S124)) + 0.5f) / 6.5536e+04f;
+    }
+    return Random_x24init_0(address_0, _S122);
 }
 
