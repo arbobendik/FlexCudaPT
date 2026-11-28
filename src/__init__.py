@@ -2190,6 +2190,7 @@ def disk(bm, sides, x, y, z):  # Polygon at height z around the ellipse with dia
 
 BACKENDS = (('OPTIX', ''), ('VULKAN', '-vulkan'))  # The renderer of each, by the suffix of its binary
 runnable = ()  # The backends whose renderer starts on this machine, which register finds
+dlss = 2  # Its DLSS, which register finds: 0 runs, 1 built with it but this machine lacks it, 2 built without
 def noises():  # The directory the blue-noise tensors are stored in, the add-on's user data
     try: return bpy.utils.extension_path_user(__package__, create=True)
     except ValueError: return bpy.utils.user_resource('DATAFILES', path='flex', create=True)
@@ -2208,11 +2209,15 @@ def quality(scene, viewport): return types.SimpleNamespace(**{name[5:]: getattr(
     for name in QUALITY})
 
 # The scene's settings of the renderer, in its order, for an output of width x height, which denoises on OptiX alone;
-# the viewport denoises every result
+# the viewport denoises every result, with DLSS at its Upscale Mode where it runs, else not at all, as Cycles, which
+# DLSS does from 32 x 32
 def settings(scene, viewport, device, width, height):
     q = quality(scene, viewport)
-    return q.restir, q.decorrelation, q.neighbors, q.bounces, q.paths, \
-        q.denoise * (1 + viewport) * (device == 'OPTIX'), 1 << q.noise_size.bit_length() - 1, 0, width, height
+    chosen = viewport and scene.flex_preview_denoiser == 'DLSS'
+    upscaled = chosen and not dlss and min(width, height) >= 32
+    return q.restir, q.decorrelation, q.neighbors, q.bounces, q.paths, (device == 'OPTIX') * q.denoise * (
+        0 if chosen and not upscaled else 1 + viewport + upscaled), 1 << q.noise_size.bit_length() - 1, \
+        [*UPSCALES].index(scene.flex_preview_denoising_upscale_quality) if upscaled else 0, width, height
 
 # The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
 # angle its camera moves and turns at most from the last one's to reuse them and continue its denoised sequence; a view
@@ -3245,7 +3250,10 @@ class Flex(bpy.types.RenderEngine):
         answer = self.answers.read(12)
         if len(answer) < 12: return self.report({'ERROR'}, 'Flex: the renderer stopped') or (0, None)
         launched, *self.memory = struct.unpack('<I2f', answer)
-        shown = settings[-2:]  # The output's size, DLSS's upscaled
+        shown = settings[-2:]  # The output's size, DLSS's upscaled; the traced where the renderer could not start DLSS,
+        if os.fstat(self.shared.fileno()).st_size != 16 * shown[0] * shown[1]:  # which it then has none of here
+            global dlss
+            dlss, shown = 1, (width, height)
         sums = mmap.mmap(self.shared.fileno(), 16 * shown[0] * shown[1], access=mmap.ACCESS_READ)
         return launched, numpy.frombuffer(sums, 'f').reshape(-1, shown[0], 4)[::-1]
 
@@ -3298,13 +3306,16 @@ class Flex(bpy.types.RenderEngine):
         region = context.region
         scene = depsgraph.scene
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
-        launched, sums = self.trace(region.width, region.height, sampling(scene, True, True), VIEWPORT_SAMPLES,
-            settings(scene, True, self.device, region.width, region.height), context.region_data.view_matrix.inverted(),
+        # Traced below its size by DLSS's factor
+        shown = settings(scene, True, self.device, region.width, region.height)
+        factor = [*UPSCALES.values()][shown[7]]
+        launched, sums = self.trace(max(1, int(region.width / factor)), max(1, int(region.height / factor)),
+            sampling(scene, True, True), VIEWPORT_SAMPLES, shown, context.region_data.view_matrix.inverted(),
             context.region_data.window_matrix, camera.evaluated_get(depsgraph) if camera else None,
             context.space_data.clip_end)
         if launched:
             pixels = (sums * (1 / sums[0, 0, 3])).ravel()
-            self.texture = gpu.types.GPUTexture((region.width, region.height), format='RGBA32F',
+            self.texture = gpu.types.GPUTexture(sums.shape[1::-1], format='RGBA32F',
                 data=gpu.types.Buffer('FLOAT', len(pixels), pixels))
             self.tag_redraw()
         gpu.state.blend_set('ALPHA_PREMULT')
@@ -3350,6 +3361,17 @@ class Sampling:  # Quality settings of the viewport or of renders, as Cycles' Sa
         denoise = self.layout.row()
         denoise.active = device() == 'OPTIX'
         denoise.prop(context.scene, PREFIXES[self.viewport] + 'denoise')
+        if not self.viewport: return
+        column = self.layout.column()  # The viewport's denoiser; DLSS's Upscale Mode, or where it lacks it, its needs
+        column.active = context.scene.flex_preview_denoise
+        chosen = column.row()
+        chosen.active = context.scene.flex_preview_denoiser != 'DLSS' or not dlss
+        chosen.prop(context.scene, 'flex_preview_denoiser', text='Denoiser')
+        if context.scene.flex_preview_denoiser == 'DLSS' and not dlss:
+            column.prop(context.scene, 'flex_preview_denoising_upscale_quality', text='Upscale Mode')
+        elif context.scene.flex_preview_denoiser == 'DLSS':
+            column.label(text='Requires NVIDIA GPU with compute capability 7.5 and NVIDIA driver version 620 or newer',
+                icon='INFO')
 
 class RENDER_PT_flex_viewport(Sampling, bpy.types.Panel):
     bl_label = 'Viewport'
@@ -3474,6 +3496,19 @@ QUALITY = {
 PREFIXES = ('flex_', 'flex_preview_')  # Of renders' quality settings and of the viewport's copies
 PROPERTIES = {prefix + name[5:]: prop.function(**prop.keywords) for prefix in PREFIXES
     for name, prop in QUALITY.items()}
+# The viewport's denoiser, of those the renderer has, and DLSS's Upscale Mode, by Cycles' factor: as Cycles has them
+DENOISERS = (('OPTIX', 'OptiX', 'Use the OptiX AI denoiser with GPU acceleration, only available on NVIDIA GPUs'),
+    ('DLSS', 'DLSS', 'Use NVIDIA DLSS Ray Reconstruction'))
+UPSCALES = {'NONE': 1, 'QUALITY': 1 / 0.66666667, 'BALANCED': 1 / 0.58, 'PERFORMANCE': 2, 'ULTRA_PERFORMANCE': 3}
+PROPERTIES |= {'flex_preview_denoiser': bpy.props.EnumProperty(name='Viewport Denoiser', description='Denoise the '
+    'image after each preview update with the selected denoiser', items=lambda _, __: DENOISERS[:1 + (dlss < 2)]),
+    'flex_preview_denoising_upscale_quality': bpy.props.EnumProperty(name='Viewport Denoising Upscale Quality',
+    description='Overall upscale factor and denoising quality when using DLSS', default='BALANCED', items=(
+    ('NONE', 'None', 'Highest quality without upscaling'),
+    ('QUALITY', 'Quality', 'Offers higher image quality than balanced mode'),
+    ('BALANCED', 'Balanced', 'Offers both optimized performance and image quality'),
+    ('PERFORMANCE', 'Performance', 'Offers a higher performance boost than balanced mode'),
+    ('ULTRA_PERFORMANCE', 'Ultra Performance', 'Offers the highest performance boost')))}
 # Flex keeps its scene from one frame of an animation to the next: Blender keeps an engine and its depsgraph for a job's
 # frames only with persistent data, which a Flex render sets as the job starts, for Blender's copy of the settings, and
 # gives the user's value back before the first frame, so no file ever saves it; the job done, setting the user's off
@@ -3514,6 +3549,9 @@ def register():
     global runnable  # Started without a file, a renderer exits once its device is up, failing without one
     runnable = tuple(key for key, suffix in BACKENDS if not subprocess.run((BINARY + suffix,),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode)
+    global dlss
+    dlss = subprocess.run((BINARY, 'dlss'), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL).returncode if 'OPTIX' in runnable else 2
     if 'OPTIX' in runnable and not bpy.app.background:  # Interactive Blender warms OptiX's disk cache with the generic
         subprocess.Popen((BINARY, 'warm', str(os.getpid())), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             start_new_session=True)  # module, once per release, a renderer of its own ending with Blender

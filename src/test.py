@@ -786,8 +786,19 @@ assert flex.settings(split, True, 'OPTIX', 64, 64)[3] == 0 and \
     flex.sampling(split, False, False)[0] == 256, 'viewport settings'
 for viewport, prefix in ((True, 'flex_preview_'), (False, 'flex_')):
     flex.Sampling.draw(types.SimpleNamespace(layout=(layout := types.SimpleNamespace(drawn=[], row=lambda: layout,
-        prop=lambda _, name: layout.drawn.append(name))), viewport=viewport), types.SimpleNamespace(scene=split))
-    assert layout.drawn == [prefix + name for name in ('samples', 'bounces', 'paths', 'noise_size', 'denoise')], prefix
+        column=lambda: layout, prop=lambda _, name, **__: layout.drawn.append(name))), viewport=viewport),
+        types.SimpleNamespace(scene=split))
+    assert layout.drawn == [prefix + name for name in ('samples', 'bounces', 'paths', 'noise_size', 'denoise')] + [
+        'flex_preview_denoiser'] * viewport, prefix
+# DLSS where the renderer has it: denoise level 3 at its Upscale Mode where it runs, from 32 x 32 on OptiX, else none
+if flex.dlss < 2:
+    split.flex_preview_denoise, split.flex_preview_denoiser = True, 'DLSS'
+    split.flex_preview_denoising_upscale_quality = 'PERFORMANCE'
+    shown = flex.settings(split, True, 'OPTIX', 64, 32)
+    assert (shown[5], shown[7]) == ((3, 3) if flex.dlss == 0 else (0, 0)) and shown[-2:] == (64, 32) and not any(
+        flex.settings(split, True, device, *size)[5] for device, size in (('OPTIX', (31, 64)), ('VULKAN', (64, 64)))), \
+        ('DLSS settings', flex.dlss)
+    split.flex_preview_denoiser = 'OPTIX'
 module['quality'] = lambda scene, viewport: quality(scene, False)
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.render.use_border = False
@@ -5350,6 +5361,32 @@ guided.flex_samples, guided.flex_denoise = 4, True
 error = abs(render(guided) - reference)
 edges = sum(abs(numpy.gradient(reference.mean(2), axis=axis)) for axis in (0, 1)) > 0.05
 assert error[edges].mean() < 0.055, ('guided denoiser', error[edges].mean())
+# DLSS Ray Reconstruction where it runs: the checker's viewport of 8 samples at each Upscale Mode finite, its mean
+# within 10% of the undenoised one's (Ultra Performance traces 21 x 21: 5% off)
+def upscaled(denoise):  # The checker's viewport, denoised or not
+    guided.flex_samples, guided.flex_denoise, engine = 8, denoise, Viewport()
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    view = types.SimpleNamespace(region=types.SimpleNamespace(width=SIZE, height=SIZE),
+        region_data=types.SimpleNamespace(view_matrix=guided_camera.matrix_world.inverted(),
+        window_matrix=guided_camera.calc_matrix_camera(depsgraph, x=SIZE, y=SIZE), view_perspective='CAMERA'),
+        space_data=types.SimpleNamespace(camera=guided_camera, clip_end=1000))
+    with offscreen.bind():
+        gpu.matrix.load_matrix(Matrix.Identity(4))
+        gpu.matrix.load_projection_matrix(Matrix.Translation((-1, -1, 0)) @ Matrix.Diagonal((2 / SIZE, 2 / SIZE, 1, 1)))
+        engine.view_update(view, depsgraph)
+        engine.view_draw(view, depsgraph)
+        while engine.__dict__.pop('redraw', False): engine.view_draw(view, depsgraph)
+        frame = numpy.array(gpu.state.active_framebuffer_get().read_color(0, 0, SIZE, SIZE, 4, 0, 'FLOAT').to_list())
+    engine.requests.close()
+    return frame[..., :3]
+if flex.dlss == 0:
+    offscreen = gpu.types.GPUOffScreen(SIZE, SIZE, format='RGBA32F')
+    plain, guided.flex_preview_denoiser = upscaled(False), 'DLSS'
+    for guided.flex_preview_denoising_upscale_quality in flex.UPSCALES:
+        frame = upscaled(True)
+        assert numpy.isfinite(frame).all() and abs(frame.mean() / plain.mean() - 1) < 0.1, \
+            ('DLSS', guided.flex_preview_denoising_upscale_quality, frame.mean(), plain.mean())
+    guided.flex_preview_denoiser = 'OPTIX'
 preferences.device = device
 
 # The blue-noise tensor of a size, every random number's: built once and stored, so a render building it and one
