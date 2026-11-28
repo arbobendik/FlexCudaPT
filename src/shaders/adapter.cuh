@@ -182,7 +182,8 @@ static __device__ bool fcptSlotLeaf(unsigned n, unsigned j) {
 // FK: point lights, which the renderer has none of; no node names one
 static __device__ FKLight fcptLight(unsigned index) { return {}; }
 static __device__ unsigned fcptTriangleOffset(unsigned instance) { return hookScene().instances[instance].first; }
-static __device__ float3 fcptCalculatePointLightContrib(unsigned index) { return make_float3(0, 0, 0); }
+static __device__ __noinline__ float3 fcptCalculatePointLightContrib(unsigned index, float3 dir, unsigned depth,
+    unsigned lobe, float length) { return make_float3(0, 0, 0); }
 // The world the renderer shades escapes by, along an escape's direction from FK's vertex b, the renderer's bounce
 // b + 2, left by FK's lobe; FK takes it for its environment map wherever its size passes 1 x 1, which none has: the
 // world always shades. No ambient color without a world
