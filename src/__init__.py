@@ -2942,22 +2942,24 @@ class Flex(bpy.types.RenderEngine):
                 current.clear()
                 shades = [rows.get((slot.material, ob.name), rows.get(variant(slot.material)))
                     for slot in slotted(ob)] or [rows[None]]
-            # Emitter faces use material 0; lights shine down -z.
-            if ob.type == 'LIGHT':
+            if ob.type == 'LIGHT':  # Lights shine down -z
                 light = ob.data
-                radius = max(light.shadow_soft_size, 0.01)
-                if light.type == 'AREA':
-                    sides = 4 if light.shape in {'SQUARE', 'RECTANGLE'} else 32
-                    size = light.size, light.size_y if light.shape in {'RECTANGLE', 'ELLIPSE'} else light.size
-                    disk(bm, sides, *size, 0)
-                elif light.type == 'SUN':
+                # A sphere's radius, unscaled as Cycles', else an area light's half axes, x and y, in the world, its
+                # front facing -(a x b), and the area of either, else a sun's disc's
+                radius = max(light.shadow_soft_size, 0.01) * (light.type != 'AREA')
+                size = (light.size, light.size_y if light.shape in {'RECTANGLE', 'ELLIPSE'} else light.size) \
+                    if light.type == 'AREA' else (0, 0)
+                a, b = (numpy.array(instance.matrix_world.to_3x3().col[k]) * size[k] / 2 for k in (0, 1))
+                b *= math.copysign(1, instance.matrix_world.determinant())
+                ellipse = light.type == 'AREA' and light.shape in {'DISK', 'ELLIPSE'}
+                if light.type == 'SUN':
                     disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2)], SUN_DISTANCE)
-                else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
             bm.transform(instance.matrix_world)
             bm.normal_update()  # Of the faces of lights, which have no corner normals
             if ob.type == 'LIGHT':
-                area = sum(face.calc_area() for face in bm.faces if not face.material_index)
+                area = sum(face.calc_area() for face in bm.faces) or 4 * math.pi * radius ** 2 \
+                    or numpy.linalg.norm(numpy.cross(a, b)) * (math.pi if ellipse else 4)
                 # Sun irradiance, else watts, by the exposure; unless normalized, by Cycles' area of the light as well:
                 # a sphere's, 4 of a point; a sun's of its angle, 1 of a parallel one; the area light's
                 radiance = light.energy * 2 ** light.exposure \
@@ -2965,9 +2967,6 @@ class Flex(bpy.types.RenderEngine):
                 if not light.normalize:
                     radiance *= area if light.type == 'AREA' else (math.pi * math.sin(light.angle / 2) ** 2 or 1) \
                         if light.type == 'SUN' else 4 * math.pi * light.shadow_soft_size ** 2 or 4
-                # A sphere glows on both sides of its shell, which every ray from outside crosses twice: at half its
-                # radiance it emits its power outward, and half that radiance inward
-                if light.type in ('POINT', 'SPOT'): radiance /= 2
                 emission = radiance * numpy.array(light.color) \
                     * (numpy.array(light.temperature_color) if light.use_temperature else 1)
                 if light.use_nodes and light.node_tree and known(light.node_tree) and (out :=
@@ -2975,9 +2974,8 @@ class Flex(bpy.types.RenderEngine):
                     emission = 'MULTIPLY', emission, resolve(out.inputs['Surface'])[4]
                 if isinstance(light, types.SimpleNamespace):  # A sky's sun, through the world's emission
                     emission = 'MULTIPLY', emission, light.emission
-                shaped = 1
-                # Spot cone and area spread on the direction emitted, as Cycles'; the lights pass, shading no ray, takes
-                # the unshaped power, a bound for the cone and exact for the spread, whose mean over the hemisphere is 1
+                shaped, unshaped = 1, emission
+                # Spot cone and area spread on the direction emitted, as Cycles'
                 if light.type == 'SPOT':
                     local = vector(*(('DOT_PRODUCT', ('INCOMING',), numpy.array(row))
                         for row in instance.matrix_world.inverted().to_3x3()))
@@ -2986,24 +2984,26 @@ class Flex(bpy.types.RenderEngine):
                     if light.spot_blend:
                         t = clamp(('MULTIPLY', ('SUBTRACT', cosine, edge), 1 / ((1 - edge) * light.spot_blend)))
                         shaped = 'MULTIPLY', ('MULTIPLY', t, t), ('SUBTRACT', 3, ('MULTIPLY', t, 2))
-                if light.type == 'AREA':  # None behind it at any distance
+                if light.type == 'AREA' and light.spread < math.pi:
                     normal = -numpy.array(instance.matrix_world.to_3x3().col[2].normalized())
                     cosine = 'DOT_PRODUCT', ('INCOMING',), normal
-                    shaped = 'LESS_THAN', 0, cosine
-                if light.type == 'AREA' and light.spread < math.pi:
                     half = (light.spread or SPREAD_ZERO) / 2
                     tangent = 'DIVIDE', length(('CROSS_PRODUCT', ('INCOMING',), normal)), cosine
                     # None behind the light or along its plane, where the tangent turns negative
                     shaped = 'MULTIPLY', ('MAXIMUM', ('MULTIPLY', ('SUBTRACT', math.tan(half), tangent),
                         1 / (math.tan(half) - half) if half > 0.05 else 3 / half ** 3), 0), shaped
-                if isinstance(shaped, tuple):
-                    emission = 'MULTIPLY', emission, mix(1, shaped, ('LESS_THAN', 0, ('LIGHT_PATH', 8)))
-                # Black reflects nothing. A sphere light's shell and an area light transmit all, white and smooth at an
-                # ior of 1, so rays pass through them straight as Cycles' lights occlude none and what lies within a
-                # sphere is lit; a sun stays black
-                sphere = light.type != 'SUN'
-                shades = [program([BLACK[0], 1, 0, 0, emission, 1, 1, *BLACK[7:]] if sphere
-                    else [*BLACK[:4], emission, *BLACK[5:]])]
+                if isinstance(shaped, tuple): emission = 'MULTIPLY', emission, shaped
+                if light.type != 'SUN':  # Its rows, its power that of its emission unshaped a unit away, as a hint takes
+                    # it, and its cone along -z, and its emission; moved, all anew
+                    if moved: return self.start(depsgraph, keeping)
+                    lights += [(*instance.matrix_world.translation, radius), (*a, ellipse),
+                        (*b, math.pi * numpy.sum(triple(emit(unshaped, [], {}, [], (), {}))) * area),
+                        (*-numpy.array(instance.matrix_world.to_3x3().col[2].normalized()),
+                        math.cos(light.spot_size / 2) if light.type == 'SPOT' else 1 if light.type == 'AREA' else -1)]
+                    lit.append(tabled([program([*BLACK[:4], emission, *BLACK[5:]])], ob))
+                    continue
+                # Black reflects nothing: a sun's disc stays black
+                shades = [program([*BLACK[:4], emission, *BLACK[5:]])]
                 positions = numpy.array([[vertex.co for vertex in face.verts] for face in bm.faces], 'f')
                 normals = numpy.array([[face.normal] * 3 for face in bm.faces], 'f')
                 uv, orco, point, color, tangent = (numpy.zeros((len(bm.faces), 3, n), 'f') for n in (2, 3, 3, 4, 4))

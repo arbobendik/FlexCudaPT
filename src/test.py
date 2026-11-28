@@ -2829,37 +2829,28 @@ for height, power in ((2.5, 0.01), (0.5, 0)):
         assert numpy.isclose(seen, 1 + power / (4 * math.pi ** 2 * height ** 2), rtol=0.01), ('light shell', height,
             device, seen)
     bpy.data.objects.remove(shell)
-# A sphere light is a thin shell glowing on both sides at half its radiance L = P / (pi A), the shell the icosphere of
-# 320 faces the export draws and A its area: the floor crossing a hidden one of 100 W and radius 1 centered 0.5 over it,
-# the sun off, holds L / 2 within it, each way up crossing one face, and without it L / 2 by the projected solid angle
-# of the ways up through its faces, met twice, by quadrature over the hemisphere: within 2% both, nowhere dark, seen
-# across the rim at 0.866 from the axis
+# A sphere light glows at its radiance L = P / (pi A), A its sphere's area, every way it is met from: the floor crossing
+# a hidden one of 100 W and radius 1 centered 0.5 over it, the sun off, holds L within it, and without it L by the
+# projected solid angle of the ways up meeting it, by quadrature over the hemisphere: within 2% both, nowhere dark,
+# seen across the rim at 0.866 from the axis
 shell = add(bpy.data.lights.new('crossed shell', 'POINT'), (0, 0, 0.5))
 shell.data.shadow_soft_size, shell.data.energy, shell.visible_camera = 1, 100, False
 sun.energy, scene.flex_samples = 0, 1024
 scene.camera.location, scene.camera.data.ortho_scale = (1, 0, 1.6), 2
-bmesh.ops.create_icosphere(ico := bmesh.new(), subdivisions=3, radius=1)  # The shell as the export draws it
-corners = numpy.array([[v.co for v in face.verts] for face in ico.faces]) + (0, 0, 0.5)
-half = 100 / (2 * math.pi * sum(face.calc_area() for face in ico.faces))
-ico.free()
+radiance = 100 / (4 * math.pi ** 2)
 theta, phi = ((numpy.arange(n) + 0.5) / n * k for n, k in ((64, math.pi / 2), (128, 2 * math.pi)))
 theta, phi = numpy.meshgrid(theta, phi, indexing='ij')
 up = numpy.stack((numpy.sin(theta) * numpy.cos(phi), numpy.sin(theta) * numpy.sin(phi), numpy.cos(theta)), -1)
-up = up[..., None, :]  # Against each face
-along, across = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
-def crossed(rho):  # Of a point of the floor at rho from the axis, half the radiance's multiple its irradiance over pi is
-    s = numpy.array((rho, 0, 0)) - corners[:, 0]
-    h, q = numpy.cross(up, across), numpy.cross(s, along)
-    with numpy.errstate(divide='ignore', invalid='ignore'):  # Faces the way up runs along meet it nowhere
-        det = (h * along).sum(-1)
-        u, v, t = (h * s).sum(-1) / det, (up * q).sum(-1) / det, (across * q).sum(-1) / det
-    meets = ((u >= 0) & (v >= 0) & (u + v <= 1) & (t > 0)).sum(-1)  # The faces each way up crosses
+def crossed(rho):  # Of a point of the floor at rho from the axis, the radiance's multiple its irradiance over pi is
+    c = numpy.array((-rho, 0, 0.5))  # The center from it, which a way up meets ahead within the radius
+    b = (up * c).sum(-1)
+    meets = (b * b - c @ c + 1 >= 0) & (b + numpy.sqrt(numpy.maximum(b * b - c @ c + 1, 0)) > 0)
     return (meets * numpy.cos(theta) * numpy.sin(theta)).sum() * (2 * math.pi / 128) * (math.pi / 2 / 64) / math.pi
 y, x = (numpy.mgrid[:SIZE, :SIZE] + 0.5) / SIZE * 2  # The pixels' points, the axis at y 1, x 0
 y = y - 1
 rho = numpy.hypot(x, y)
 rings = numpy.linspace(0, 2.3, 93)
-due = half * numpy.interp(rho, rings, [crossed(r) for r in rings])
+due = radiance * numpy.interp(rho, rings, [crossed(r) for r in rings])
 for device in ('OPTIX', 'VULKAN'):
     preferences.device = device
     seen = render().mean(2)
@@ -2950,14 +2941,14 @@ for preferences.device in ('OPTIX', 'VULKAN'):
     strays = [stray(name) for name in ('disk', 'falloff 0', 'falloff 1', 'falloff 2')]
     assert max(strays[1:]) < 1.5 * strays[0], ('falloff samples', preferences.device, strays)
 scene.flex_samples, scene.flex_restir = 1024, True
-# Turned, a spot exports anew, as its program holds its cone's axis; moved, it updates in place
+# Turned or moved, a spot exports anew, as its program holds its cone's axis and its rows its place
 spot = lights['spot'][0]
 for other, _ in lights.values(): other.hide_render = other != spot
 bpy.context.view_layer.update()
 exporter = exported(depsgraph := bpy.context.evaluated_depsgraph_get())
 # Anew, as an update can
 exporter.start = lambda depsgraph, keeping=False: Viewport.engine.start(exporter, depsgraph, keeping)
-for vector, kind in ((spot.location, flex.UPDATE), (spot.rotation_euler, flex.SCENE)):
+for vector, kind in ((spot.location, flex.SCENE), (spot.rotation_euler, flex.SCENE)):
     vector.x, exporter.requests = 0.5, io.BytesIO()
     bpy.context.view_layer.update()
     exporter.start(updated(depsgraph, spot))
