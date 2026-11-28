@@ -8,7 +8,7 @@ from mathutils.bvhtree import BVHTree
 from bl_ui.properties_data_camera import classes as CAMERA_PANELS
 from bpy_extras import anim_utils
 
-SUN_DISTANCE = 1e5
+SUN_FAR = 2 ** 32  # FK's POW32, as far as its rays reach: a sun's sphere there, of its angle
 BOX_MARGIN = 0.01  # Of the world's box past what it holds: of their extent's diagonal, floored at 1
 SUN_MIN_ANGLE = 1e-4  # Blender's parallel sun of angle 0 as the smallest disk, which delivers the same irradiance
 SPREAD_ZERO = math.radians(5)  # An area light's spread of 0, a parallel beam no light sample meets, as 5 degrees
@@ -2953,9 +2953,7 @@ class Flex(bpy.types.RenderEngine):
                     disk(bm, sides, *size, 1e-3)
                 for face in bm.faces: face.material_index = 1
                 if light.type == 'AREA': disk(bm, sides, *size, 0)
-                elif light.type == 'SUN':
-                    disk(bm, 32, *2 * [2 * SUN_DISTANCE * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2)], SUN_DISTANCE)
-                else: bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
+                elif light.type != 'SUN': bmesh.ops.create_icosphere(bm, subdivisions=3, radius=radius)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
             bm.transform(instance.matrix_world)
             bm.normal_update()  # Of the faces of lights, which have no corner normals
@@ -2964,7 +2962,8 @@ class Flex(bpy.types.RenderEngine):
                 # Sun irradiance, else watts, by the exposure; unless normalized, by Cycles' area of the light as well:
                 # a sphere's, 4 of a point; a sun's of its angle, 1 of a parallel one; the area light's
                 radiance = light.energy * 2 ** light.exposure \
-                    * (SUN_DISTANCE ** 2 if light.type == 'SUN' else 1 / math.pi) / area
+                    * (1 / (math.pi * math.tan(max(light.angle, SUN_MIN_ANGLE) / 2) ** 2) if light.type == 'SUN'
+                    else 1 / math.pi / area)
                 if not light.normalize:
                     radiance *= area if light.type == 'AREA' else (math.pi * math.sin(light.angle / 2) ** 2 or 1) \
                         if light.type == 'SUN' else 4 * math.pi * light.shadow_soft_size ** 2 or 4
@@ -2978,6 +2977,12 @@ class Flex(bpy.types.RenderEngine):
                     emission = 'MULTIPLY', emission, resolve(out.inputs['Surface'])[4]
                 if isinstance(light, types.SimpleNamespace):  # A sky's sun, through the world's emission
                     emission = 'MULTIPLY', emission, light.emission
+                if light.type == 'SUN':  # Along -z, at its direction SUN_FAR away; moved, the scene anew
+                    if moved: return self.start(depsgraph, keeping)
+                    lamps.append((*SUN_FAR * numpy.array(instance.matrix_world.to_3x3().col[2].normalized()),
+                        SUN_FAR * math.sin(max(light.angle, SUN_MIN_ANGLE) / 2), 0, 0, 0, 0))
+                    glows.append(emission)
+                    continue
                 shaped = 1
                 # Spot cone and area spread on the direction emitted, as Cycles'; the lights pass, shading no ray, takes
                 # the unshaped power, a bound for the cone and exact for the spread, whose mean over the hemisphere is 1
