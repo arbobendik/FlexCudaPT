@@ -1407,12 +1407,12 @@ __device__ Domain pixelDomain(const Scene& scene, VIEWING(camera), int pixel, ui
 #endif
 }
 
-// World: equirectangular texture along the direction
-__device__ float3 environment(const Scene& scene, float3 direction, const Ray& ray) {
+// World: equirectangular texture along the direction; world 1 on the lamps'
+__device__ float3 environment(const Scene& scene, float3 direction, const Ray& ray, unsigned world = 0) {
     const Point point = {0.5f - atan2f(direction.y, direction.x) / (2 * PI),
         0.5f + atan2f(direction.z, sqrtf(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, make_float4(0, 0, 0, 0), direction, 0, 0, NONE};
-    return shade<true>(scene, scene.materials[scene.count].program, direction, SlangMatrix<float, 3, 3>{}, point,
+    return shade<true>(scene, scene.materials[scene.count + world].program, direction, SlangMatrix<float, 3, 3>{}, point,
         -direction, false, ray, Info{{}, {}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}}).emissive;
 }
 

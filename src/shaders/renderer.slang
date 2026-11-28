@@ -89,6 +89,7 @@ struct Scene {
     float4* hairs; // Per level of a hair table
     uint environmentWidth, environmentHeight; // The grid the world bakes over, none where the same every way
     float2* environmentCdf; uint cdfWidth, cdfHeight; // Its luminance CDF, its marginal in the last column
+    float4* lamps; uint lampCount; // Per point, spot or area light its rows, as renderer.h lists them
     uint* queue; // The shift queue
     Scene* anchor; // The anchor's scene, in its record
     uint width, height; // The image's size, which shift passes launched over their queue need
@@ -1268,13 +1269,13 @@ Domain pixelDomain(Scene* scene, Camera camera, int pixel, uint3 size, uint seed
         hit, camera.lens.ortho != 0 ? across : 0, camera.lens.ortho != 0 ? 0 : across / length(plane));
 }
 
-// World: equirectangular texture along the direction
-float3 environment(Scene* scene, float3 direction, Ray ray) {
+// World: equirectangular texture along the direction; world 1 on the lamps'
+float3 environment(Scene* scene, float3 direction, Ray ray, uint world = 0) {
     const Point point = Point(0.5f - atan2(direction.y, direction.x) / (2 * PI),
         0.5f + atan2(direction.z, sqrt(direction.x * direction.x + direction.y * direction.y)) / PI, direction,
         direction, float4(0, 0, 0, 0), direction, 0, 0, NONE, NONE);
     const Info info = {{0, 0, 0}, {0, 0, 0, 0}, 0, 0, {1, 0, 0, 0, 1, 0, 0, 0, 1}};
-    return shade(scene, scene.materials[scene.count].program, direction, float3x3(float3(0), float3(0), float3(0)),
+    return shade(scene, scene.materials[scene.count + world].program, direction, float3x3(float3(0), float3(0), float3(0)),
         point, -direction, false, ray, info).emissive;
 }
 
