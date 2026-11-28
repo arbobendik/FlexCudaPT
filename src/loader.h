@@ -252,6 +252,7 @@ struct Loaded { std::vector<CUdeviceptr> arrays; std::vector<float3> vertices; s
     std::vector<Op> ops; std::vector<unsigned> bakes, rebakes; CUdeviceptr bakeOps, bounds; unsigned rows;
     std::vector<std::tuple<CUtexObject, CUtexObject, CUmipmappedArray, size_t>> textures;
     std::vector<HairTable> tables; std::vector<float4> hairs; std::future<void> baking; // Hair tables, as they bake
+    std::vector<float4> lamps; // The lamps' rows, which the light tree bounds
     bool deformed{}; // Whether an update since last asked changed a mesh in its own space, not only moved its instances
     struct { unsigned count, ops, texels, baked, bakes, rows, only, triangles, instances, images; } header; }; // Its counts
 
@@ -592,7 +593,9 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
     scene.objects = upload(read<float3>(3 * meshes)), scene.uvs = upload(read<float2>(3 * meshes));
     scene.colors = upload(read<float4>(3 * meshes)), scene.tangents = upload(read<float4>(3 * meshes));
     scene.passes = upload(read<float>(meshes)); // Per triangle of the meshes its material's pass index, then its
-    const std::vector<Material> table = read<Material>(meshes + 1); // material and the world's
+    receive(&scene.lampCount, sizeof(unsigned), 1); // material, the world's and the lamps'
+    loaded.lamps = read<float4>(4 * scene.lampCount), scene.lamps = upload(loaded.lamps);
+    const std::vector<Material> table = read<Material>(meshes + 1 + scene.lampCount);
     struct { unsigned points, segments, strands; } hair; // Strands: their points, per segment its first point and
     receive(&hair, sizeof(hair), 1); // strand and its bounds, per strand its first point, count and random, its root's
     scene.points = upload(read<float4>(hair.points)), scene.segments = upload(read<unsigned>(2 * hair.segments));
@@ -607,7 +610,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         if (instance.world == 1)
             std::copy_n(IDENTITY_ROWS, 12, instance.matrix), std::copy_n(IDENTITY_ADJUGATE, 9, instance.adjugate);
     }
-    loaded.materials.push_back(table[meshes]);
+    loaded.materials.insert(loaded.materials.end(), table.begin() + meshes, table.end());
     scene.instances = upload(instances), scene.instanceCount = instances.size();
     scene.materials = upload(loaded.materials);
     scene.lights = (LightNode*)allocate(0), scene.trails = (unsigned long long*)allocate(0);
@@ -642,7 +645,7 @@ inline void loadScene(OptixDeviceContext context, Scene& scene, Loaded& loaded) 
         (CUdeviceptr)scene.passes, (CUdeviceptr)scene.materials, (CUdeviceptr)scene.lights, (CUdeviceptr)scene.trails,
         (CUdeviceptr)scene.ops, (CUdeviceptr)scene.texels, (CUdeviceptr)scene.images, (CUdeviceptr)scene.attributes,
         (CUdeviceptr)scene.points, (CUdeviceptr)scene.segments, loaded.bounds, (CUdeviceptr)scene.strands,
-        (CUdeviceptr)scene.hairs};
+        (CUdeviceptr)scene.hairs, (CUdeviceptr)scene.lamps};
 }
 
 // The steps of all programs anew, piped in by the extension as their count, the same, then the steps, as when only
