@@ -1463,12 +1463,34 @@ FKSurface walkSurface(Scene* scene, Hit at, Surface surface, float3 position, ui
 }
 struct VkScene : IScene {
     Scene* scene;
-    // Nearest hit, from past a surface's margin or from a medium's vertex; from the camera past hidden layers
+    // The nearest of hit, else a miss reaching max_len, and the lamps the ray meets, but the one it leaves and those
+    // hidden from it when viewed
+    FKHit lamped(FKRay ray, FKHit hit, float max_len, bool viewed, FKHit left = {}) {
+        for (uint k = 0; k < scene.lampCount; ++k) {
+            const float reach = hit.instance_index == NONE ? max_len : hit.distance;
+            const float t = rayLight(light(k), lightShape(k, 0), lightShape(k, 1), ray, reach);
+            const FKHit lamp = FKHit(float2(0), k, 0, 1, t);
+            if (t < reach && !(left.is_point_light != 0 && left.instance_index == k)
+                && !(viewed && scene.materials[lightSlot(lamp)].hidden != 0)) hit = lamp;
+        }
+        return hit;
+    }
+    // The walk's domain of a renderer's domain, a miss of no instance; a lamp seen first at its point, none blind
+    FKDomain fkDomain(Domain dom) {
+        const float3 dir = normalize(dom.x1 - dom.x0);
+        const FKHit hit = lamped(FKRay(dom.x0, dir), FKHit(dom.hit.uv, dom.hit.triangle == NONE ? NONE
+            : dom.hit.instance, dom.hit.triangle, 0, length(dom.x1 - dom.x0)), dom.spread < 0 ? 0 : POW32, true);
+        return FKDomain(dom.x0, hit.is_point_light != 0 ? dom.x0 + hit.distance * dir : dom.x1, hit, dom.width,
+            dom.spread);
+    }
+    // Nearest hit, from past a surface's margin or from a medium's vertex; from the camera past hidden layers; the
+    // lamps but one left
     FKHit traverseInstanceBVH(FKRay ray, bool consider_point_lights, float max_len, bool surface, FKHit left,
         bool viewed) {
         float distance = 0;
         Hit hit = surface ? traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
-            left.instance_index != NONE && left.distance >= MARGIN ? key(scene, nativeHit(left)) : NONE)
+            left.instance_index != NONE && left.is_point_light == 0 && left.distance >= MARGIN
+            ? key(scene, nativeHit(left)) : NONE)
             : traverse(scene, ray.origin, ray.unit_direction, max_len, distance,
             left.instance_index != NONE ? key(scene, nativeHit(left)) : NONE, 0);
         for (bool first = true; viewed && hit.triangle != NONE && scene.materials[key(scene, hit)].hidden != 0;
@@ -1476,7 +1498,8 @@ struct VkScene : IScene {
             if (first) distance = asfloat(asuint(distance) - 1);
             hit = nextLayer(scene, ray.origin, ray.unit_direction, max_len, distance, first ? NONE : key(scene, hit));
         }
-        return FKHit(hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance);
+        const FKHit met = FKHit(hit.uv, hit.triangle == NONE ? NONE : hit.instance, hit.triangle, 0, distance);
+        return lamped(ray, met, max_len, viewed, left);
     }
     // Transmittance toward the light, zero if blocked
     float3 shadowTransmittanceIn(FKRay ray, float l, float3 extinction, uint filling, uint random_state, uint depth,
@@ -1486,13 +1509,19 @@ struct VkScene : IScene {
         return occluded(scene, ray.origin, ray.unit_direction, l, Medium(float3(0, 0, 0), extinction), filling, state,
             Ray(depth == 0, false, lobe, float(depth), length, width), surface, transmitted,
             left.instance_index != NONE ? key(scene, nativeHit(left)) : NONE, light.instance_index != NONE
-            && (scene.materials[key(scene, nativeHit(light))].opaque & 4) != 0 ? 0 : SHADOWS) ? float3(0, 0, 0)
+            && (scene.materials[lightSlot(light)].opaque & 4) != 0 ? 0 : SHADOWS) ? float3(0, 0, 0)
             : transmitted;
     }
     // Unused
     FKSurface surfaceAt(FKHit hit, float3 origin, uint init_random_state) { return {}; }
     // A light sample's emission: its emission program toward the face, and its smooth normal
     FKSurface lightSurfaceAt(FKHit hit, float3 point, uint init_random_state, float3 dir, uint depth, float length) {
+        if (hit.is_point_light != 0) {  // A lamp's, its emission alone
+            FKSurface lamp = {};
+            lamp.material.emissive = calculatePointLightContrib(hit.instance_index, dir, depth + 1, LOBE_NONE, length);
+            lamp.random_state = init_random_state;
+            return lamp;
+        }
         const Hit at = nativeHit(hit);
         const Corners corner = corners(scene.vertices, scene.instances[at.instance], at.triangle);
         FKSurface light = walkSurface(scene, at, shade(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
@@ -1578,7 +1607,10 @@ struct VkScene : IScene {
     FKLight light(uint index) { return {scene.lamps[4 * index].xyz, 0, float3(0), 0, scene.lamps[4 * index].w}; }
     float4 lightShape(uint index, uint row) { return scene.lamps[4 * index + 1 + row]; }
     uint triangleOffset(uint instance_index) { return scene.instances[instance_index].first; }
-    float3 calculatePointLightContrib(uint index, float3 dir, uint depth, uint lobe, float length) { return float3(0); }
+    // A lamp's, by its program, as the world's
+    float3 calculatePointLightContrib(uint index, float3 dir, uint depth, uint lobe, float length) {
+        return environment(scene, dir, Ray(depth == 0, false, lobe, float(depth), length), 1 + index);
+    }
     // The world along an escape's direction, shaded at bounce depth + 2 by lobe
     float3 env_map_sample(float3 dir, uint depth, uint lobe) {
         return environment(scene, dir, Ray(false, false, lobe, float(depth + 2u), 0));
@@ -1724,11 +1756,6 @@ struct VkScene : IScene {
     // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without
     void addColor(int2 p, float4 color) { scene.accumulation[index(p)] += color; }
 };
-// The walk's domain of a renderer's domain, a miss of no instance
-FKDomain fkDomain(Domain dom) {
-    return FKDomain(dom.x0, dom.x1, FKHit(dom.hit.uv, dom.hit.triangle == NONE ? NONE : dom.hit.instance,
-        dom.hit.triangle, 0, length(dom.x1 - dom.x0)), dom.width, dom.spread);
-}
 
 // Running sums of a hair table level's rows (image 0) or columns (1), RGBA by lobe, filtered at x and y
 float4 hairSums(Scene* scene, float4* record, uint image, float x, float y) {
