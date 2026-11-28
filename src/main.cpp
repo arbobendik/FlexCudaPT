@@ -672,7 +672,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 if (view.settings.denoise) for (CUdeviceptr array : {state, scratch, denoised, guides[0], guides[1],
                     (CUdeviceptr)scene.mean, (CUdeviceptr)scene.flow, (CUdeviceptr)scene.trust,
                     (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen, (CUdeviceptr)scene.albedo,
-                    (CUdeviceptr)scene.normal, (CUdeviceptr)scene.deferred}) release(array);
+                    (CUdeviceptr)scene.normal, (CUdeviceptr)scene.specular, (CUdeviceptr)scene.depth,
+                    (CUdeviceptr)scene.deferred}) release(array);
                 if (request.view.settings.denoise) {
                     const unsigned width = request.view.width, height = request.view.height;
                     CHECK(optixDenoiserComputeMemoryResources(denoiser, width, height, &sizes));
@@ -684,6 +685,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                     scene.mean = zeros<float4>(pixels), scene.flow = zeros<float2>(pixels);
                     scene.trust = zeros<float>(pixels);
                     scene.albedo = zeros<float4>(pixels), scene.normal = zeros<float4>(pixels);
+                    const size_t upscaling = request.view.settings.denoise == 3 ? pixels : 0; // DLSS's alone
+                    scene.specular = zeros<float4>(upscaling), scene.depth = zeros<float>(upscaling);
                     scene.deferred = zeros<float4>(pixels);
                     scene.seen = zeros<unsigned>(pixels), scene.previousSeen = zeros<unsigned>(pixels);
                     CHECK(optixDenoiserSetup(denoiser, nullptr, width, height, state, sizes.stateSizeInBytes, scratch,

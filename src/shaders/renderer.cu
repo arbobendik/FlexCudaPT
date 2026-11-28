@@ -1802,7 +1802,8 @@ extern "C" __global__ void __raygen__lights() {
 extern "C" __global__ void __raygen__initial() { restir_initial_hook(optixGetLaunchIndex()); }
 
 // Denoiser input of the pixel and the motion of what it sees since the last denoised frame; its guides the means of its
-// paths' (guide in adapter.cuh), the normal the world's
+// paths' (guide in adapter.cuh), the normal the world's for OptiX; for DLSS, as Cycles' filter_guiding_preprocess_to_
+// surface has them, the albedo tonemapped x / (1 + x), the normal the camera's (x right, y up, z forward)
 extern "C" __global__ void __raygen__denoise() {
     const uint3 p = optixGetLaunchIndex();
     const uint3 size = optixGetLaunchDimensions();
@@ -1825,6 +1826,14 @@ extern "C" __global__ void __raygen__denoise() {
     scene.trust[index] = (PANORAMIC(scene.denoisedCamera) || dot(back, before - last.origin) * dot(back, last.z) > 0.0f)
         && x >= 0 && y >= 0 && x < int(size.x) && y < int(size.y) && scene.previousSeen[y * size.x + x] == seen;
     scene.seen[index] = seen;
+    if (scene.settings.denoise == 3) { // DLSS's frame, of one sample: its albedo tonemapped, its normal the camera's
+        const float4 a = scene.albedo[index], n = scene.normal[index];
+        const float3 normal = make_float3(n.x, n.y, n.z);
+        const Camera& now = scene.camera;
+        scene.albedo[index] = make_float4(a.x / (1 + a.x), a.y / (1 + a.y), a.z / (1 + a.z), a.w);
+        scene.normal[index] = make_float4(dot(normal, normalize(now.x)), dot(normal, normalize(now.y)),
+            dot(normal, normalize(cross(now.y, now.x))), n.w);
+    }
 }
 
 // The temporal round of FlexKernels' shift queue: each pixel's neighbour stored and its jobs counted per bin, then

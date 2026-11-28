@@ -96,23 +96,34 @@ static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 po
 }
 // Denoising guides of the initial pass's own paths, as Cycles writes its denoising features (film/denoising_passes.h,
 // Denoising Pass Reflections on), each the running mean over the pixel's paths in the image the denoiser reads:
-// diffuse albedo (w the paths) and normal. Each lobe a closure, its albedo FlexKernels' normalWeights', a diffuse one
-// of roughness 1; deferred through smooth specular chains by the path's feature throughput in deferred (w 1 while it
-// follows)
+// diffuse albedo (w the paths), normal (w perceptual roughness); DLSS's specular albedo and depth too. Each lobe a
+// closure, its albedo FlexKernels' normalWeights', a diffuse one of roughness 1; deferred through smooth specular
+// chains by the path's feature throughput in deferred (w 1 while it follows)
 static __device__ float rise(float edge, float x) { x = fminf(fmaxf(x / edge, 0), 1); return x * x * (3 - 2 * x); }
+static __device__ float along(const Scene& scene, float3 dir) { // A camera ray's cosine to the view, a panorama's 1
+    return PANORAMIC(scene.camera) || scene.camera.lens.ortho ? 1 : dot(dir, normalize(cross(scene.camera.y,
+        scene.camera.x)));
+}
 // A path's part of pixel i's guides: its first, at its first hit or miss, counts it among the paths; a later one adds
-static __device__ void blend(const Scene& scene, unsigned i, bool first, float3 albedo, float3 normal) {
+static __device__ void blend(const Scene& scene, unsigned i, bool first, float3 albedo, float3 normal, float roughness,
+    float3 specular, float depth) {
     float4 &a = scene.albedo[i], &n = scene.normal[i];
     const float count = a.w + first, keep = first ? 1 - 1 / count : 1, share = 1 / count;
     a = make_float4(a.x * keep + albedo.x * share, a.y * keep + albedo.y * share, a.z * keep + albedo.z * share, count);
-    n = make_float4(n.x * keep + normal.x * share, n.y * keep + normal.y * share, n.z * keep + normal.z * share, 0);
+    n = make_float4(n.x * keep + normal.x * share, n.y * keep + normal.y * share, n.z * keep + normal.z * share,
+        n.w * keep + roughness * share);
+    if (scene.settings.denoise != 3) return;
+    float4& s = scene.specular[i];
+    s = make_float4(s.x * keep + specular.x * share, s.y * keep + specular.y * share, s.z * keep + specular.z * share,
+        1);
+    scene.depth[i] = scene.depth[i] * keep + depth * share;
 }
 static __device__ unsigned guided() { // The pixel the initial pass's thread walks
     const uint3 p = optixGetLaunchIndex();
     return p.y * optixGetLaunchDimensions().x + p.x;
 }
-static __device__ void guide(const Scene& scene, const FKSurface& s, float3 dir, unsigned depth) {
-    const bool first = depth == 0;
+static __device__ void guide(const Scene& scene, const FKSurface& s, float3 dir, float distance, unsigned depth) {
+    const bool dlss = scene.settings.denoise == 3, first = depth == 0;
     const unsigned i = guided();
     float4& path = scene.deferred[i];
     if (first) path = make_float4(1, 1, 1, 1);
@@ -125,15 +136,18 @@ static __device__ void guide(const Scene& scene, const FKSurface& s, float3 dir,
     const float3 albedos[] = {m.albedo * w.diffuse_weight, w.F, m.albedo * w.refract_weight, w.sheen, w.coat};
     const float roughnesses[] = {1, m.roughness, m.roughness, 1, m.coat_roughness};
     float3 diffuse = make_float3(0, 0, 0), specular = make_float3(0, 0, 0);
-    float sum = 0, rough = 0; // The closures' albedo, and the share of the rough ones
+    float roughness = 0, sum = 0, rough = 0; // The closures' roughness and albedo, and the share of the rough ones
     for (unsigned k = 0; k < 5; ++k) {
         const float3 a = albedos[k] * s.coverage;
         const float weight = (a.x + a.y + a.z) / 3, share = rise(0.15f, roughnesses[k] * roughnesses[k]);
-        diffuse = diffuse + a * share, specular = specular + a * (1 - share), sum += weight, rough += weight * share;
+        diffuse = diffuse + a * share, specular = specular + a * (1 - share);
+        roughness += roughnesses[k] * weight, sum += weight, rough += weight * share;
     }
     const float feature = sum > 0 ? rise(0.5f, rough / sum) : 0;
+    const float near = scene.camera.lens.ortho ? 0 : scene.camera.lens.near / along(scene, dir); // As Cycles' nearclip
     blend(scene, i, first, diffuse * through * feature + m.emissive * through, s.smooth_n * (sum > 0 ? sum * feature * t
-        / (sum + 1 - s.coverage) : 0));
+        / (sum + 1 - s.coverage) : 0), dlss && first && sum > 0 ? roughness / sum * t : 0,
+        first ? specular * through : make_float3(0, 0, 0), (distance + (first ? near : 0)) * t);
     const float3 deferred = specular * (1 - feature) + make_float3(1, 1, 1) * (1 - s.coverage);
     path = fmaxf(fmaxf(deferred.x, deferred.y), deferred.z) > 1e-4f ? make_float4(through.x * deferred.x,
         through.y * deferred.y, through.z * deferred.z, 1) : make_float4(0, 0, 0, 0);
@@ -146,7 +160,7 @@ static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 ori
     const FKSurface surface = walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
         smoothNormal(scene, at), dir, Ray{depth == 0, false, lobe, float(depth), hit.distance, width}),
         hitPosition(scene, scene.vertices, at), random_state);
-    if (scene.guiding) guide(scene, surface, dir, depth);
+    if (scene.guiding) guide(scene, surface, dir, hit.distance, depth);
     return surface;
 }
 // Whether hair is compiled in: the renderer's own switch, false in the PTX compiled without it, which folds the walk's
@@ -379,7 +393,10 @@ static __device__ float3 fcptMissed(int2 p, FKDomain dom, float scale) {
     if (dom.spread < 0) return make_float3(0, 0, 0);
     const Scene& scene = hookScene();
     const float3 dir = normalize(dom.x1 - dom.x0), seen = environment(scene, dir, {true, false, LOBE_NONE, 1, 0});
-    if (scene.guiding) blend(scene, pixelIndex(p), true, seen, make_float3(0, 0, 0)); // The world's albedo, as Cycles'
+    if (scene.guiding) // Its guides: the world's albedo, as Cycles' background, and depth the far plane's
+        blend(scene, pixelIndex(p), true, seen, make_float3(0, 0, 0), 0, make_float3(0, 0, 0),
+            scene.camera.lens.ortho ? scene.camera.lens.far - scene.camera.lens.near : scene.camera.lens.far
+            / along(scene, dir));
     return seen / scene.settings.paths;
 }
 // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without; through a custom
