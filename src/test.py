@@ -246,6 +246,8 @@ specular = bpy.data.materials.new('specular').node_tree
 specular.links.new(specular.nodes.new('ShaderNodeEeveeSpecular').outputs[0],
     specular.nodes['Material Output'].inputs['Surface'])
 module = Viewport.engine.start.__globals__
+quality = module['quality']  # The viewport traces the render's settings, which tests set, but where it tests its own
+module['quality'] = lambda scene, viewport: quality(scene, False)
 surface = module['fold'](module['resolve'](specular.nodes['Material Output'].inputs['Surface']))
 assert numpy.any(surface[1]) and numpy.all(surface[6] == 1.5), 'eevee specular'
 # One render starts one renderer per engine, though Blender calls an engine's constructor twice
@@ -771,6 +773,14 @@ for name in ('DATA_PT_lens', 'DATA_PT_camera', 'DATA_PT_camera_dof', 'DATA_PT_ca
 panel, subpanel = bpy.types.RENDER_PT_flex, bpy.types.RENDER_PT_flex_restir  # Shown on the render tab
 assert getattr(panel, 'bl_context', None) == 'render' and panel.poll(context), 'Flex panel'
 assert subpanel.bl_parent_id == 'RENDER_PT_flex' and getattr(subpanel, 'bl_context', None) == 'render', 'ReSTIR panel'
+# Each quality setting has a viewport copy of its default, which the viewport traces; renders theirs
+module['quality'], split = quality, new('split')
+assert all(getattr(split, 'flex_preview_' + name[5:]) == getattr(split, name) for name in flex.QUALITY
+    if name != 'flex_samples'), 'viewport defaults'
+split.flex_preview_bounces, split.flex_preview_samples = 0, 8
+assert flex.settings(split, True, 'OPTIX')[3] == 0 and flex.settings(split, False, 'OPTIX')[3] == 16 and \
+    flex.sampling(split, True, True)[0] == 8 and flex.sampling(split, False, False)[0] == 256, 'viewport settings'
+module['quality'] = lambda scene, viewport: quality(scene, False)
 for ob in scene.objects: ob.hide_render = ob != scene.camera
 scene.render.use_border = False
 scene.camera.data.angle, scene.flex_samples = math.pi / 2, 512

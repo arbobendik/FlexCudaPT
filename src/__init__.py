@@ -2203,18 +2203,23 @@ def inside(tree, point):
         crossings, point = crossings + 1, hit[0] + Vector((0, 0, 1e-5 + 1e-6 * abs(hit[0].z)))
     return crossings % 2 == 1
 
+# A scene's quality settings of the viewport or of renders, by their names after flex_
+def quality(scene, viewport): return types.SimpleNamespace(**{name[5:]: getattr(scene, PREFIXES[viewport] + name[5:])
+    for name in QUALITY})
+
 # The scene's settings of the renderer, in its order, which denoises on OptiX alone; the viewport denoises every result
 def settings(scene, viewport, device):
-    return scene.flex_restir, scene.flex_decorrelation, scene.flex_neighbors, scene.flex_bounces, scene.flex_paths, \
-        scene.flex_denoise * (1 + viewport) * (device == 'OPTIX'), 1 << scene.flex_noise_size.bit_length() - 1
+    q = quality(scene, viewport)
+    return q.restir, q.decorrelation, q.neighbors, q.bounces, q.paths, \
+        q.denoise * (1 + viewport) * (device == 'OPTIX'), 1 << q.noise_size.bit_length() - 1
 
 # The scene's samples of a view and of one reusing the last one's reservoirs, then the distance and the cosine of the
 # angle its camera moves and turns at most from the last one's to reuse them and continue its denoised sequence; a view
 # following none jumps
-def sampling(scene, follows):
-    reuse = scene.flex_restir and scene.flex_reuse
-    return scene.flex_samples, scene.flex_reuse_samples if reuse else scene.flex_samples, \
-        scene.flex_jump_distance if follows else -1, math.cos(scene.flex_jump_angle)
+def sampling(scene, viewport, follows):
+    q = quality(scene, viewport)
+    return q.samples, q.reuse_samples if q.restir and q.reuse else q.samples, q.jump_distance if follows else -1, \
+        math.cos(q.jump_angle)
 
 PANORAMAS = ('EQUIRECTANGULAR', 'EQUIANGULAR_CUBEMAP_FACE', 'MIRRORBALL', 'FISHEYE_EQUIDISTANT', 'FISHEYE_EQUISOLID',
     'FISHEYE_LENS_POLYNOMIAL', 'CENTRAL_CYLINDRICAL')  # Blender's panoramas, numbered from 1 in the renderer
@@ -3265,7 +3270,7 @@ class Flex(bpy.types.RenderEngine):
         started = time.perf_counter()
         count = 0  # Shown none yet: a view that already has its samples is shown once
         while not self.test_break():
-            launched, sums = self.trace(width, height, sampling(scene, follows), min(count or 1, RENDER_SAMPLES),
+            launched, sums = self.trace(width, height, sampling(scene, False, follows), min(count or 1, RENDER_SAMPLES),
                 settings(scene, False, self.device), *camera)
             if sums is None or count and not launched: break
             count = int(sums[0, 0, 3])
@@ -3291,7 +3296,7 @@ class Flex(bpy.types.RenderEngine):
         region = context.region
         scene = depsgraph.scene
         camera = context.space_data.camera if context.region_data.view_perspective == 'CAMERA' else None
-        launched, sums = self.trace(region.width, region.height, sampling(scene, True), VIEWPORT_SAMPLES,
+        launched, sums = self.trace(region.width, region.height, sampling(scene, True, True), VIEWPORT_SAMPLES,
             settings(scene, True, self.device), context.region_data.view_matrix.inverted(), context.region_data.window_matrix,
             camera.evaluated_get(depsgraph) if camera else None, context.space_data.clip_end)
         if launched:
@@ -3415,7 +3420,7 @@ class RENDER_PT_flex_restir(bpy.types.Panel):  # ReSTIR settings of the Flex eng
             body.prop(scene, 'flex_jump_distance')
             body.prop(scene, 'flex_jump_angle')
 
-PROPERTIES = {
+QUALITY = {
     'flex_samples': bpy.props.IntProperty(name='Max Samples', description='Paths traced per pixel',
         default=1024, min=1),
     'flex_bounces': bpy.props.IntProperty(name='Max Bounces',
@@ -3443,6 +3448,9 @@ PROPERTIES = {
     'flex_jump_angle': bpy.props.FloatProperty(name='Angle', description='Furthest the camera turns '
         'between views to reuse samples, a further turn jumps and traces all of them', default=math.radians(10), min=0,
         max=math.pi, subtype='ANGLE')}
+PREFIXES = ('flex_', 'flex_preview_')  # Of renders' quality settings and of the viewport's copies
+PROPERTIES = {prefix + name[5:]: prop.function(**prop.keywords) for prefix in PREFIXES
+    for name, prop in QUALITY.items()}
 # Flex keeps its scene from one frame of an animation to the next: Blender keeps an engine and its depsgraph for a job's
 # frames only with persistent data, which a Flex render sets as the job starts, for Blender's copy of the settings, and
 # gives the user's value back before the first frame, so no file ever saves it; the job done, setting the user's off
