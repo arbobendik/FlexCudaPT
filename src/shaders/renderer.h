@@ -159,4 +159,7 @@ struct Scene {
     float3* lensed; // Of a custom camera, per pixel its sample's throughput; none for other cameras
     unsigned* noise; unsigned noiseSize; // The blue-noise tensor, of noiseSize^2 x 32 rank pairs by layer and row,
     unsigned long long noiseTexture; // while built; then as a layered texture of 32 layers
+    float4 *albedo, *normal; // Denoised, per pixel: the guides, means of its paths' diffuse albedo (w their count) and
+    float4* deferred; // normal; the paths' feature throughput (adapter.cuh's guide)
+    unsigned guiding; // Whether a pass sums the guides: the initial pass's, where denoised
 };

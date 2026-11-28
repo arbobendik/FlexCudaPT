@@ -1801,7 +1801,8 @@ extern "C" __global__ void __raygen__lights() {
 // Initial candidates: path trees of the pixel's primary hits, and the radiance seen right there
 extern "C" __global__ void __raygen__initial() { restir_initial_hook(optixGetLaunchIndex()); }
 
-// Denoiser input and guides of the pixel, and the motion of what it sees since the last denoised frame
+// Denoiser input of the pixel and the motion of what it sees since the last denoised frame; its guides the means of its
+// paths' (guide in adapter.cuh), the normal the world's
 extern "C" __global__ void __raygen__denoise() {
     const uint3 p = optixGetLaunchIndex();
     const uint3 size = optixGetLaunchDimensions();

@@ -94,14 +94,60 @@ static __device__ __noinline__ FKSurface fcptLightSurfaceAt(FKHit hit, float3 po
     light.smooth_n = smoothNormal(scene, at);
     return light;
 }
-// The surface as the walk's loop shades a hit
+// Denoising guides of the initial pass's own paths, as Cycles writes its denoising features (film/denoising_passes.h,
+// Denoising Pass Reflections on), each the running mean over the pixel's paths in the image the denoiser reads:
+// diffuse albedo (w the paths) and normal. Each lobe a closure, its albedo FlexKernels' normalWeights', a diffuse one
+// of roughness 1; deferred through smooth specular chains by the path's feature throughput in deferred (w 1 while it
+// follows)
+static __device__ float rise(float edge, float x) { x = fminf(fmaxf(x / edge, 0), 1); return x * x * (3 - 2 * x); }
+// A path's part of pixel i's guides: its first, at its first hit or miss, counts it among the paths; a later one adds
+static __device__ void blend(const Scene& scene, unsigned i, bool first, float3 albedo, float3 normal) {
+    float4 &a = scene.albedo[i], &n = scene.normal[i];
+    const float count = a.w + first, keep = first ? 1 - 1 / count : 1, share = 1 / count;
+    a = make_float4(a.x * keep + albedo.x * share, a.y * keep + albedo.y * share, a.z * keep + albedo.z * share, count);
+    n = make_float4(n.x * keep + normal.x * share, n.y * keep + normal.y * share, n.z * keep + normal.z * share, 0);
+}
+static __device__ unsigned guided() { // The pixel the initial pass's thread walks
+    const uint3 p = optixGetLaunchIndex();
+    return p.y * optixGetLaunchDimensions().x + p.x;
+}
+static __device__ void guide(const Scene& scene, const FKSurface& s, float3 dir, unsigned depth) {
+    const bool first = depth == 0;
+    const unsigned i = guided();
+    float4& path = scene.deferred[i];
+    if (first) path = make_float4(1, 1, 1, 1);
+    if (path.w == 0) return;
+    const float3 through = make_float3(path.x, path.y, path.z);
+    const float t = (through.x + through.y + through.z) / 3;
+    const BSDFMaterial& m = s.material;
+    const bool front = dot(s.geometry_n, dir) < 0;
+    const Weights w = normalWeights(dir, s.smooth_n, m, front ? 1 : m.ior, front ? m.ior : 1);
+    const float3 albedos[] = {m.albedo * w.diffuse_weight, w.F, m.albedo * w.refract_weight, w.sheen, w.coat};
+    const float roughnesses[] = {1, m.roughness, m.roughness, 1, m.coat_roughness};
+    float3 diffuse = make_float3(0, 0, 0), specular = make_float3(0, 0, 0);
+    float sum = 0, rough = 0; // The closures' albedo, and the share of the rough ones
+    for (unsigned k = 0; k < 5; ++k) {
+        const float3 a = albedos[k] * s.coverage;
+        const float weight = (a.x + a.y + a.z) / 3, share = rise(0.15f, roughnesses[k] * roughnesses[k]);
+        diffuse = diffuse + a * share, specular = specular + a * (1 - share), sum += weight, rough += weight * share;
+    }
+    const float feature = sum > 0 ? rise(0.5f, rough / sum) : 0;
+    blend(scene, i, first, diffuse * through * feature + m.emissive * through, s.smooth_n * (sum > 0 ? sum * feature * t
+        / (sum + 1 - s.coverage) : 0));
+    const float3 deferred = specular * (1 - feature) + make_float3(1, 1, 1) * (1 - s.coverage);
+    path = fmaxf(fmaxf(deferred.x, deferred.y), deferred.z) > 1e-4f ? make_float4(through.x * deferred.x,
+        through.y * deferred.y, through.z * deferred.z, 1) : make_float4(0, 0, 0, 0);
+}
+// The surface as the walk's loop shades a hit; the initial pass's own guiding the denoiser
 static __device__ __noinline__ FKSurface fcptSurfaceAtPath(FKHit hit, float3 origin, unsigned random_state, float width,
     unsigned layer, unsigned depth, unsigned lobe, float3 dir) {
     const Scene& scene = hookScene();
     const Hit at = nativeHit(hit);
-    return walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
+    const FKSurface surface = walkSurface(scene, at, shade<true>(scene, at.instance, at.triangle, at.uv.x, at.uv.y,
         smoothNormal(scene, at), dir, Ray{depth == 0, false, lobe, float(depth), hit.distance, width}),
         hitPosition(scene, scene.vertices, at), random_state);
+    if (scene.guiding) guide(scene, surface, dir, depth);
+    return surface;
 }
 // Whether hair is compiled in: the renderer's own switch, false in the PTX compiled without it, which folds the walk's
 // hair code out; bound per scene where it is compiled
@@ -331,8 +377,10 @@ static __device__ bool fcptRestirUsed() { return hookScene().settings.restir; }
 // (spread -1), off a fisheye's circle
 static __device__ float3 fcptMissed(int2 p, FKDomain dom, float scale) {
     if (dom.spread < 0) return make_float3(0, 0, 0);
-    return environment(hookScene(), normalize(dom.x1 - dom.x0), {true, false, LOBE_NONE, 1, 0})
-        / hookScene().settings.paths;
+    const Scene& scene = hookScene();
+    const float3 dir = normalize(dom.x1 - dom.x0), seen = environment(scene, dir, {true, false, LOBE_NONE, 1, 0});
+    if (scene.guiding) blend(scene, pixelIndex(p), true, seen, make_float3(0, 0, 0)); // The world's albedo, as Cycles'
+    return seen / scene.settings.paths;
 }
 // Added to the pixel's sum: the initial pass's with its sample counted, the spatial pass's without; through a custom
 // camera times the throughput of the pixel's own sample, which its own thread stored as the initial pass drew it

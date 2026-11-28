@@ -137,8 +137,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
     Scene scene{.pairing = {loadPairing(PAIRING_SIZES[0]), loadPairing(PAIRING_SIZES[1]),
         loadPairing(PAIRING_SIZES[2])}};
     Loaded loaded;
-    // Temporal denoiser of the means, guided by their motion
-    OptixDenoiserOptions denoiserOptions{};
+    // Temporal denoiser of the means, guided by their motion, albedo and normal
+    OptixDenoiserOptions denoiserOptions{.guideAlbedo = 1, .guideNormal = 1};
     OptixDenoiser denoiser;
     CHECK(optixDenoiserCreate(context, OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV, &denoiserOptions, &denoiser));
 
@@ -669,7 +669,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                 }
                 if (view.settings.denoise) for (CUdeviceptr array : {state, scratch, denoised, guides[0], guides[1],
                     (CUdeviceptr)scene.mean, (CUdeviceptr)scene.flow, (CUdeviceptr)scene.trust,
-                    (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen}) release(array);
+                    (CUdeviceptr)scene.seen, (CUdeviceptr)scene.previousSeen, (CUdeviceptr)scene.albedo,
+                    (CUdeviceptr)scene.normal, (CUdeviceptr)scene.deferred}) release(array);
                 if (request.view.settings.denoise) {
                     const unsigned width = request.view.width, height = request.view.height;
                     CHECK(optixDenoiserComputeMemoryResources(denoiser, width, height, &sizes));
@@ -680,6 +681,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
                         guide = (CUdeviceptr)zeros<char>(pixels * sizes.internalGuideLayerPixelSizeInBytes);
                     scene.mean = zeros<float4>(pixels), scene.flow = zeros<float2>(pixels);
                     scene.trust = zeros<float>(pixels);
+                    scene.albedo = zeros<float4>(pixels), scene.normal = zeros<float4>(pixels);
+                    scene.deferred = zeros<float4>(pixels);
                     scene.seen = zeros<unsigned>(pixels), scene.previousSeen = zeros<unsigned>(pixels);
                     CHECK(optixDenoiserSetup(denoiser, nullptr, width, height, state, sizes.stateSizeInBytes, scratch,
                         sizes.withoutOverlapScratchSizeInBytes));
@@ -698,6 +701,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             scene.camera = view.camera, scene.cameraProjection = view.projection;
             scene.settings = view.settings, scene.box = view.box;
             CHECK(cuMemsetD32((CUdeviceptr)scene.accumulation, 0, 4 * pixels));
+            if (view.settings.denoise) for (CUdeviceptr guide : {(CUdeviceptr)scene.albedo, (CUdeviceptr)scene.normal})
+                CHECK(cuMemsetD32(guide, 0, 4 * pixels));
         }
         // A ReSTIR frame per sample: its passes in order over the pixels times their depth, none of depth 0, then its
         // camera is the one the next frame reprojects from. Without ReSTIR only the initial pass runs, the duplication
@@ -718,6 +723,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             anchored.normals = scene.anchorNormals, anchored.lights = scene.anchorLights;
             anchored.trails = scene.anchorTrails, anchored.instances = anchorInstances;
             walk[0].data = walk[1].data = scene, walk[2].data = anchored;
+            // The initial pass's own paths, its raygen's and its walk's, sum the denoiser's guides
+            records[PASS_INITIAL + 1].data.guiding = walk[0].data.guiding = view.settings.denoise != 0;
             CHECK(cuMemcpyHtoD(table, records, sizeof(records)));
             // A view's later frames keep its camera and scene, where the temporal round's queue finds no job: only a
             // view's first frame launches its count, queue and queued shifts, where the round queues them
@@ -775,6 +782,8 @@ int main(int, char** argv) { // Usage: renderer file parent < scenes, requests >
             if (history) layer.previousOutput.data = denoised;
             const OptixDenoiserParams params{.temporalModeUsePreviousLayers = history};
             const OptixDenoiserGuideLayer guide{
+                .albedo = image((CUdeviceptr)scene.albedo, sizeof(float4), OPTIX_PIXEL_FORMAT_FLOAT4),
+                .normal = image((CUdeviceptr)scene.normal, sizeof(float4), OPTIX_PIXEL_FORMAT_FLOAT4),
                 .flow = image((CUdeviceptr)scene.flow, sizeof(float2), OPTIX_PIXEL_FORMAT_FLOAT2),
                 .previousOutputInternalGuideLayer = image(guides[0], stride, OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER),
                 .outputInternalGuideLayer = image(guides[1], stride, OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER),

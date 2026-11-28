@@ -5332,6 +5332,25 @@ def denoised():  # The OptiX denoiser
     preferences.device = device
 denoised()
 
+# The OptiX denoiser guided by the albedo and normal of each pixel's first hits: a checker's 4 samples denoised within
+# 0.055 at its edges of 1024 undenoised, as its beauty and motion alone were not (0.059; guided 0.053)
+bpy.context.window.scene = guided = new('guided', samples=1024, sky=(1, 1, 1))
+bpy.ops.mesh.primitive_plane_add(size=2)
+checker = bpy.data.materials.new('guided')
+bpy.context.object.data.materials.append(checker)
+pattern = checker.node_tree.nodes.new('ShaderNodeTexChecker')
+pattern.inputs['Scale'].default_value = 6
+checker.node_tree.links.new(pattern.outputs['Color'], checker.node_tree.nodes['Principled BSDF'].inputs['Base Color'])
+guided.collection.objects.link(guided_camera := bpy.data.objects.new('guided', bpy.data.cameras.new('guided')))
+guided.camera, guided_camera.location.z, guided.flex_restir = guided_camera, 2.2, False
+device, preferences.device = preferences.device, 'OPTIX'
+reference = render(guided)
+guided.flex_samples, guided.flex_denoise = 4, True
+error = abs(render(guided) - reference)
+edges = sum(abs(numpy.gradient(reference.mean(2), axis=axis)) for axis in (0, 1)) > 0.05
+assert error[edges].mean() < 0.055, ('guided denoiser', error[edges].mean())
+preferences.device = device
+
 # The blue-noise tensor of a size, every random number's: built once and stored, so a render building it and one
 # loading it are the same; each of its layers a permutation of the ranks; an image's mean, whole and over disjoint
 # cells, that of many more samples within its noise, at 1, 4 and 16 samples
